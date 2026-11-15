@@ -10,23 +10,17 @@ pub(super) fn initial_controls(
         .map(|input| input.publication(true))
         .collect::<Vec<_>>();
     let mut controls = Vec::new();
-    if let Some(commit) = prepared
+    let commit = prepared
         .initial_commit()
-        .map_err(|error| TurnError::Invalid(error.to_string()))?
-    {
-        controls.push(
-            AgentControlRecord::new(
-                1,
-                header.created_at_ms(),
-                AgentControlRecordBody::DomainStateCommitted { commit },
-            )
-            .map_err(|error| TurnError::Invalid(error.to_string()))?,
-        );
-    } else if !inputs.is_empty() {
-        return Err(TurnError::Invariant(
-            "draft command input requires its domain baseline".into(),
-        ));
-    }
+        .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    controls.push(
+        AgentControlRecord::new(
+            1,
+            header.created_at_ms(),
+            AgentControlRecordBody::DomainStateCommitted { commit },
+        )
+        .map_err(|error| TurnError::Invalid(error.to_string()))?,
+    );
     for input in inputs {
         controls.push(
             AgentControlRecord::new(
@@ -58,10 +52,7 @@ impl AgentKernel {
                 .map_err(turn_store_error)?;
         let stored = page.records.first().and_then(|record| match record.body() {
             AgentControlRecordBody::DomainStateCommitted { commit }
-                if matches!(
-                    commit.source(),
-                    rsi_agent_session_protocol::DomainMutationSource::Baseline
-                ) =>
+                if commit.source().is_initial() =>
             {
                 Some(commit.request_sha256())
             }
@@ -993,6 +984,69 @@ impl AgentKernel {
         &self,
         header: &SessionHeader,
     ) -> TurnResult<AgentCompositionPin> {
+        self.pin_cold_composition_at(header, None).await
+    }
+
+    pub(super) async fn pin_cold_composition_at(
+        &self,
+        header: &SessionHeader,
+        captured: Option<&rsi_agent_store_protocol::StoreDomainStatePage>,
+    ) -> TurnResult<AgentCompositionPin> {
+        let owned;
+        let page = if let Some(page) = captured {
+            page
+        } else {
+            owned = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
+                .await
+                .map_err(turn_store_error)?;
+            &owned
+        };
+        let selection = &page
+            .generation
+            .as_ref()
+            .ok_or_else(|| {
+                TurnError::Invalid("Session has no committed executable generation".into())
+            })?
+            .selection;
+        let states = page
+            .states
+            .iter()
+            .map(|state| state.snapshot.clone())
+            .collect();
+        let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(states)
+            .map_err(turn_composition_error)?;
+        let composition = if let Some(pin) = self.retained_cold_composition(header, selection)? {
+            pin
+        } else {
+            self.inner
+                .composition
+                .pin_session(header, Some(&seed))
+                .await
+                .map_err(turn_composition_error)?
+        };
+        // Only current owners interpret retained state. Removed owners are history-only;
+        // the output catalog describes the current executable set and is replaced on adoption.
+        for snapshot in seed.states() {
+            if composition
+                .domains()
+                .baseline()
+                .iter()
+                .any(|state| state.identity().id() == snapshot.identity().id())
+            {
+                composition
+                    .domains()
+                    .validate_snapshot(snapshot)
+                    .map_err(|error| turn_composition_error(error.into()))?;
+            }
+        }
+        Ok(composition)
+    }
+
+    fn retained_cold_composition(
+        &self,
+        header: &SessionHeader,
+        selection: &rsi_agent_session_protocol::GenerationSelection,
+    ) -> TurnResult<Option<AgentCompositionPin>> {
         if let Some(rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
             session_id,
             run_id,
@@ -1009,7 +1063,8 @@ impl AgentKernel {
             if let Some(run) = run
                 && run.run_id() == run_id
             {
-                return Ok(run.pinned_composition());
+                let pin = run.pinned_composition();
+                return Ok((pin.selection() == selection).then_some(pin));
             }
         }
         let continuation = self
@@ -1017,65 +1072,12 @@ impl AgentKernel {
             .into_iter()
             .find(|lease| lease.binding().revision.get() == 0);
         if let Some(lease) = continuation {
-            let (retained_header, composition) = self.inner.continuation_issuer.inspect(&lease)?;
-            if retained_header != header {
-                return Err(TurnError::ContinuationDisarmed);
+            let (retained_header, pin) = self.inner.continuation_issuer.inspect(&lease)?;
+            if retained_header == header && pin.selection() == selection {
+                return Ok(Some(pin.clone()));
             }
-            return Ok(composition.clone());
         }
-        let baseline = observation::read_controls_bounded(&self.inner, header.session_id(), 0, 1)
-            .await
-            .map_err(turn_store_error)?;
-        let states = baseline
-            .records
-            .first()
-            .and_then(|record| match record.body() {
-                AgentControlRecordBody::DomainStateCommitted { commit }
-                    if matches!(
-                        commit.source(),
-                        rsi_agent_session_protocol::DomainMutationSource::Baseline
-                    ) =>
-                {
-                    Some(
-                        commit
-                            .updates()
-                            .iter()
-                            .map(|update| update.snapshot().clone())
-                            .collect(),
-                    )
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(states)
-            .map_err(turn_composition_error)?;
-        let composition = self
-            .inner
-            .composition
-            .pin_session(header, Some(&seed))
-            .await
-            .map_err(turn_composition_error)?;
-        Ok(composition)
-    }
-
-    async fn prepare_cold_composition(
-        &self,
-        header: &SessionHeader,
-    ) -> TurnResult<AgentCompositionPin> {
-        let composition = self.pin_cold_composition(header).await?;
-        let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
-            .await
-            .map_err(turn_store_error)?;
-        let states: Vec<_> = page
-            .states
-            .into_iter()
-            .map(|state| state.snapshot)
-            .collect();
-        composition
-            .domains()
-            .validate_complete_states(&states)
-            .map_err(|error| turn_composition_error(error.into()))?;
-        Ok(composition)
+        Ok(None)
     }
 
     pub(super) async fn prepare_resume_session(
@@ -1089,10 +1091,11 @@ impl AgentKernel {
                     return Err(TurnError::ShuttingDown);
                 }
                 if let Some(session) = state.sessions.get(session_id) {
-                    return self
-                        .inner
-                        .resume_issuer
-                        .issue(session.header.as_ref().clone(), session.composition.clone());
+                    return self.inner.resume_issuer.issue(
+                        session.header.as_ref().clone(),
+                        session.composition.clone(),
+                        None,
+                    );
                 }
                 if state.fresh_reservations.contains(session_id) {
                     return Err(TurnError::Invalid(
@@ -1109,7 +1112,21 @@ impl AgentKernel {
             let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
-            let composition = match self.prepare_cold_composition(&header).await {
+            let page = observation::read_domain_states_bounded(&self.inner, session_id, None)
+                .await
+                .map_err(turn_store_error)?;
+            let composition = match async {
+                let composition = self.pin_cold_composition_at(&header, Some(&page)).await?;
+                let seq = page
+                    .durable_control_seq
+                    .checked_add(1)
+                    .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
+                let adoption = generations::adoption_states(&composition, &page.states, seq)?;
+                generations::validate_cold_state(&header, &composition, &adoption.states).await?;
+                Ok(composition)
+            }
+            .await
+            {
                 Ok(composition) => composition,
                 Err(error) => {
                     let concurrent_load = {
@@ -1121,6 +1138,7 @@ impl AgentKernel {
                             return self.inner.resume_issuer.issue(
                                 session.header.as_ref().clone(),
                                 session.composition.clone(),
+                                None,
                             );
                         }
                         if state.fresh_reservations.contains(session_id) {
@@ -1144,10 +1162,11 @@ impl AgentKernel {
                     return Err(TurnError::ShuttingDown);
                 }
                 if let Some(session) = state.sessions.get(session_id) {
-                    return self
-                        .inner
-                        .resume_issuer
-                        .issue(session.header.as_ref().clone(), session.composition.clone());
+                    return self.inner.resume_issuer.issue(
+                        session.header.as_ref().clone(),
+                        session.composition.clone(),
+                        None,
+                    );
                 }
                 if state.fresh_reservations.contains(session_id) {
                     return Err(TurnError::Invalid(
@@ -1160,14 +1179,19 @@ impl AgentKernel {
                 load.wait().await?;
                 continue;
             }
-            return self.inner.resume_issuer.issue(header, composition);
+            return self.inner.resume_issuer.issue(
+                header,
+                composition,
+                Some(page.domain_control_seq),
+            );
         }
     }
 
     pub(super) async fn ensure_prepared_session_loaded(
         &self,
         prepared: &PreparedResumeSession,
-    ) -> TurnResult<()> {
+        admission: SubmissionAdmissionLease,
+    ) -> TurnResult<SubmissionAdmissionLease> {
         let (header, composition) = self.inner.resume_issuer.inspect(prepared)?;
         let session_id = header.session_id();
         let (load, leader) = {
@@ -1176,7 +1200,7 @@ impl AgentKernel {
                 return Err(TurnError::ShuttingDown);
             }
             if state.sessions.contains_key(session_id) {
-                return Ok(());
+                return Ok(admission);
             }
             if state.fresh_reservations.contains(session_id) {
                 return Err(TurnError::Invalid(
@@ -1203,59 +1227,89 @@ impl AgentKernel {
             }
         };
         if !leader {
-            return load.wait().await;
+            load.wait().await?;
+            return Ok(admission);
         }
         let load_guard = SessionLoadGuard::new(&self.inner, session_id.clone(), Arc::clone(&load));
+        let commit = self
+            .prepare_cold_generation(header, composition, prepared.domain_control_seq())
+            .await?;
+        // Turn Facts are unchanged by the control-only generation commit. Read
+        // them while cancellation can still abandon all work without publication.
         let loaded = load_control_state(&self.inner.store, Some(&self.inner), header)
             .await
-            .map_err(turn_kernel_error);
-        let result = {
-            let mut state = lock_state(&self.inner);
-            if !state.accepting {
-                Err(TurnError::ShuttingDown)
-            } else if state.sessions.contains_key(session_id) {
-                Ok(())
-            } else {
-                match loaded {
-                    Err(error) => Err(error),
-                    Ok(loaded) => {
-                        let mut session = SessionRuntime::new(
-                            header.clone(),
-                            composition.clone(),
-                            loaded.fact_seq,
-                            false,
-                        );
-                        session.turns = loaded.turns;
-                        session.turn_order = loaded.order;
-                        for turn_id in &session.turn_order {
-                            enqueue(&mut state, session_id.clone(), turn_id.clone());
+            .map_err(turn_kernel_error)?;
+        let publishing = commit.is_some();
+        let header = header.clone();
+        let composition = composition.clone();
+        let kernel = self.clone();
+        let install = async move {
+            let session_id = header.session_id();
+            let published = match commit {
+                Some(commit) => kernel.publish_cold_generation(commit).await,
+                None => Ok(()),
+            };
+            let result = {
+                let mut state = lock_state(&kernel.inner);
+                if !state.accepting {
+                    Err(TurnError::ShuttingDown)
+                } else if state.sessions.contains_key(session_id) {
+                    Ok(())
+                } else {
+                    match published {
+                        Err(error) => Err(error),
+                        Ok(()) => {
+                            let mut session = SessionRuntime::new(
+                                header.clone(),
+                                composition.clone(),
+                                loaded.fact_seq,
+                                false,
+                            );
+                            session.turns = loaded.turns;
+                            session.turn_order = loaded.order;
+                            for turn_id in &session.turn_order {
+                                enqueue(&mut state, session_id.clone(), turn_id.clone());
+                            }
+                            state.sessions.insert(session_id.clone(), session);
+                            Ok(())
                         }
-                        state.sessions.insert(session_id.clone(), session);
-                        Ok(())
                     }
                 }
+            };
+            load_guard.complete(result.clone());
+            if result.is_ok() {
+                kernel.inner.claim_changed.notify_waiters();
             }
+            result.map(|()| admission)
         };
-        load_guard.complete(result.clone());
-        if result.is_ok() {
-            self.inner.claim_changed.notify_waiters();
+        if publishing {
+            self.owned_commit(install).await
+        } else {
+            install.await
         }
-        result
     }
 
-    pub(super) async fn ensure_session_loaded(&self, session_id: &SessionId) -> TurnResult<()> {
+    pub(super) async fn ensure_session_loaded(
+        &self,
+        session_id: &SessionId,
+        admission: SubmissionAdmissionLease,
+    ) -> TurnResult<SubmissionAdmissionLease> {
         let prepared = self.prepare_resume_session(session_id).await?;
-        self.ensure_prepared_session_loaded(&prepared).await
+        self.ensure_prepared_session_loaded(&prepared, admission)
+            .await
     }
 
     pub(super) async fn reserve_resume_submission(
         &self,
         prepared: &PreparedResumeSession,
-    ) -> TurnResult<ResumeAdmissionGuard> {
+        mut admission: SubmissionAdmissionLease,
+    ) -> TurnResult<(ResumeAdmissionGuard, SubmissionAdmissionLease)> {
         let (header, _) = self.inner.resume_issuer.inspect(prepared)?;
         let session_id = header.session_id().clone();
         loop {
-            self.ensure_prepared_session_loaded(prepared).await?;
+            admission = self
+                .ensure_prepared_session_loaded(prepared, admission)
+                .await?;
             let mut state = lock_state(&self.inner);
             let Some(session) = state.sessions.get_mut(&session_id) else {
                 continue;
@@ -1266,10 +1320,13 @@ impl AgentKernel {
                 .ok_or_else(|| {
                     TurnError::Invariant("resume admission reservation count overflowed".into())
                 })?;
-            return Ok(ResumeAdmissionGuard {
-                inner: Arc::clone(&self.inner),
-                session_id,
-            });
+            return Ok((
+                ResumeAdmissionGuard {
+                    inner: Arc::clone(&self.inner),
+                    session_id,
+                },
+                admission,
+            ));
         }
     }
 
@@ -1500,10 +1557,13 @@ impl AgentKernel {
             }
             return Ok(receipt);
         }
-        let resume_admission = match &session {
-            SubmitSession::Fresh(_) => None,
+        let (resume_admission, submission_admission) = match &session {
+            SubmitSession::Fresh(_) => (None, submission_admission),
             SubmitSession::Resume(prepared) => {
-                Some(self.reserve_resume_submission(prepared).await?)
+                let (resume, admission) = self
+                    .reserve_resume_submission(prepared, submission_admission)
+                    .await?;
+                (Some(resume), admission)
             }
         };
         let fresh_reservation = match &session {

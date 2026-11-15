@@ -72,7 +72,6 @@ pub(super) fn validate_sqlite_quiescence_guard(
 pub(super) fn apply_atomic_sqlite_append(
     transaction: &Transaction<'_>,
     append: AtomicSessionAppend,
-    codecs: &rsi_agent_store_protocol::ReferenceCodecs,
 ) -> Result<StoreSessionWatermarks> {
     super::reference_index::available(transaction, &append.session_id)?;
     let existing = transaction
@@ -105,7 +104,7 @@ pub(super) fn apply_atomic_sqlite_append(
             actual: actual_control,
         });
     }
-    let references = super::reference_index::Writer::new(transaction, &append.session_id, codecs)?;
+    let references = super::reference_index::Writer::new(transaction, &append.session_id)?;
     match (existing, append.header.as_ref()) {
         (None, Some(header)) => {
             transaction

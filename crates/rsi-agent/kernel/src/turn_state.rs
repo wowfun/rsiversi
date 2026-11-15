@@ -819,8 +819,6 @@ pub(super) fn turn_composition_error(error: AgentCompositionError) -> TurnError 
             TurnError::Invalid(bounded_diagnostic(&message))
         }
         AgentCompositionError::Unavailable { .. }
-        | AgentCompositionError::OutputCatalogMismatch
-        | AgentCompositionError::MissingOutputCatalog
         | AgentCompositionError::UnsupportedSeedCodec { .. }
         | AgentCompositionError::Domain(_)
         | AgentCompositionError::DefaultUnavailable { .. }

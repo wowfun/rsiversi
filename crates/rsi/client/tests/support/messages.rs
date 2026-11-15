@@ -60,6 +60,7 @@ impl Scenario {
                 }
             };
             return vec![Ok(SessionObservation::Control {
+                fact_cursor: 0,
                 record: retention
                     .retain_controls(vec![Arc::new(AgentControlRecord::new(2, 1, body).unwrap())])
                     .unwrap()

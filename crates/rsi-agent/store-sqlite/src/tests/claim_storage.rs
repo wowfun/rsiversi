@@ -160,11 +160,7 @@ async fn queued_claims_store_one_body_and_preserve_every_logical_reader() {
         assert_eq!(point, expected[2]);
         drop(store);
         SqliteStore::verify(root.path()).unwrap();
-        SqliteStore::rebuild_reference_index(
-            root.path(),
-            &rsi_agent_store_protocol::ReferenceCodecs::default(),
-        )
-        .unwrap();
+        SqliteStore::rebuild_reference_index(root.path()).unwrap();
         let reopened = SqliteStore::open(root.path()).unwrap();
         check_reads(&reopened, header.session_id(), &expected).await;
     }

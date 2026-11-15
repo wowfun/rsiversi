@@ -9,7 +9,8 @@ mod resource;
 #[path = "contracts/tool_around.rs"]
 mod tool_around;
 use rsi_agent_composition_protocol::{
-    AgentComposition, AgentCompositionError, AgentCompositionPin, AgentSessionDraft,
+    AgentComposition, AgentCompositionError, AgentCompositionPin, AgentGenerationSeed,
+    AgentSessionDraft,
 };
 use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId};
 use rsi_ai_protocol::ModelRef;
@@ -354,6 +355,20 @@ fn pin_rejects_non_sha256_source_identity() {
         ),
         Err(AgentCompositionError::InvalidInput(_))
     ));
+}
+
+#[tokio::test]
+async fn default_session_resolution_uses_current_preset_with_saved_state() {
+    let composition = FakeComposition {
+        failures: Mutex::default(),
+        domains: rsi_agent_composition_protocol::DomainCatalog::default(),
+    };
+    let header = header("alpha");
+    let pin = composition
+        .pin_session(&header, Some(&AgentGenerationSeed::default()))
+        .await
+        .unwrap();
+    assert_eq!(pin.preset_id(), header.agent_preset_id());
 }
 
 #[tokio::test]

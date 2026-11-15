@@ -1,6 +1,10 @@
 # rsi-session-api
 
-Interface version 23 carries `read-summary` v1 and `recent` v11 summaries with the
+Interface version 25 adds the committing append's Fact cursor to `observe` v10
+controls, preserving historical generation-to-intent correlation. It retains
+projection rebuild status and Session format 38.
+`projections` v3 exposes transient rebuild activity without changing its durable cursor.
+It carries `read-summary` v1 and `recent` v11 summaries with the
 Header, activity time and Fact/control watermarks from each Store metadata snapshot.
 The fields are required; clients validate activity against Header creation under the
 [Session listing contract](../session-protocol/README.md).
@@ -173,8 +177,9 @@ decoding; retained snapshots own the final bytes after transport delivery ends.
 Unavailable claims are not read from history, and no output or reporting operation
 is exposed by this status port.
 
-The authenticated `session/projections` Subscription returns complete retained
+The authenticated `session/projections` version-3 Subscription returns complete retained
 extension snapshots with a separate 5 MiB payload plus 64 KiB envelope limit.
+It includes transient generation rejection status without adding durable writes.
 Both the envelope and snapshot bind the captured Session/Header; the client also
 checks monotone draft or durable dual cursors. A preset change ends the old
 subscription. Each decoder reserves its bounded projection collection before

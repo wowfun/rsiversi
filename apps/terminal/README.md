@@ -259,7 +259,9 @@ configuration. Rendering uses the shared application/Session scene protocol.
 
 
 
-The machine-readable JSONL envelope is version 6. Live model observations use
+The machine-readable JSONL envelope is version 7.
+Domain controls carry canonical references and generation deltas with explicit removals;
+projection snapshots include transient plugin-rebuild status. Live model observations use
 bounded pages of encoded events; durable Facts retain complete settled attempts.
 One-shot messages observe live models and interactions until completion. Plain
 answer output emits live text and only the unsettled suffix at settlement, and excludes

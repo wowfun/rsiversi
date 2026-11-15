@@ -206,6 +206,7 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
     )
     .unwrap();
     let update = rsi_agent_turn_protocol::SessionObservation::Control {
+        fact_cursor: 0,
         record: retention
             .retain_controls(vec![Arc::new(record)])
             .unwrap()

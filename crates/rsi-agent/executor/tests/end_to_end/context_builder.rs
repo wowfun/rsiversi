@@ -215,12 +215,12 @@ async fn execution_and_delayed_checkpoint_keep_the_admitted_builder_after_catalo
         Arc::new(()),
     )
     .unwrap();
-    *stack.composition.pin.lock().unwrap() = Some(replacement_pin);
-    *stack.composition.context_builder.lock().unwrap() = replacement.clone();
     drop(admitted);
 
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
     let language = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(answer_script())])),
+        outcomes: Mutex::new(VecDeque::from([gated_answer(&entered, &release)])),
         requests: Mutex::new(vec![]),
         starts: Arc::new(AtomicUsize::new(0)),
         store: stack.store.clone(),
@@ -230,6 +230,14 @@ async fn execution_and_delayed_checkpoint_keep_the_admitted_builder_after_catalo
         .activate_language("test.language.selected-builder", language.clone())
         .await;
     let executor_fiber = stack.activate_executor("executor-selected-builder").await;
+    // A Session may adopt newer code before its first request. Replace the
+    // catalog only after this request has captured its builder and started.
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    *stack.composition.pin.lock().unwrap() = Some(replacement_pin);
+    *stack.composition.context_builder.lock().unwrap() = replacement.clone();
+    release.notify_one();
     assert_eq!(
         wait_for_outcome(&turns, &submitted).await,
         TurnOutcome::Completed

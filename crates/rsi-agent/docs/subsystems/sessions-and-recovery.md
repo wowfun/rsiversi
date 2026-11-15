@@ -17,7 +17,11 @@ decodes every Fact and recomputes every canonical prefix digest.
 
 The Kernel owns an in-memory speculative suffix after the Store's durable
 prefix. It publishes nonterminal Facts immediately to live observers. Its
-per-Session submission admission serializes every speculative suffix mutation
+durable control observations retain the committing append's final Fact cursor.
+Control and Fact pages remain independently ordered; consumers use that cursor
+when correlating historical generation declarations with a later Tool intent.
+The cursor is not the observer's current Fact watermark.
+Per-Session submission admission serializes every speculative suffix mutation
 with direct Agent-control commits and remains held until a successful direct
 commit is reflected into resident state. A durable Store prefix therefore
 cannot advance past a concurrently retained speculative suffix. The single

@@ -880,6 +880,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         let turn_id = TurnId::new("turn-reconcile").unwrap();
         let update = if cursor.fact_seq == 0 {
             SessionObservation::Control {
+                fact_cursor: 0,
                 record: rsi_agent_turn_protocol::ObservationRetention::default()
                     .retain_controls(vec![Arc::new(
                         AgentControlRecord::new(
@@ -1836,4 +1837,30 @@ fn maintenance_commands_are_bounded_and_exclusive_from_session_work() {
         parse(&["--cas-gc", &gc]).unwrap().maintenance,
         Some(MaintenanceCommand::CasCollect(_))
     ));
+}
+
+#[test]
+fn jsonl_projection_announces_the_current_domain_contract_and_rebuild_status() {
+    use rsi_agent_session_protocol::{ProjectionCursor, SessionProjectionSnapshot};
+    let pool = rsi_session_protocol::ProjectionRetention::default();
+    for rebuilding in [true, false] {
+        let snapshot = SessionProjectionSnapshot::new(
+            SessionId::new("jsonl-rebuild").unwrap(),
+            "a".repeat(64),
+            "b".repeat(64),
+            ProjectionCursor::Draft { revision: 0 },
+            vec![],
+        )
+        .unwrap()
+        .with_generation_rebuilding(rebuilding);
+        let event = CliEvent::Projections {
+            snapshot: pool.reserve_capture().unwrap().retain(snapshot).unwrap(),
+        };
+        let value: Value = serde_json::from_str(&event.json_line().unwrap()).unwrap();
+        assert_eq!(value["version"], 7);
+        assert_eq!(value["type"], "projections");
+        assert_eq!(value["data"]["generation_rebuilding"], rebuilding);
+        assert_eq!(value["data"]["cursor"]["revision"], 0);
+    }
+    assert_eq!(pool.retained_bytes(), 0);
 }

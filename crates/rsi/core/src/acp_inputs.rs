@@ -142,7 +142,7 @@ impl PrivateInputs {
         if header.canonical_cwd() != binding.cwd || header.agent_preset_id().as_str() != PRESET {
             return Err(unavailable());
         }
-        if !matches_seed(binding, seed) {
+        if !matches_seed(binding.pin.domains().baseline(), seed) {
             return Err(unavailable());
         }
         Ok(binding.pin.clone())
@@ -173,7 +173,7 @@ impl PrivateInputs {
             if let Some(binding) = state.entries.get(&id) {
                 return if binding.cwd == cwd
                     && binding.request_sha256 == request_sha256
-                    && matches_seed(binding, seed.as_ref())
+                    && matches_seed(binding.pin.domains().baseline(), seed.as_ref())
                 {
                     Ok(())
                 } else {
@@ -457,19 +457,14 @@ impl PrivateInputs {
         if clean { Ok(()) } else { Err(Failure::Backend) }
     }
 }
-fn matches_seed(binding: &Binding, seed: Option<&AgentGenerationSeed>) -> bool {
+fn matches_seed(
+    baseline: &[rsi_agent_session_protocol::DomainSnapshot],
+    seed: Option<&AgentGenerationSeed>,
+) -> bool {
     seed.is_none_or(|seed| {
-        binding
-            .pin
-            .domains()
-            .baseline()
+        baseline
             .iter()
-            .filter(|domain| {
-                matches!(
-                    domain.identity().id(),
-                    "rsi.mcp.manifest" | "rsi.tools.outputs"
-                )
-            })
+            .filter(|domain| domain.identity().id() == "rsi.mcp.manifest")
             .all(|domain| seed.find(domain.identity()) == Some(domain))
     })
 }
@@ -580,6 +575,26 @@ fn configuration(
 #[cfg(test)]
 mod claim_tests {
     use super::*;
+    #[test]
+    fn private_manifest_equality_does_not_freeze_historical_output_declarations() {
+        use rsi_agent_session_protocol::{DomainIdentity, DomainSnapshot, DomainStateValue};
+        let snapshot = |id, value| {
+            DomainSnapshot::new(
+                DomainIdentity::new(id, 1).unwrap(),
+                DomainStateValue::new(serde_json::json!(value)).unwrap(),
+            )
+        };
+        let manifest = snapshot("rsi.mcp.manifest", "private MCP");
+        let old =
+            AgentGenerationSeed::new(vec![manifest.clone(), snapshot("rsi.tools.outputs", "old")])
+                .unwrap();
+        let current = [manifest, snapshot("rsi.tools.outputs", "new")];
+        assert!(matches_seed(&current, Some(&old)));
+        assert!(!matches_seed(
+            &[snapshot("rsi.mcp.manifest", "changed MCP")],
+            Some(&old)
+        ));
+    }
     #[test]
     fn abandoned_connection_releases_all_claims_before_capacity_admission() {
         let mut claims = Claims::default();

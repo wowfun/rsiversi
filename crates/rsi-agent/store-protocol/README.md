@@ -1,5 +1,12 @@
 # rsi-agent-store-protocol
 
+Domain reads return canonical state positions and optional generation metadata
+from the same Store snapshot. Named state reads do not decode unrelated generation
+payloads. A generation commit appends only changed snapshots and explicit removals.
+Unchanged heads keep their canonical positions and revisions. Historical reads and
+forks resolve membership at their cut. See the
+[generation contract](../docs/subsystems/composition-generations.md).
+
 Complete order membership includes immutable creation time and current activity
 from the same Store snapshot. Shared Workspace account order uses creation time;
 activity-based views retain the separate activity value. Neither requires loading
@@ -12,8 +19,8 @@ or creating runtime activity. A missing or retired Session is not found.
 
 A domain-state read can select one domain ID. It returns the same watermarks
 and canonical state as filtering the complete page at that cut. A missing
-domain yields an empty page. Readers can request the stored codec version by
-name even when the active preset no longer registers it.
+domain yields an empty page. Readers can request a removed Domain by name at a
+historical cut where that Domain was active, without loading its executable codec.
 
 The mailbox names claim anchors as claimed Facts, independently of final
 model input. Claim validation still compares the complete original accepted source
@@ -64,10 +71,12 @@ must appear immediately after that domain control in the same atomic append, wit
 identical identity, source, content and delivery intent. Extra unbound command
 messages, missing messages and reordered or substituted payloads are rejected.
 
-Reference maintenance recognizes the built-in `ExtensionJournal` envelope
-independently of plugin registration. It validates that exact version and visits
-only explicit typed references, so uninstalling an extension does not lose its
-Agent-CAS roots. Other domain identities retain exact registered-codec semantics.
+Reference maintenance reads bounded typed references persisted in each canonical
+Domain snapshot, including ExtensionJournal. The writing Domain owner validates
+these references with its state before admission. Store does not invoke plugin
+code or reinterpret arbitrary strings as references. Historical business rules
+cannot be rechecked without their plugin; canonical reference/index consistency
+and CAS integrity remain independently verifiable.
 
 Product purge previews distinguish `UncertainWork` (missing native settlement
 evidence) from `Busy` (work that can still settle). Such a blocker does not admit
@@ -93,11 +102,9 @@ batches. Session purge retains Agent CAS and Media objects. Object collection an
 exclusive database compaction are separate operations with separate receipts.
 
 Canonical reference indexes derive only from decoded Headers, controls, Facts and
-exact pure Domain codecs. Missing codecs return Unsupported. Missing, extra or
-changed index edges are corruption, never proof of absence. Maintenance enables
-strict admission only after a successful coverage audit and an atomic recheck for
-concurrent incomplete coverage; a failed audit does not change write policy. New
-writes then maintain coverage and edges in their canonical transaction and cannot
+canonical Domain reference sets. No plugin codec is needed. Missing, extra or
+changed index edges are corruption, never proof of absence. All writes maintain
+coverage and edges in their canonical transaction and cannot
 reference a retiring Session or deleting CAS object.
 
 Model intent, start and settlement coordinates are unique by Session/Turn/effect/role
@@ -197,9 +204,9 @@ binding before either stream changes; cold validation checks the canonical
 Fact interval again. A retry cannot change Facts while retaining the same
 domain request identity. Baselines and external commands do not claim Turn Facts.
 
-The initial nonempty baseline is control one of the atomic fresh Header and
-first acceptance commit; an omitted baseline denotes an empty domain set.
-Only baseline admission creates a domain. Later mutations require an existing
+The initial generation selection is control one of the atomic fresh Header and
+first acceptance commit, including an empty Domain set. Generation adoption can
+introduce and explicitly remove Domains. Ordinary mutations require an existing
 matching codec and exact predecessor revision. Same request identity with
 different content conflicts. Querying a committed request recovers the exact
 receipt after an unknown result. Selecting a historical state uses the paired
@@ -534,8 +541,8 @@ missing objects. Namespace removal and directory sync precede metadata removal;
 completed old receipts cannot remove a later publication of the same hash.
 
 Native canonical reference projection is shared by the derived edge index and
-offline CAS inspection. Domain state is added only through exact registered codecs;
-native-only inspection does not infer plugin references.
+offline CAS inspection. Domain references are explicit canonical data;
+inspection never infers references from opaque business fields.
 
 Pending maintenance can be rediscovered through `StoreMaintenance` without a
 remembered operation ID. Purge and CAS collection each expose a read-only,

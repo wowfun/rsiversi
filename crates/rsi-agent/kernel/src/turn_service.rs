@@ -4,6 +4,19 @@ use rsi_agent_store_protocol::MailboxRead;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    async fn generation_status(
+        &self,
+        session: &SessionId,
+    ) -> TurnResult<Option<rsi_agent_turn_protocol::SessionGenerationStatus>> {
+        Ok(lock_state(&self.inner)
+            .sessions
+            .get(session)
+            .map(|session| rsi_agent_turn_protocol::SessionGenerationStatus {
+                selection: session.composition.selection().clone(),
+                rejection: session.generation_rejection.clone(),
+                rebuilding: session.generation_rebuilding,
+            }))
+    }
     async fn wait_idle(&self, session_id: &SessionId) -> TurnResult<()> {
         let mut changes = self.inner.session_changes.session(session_id);
         loop {
@@ -589,7 +602,7 @@ impl TurnService for AgentKernel {
         };
         body.validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        let submission_admission = self.inner.submission_admission.acquire(session_id).await?;
+        let mut submission_admission = self.inner.submission_admission.acquire(session_id).await?;
         if !lock_state(&self.inner).sessions.contains_key(session_id) {
             if read_stored_outcome(&self.inner, session_id, turn_id)
                 .await?
@@ -600,7 +613,9 @@ impl TurnService for AgentKernel {
                     already_terminal: true,
                 });
             }
-            self.ensure_session_loaded(session_id).await?;
+            submission_admission = self
+                .ensure_session_loaded(session_id, submission_admission)
+                .await?;
         }
         let live = lock_state(&self.inner)
             .sessions
@@ -1214,7 +1229,9 @@ impl AgentKernel {
             .execution_messages
             .get(&session_id, &request.message_id);
         let execution_admission = execution_admission::admit(&header, execution.as_ref())?;
-        let resume_admission = self.reserve_resume_submission(&request.session).await?;
+        let (resume_admission, admissions) = self
+            .reserve_resume_submission(&request.session, admissions)
+            .await?;
 
         let wait = {
             let state = lock_state(&self.inner);
@@ -1815,10 +1832,6 @@ impl AgentKernel {
         })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One exact receipt check validates original invocation and durable child together"
-    )]
     async fn existing_spawn(
         &self,
         request: &SpawnAgentRequest,
@@ -1902,14 +1915,8 @@ impl AgentKernel {
             MailboxRead::WithMessage(request.message_id.clone()),
         )
         .await?;
-        let initial = observation::read_domain_states_bounded(
-            &self.inner,
-            &request.child_session_id,
-            Some(1),
-        )
-        .await
-        .map_err(turn_store_error)?;
-        let acceptance_seq = 1 + u64::from(!initial.states.is_empty());
+        // A spawned child always publishes its executable selection at control one.
+        let acceptance_seq = 2;
         let entry = scan
             .selected
             .filter(|entry| {

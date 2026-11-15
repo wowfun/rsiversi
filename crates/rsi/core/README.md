@@ -267,9 +267,9 @@ preview. EndpointId persists in Base Storage independently of Session history.
 The Service also owns an isolated UI registry, Session contributions and the
 authenticated UI API. Its explicit Session binder creates ordinary child Profiles
 from semantic Session scopes; no request can name a Context or Local contract key.
-Each Service isolates the Store's reference-codec registry alongside its Store
-contract, so Services sharing a Runtime cannot collide or consume each other's codecs.
-Its Session purge cleanup hook is likewise scoped to that Service's navigation owner.
+Each Service isolates its Store contract and Session purge cleanup hook from
+other Services in the Runtime. Canonical Domain references let maintenance
+operate without a plugin-code registry.
 Application UI registries remain in their own Local mappings. Service Portable UI
 sources are opt-in Profile entries with an explicit injected service key, using
 the same staged native catalog and existing Meta retirement rules.
@@ -381,8 +381,12 @@ service and generation before draft creation. Environment values resolve through
 ephemeral credential references; only the frozen MCP manifest enters Agent
 durability. Cold restore requires the caller's configuration and secrets again,
 compares the discovered manifest, and rejects missing or changed declarations.
-ACP restore prepares the durable Session before reading its baseline controls;
-plain canonical history reads do not establish an execution proof.
+Output declarations belong to current-plugin admission and do not participate
+in the private MCP manifest equality check.
+ACP restore prepares the durable Session before reading its initial controls;
+the initial generation publication supplies the saved private-input seed, and
+non-initial generation updates cannot be mistaken for that seed.
+Plain canonical history reads do not establish an execution proof.
 The source resolves descendants through their validated root lineage, retaining
 the same private provider. Private input failure cannot fall back to Host MCP.
 Preparation reserves the root ID before starting effects. The 256-root budget

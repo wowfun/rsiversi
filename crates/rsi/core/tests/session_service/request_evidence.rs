@@ -2,6 +2,120 @@ use super::*;
 use rsi_agent_session_protocol::{EvidencePart, EvidenceSection, RequestEvidence};
 use rsi_session_protocol::{EvidencePageContent, EvidenceRead};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the provider failure, durable evidence and cold restart assertions in one lifecycle test."
+)]
+async fn malformed_provider_terminal_preserves_failed_attempt_after_cold_restart() {
+    use rsi_ai_protocol::{ContentDelta, ErrorKind, LanguageEvent};
+    for (label, delta, finish) in [
+        (
+            "text",
+            serde_json::json!({"content":"accepted prefix"}),
+            "tool_calls",
+        ),
+        (
+            "tool",
+            serde_json::json!({"tool_calls":[{"index":0,"id":"never-run","type":"function","function":{"name":"pwsh","arguments":"{}"}}]}),
+            "stop",
+        ),
+        ("empty", serde_json::json!({}), "stop"),
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let wire = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}})
+        );
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let wire = wire.clone();
+                async move {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(wire))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+            .await
+            .unwrap();
+        let id = SessionId::new(format!("invalid-terminal-{label}")).unwrap();
+        let handle = running
+            .session_service()
+            .unwrap()
+            .create(CreateSession {
+                fork: None,
+                workspace_id: running
+                    .workspace_registry()
+                    .unwrap()
+                    .get_or_create(&fixture.workspace)
+                    .await
+                    .unwrap()
+                    .id,
+                session_id: id.clone(),
+                agent_preset_id: None,
+            })
+            .await
+            .unwrap();
+        run_message_to_terminal(&handle, "malformed-terminal").await;
+        let before = handle.history_before(None, 128).await.unwrap().facts;
+        assert!(running.shutdown().await.is_clean());
+        drop(handle);
+        let reopened = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+            .await
+            .unwrap();
+        let handle = reopened
+            .session_service()
+            .unwrap()
+            .attach(&id)
+            .await
+            .unwrap();
+        let after = handle.history_before(None, 128).await.unwrap().facts;
+        assert_eq!(after, before);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            !after
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::ToolIntent { .. }))
+        );
+        let attempts: Vec<_> = after
+            .iter()
+            .filter_map(|fact| {
+                if let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body() {
+                    Some(attempt)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(attempts.len(), 1);
+        let events: Vec<_> = attempts[0].events().map(|event| event.unwrap().1).collect();
+        assert!(
+            matches!(events.last(), Some(LanguageEvent::Failed {error, ..}) if error.kind() == ErrorKind::Protocol)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LanguageEvent::Usage { .. }))
+        );
+        if label == "text" {
+            assert!(events.iter().any(|event| matches!(event, LanguageEvent::ContentDelta {delta: ContentDelta::Text(text), ..} if text == "accepted prefix")));
+        }
+        assert!(reopened.shutdown().await.is_clean());
+        server.abort();
+        let _ = server.await;
+    }
+}
+
 async fn section(
     handle: &Arc<dyn rsi_session_protocol::SessionHandle>,
     seq: u64,

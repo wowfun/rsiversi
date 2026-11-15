@@ -571,7 +571,7 @@ impl TurnService for ConcurrentResumeTurns {
             .expect("test release semaphore remains open")
             .forget();
         self.resume_issuer
-            .issue(self.header.clone(), self.composition.clone())
+            .issue(self.header.clone(), self.composition.clone(), None)
     }
 
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
@@ -635,7 +635,8 @@ impl TurnService for CompetingPublicationTurns {
             .header(session_id)
             .await
             .map_err(|error| rsi_agent_turn_protocol::TurnError::Store(error.to_string()))?;
-        self.resume_issuer.issue(header, self.composition.clone())
+        self.resume_issuer
+            .issue(header, self.composition.clone(), None)
     }
 
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {

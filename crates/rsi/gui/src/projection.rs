@@ -937,6 +937,7 @@ mod tests {
                 .pop()
                 .unwrap();
             transcript.observation(&SessionObservation::Control {
+                fact_cursor: 0,
                 record,
                 durable_control_seq: seq,
             });

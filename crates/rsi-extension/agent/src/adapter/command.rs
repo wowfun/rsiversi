@@ -21,11 +21,13 @@ pub(super) struct Commands {
 }
 #[derive(Clone, Debug)]
 struct UnobservedCommand {
+    ownership: Arc<super::Ownership>,
     invocation: SessionCommandInvocation,
     outcome: CommandOutcome,
 }
 #[derive(Debug)]
 struct PendingCommand {
+    ownership: Arc<super::Ownership>,
     connection: Arc<Connection>,
     session: SessionId,
     invocation: SessionCommandInvocation,
@@ -54,6 +56,7 @@ impl PendingCommand {
         }
         self.state
             .store(if outcome == "rejected" { 2 } else { 1 }, Ordering::Release);
+        self.ownership.release();
         Ok(())
     }
     async fn reconcile(
@@ -96,12 +99,14 @@ impl PendingCommand {
                 .await
             }
             CommandOutcomeEvidence::Draft {
+                selection,
                 session_id,
                 receipt,
                 baseline,
                 inputs,
             } => {
                 self.draft_committed(&DraftPublicationReceipt {
+                    selection,
                     session_id,
                     receipt,
                     baseline,
@@ -156,7 +161,7 @@ impl PublicationObserver for PendingCommand {
         let proposal = self.prepared.proposal();
         let expected = rsi_agent_session_protocol::SessionCommandReceipt::draft_changed(
             &self.invocation,
-            receipt.state_sha256()?,
+            receipt.state_sha256().to_owned(),
         )
         .map_err(invalid)?;
         let own = receipt.inputs.iter().filter(|input| matches!(&input.message().source,
@@ -356,22 +361,11 @@ impl SessionCommand for ExternalCommand {
                 &context.header,
                 view.revision,
                 &journal,
+                false,
                 cancellation.clone(),
             )
             .await
             .map_err(invalid)?;
-        self.adapter
-            .commands
-            .unobserved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                session.clone(),
-                UnobservedCommand {
-                    invocation: invocation.clone(),
-                    outcome: outcome.clone(),
-                },
-            );
         let _history = context
             .history
             .as_ref()
@@ -386,6 +380,19 @@ impl SessionCommand for ExternalCommand {
             })
             .transpose()
             .map_err(invalid)?;
+        let ownership = super::Ownership::reserve(&self.adapter.operations)
+            .ok_or(ContributionError::Capacity)?;
+        let unobserved = UnobservedCommand {
+            ownership,
+            invocation,
+            outcome,
+        };
+        self.adapter
+            .commands
+            .unobserved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.clone(), unobserved.clone());
         let response = self.adapter.connection.request("agent.command", json!({
             "session_id": session, "operation_id": context.request_id, "name": self.name, "input": input,
             "fact_horizon": context.history.as_ref().map_or(0, |history| history.through_seq),
@@ -405,27 +412,24 @@ impl SessionCommand for ExternalCommand {
                 return Err(invalid(diagnostic));
             }
         };
-        self.stage(
-            context,
-            invocation,
-            outcome,
-            view.revision,
-            &journal,
-            *staged,
-        )
-        .await
+        self.stage(context, unobserved, view.revision, &journal, *staged)
+            .await
     }
 }
 impl ExternalCommand {
     async fn stage(
         &self,
         context: &SessionCommandContext,
-        invocation: SessionCommandInvocation,
-        outcome: CommandOutcome,
+        unobserved: UnobservedCommand,
         revision: rsi_agent_session_protocol::DomainRevision,
         journal: &ExtensionJournal,
         staged: StagedCommand,
     ) -> ContributionResult<SessionCommandOutput> {
+        let UnobservedCommand {
+            invocation,
+            outcome,
+            ownership,
+        } = unobserved;
         if staged.operation_id != invocation.request_id.as_str()
             || staged.expected_revision != revision.get()
             || staged.token.len() != 64
@@ -461,6 +465,7 @@ impl ExternalCommand {
         .await
         .map_err(invalid)?;
         let operation = Arc::new(PendingCommand {
+            ownership,
             connection: self.adapter.connection.clone(),
             session: context.header.session_id().clone(),
             invocation,

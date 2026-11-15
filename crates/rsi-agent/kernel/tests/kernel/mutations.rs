@@ -161,6 +161,30 @@ async fn source_release_and_same_id_registration_wait_for_cancelled_commit_waite
 }
 
 #[tokio::test]
+async fn cancelled_mutation_reports_cancellation_without_publishing() {
+    let (kernel, workers, _observed, memory, lease, claim, child) = mutation_fixture(false).await;
+    let caller = kernel.agent_caller(&claim).unwrap();
+    let before = memory.read_watermarks(&child).await.unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let result = kernel
+        .send_agent_message(SendAgentMessage {
+            cancellation,
+            caller,
+            target_session_id: child.clone(),
+            message_id: MessageId::new("cancelled-mutation").unwrap(),
+            message: "must not publish".into(),
+            start_new_turn: false,
+        })
+        .await;
+    assert!(matches!(result, Err(TurnError::Cancelled)), "{result:?}");
+    let after = memory.read_watermarks(&child).await.unwrap();
+    assert_eq!(after, before);
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
 async fn tree_control_requires_validation_even_when_metadata_is_readable() {
     let memory = Arc::new(MemoryStore::new());
     let id = SessionId::new("cold-tree-validation").unwrap();
@@ -440,7 +464,7 @@ async fn cancelled_spawn_commit_is_recoverable_by_exact_retry() {
     let recovered = retry.await.unwrap();
     assert_eq!(recovered.session_id, request.child_session_id);
     assert_eq!(recovered.message.message_id, request.message_id);
-    assert_eq!(recovered.message.accepted_control_seq, 1);
+    assert_eq!(recovered.message.accepted_control_seq, 2);
     assert_eq!(
         kernel.spawn_agent(request.clone()).await.unwrap(),
         recovered
@@ -463,7 +487,7 @@ async fn cancelled_spawn_commit_is_recoverable_by_exact_retry() {
             .unwrap()
             .records
             .len(),
-        1
+        2
     );
     kernel.shutdown(workers).await.unwrap();
 }
@@ -542,7 +566,7 @@ async fn cancelled_source_preparation_cannot_commit_later() {
             .unwrap()
             .records
             .len(),
-        1
+        2
     );
     kernel.shutdown(workers).await.unwrap();
 }
@@ -580,7 +604,7 @@ async fn shutdown_timeout_does_not_abort_an_admitted_target_commit() {
             .unwrap()
             .records
             .len(),
-        2
+        3
     );
 }
 

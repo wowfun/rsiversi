@@ -18,7 +18,6 @@ impl Stamp {
 }
 pub(super) struct Proof {
     stamp: Stamp,
-    pub(super) strict: bool,
 }
 pub(super) fn check_cached(owner: &StoreInner, connection: &Connection) -> Result<()> {
     let mut proof = owner.reference_proof.lock().expect("reference proof");
@@ -38,16 +37,7 @@ pub(super) fn after_write(
     if let Some(current) = proof.as_mut() {
         let after = Stamp::read(owner, connection)?;
         if current.stamp.external != after.external
-            || (current.stamp.changes != after.changes
-                && (!success
-                    || (!current.strict
-                        && connection
-                            .query_row(
-                                "SELECT EXISTS(SELECT 1 FROM reference_records WHERE complete=0)",
-                                [],
-                                |row| row.get::<_, bool>(0),
-                            )
-                            .map_err(sql_error)?)))
+            || (current.stamp.changes != after.changes && !success)
         {
             *proof = None;
         } else {
@@ -56,17 +46,6 @@ pub(super) fn after_write(
     }
     Ok(())
 }
-pub(super) fn strict(owner: &StoreInner) {
-    if let Some(proof) = owner
-        .reference_proof
-        .lock()
-        .expect("reference proof")
-        .as_mut()
-    {
-        proof.strict = true;
-    }
-}
-
 /// The immediate transaction excludes foreign commits between proof and admission.
 pub(super) fn ensure(owner: &StoreInner, transaction: &Transaction<'_>) -> Result<()> {
     check_cached(owner, transaction)?;
@@ -80,16 +59,9 @@ pub(super) fn ensure(owner: &StoreInner, transaction: &Transaction<'_>) -> Resul
     }
     #[cfg(test)]
     owner.reference_audits.fetch_add(1, Ordering::Relaxed);
-    reference_index::validate_all(transaction, &owner.reference_codecs)?;
+    reference_index::validate_all(transaction)?;
     let stamp = Stamp::read(owner, transaction)?;
-    let strict = transaction
-        .query_row(
-            "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sql_error)?;
-    *owner.reference_proof.lock().expect("reference proof") = Some(Proof { stamp, strict });
+    *owner.reference_proof.lock().expect("reference proof") = Some(Proof { stamp });
     Ok(())
 }
 

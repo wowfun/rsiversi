@@ -52,13 +52,14 @@ async fn native_tool_transport() {
                 let channel: Channel = serde_json::from_slice(&bytes).unwrap();
                 let endpoint = Arc::new(Endpoint {
                     listener: Listener {
-                        protocol: 15,
+                        protocol: 16,
                         generation: "transport-probe".into(),
                         port: channel.port,
                     },
                     key: SecretValue::new(channel.key).unwrap(),
                     client: client.clone(),
                     retired: CancellationToken::new(),
+                    views: Arc::new(Semaphore::new(256)),
                 });
                 let (_, current) = watch::channel(Some(endpoint.clone()));
                 view = Some(captured_view(endpoint, current));

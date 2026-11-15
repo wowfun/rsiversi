@@ -243,6 +243,10 @@ impl AgentKernel {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep receipt recovery, cold adoption, review fencing and callback preparation in causal order"
+    )]
     async fn prepare_session_command(
         &self,
         session: PreparedResumeSession,
@@ -264,6 +268,29 @@ impl AgentKernel {
         } = &authorization
         {
             self.inner.continuation_issuer.request_round(lease)?;
+        }
+        if session.domain_control_seq().is_some() {
+            let _admission = self
+                .inner
+                .submission_admission
+                .acquire(header.session_id())
+                .await?;
+            let cold = !lock_state(&self.inner)
+                .sessions
+                .contains_key(header.session_id());
+            if cold {
+                if let Some(commit) = self
+                    .prepare_cold_generation(header, composition, session.domain_control_seq())
+                    .await?
+                {
+                    let kernel = self.clone();
+                    self.owned_commit(async move {
+                        let _admission = _admission;
+                        kernel.publish_cold_generation(commit).await
+                    })
+                    .await?;
+                }
+            }
         }
         let callback: SessionCommandRegistration = composition
             .contributions()

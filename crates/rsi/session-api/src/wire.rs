@@ -236,14 +236,15 @@ impl Operation {
         match self {
             Self::Create => 12,
             Self::Recent => 11,
-            Self::Inspect | Self::DraftSnapshot | Self::SelectPreset => 10,
+            Self::Inspect | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 10,
             Self::Submit | Self::History | Self::ReadMessage => 7,
             Self::MessageStatus
             | Self::Terminal
             | Self::TerminalOutput
             | Self::Jobs
             | Self::MutateQueue
-            | Self::Cancel => 3,
+            | Self::Cancel
+            | Self::Projections => 3,
             Self::ModelObserve
             | Self::ListWorkflows
             | Self::Interactions
@@ -251,7 +252,7 @@ impl Operation {
             | Self::AnswerQuestion
             | Self::DiscardDraftInputs
             | Self::ExecuteCommand => 2,
-            Self::Attach | Self::Observe => 9,
+            Self::Attach => 9,
             _ => 1,
         }
     }
@@ -339,8 +340,15 @@ pub(crate) type Observe = HandleRequest<ObservationCursor>;
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Observation<C, F> {
-    Control { record: C, durable_control_seq: u64 },
-    Fact { fact: F, durable_fact_seq: u64 },
+    Control {
+        record: C,
+        fact_cursor: u64,
+        durable_control_seq: u64,
+    },
+    Fact {
+        fact: F,
+        durable_fact_seq: u64,
+    },
 }
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]

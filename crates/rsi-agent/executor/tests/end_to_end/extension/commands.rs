@@ -107,7 +107,7 @@ async fn original_plan_commands_reconcile_draft_and_durable_receipts_without_han
             )
             .await
             .unwrap();
-        let definition = rsi_extension_agent::definition("a".repeat(64)).unwrap();
+        let definition = rsi_extension_agent::definition().unwrap();
         let domains = DomainCatalog::new([definition.registration()]).unwrap();
         let handle = domains.bind(&definition).unwrap();
         *stack.composition.domains.lock().unwrap() = domains;
@@ -120,7 +120,6 @@ async fn original_plan_commands_reconcile_draft_and_durable_receipts_without_han
                 .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
                 .unwrap(),
             handle.clone(),
-            "a".repeat(64),
         )
         .unwrap();
         let callbacks = contributions::install(&stack, vec![registration(&adapter)]).await;

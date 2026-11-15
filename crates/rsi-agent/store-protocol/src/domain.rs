@@ -99,6 +99,34 @@ pub struct StoreDomainHead {
     pub snapshot_bytes: usize,
 }
 
+impl StoreDomainHead {
+    /// Resolves this derived position against its canonical control.
+    pub fn snapshot_from<'a>(&self, record: &'a AgentControlRecord) -> Result<&'a DomainSnapshot> {
+        let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+            return Err(StoreError::Corrupt(
+                "domain index points to another control kind".into(),
+            ));
+        };
+        let update = commit.updates().get(self.update_index).ok_or_else(|| {
+            StoreError::Corrupt("domain update index exceeds its canonical record".into())
+        })?;
+        let snapshot = update.snapshot();
+        if record.seq() != self.control_seq
+            || update.revision() != self.revision
+            || snapshot.identity() != &self.identity
+            || snapshot
+                .encoded_len()
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?
+                != self.snapshot_bytes
+        {
+            return Err(StoreError::Corrupt(
+                "domain position differs from its canonical snapshot".into(),
+            ));
+        }
+        Ok(snapshot)
+    }
+}
+
 /// One opaque state and its exact canonical source position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreDomainState {
@@ -108,7 +136,48 @@ pub struct StoreDomainState {
     pub snapshot: DomainSnapshot,
 }
 
-/// Selected domain states at one control horizon in a single Store snapshot.
+/// Composition selection digest decoded from a canonical generation control.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreGenerationSelection {
+    /// Canonical generation control position.
+    pub control_seq: u64,
+    /// Selection identity decoded from that control in the same read snapshot.
+    pub selection: rsi_agent_session_protocol::GenerationSelection,
+}
+
+impl StoreGenerationSelection {
+    /// Decodes a derived generation index entry's canonical authority.
+    ///
+    /// # Errors
+    /// Rejects an index pointing to any other control kind.
+    pub fn from_record(record: &AgentControlRecord) -> Result<Self> {
+        let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+            return Err(StoreError::Corrupt(
+                "generation index points to another control kind".into(),
+            ));
+        };
+        let selection = commit.source().generation_selection().ok_or_else(|| {
+            StoreError::Corrupt("generation index points to an ordinary state mutation".into())
+        })?;
+        Ok(Self {
+            control_seq: record.seq(),
+            selection: selection.clone(),
+        })
+    }
+}
+
+/// Payload-free relevant cuts from one Store snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoreDomainWatermarks {
+    /// Latest durable Fact.
+    pub fact_seq: u64,
+    /// Latest durable control, for atomic append fencing.
+    pub control_seq: u64,
+    /// Latest Domain state update or removal, excluding unrelated controls.
+    pub domain_seq: u64,
+}
+
+/// Selected domain states and executable identity at one Store snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreDomainStatePage {
     /// Durable Fact tail of the same read snapshot.
@@ -117,6 +186,10 @@ pub struct StoreDomainStatePage {
     pub durable_control_seq: u64,
     /// Selected as-of horizon, at most the read-time control tail.
     pub selected_control_seq: u64,
+    /// Latest Domain update or removal at this selected horizon.
+    pub domain_control_seq: u64,
+    /// Canonical position and identity of the last executable selection at this horizon.
+    pub generation: Option<StoreGenerationSelection>,
     /// Complete domain states in ascending durable-name order.
     pub states: Vec<StoreDomainState>,
 }
@@ -124,9 +197,18 @@ pub struct StoreDomainStatePage {
 impl StoreDomainStatePage {
     /// Validates positions, complete-set bounds and canonical snapshot correspondence.
     pub fn validate(&self) -> Result<()> {
-        if self.selected_control_seq > self.durable_control_seq {
+        if self.selected_control_seq > self.durable_control_seq
+            || self.domain_control_seq > self.selected_control_seq
+        {
             return Err(StoreError::Corrupt(
                 "domain horizon exceeds the read snapshot".into(),
+            ));
+        }
+        if self.generation.as_ref().is_some_and(|entry| {
+            entry.control_seq == 0 || entry.control_seq > self.selected_control_seq
+        }) {
+            return Err(StoreError::Corrupt(
+                "generation selection exceeds the domain horizon".into(),
             ));
         }
         validate_domain_heads(self.states.iter().map(|entry| &entry.head))?;
@@ -148,7 +230,7 @@ impl StoreDomainStatePage {
     }
 }
 
-/// Projects one canonical request into derived positions without changing its predecessor set.
+/// Projects one canonical commit into derived positions according to its mutation source.
 /// Store adapters separately validate Turn provenance and request uniqueness in their transaction.
 pub fn domain_heads_after(
     heads: &[StoreDomainHead],
@@ -156,7 +238,8 @@ pub fn domain_heads_after(
     commit: &DomainStateCommit,
 ) -> Result<Vec<StoreDomainHead>> {
     validate_domain_heads(heads.iter())?;
-    let baseline = matches!(commit.source(), DomainMutationSource::Baseline);
+    let baseline = commit.source().is_initial();
+    let generation = commit.source().is_generation();
     if let DomainMutationSource::Command { invocation }
     | DomainMutationSource::Continuation { invocation, .. } = commit.source()
         && invocation.expected_revision
@@ -168,18 +251,30 @@ pub fn domain_heads_after(
             "command control revision differs from its canonical predecessor".into(),
         ));
     }
-    if control_seq == 0 || (baseline && (control_seq != 1 || !heads.is_empty())) {
+    if control_seq == 0
+        || (baseline && (control_seq != 1 || !heads.is_empty()))
+        || (generation && !baseline && control_seq == 1)
+    {
         return Err(StoreError::Invalid(
             "domain baseline must be the first control of a fresh empty set".into(),
         ));
     }
     let mut next = heads.to_vec();
+    for removed in commit.removed() {
+        let index = next
+            .binary_search_by(|head| head.identity.id().cmp(removed.id()))
+            .map_err(|_| StoreError::Invalid("removed Domain is absent".into()))?;
+        if &next[index].identity != removed {
+            return Err(StoreError::Invalid("removed Domain codec differs".into()));
+        }
+        next.remove(index);
+    }
     for (update_index, update) in commit.updates().iter().enumerate() {
         let identity = update.snapshot().identity();
-        let slot = next.binary_search_by(|head| head.identity.id().cmp(identity.id()));
+        let slot = heads.binary_search_by(|head| head.identity.id().cmp(identity.id()));
         let actual = slot
             .as_ref()
-            .map_or(DomainRevision::new(0), |index| next[*index].revision);
+            .map_or(DomainRevision::new(0), |index| heads[*index].revision);
         if actual != update.expected_revision() {
             return Err(StoreError::DomainRevisionConflict {
                 domain: identity.id().into(),
@@ -188,14 +283,20 @@ pub fn domain_heads_after(
             });
         }
         if let Ok(index) = slot {
-            if next[index].identity != *identity || next[index].control_seq >= control_seq {
+            if (!generation && heads[index].identity != *identity)
+                || heads[index].control_seq >= control_seq
+            {
                 return Err(StoreError::Invalid(
-                    "domain codec or canonical order cannot change within a Session".into(),
+                    "ordinary mutation changed domain codec or canonical order".into(),
                 ));
             }
-        } else if !baseline {
+        } else if !baseline && !generation {
             return Err(StoreError::Invalid(
                 "only a fresh baseline may create a domain".into(),
+            ));
+        } else if update.revision().get() != control_seq {
+            return Err(StoreError::Invalid(
+                "introduced domain revision differs from its generation control sequence".into(),
             ));
         }
         let head = StoreDomainHead {
@@ -208,7 +309,7 @@ pub fn domain_heads_after(
                 .encoded_len()
                 .map_err(|error| StoreError::Invalid(error.to_string()))?,
         };
-        match slot {
+        match next.binary_search_by(|head| head.identity.id().cmp(identity.id())) {
             Ok(index) => next[index] = head,
             Err(index) => next.insert(index, head),
         }

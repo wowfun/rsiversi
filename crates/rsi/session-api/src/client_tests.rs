@@ -459,7 +459,9 @@ async fn observation_checks_each_cursor_and_retains_decoded_payload_after_wire_r
     .unwrap();
     remote.stream(&[
         observed_fact(1, 4),
-        envelope(json!({"kind":"control","record":control,"durable_control_seq":1})),
+        envelope(
+            json!({"kind":"control","record":control,"fact_cursor":2,"durable_control_seq":1}),
+        ),
         observed_fact(2, 3),
     ]);
     let mut stream = handle.observe(ObservationCursor::default()).await.unwrap();
@@ -474,7 +476,7 @@ async fn observation_checks_each_cursor_and_retains_decoded_payload_after_wire_r
     );
     assert!(matches!(
         stream.next().await.unwrap().unwrap(),
-        SessionObservation::Control { .. }
+        SessionObservation::Control { fact_cursor: 2, .. }
     ));
     assert!(matches!(
         stream.next().await.unwrap(),
@@ -636,7 +638,7 @@ fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
         (Operation::SelectPreset, 10),
         (Operation::Inspect, 10),
         (Operation::Submit, 7),
-        (Operation::Observe, 9),
+        (Operation::Observe, 10),
         (Operation::History, 7),
         (Operation::ReadMessage, 7),
         (Operation::ReadSummary, 1),

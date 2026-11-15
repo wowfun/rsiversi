@@ -87,7 +87,7 @@ impl ApiHandler for Handler {
                     while let Some(update) = source.next().await {
                         let update = match wire::domain(update)? { Ok(update) => update, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
                         let body = match &update {
-                            SessionObservation::Control { record, durable_control_seq } => wire::Observation::Control { record: &**record, durable_control_seq: *durable_control_seq },
+                            SessionObservation::Control { record, fact_cursor, durable_control_seq } => wire::Observation::Control { record: &**record, fact_cursor: *fact_cursor, durable_control_seq: *durable_control_seq },
                             SessionObservation::Fact { fact, durable_fact_seq } => wire::Observation::Fact { fact: &**fact, durable_fact_seq: *durable_fact_seq },
                         };
                         let json = budget.encode(&HandleReply { target: request.target.clone(), body }, maximum)?;

@@ -43,6 +43,12 @@ fn fact(seq: u64) -> SessionFact {
     .unwrap()
 }
 
+#[tokio::test]
+async fn generation_selection_and_active_domains_commit_together() {
+    rsi_agent_testkit::assert_generation_store_contract(&MemoryStore::default(), header(), fact(1))
+        .await;
+}
+
 fn model_delta(seq: u64, turn_id: &TurnId, text: String) -> SessionFact {
     SessionFact::new(
         seq,

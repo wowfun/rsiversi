@@ -2,81 +2,9 @@
 use super::{Result, StoreError};
 use rsi_agent_session_protocol::{
     ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentMessageContent,
-    AgentMessageSource, DomainIdentity, DomainReferenceCodec, DomainSnapshot, ExecutionOwner,
-    InputMessageSource, MAXIMUM_SESSION_DOMAINS, ProgramRunEvent, ReferenceCodecRegistration,
-    ReferenceCollector, SessionFact, SessionFactBody, SessionHeader,
+    AgentMessageSource, ExecutionOwner, InputMessageSource, ProgramRunEvent, ReferenceCollector,
+    SessionFact, SessionFactBody, SessionHeader,
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
-
-/// Bounded exact-version codec registry retained by one Store generation.
-#[derive(Debug, Default)]
-pub struct ReferenceCodecs(RwLock<BTreeMap<DomainIdentity, Arc<dyn DomainReferenceCodec>>>);
-impl ReferenceCodecRegistration for ReferenceCodecs {
-    fn install(
-        &self,
-        codecs: Vec<Arc<dyn DomainReferenceCodec>>,
-    ) -> std::result::Result<(), String> {
-        if codecs.len() > MAXIMUM_SESSION_DOMAINS {
-            return Err("reference codec batch exceeds capacity".into());
-        }
-        let mut known = self
-            .0
-            .write()
-            .map_err(|_| "reference codec registry poisoned")?;
-        let mut next = known.clone();
-        for codec in codecs {
-            if let Some(previous) = next.get(codec.identity()) {
-                if previous.definition_key() != codec.definition_key() {
-                    return Err("exact Domain version cannot change reference semantics".into());
-                }
-            } else {
-                if next.len() == 256 {
-                    return Err("reference codec registry exceeds capacity".into());
-                }
-                next.insert(codec.identity().clone(), codec);
-            }
-        }
-        *known = next;
-        Ok(())
-    }
-}
-impl ReferenceCodecs {
-    /// Reads one exact codec without retaining a composition owner.
-    pub fn collect(
-        &self,
-        snapshot: &DomainSnapshot,
-        output: &mut ReferenceCollector,
-    ) -> Result<()> {
-        if snapshot.identity().id() == rsi_agent_session_protocol::EXTENSION_JOURNAL_DOMAIN {
-            if snapshot.identity().version() != 1 {
-                return Err(StoreError::Unsupported("extension journal version".into()));
-            }
-            let journal: rsi_agent_session_protocol::ExtensionJournal =
-                serde_json::from_value(snapshot.state().value().clone())
-                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            return journal.references(output).map_err(StoreError::Corrupt);
-        }
-        let codec = self
-            .0
-            .read()
-            .map_err(|_| StoreError::Corrupt("reference codec registry poisoned".into()))?
-            .get(snapshot.identity())
-            .cloned()
-            .ok_or_else(|| {
-                StoreError::Unsupported(format!(
-                    "missing reference codec {} version {}",
-                    snapshot.identity().id(),
-                    snapshot.identity().version()
-                ))
-            })?;
-        codec
-            .references(snapshot.state(), output)
-            .map_err(StoreError::Corrupt)
-    }
-}
 
 /// Projects the immutable Header's typed lineage and execution ownership.
 pub fn header_references(header: &SessionHeader) -> Result<ReferenceCollector> {
@@ -153,20 +81,19 @@ fn source(
     }
     Ok(())
 }
-/// Projects every typed control edge; missing Domain codecs remain Unsupported.
-pub fn control_references(
-    record: &AgentControlRecord,
-    codecs: &ReferenceCodecs,
-) -> Result<ReferenceCollector> {
+/// Projects native edges and canonical Domain references without plugin code.
+pub fn control_references(record: &AgentControlRecord) -> Result<ReferenceCollector> {
     let mut output = native_control_references(record)?;
     if let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() {
         for update in commit.updates() {
-            codecs.collect(update.snapshot(), &mut output)?;
+            output
+                .extend(update.snapshot().references())
+                .map_err(StoreError::Invalid)?;
         }
     }
     Ok(output)
 }
-/// Projects built-in control references only; plugin Domain state needs exact codecs.
+/// Projects built-in control references independently of Domain state.
 pub fn native_control_references(record: &AgentControlRecord) -> Result<ReferenceCollector> {
     let mut output = ReferenceCollector::default();
     let mut visit = || -> std::result::Result<(), String> {
@@ -322,133 +249,35 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{
-        DomainStateValue, DurableReference, MAXIMUM_RECORD_REFERENCES, SessionId,
+        DomainIdentity, DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
+        DomainStateUpdate, DomainStateValue, SessionId,
     };
-    #[derive(Debug)]
-    struct Codec {
-        id: DomainIdentity,
-        key: usize,
-    }
+
     #[test]
-    fn extension_roots_survive_without_a_registered_plugin_codec() {
-        use rsi_agent_session_protocol::{
-            EXTENSION_JOURNAL_DOMAIN, ExtensionJournal, ExtensionSegment,
-        };
-        let journal = ExtensionJournal {
-            artifact_sha256: "a".repeat(64),
-            segments: vec![ExtensionSegment {
-                first: 0,
-                count: 1,
-                sha256: "b".repeat(64),
-                byte_len: 27,
-            }],
-            sessions: vec![],
-            checkpoint: DomainStateValue::new(serde_json::Value::Null).unwrap(),
-        };
-        let snapshot = DomainSnapshot::new(
-            DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 1).unwrap(),
-            DomainStateValue::encode(&journal).unwrap(),
-        );
-        let codecs = ReferenceCodecs::default();
-        let mut roots = ReferenceCollector::default();
-        codecs.collect(&snapshot, &mut roots).unwrap();
-        assert_eq!(
-            roots.iter().next(),
-            Some(&DurableReference::Cas {
-                sha256: "b".repeat(64),
-                byte_len: 27
-            })
-        );
-        assert!(matches!(
-            codecs.collect(
-                &DomainSnapshot::new(
-                    DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 2).unwrap(),
-                    snapshot.state().clone()
-                ),
-                &mut ReferenceCollector::default()
-            ),
-            Err(StoreError::Unsupported(_))
-        ));
-    }
-    impl DomainReferenceCodec for Codec {
-        fn identity(&self) -> &DomainIdentity {
-            &self.id
-        }
-        fn definition_key(&self) -> (std::any::TypeId, usize, usize) {
-            (std::any::TypeId::of::<Self>(), 0, self.key)
-        }
-        fn references(
-            &self,
-            value: &DomainStateValue,
-            output: &mut ReferenceCollector,
-        ) -> std::result::Result<(), String> {
-            let id = value
-                .value()
-                .as_str()
-                .ok_or("expected typed Session identity")?;
-            output.session(&SessionId::new(id).map_err(|e| e.to_string())?)
-        }
-    }
-    #[test]
-    fn exact_codec_coverage_is_bounded_atomic_and_cannot_change_semantics() {
-        let codecs = ReferenceCodecs::default();
-        let id = DomainIdentity::new("references", 1).unwrap();
-        let snapshot = DomainSnapshot::new(
-            id.clone(),
-            DomainStateValue::new(serde_json::json!("retained-session")).unwrap(),
-        );
-        assert!(matches!(
-            codecs.collect(&snapshot, &mut ReferenceCollector::default()),
-            Err(StoreError::Unsupported(_))
-        ));
-        codecs
-            .install(vec![Arc::new(Codec {
-                id: id.clone(),
-                key: 1,
-            })])
+    fn unknown_domain_history_retains_explicit_roots_without_executable_code() {
+        let mut references = ReferenceCollector::default();
+        references
+            .session(&SessionId::new("retained-child").unwrap())
             .unwrap();
-        let mut refs = ReferenceCollector::default();
-        codecs.collect(&snapshot, &mut refs).unwrap();
-        assert_eq!(
-            refs.iter().collect::<Vec<_>>(),
-            vec![&DurableReference::Session(
-                SessionId::new("retained-session").unwrap()
-            )]
-        );
-        assert!(
-            codecs
-                .install(vec![Arc::new(Codec {
-                    id: id.clone(),
-                    key: 2
-                })])
-                .is_err()
-        );
-        assert!(
-            codecs
-                .collect(
-                    &DomainSnapshot::new(
-                        DomainIdentity::new("references", 2).unwrap(),
-                        snapshot.state().clone()
-                    ),
-                    &mut ReferenceCollector::default()
-                )
-                .is_err()
-        );
-        assert!(
-            codecs
-                .collect(
-                    &DomainSnapshot::new(
-                        id,
-                        DomainStateValue::new(serde_json::json!(false)).unwrap()
-                    ),
-                    &mut ReferenceCollector::default()
-                )
-                .is_err()
-        );
-        for n in 0..MAXIMUM_RECORD_REFERENCES {
-            refs.session(&SessionId::new(format!("session-{n}")).unwrap())
-                .unwrap_or_else(|_| assert_eq!(n, MAXIMUM_RECORD_REFERENCES - 1));
-        }
-        assert!(refs.session(&SessionId::new("overflow").unwrap()).is_err());
+        references.cas(&"b".repeat(64), 27).unwrap();
+        let snapshot = DomainSnapshot::new(
+            DomainIdentity::new("unloaded-plugin", 987).unwrap(),
+            DomainStateValue::new(serde_json::json!({"opaque":"not interpreted"})).unwrap(),
+        )
+        .with_references(references.clone());
+        let commit = DomainStateCommit::new(
+            None,
+            DomainMutationSource::Baseline,
+            vec![DomainStateUpdate::new(DomainRevision::new(0), snapshot).unwrap()],
+        )
+        .unwrap();
+        let record = AgentControlRecord::new(
+            1,
+            1,
+            AgentControlRecordBody::DomainStateCommitted { commit },
+        )
+        .unwrap();
+        let restored = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(control_references(&restored).unwrap(), references);
     }
 }

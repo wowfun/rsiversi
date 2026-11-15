@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE: usize = 32 * 1024 * 1024;
@@ -32,7 +32,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 15 || self.port == 0 {
+        if self.protocol != 16 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -46,8 +46,26 @@ struct Endpoint {
     key: SecretValue,
     client: reqwest::Client,
     retired: CancellationToken,
+    views: Arc<Semaphore>,
 }
 impl Endpoint {
+    async fn release_view(&self, id: &str) {
+        let request = json!({"view":id});
+        let mut delay = Duration::from_millis(100);
+        loop {
+            match self.call::<Value>("release", &request, 128).await {
+                Err(ToolError::OutcomeUnknown | ToolError::Capacity) => {}
+                _ => return,
+            }
+            // Release is idempotent and belongs only to this process generation.
+            tokio::select! { biased;
+                () = self.retired.cancelled() => return,
+                () = tokio::time::sleep(delay) => {},
+            }
+            delay = (delay * 2).min(Duration::from_secs(1));
+        }
+    }
+
     async fn call<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -174,6 +192,7 @@ impl Publisher {
             key,
             retired,
             client: self.client.clone(),
+            views: Arc::new(Semaphore::new(256)),
         })));
     }
 }
@@ -220,6 +239,7 @@ struct View {
     current: watch::Receiver<Option<Arc<Endpoint>>>,
     lifetime: CancellationToken,
     executions: Arc<Semaphore>,
+    release_permit: Option<OwnedSemaphorePermit>,
 }
 impl Drop for View {
     fn drop(&mut self) {
@@ -228,10 +248,10 @@ impl Drop for View {
         {
             let endpoint = self.endpoint.clone();
             let id = self.id.clone();
+            let permit = self.release_permit.take();
             runtime.spawn(async move {
-                let _ = endpoint
-                    .call::<Value>("release", &json!({"view":id}), 128)
-                    .await;
+                let _permit = permit;
+                endpoint.release_view(&id).await;
             });
         }
     }
@@ -279,6 +299,11 @@ impl RequestToolSource for Source {
             .ok_or_else(|| invalid("application tools are preparing"))?;
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).map_err(invalid)?;
+        let release_permit = endpoint
+            .views
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AgentCompositionError::Capacity)?;
         let view = Arc::new(View {
             id: hex::encode(nonce),
             session: header.session_id().clone(),
@@ -286,6 +311,7 @@ impl RequestToolSource for Source {
             current: self.endpoint.clone(),
             lifetime: self.lifetime.clone(),
             executions: self.executions.clone(),
+            release_permit: Some(release_permit),
         });
         let mut model_selection =
             json!({"provider":selection.model.deployment(),"model":selection.model.model()});

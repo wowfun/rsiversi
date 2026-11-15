@@ -80,10 +80,23 @@ const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 22] = [
+const EXPECTED_TABLES: [(&str, &str); 23] = [
+    ("domain_removals", "CREATE TABLE domain_removals (
+        session_id TEXT NOT NULL,
+        domain_id TEXT NOT NULL,
+        control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+        codec_version INTEGER NOT NULL CHECK (codec_version > 0),
+        PRIMARY KEY (session_id, domain_id, control_seq),
+        FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+    ) STRICT"),
+    ("generation_selections", "CREATE TABLE generation_selections (
+        session_id TEXT NOT NULL,
+        control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+        PRIMARY KEY (session_id, control_seq),
+        FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+    ) STRICT"),
     ("cas_deletions", "CREATE TABLE cas_deletions (operation_id TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL, byte_len INTEGER NOT NULL CHECK (byte_len > 0), generation INTEGER NOT NULL CHECK (generation > 0), state TEXT NOT NULL CHECK (state IN ('deleting', 'deleted')), UNIQUE (sha256, generation)) STRICT"),
-    ("reference_policy", "CREATE TABLE reference_policy (id INTEGER PRIMARY KEY CHECK (id = 1), strict INTEGER NOT NULL CHECK (strict IN (0, 1))) STRICT"),
-    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), PRIMARY KEY (session_id, stream, seq)) STRICT"),
+    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 TEXT NOT NULL, PRIMARY KEY (session_id, stream, seq)) STRICT"),
     ("reference_edges", "CREATE TABLE reference_edges (session_id TEXT NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL, target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'cas')), target_id TEXT NOT NULL, target_bytes INTEGER NOT NULL CHECK (target_bytes >= 0), PRIMARY KEY (session_id, stream, seq, target_kind, target_id), FOREIGN KEY (session_id, stream, seq) REFERENCES reference_records(session_id, stream, seq) ON DELETE RESTRICT) STRICT"),
     ("purge_operations", "CREATE TABLE purge_operations (operation_id TEXT PRIMARY KEY NOT NULL, request_json TEXT NOT NULL, locations_json TEXT NOT NULL, locations_sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), deleted_records INTEGER NOT NULL CHECK (deleted_records >= 0), deleted_payload_bytes INTEGER NOT NULL CHECK (deleted_payload_bytes >= 0)) STRICT"),
     ("session_tombstones", "CREATE TABLE session_tombstones (session_id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL REFERENCES purge_operations(operation_id) ON DELETE RESTRICT, state TEXT NOT NULL CHECK (state IN ('retiring', 'purged'))) STRICT"),
@@ -118,7 +131,6 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
             revision INTEGER NOT NULL CHECK (revision > 0),
             snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
             PRIMARY KEY (session_id, domain_id, control_seq),
-            UNIQUE (session_id, domain_id, revision),
             FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
          ) STRICT",
     ),
@@ -312,7 +324,15 @@ const EXPECTED_TABLES: [(&str, &str); 22] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 27] = [
+const EXPECTED_INDEXES: [(&str, &str); 28] = [
+    (
+        "domain_removals_by_control",
+        "CREATE INDEX domain_removals_by_control ON domain_removals(session_id, control_seq, domain_id)",
+    ),
+    (
+        "domain_versions_by_control",
+        "CREATE INDEX domain_versions_by_control ON domain_versions(session_id, control_seq, domain_id)",
+    ),
     (
         "purge_operations_pending",
         "CREATE INDEX purge_operations_pending ON purge_operations(operation_id) WHERE complete=0",
@@ -320,10 +340,6 @@ const EXPECTED_INDEXES: [(&str, &str); 27] = [
     (
         "cas_deletions_pending",
         "CREATE INDEX cas_deletions_pending ON cas_deletions(operation_id) WHERE state='deleting'",
-    ),
-    (
-        "reference_records_incomplete",
-        "CREATE INDEX reference_records_incomplete ON reference_records(session_id) WHERE complete=0",
     ),
     (
         "operation_tombstones",
@@ -483,7 +499,6 @@ impl ForkBoundaryCache {
 }
 
 struct StoreInner {
-    reference_codecs: Arc<rsi_agent_store_protocol::ReferenceCodecs>,
     retirement_started: AtomicBool,
     reference_proof: Mutex<Option<reference_validation::Proof>>,
     reference_commits: Arc<AtomicU64>,
@@ -789,7 +804,7 @@ impl SqliteStore {
                         )
                         .map_err(sql_error)?,
                 ),
-                reference_codecs: Arc::default(),
+
                 reference_proof: Mutex::new(None),
                 reference_commits,
                 #[cfg(feature = "test-support")]
@@ -871,10 +886,7 @@ impl SqliteStore {
         let offline = filesystem::open_offline_store(root.as_ref())?;
         offline_maintenance::require_settled(&offline.connection)?;
         validate_database(&offline.connection)?;
-        reference_index::validate_retiring(
-            &offline.connection,
-            &rsi_agent_store_protocol::ReferenceCodecs::default(),
-        )?;
+        reference_index::validate_retiring(&offline.connection)?;
         Ok(())
     }
 
@@ -1278,11 +1290,6 @@ impl PluginFactory for SqliteStoreFactory {
                 }
                 MetaError::Activation(error.to_string())
             })?;
-        let codecs = plan
-            .context()
-            .provide_local::<rsi_agent_session_protocol::ReferenceCodecRegistrationContract>(
-            store.inner.reference_codecs.clone(),
-        )?;
         let store: Arc<dyn SessionStore> = Arc::new(store);
         let supply = plan
             .context()
@@ -1292,7 +1299,6 @@ impl PluginFactory for SqliteStoreFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
-                    drop(codecs);
                     Ok(())
                 })
             }),

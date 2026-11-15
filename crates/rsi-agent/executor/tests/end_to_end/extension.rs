@@ -6,6 +6,8 @@ use rsi_agent_session_protocol::{ContributionId, ExtensionJournal};
 mod commands;
 #[path = "extension/fork.rs"]
 mod fork;
+#[path = "extension/generations.rs"]
+mod generations;
 #[path = "extension/rejection.rs"]
 mod rejection;
 
@@ -45,7 +47,7 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         &payload.path().join("rsi-dsh-plugin-bridge/src/index.mjs"),
     )
     .await;
-    let definition = rsi_extension_agent::definition(package.digest().to_owned()).unwrap();
+    let definition = rsi_extension_agent::definition().unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = domains.bind(&definition).unwrap();
     *stack.composition.domains.lock().unwrap() = domains;
@@ -58,7 +60,6 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
             .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
             .unwrap(),
         handle.clone(),
-        package.digest().to_owned(),
     )
     .unwrap();
     let callbacks = contributions::install(
@@ -225,7 +226,7 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
         .await
         .unwrap();
     let open = json!({"session_id": submitted.session_id, "created_at": header().created_at_ms(),
-        "local_cwd":header().canonical_cwd(),"revision": states.states[0].head.revision.get(), "count": events.len()});
+        "local_cwd":header().canonical_cwd(),"revision": states.states[0].head.revision.get(), "count": events.len(), "reload": false});
     let begin = connection
         .request("agent.load.begin", open.clone(), CancellationToken::new())
         .await
@@ -414,11 +415,10 @@ async fn original_plan_review_parks_the_kernel_and_rejects_answers_invalidated_b
             &cohort.join("node_modules/rsi-dsh-plugin-bridge/src/index.mjs"),
         )
         .await;
-        let definition = rsi_extension_agent::definition("a".repeat(64)).unwrap();
+        let definition = rsi_extension_agent::definition().unwrap();
         let initial_catalog = DomainCatalog::new([definition.registration()]).unwrap();
         let initial_handle = initial_catalog.bind(&definition).unwrap();
         let empty = ExtensionJournal {
-            artifact_sha256: "a".repeat(64),
             segments: vec![],
             sessions: vec![],
             checkpoint: DomainStateValue::new(Value::Null).unwrap(),
@@ -442,7 +442,11 @@ async fn original_plan_review_parks_the_kernel_and_rejects_answers_invalidated_b
             .decode(prepared.proposal().snapshot())
             .unwrap();
         let definition = DomainDefinition::new(
-            DomainIdentity::new(EXTENSION_JOURNAL_DOMAIN, 1).unwrap(),
+            DomainIdentity::new(
+                EXTENSION_JOURNAL_DOMAIN,
+                rsi_agent_session_protocol::EXTENSION_JOURNAL_VERSION,
+            )
+            .unwrap(),
             &initial,
             ExtensionJournal::validate,
             DomainReferencePolicy::Visit(ExtensionJournal::references),
@@ -460,7 +464,6 @@ async fn original_plan_review_parks_the_kernel_and_rejects_answers_invalidated_b
                 .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
                 .unwrap(),
             handle.clone(),
-            "a".repeat(64),
         )
         .unwrap();
         let review = Arc::new(ReviewFixture {
@@ -702,7 +705,7 @@ async fn lost_reply(lose_stage: bool) {
             .await
             .unwrap();
     }
-    let definition = rsi_extension_agent::definition("a".repeat(64)).unwrap();
+    let definition = rsi_extension_agent::definition().unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = domains.bind(&definition).unwrap();
     *stack.composition.domains.lock().unwrap() = domains;
@@ -715,7 +718,6 @@ async fn lost_reply(lose_stage: bool) {
             .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
             .unwrap(),
         handle.clone(),
-        "a".repeat(64),
     )
     .unwrap();
     let callbacks = contributions::install(

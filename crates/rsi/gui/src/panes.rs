@@ -1337,6 +1337,7 @@ mod tests {
                 .pop()
                 .unwrap();
             owner.observe(&SessionObservation::Control {
+                fact_cursor: 0,
                 record,
                 durable_control_seq: 2,
             });

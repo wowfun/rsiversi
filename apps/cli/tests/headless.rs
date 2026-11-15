@@ -1033,7 +1033,7 @@ async fn built_binary_separates_jsonl_and_model_text_from_status_feedback() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.first().unwrap()["type"], "message");
-    assert_eq!(lines.first().unwrap()["version"], 6);
+    assert_eq!(lines.first().unwrap()["version"], 7);
     assert_eq!(lines.first().unwrap()["session_id"], "session-binary");
     assert_eq!(lines.get(1).unwrap()["type"], "turn");
     assert_eq!(lines.last().unwrap()["type"], "outcome");
@@ -2346,7 +2346,8 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
         }))).await.unwrap();
     }));
     let fixture = fixture(&format!("http://{address}"));
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_rsi"));
+    command
         .args([
             "run",
             "test-headless",
@@ -2369,15 +2370,12 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
             "DBUS_SESSION_BUS_ADDRESS",
             format!("unix:path={}/absent", fixture.temporary.path().display()),
         )
-        .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(CHILD_PROVIDER_START_TIMEOUT, sent.notified())
+        .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret");
+    let mut child = child::ObservedChild::spawn_undrained(&mut command).unwrap();
+    child
+        .wait_provider(sent.notified(), CHILD_PROVIDER_START_TIMEOUT)
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
     // Text exposes live bytes; JSONL exposes live and settled encoded events.
     // Confirm either reached the pipe, then retain it without draining.
     let marker: &[u8] = if output == "jsonl" {
@@ -2385,27 +2383,16 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
     } else {
         &[b'x'; 32]
     };
-    let mut stdout = child.stdout.take().unwrap();
+    let mut stdout = child.take_stdout();
     let mut prefix = Vec::new();
     let received = tokio::time::timeout(Duration::from_secs(5), async {
         let mut chunk = [0; 4096];
         loop {
             let count = stdout.read(&mut chunk).await.unwrap();
             if count == 0 {
-                let mut diagnostic = Vec::new();
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(1),
-                    child
-                        .stderr
-                        .take()
-                        .unwrap()
-                        .take(8192)
-                        .read_to_end(&mut diagnostic),
-                )
-                .await;
                 panic!(
                     "stdout closed before streamed model bytes: {}",
-                    String::from_utf8_lossy(&diagnostic)
+                    child.diagnostic("model output")
                 );
             }
             prefix.extend_from_slice(&chunk[..count]);
@@ -2429,21 +2416,21 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
         wait_for_completed_output(&fixture).await;
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(child.try_wait().unwrap().is_none());
+    assert!(child.is_running());
     assert!(
         tokio::process::Command::new("/bin/kill")
-            .args(["-INT", &child.id().unwrap().to_string()])
+            .args(["-INT", &child.id().to_string()])
             .status()
             .await
             .unwrap()
             .success()
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-    assert!(
-        result.is_ok(),
-        "SIGINT cleanup waited for the external stdout consumer"
-    );
-    assert_eq!(result.unwrap().unwrap().code(), Some(130));
+    child.signal_sent("SIGINT");
+    let result = child
+        .wait(Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.status.code(), Some(130));
     drop(stdout);
     server.abort();
     let _ = server.await;

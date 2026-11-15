@@ -536,7 +536,7 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> validation::CanonicalObser
             session,
             CasInspectionStream::Control,
             record.seq(),
-            &rsi_agent_store_protocol::native_control_references(record)?,
+            &rsi_agent_store_protocol::control_references(record)?,
         )
     }
     fn fact(&mut self, session: &SessionId, fact: &SessionFact, _: &str) -> Result<()> {

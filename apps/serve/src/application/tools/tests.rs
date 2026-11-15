@@ -165,13 +165,14 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     let port = socket.local_addr().unwrap().port();
     let endpoint = Arc::new(Endpoint {
         listener: Listener {
-            protocol: 15,
+            protocol: 16,
             generation: "worker".into(),
             port,
         },
         key: SecretValue::new("fixture-key").unwrap(),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         retired: CancellationToken::new(),
+        views: Arc::new(Semaphore::new(256)),
     });
     (socket, endpoint)
 }
@@ -182,6 +183,7 @@ pub(super) fn captured_view(
 ) -> View {
     View {
         id: "capture".into(),
+        release_permit: Some(endpoint.views.clone().try_acquire_owned().unwrap()),
         session: rsi_agent_session_protocol::SessionId::new("session").unwrap(),
         endpoint,
         current,
@@ -393,6 +395,84 @@ async fn respond(stream: &mut TcpStream, reply: &str) {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn dropped_view_release_survives_lost_requests_and_replies() {
+    let (listener, endpoint) = endpoint().await;
+    let (_publish, current) = watch::channel(Some(endpoint.clone()));
+    let remaining = endpoint.views.clone().try_acquire_many_owned(255).unwrap();
+    drop(captured_view(endpoint.clone(), current));
+    assert!(endpoint.views.clone().try_acquire_owned().is_err());
+    let expected = json!({"view":"capture"});
+    // Neither an unacknowledged request nor a lost reply proves delivery.
+    let mut refused = accept(&listener, "release", &expected).await;
+    refused
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    drop(refused);
+    assert!(endpoint.views.clone().try_acquire_owned().is_err());
+    let retried = tokio::time::timeout(
+        Duration::from_secs(2),
+        accept(&listener, "release", &expected),
+    )
+    .await
+    .expect("a lost release must be retried while the generation lives");
+    drop(retried);
+    let mut acknowledged = tokio::time::timeout(
+        Duration::from_secs(2),
+        accept(&listener, "release", &expected),
+    )
+    .await
+    .expect("a lost reply must also be retried");
+    respond(&mut acknowledged, "{}").await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while Arc::strong_count(&endpoint) > 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("acknowledged release must retire its task");
+    assert_eq!(endpoint.views.available_permits(), 1);
+    drop(remaining);
+}
+
+#[tokio::test]
+async fn definite_release_refusal_retires_delivery() {
+    let (listener, endpoint) = endpoint().await;
+    let ((), ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(endpoint.release_view("unknown"), async {
+            let mut stream = accept(&listener, "release", &json!({"view":"unknown"})).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        })
+    })
+    .await
+    .expect("a definite refusal must end delivery without retiring the generation");
+    assert!(!endpoint.retired.is_cancelled());
+}
+
+#[tokio::test]
+async fn dropped_view_release_stops_with_its_original_generation() {
+    let (listener, endpoint) = endpoint().await;
+    let release = endpoint.release_view("capture");
+    let retire = async {
+        let held = accept(&listener, "release", &json!({"view":"capture"})).await;
+        endpoint.retired.cancel();
+        held
+    };
+    let ((), _held) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(release, retire)
+    })
+    .await
+    .expect("retirement interrupts a stalled release request");
 }
 
 #[tokio::test]

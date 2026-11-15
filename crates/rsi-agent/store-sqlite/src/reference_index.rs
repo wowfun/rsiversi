@@ -5,9 +5,7 @@ use super::{
     validation,
 };
 use rsi_agent_session_protocol::{DurableReference, ReferenceCollector};
-use rsi_agent_store_protocol::{
-    ReferenceCodecs, control_references, fact_references, header_references,
-};
+use rsi_agent_store_protocol::{control_references, fact_references, header_references};
 
 pub(super) fn available(connection: &Connection, id: &SessionId) -> Result<()> {
     let retired = connection
@@ -33,40 +31,43 @@ fn write(
     seq: u64,
     hash: &str,
     refs: Result<ReferenceCollector>,
-    strict: bool,
 ) -> Result<()> {
-    let refs = match refs {
-        Ok(refs) => Some(refs),
-        Err(StoreError::Unsupported(_)) if !strict => None,
-        Err(error) => return Err(error),
-    };
-    connection.execute("INSERT INTO reference_records(session_id,stream,seq,sha256,complete) VALUES(?1,?2,?3,?4,?5)", params![id.as_str(),stream,sqlite_u64("reference sequence",seq)?,hash,refs.is_some()]).map_err(sql_error)?;
-    if let Some(refs) = refs {
-        for edge in refs.iter() {
-            let (kind, target, bytes) = match edge {
-                DurableReference::Session(target) => {
-                    available(connection, target)?;
-                    ("session", target.as_str(), 0)
+    let refs = refs?;
+    connection
+        .execute(
+            "INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES(?1,?2,?3,?4)",
+            params![
+                id.as_str(),
+                stream,
+                sqlite_u64("reference sequence", seq)?,
+                hash
+            ],
+        )
+        .map_err(sql_error)?;
+    for edge in refs.iter() {
+        let (kind, target, bytes) = match edge {
+            DurableReference::Session(target) => {
+                available(connection, target)?;
+                ("session", target.as_str(), 0)
+            }
+            DurableReference::Cas { sha256, byte_len } => {
+                cas_ownership::available(connection, sha256)?;
+                let stored = connection
+                    .query_row(
+                        "SELECT byte_len FROM cas_objects WHERE sha256=?1",
+                        [sha256],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                    .ok_or_else(|| StoreError::NotFound(sha256.clone()))?;
+                if decode_u64("CAS reference bytes", stored)? != *byte_len {
+                    return Err(StoreError::Corrupt("canonical CAS length differs".into()));
                 }
-                DurableReference::Cas { sha256, byte_len } => {
-                    cas_ownership::available(connection, sha256)?;
-                    let stored = connection
-                        .query_row(
-                            "SELECT byte_len FROM cas_objects WHERE sha256=?1",
-                            [sha256],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .optional()
-                        .map_err(sql_error)?
-                        .ok_or_else(|| StoreError::NotFound(sha256.clone()))?;
-                    if decode_u64("CAS reference bytes", stored)? != *byte_len {
-                        return Err(StoreError::Corrupt("canonical CAS length differs".into()));
-                    }
-                    ("cas", sha256.as_str(), *byte_len)
-                }
-            };
-            connection.execute("INSERT INTO reference_edges(session_id,stream,seq,target_kind,target_id,target_bytes) VALUES(?1,?2,?3,?4,?5,?6)", params![id.as_str(),stream,sqlite_u64("reference sequence",seq)?,kind,target,sqlite_u64("reference bytes",bytes)?]).map_err(sql_error)?;
-        }
+                ("cas", sha256.as_str(), *byte_len)
+            }
+        };
+        connection.execute("INSERT INTO reference_edges(session_id,stream,seq,target_kind,target_id,target_bytes) VALUES(?1,?2,?3,?4,?5,?6)", params![id.as_str(),stream,sqlite_u64("reference sequence",seq)?,kind,target,sqlite_u64("reference bytes",bytes)?]).map_err(sql_error)?;
     }
     Ok(())
 }
@@ -74,29 +75,11 @@ fn write(
 pub(super) struct Writer<'a> {
     connection: &'a Connection,
     id: &'a SessionId,
-    codecs: &'a ReferenceCodecs,
-    strict: bool,
 }
 impl<'a> Writer<'a> {
-    pub(super) fn new(
-        connection: &'a Connection,
-        id: &'a SessionId,
-        codecs: &'a ReferenceCodecs,
-    ) -> Result<Self> {
+    pub(super) fn new(connection: &'a Connection, id: &'a SessionId) -> Result<Self> {
         available(connection, id)?;
-        let strict = connection
-            .query_row(
-                "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sql_error)?;
-        Ok(Self {
-            connection,
-            id,
-            codecs,
-            strict,
-        })
+        Ok(Self { connection, id })
     }
     fn encode(
         &self,
@@ -113,7 +96,6 @@ impl<'a> Writer<'a> {
             seq,
             &hex::encode(Sha256::digest(encoded.as_bytes())),
             refs,
-            self.strict,
         )?;
         Ok(encoded)
     }
@@ -135,7 +117,7 @@ impl<'a> Writer<'a> {
             "control",
             control.seq(),
             control,
-            control_references(control, self.codecs),
+            control_references(control),
         )
     }
 }
@@ -147,8 +129,15 @@ fn verify(
     hash: &str,
     refs: &ReferenceCollector,
 ) -> Result<()> {
-    let row = connection.query_row("SELECT sha256,complete FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",params![id.as_str(),stream,sqlite_u64("reference sequence",seq)?], |row| Ok((bounded_text(row,0,64)?,row.get::<_,bool>(1)?))).optional().map_err(sql_error)?;
-    let Some((stored, complete)) = row else {
+    let row = connection
+        .query_row(
+            "SELECT sha256 FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
+            params![id.as_str(), stream, sqlite_u64("reference sequence", seq)?],
+            |row| bounded_text(row, 0, 64),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let Some(stored) = row else {
         return Err(StoreError::Corrupt(
             "missing canonical reference coverage".into(),
         ));
@@ -156,11 +145,6 @@ fn verify(
     if stored != hash {
         return Err(StoreError::Corrupt(
             "reference coverage digest differs from canonical record".into(),
-        ));
-    }
-    if !complete {
-        return Err(StoreError::Unsupported(
-            "canonical Domain reference coverage requires explicit rebuild".into(),
         ));
     }
     let mut statement = connection.prepare("SELECT target_kind,target_id,target_bytes FROM reference_edges WHERE session_id=?1 AND stream=?2 AND seq=?3 ORDER BY target_kind,target_id").map_err(sql_error)?;
@@ -197,7 +181,7 @@ fn verify(
 }
 struct Observer<'a> {
     connection: &'a Connection,
-    codecs: &'a ReferenceCodecs,
+
     records: u64,
 }
 impl validation::CanonicalObserver for Observer<'_> {
@@ -225,18 +209,18 @@ impl validation::CanonicalObserver for Observer<'_> {
             "control",
             control.seq(),
             &digest(encoded),
-            &control_references(control, self.codecs)?,
+            &control_references(control)?,
         )?;
         self.records += 1;
         Ok(())
     }
 }
-pub(super) fn validate_all(connection: &Connection, codecs: &ReferenceCodecs) -> Result<()> {
+pub(super) fn validate_all(connection: &Connection) -> Result<()> {
     let mut statement = connection.prepare("SELECT session_id FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) ORDER BY session_id").map_err(sql_error)?;
     let mut rows = statement.query([]).map_err(sql_error)?;
     let mut observer = Observer {
         connection,
-        codecs,
+
         records: 0,
     };
     while let Some(row) = rows.next().map_err(sql_error)? {
@@ -255,7 +239,7 @@ pub(super) fn validate_all(connection: &Connection, codecs: &ReferenceCodecs) ->
         validation::validate_session_observed(connection, &id, &mut observer)?;
         validation::validate_canonical_fact_prefix(connection, &id, &mut observer)?;
     }
-    observer.records += validate_retiring(connection, codecs)?;
+    observer.records += validate_retiring(connection)?;
     let indexed = connection
         .query_row("SELECT COUNT(*) FROM reference_records", [], |row| {
             row.get::<_, i64>(0)
@@ -290,31 +274,19 @@ pub(super) fn remove(connection: &Connection, id: &str, stream: &str, seq: i64) 
 
 // A retired prefix is intentionally incomplete. Authenticate each surviving
 // canonical record and its exact projection without pretending it is replayable.
-pub(super) fn validate_retiring(connection: &Connection, codecs: &ReferenceCodecs) -> Result<u64> {
-    validate_retiring_operation(connection, codecs, None)
+pub(super) fn validate_retiring(connection: &Connection) -> Result<u64> {
+    validate_retiring_operation(connection, None)
 }
 pub(super) fn validate_retiring_operation(
     connection: &Connection,
-    codecs: &ReferenceCodecs,
+
     operation: Option<&str>,
 ) -> Result<u64> {
     validate_retirement_bindings(connection, operation)?;
-    if let Some(operation) = operation {
-        if maintenance::operation_request(connection, operation)?.is_none() {
-            return Err(StoreError::NotFound(operation.into()));
-        }
-        let strict: bool = connection
-            .query_row(
-                "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sql_error)?;
-        if !strict {
-            return Err(StoreError::Corrupt(
-                "retirement requires strict reference admission".into(),
-            ));
-        }
+    if let Some(operation) = operation
+        && maintenance::operation_request(connection, operation)?.is_none()
+    {
+        return Err(StoreError::NotFound(operation.into()));
     }
     let mut records = 0;
     for (table, stream, column, seq, maximum) in [
@@ -343,7 +315,7 @@ pub(super) fn validate_retiring_operation(
                 row.get(1).map_err(sql_error)?,
             )?;
             let encoded = bounded_text(row, 2, maximum).map_err(sql_error)?;
-            verify_encoded(connection, codecs, &id, stream, seq, &encoded)?;
+            verify_encoded(connection, &id, stream, seq, &encoded)?;
             records += 1;
         }
     }
@@ -386,7 +358,7 @@ pub(super) fn validate_retiring_operation(
 
 pub(super) fn verify_encoded(
     connection: &Connection,
-    codecs: &ReferenceCodecs,
+
     id: &SessionId,
     stream: &str,
     seq: u64,
@@ -404,7 +376,7 @@ pub(super) fn verify_encoded(
                 "retiring control sequence differs".into(),
             ));
         }
-        control_references(&value, codecs)?
+        control_references(&value)?
     };
     verify(connection, id, stream, seq, &digest(encoded), &refs)
 }
@@ -427,7 +399,7 @@ pub(super) fn verify_fact(
 
 struct Rebuilder<'a> {
     connection: &'a Connection,
-    codecs: &'a ReferenceCodecs,
+
     records: u64,
 }
 impl validation::CanonicalObserver for Rebuilder<'_> {
@@ -439,7 +411,6 @@ impl validation::CanonicalObserver for Rebuilder<'_> {
             fact.seq(),
             &digest(encoded),
             fact_references(fact),
-            true,
         )?;
         self.records += 1;
         Ok(())
@@ -456,24 +427,22 @@ impl validation::CanonicalObserver for Rebuilder<'_> {
             "control",
             control.seq(),
             &digest(encoded),
-            control_references(control, self.codecs),
-            true,
+            control_references(control),
         )?;
         self.records += 1;
         Ok(())
     }
 }
-pub(super) fn rebuild(connection: &Connection, codecs: &ReferenceCodecs) -> Result<u64> {
+pub(super) fn rebuild(connection: &Connection) -> Result<u64> {
     connection
         .execute("DELETE FROM reference_edges", [])
         .map_err(sql_error)?;
     connection
         .execute("DELETE FROM reference_records", [])
         .map_err(sql_error)?;
-    connection.execute("INSERT INTO reference_policy(id,strict) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET strict=1",[]).map_err(sql_error)?;
     let mut rebuilder = Rebuilder {
         connection,
-        codecs,
+
         records: 0,
     };
     let mut cursor = None;
@@ -491,7 +460,6 @@ pub(super) fn rebuild(connection: &Connection, codecs: &ReferenceCodecs) -> Resu
                 0,
                 &digest(&encoded),
                 header_references(&row.header),
-                true,
             )?;
             rebuilder.records += 1;
             validation::validate_session_observed(connection, id, &mut rebuilder)?;

@@ -34,7 +34,7 @@ impl AgentKernel {
             }
             _ => None,
         };
-        let admission = self
+        let mut admission = self
             .inner
             .submission_admission
             .acquire_pair(id, parent)
@@ -50,7 +50,7 @@ impl AgentKernel {
             .await
             .map_err(turn_store_error)?;
         if stop_turns && inbox.has_open_turn {
-            self.ensure_session_loaded(id).await?;
+            admission = self.ensure_session_loaded(id, admission).await?;
         }
         let timestamp = self.inner.clock.now_ms().max(1);
         let facts = {

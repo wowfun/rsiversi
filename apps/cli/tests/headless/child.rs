@@ -99,6 +99,13 @@ impl Drop for ObservedChild {
 
 impl ObservedChild {
     pub(super) fn spawn(command: &mut Command) -> Result<Self, String> {
+        Self::spawn_with_stdout(command, true)
+    }
+    #[cfg(unix)]
+    pub(super) fn spawn_undrained(command: &mut Command) -> Result<Self, String> {
+        Self::spawn_with_stdout(command, false)
+    }
+    fn spawn_with_stdout(command: &mut Command, drain_stdout: bool) -> Result<Self, String> {
         let mut child = command
             .kill_on_drop(true)
             .stdout(Stdio::piped())
@@ -108,11 +115,13 @@ impl ObservedChild {
         let stdout = Arc::new(Mutex::new(Capture::default()));
         let stderr = Arc::new(Mutex::new(Capture::default()));
         let readers = [
-            Some(drain(
-                child.stdout.take().expect("piped stdout"),
-                stdout.clone(),
-                true,
-            )),
+            drain_stdout.then(|| {
+                drain(
+                    child.stdout.take().expect("piped stdout"),
+                    stdout.clone(),
+                    true,
+                )
+            }),
             Some(drain(
                 child.stderr.take().expect("piped stderr"),
                 stderr.clone(),
@@ -139,7 +148,7 @@ impl ObservedChild {
         self.signal = Some(signal);
     }
 
-    fn diagnostic(&self, stage: &str) -> String {
+    pub(super) fn diagnostic(&self, stage: &str) -> String {
         let stdout = self.stdout.lock().unwrap();
         let stderr = self.stderr.lock().unwrap();
         format!(
@@ -152,6 +161,14 @@ impl ObservedChild {
             stdout.diagnostic(),
             stderr.diagnostic()
         )
+    }
+    #[cfg(unix)]
+    pub(super) fn take_stdout(&mut self) -> tokio::process::ChildStdout {
+        self.child.stdout.take().expect("retained undrained stdout")
+    }
+    #[cfg(unix)]
+    pub(super) fn is_running(&mut self) -> bool {
+        self.child.try_wait().expect("child status").is_none()
     }
 
     async fn drain_after_exit(&mut self) -> Result<(), String> {

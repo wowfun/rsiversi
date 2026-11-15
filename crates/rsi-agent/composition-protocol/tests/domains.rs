@@ -465,30 +465,28 @@ fn draft_batches_never_publish_a_valid_prefix_before_a_later_rejection() {
 }
 
 #[test]
-fn reference_free_versions_skip_decoding_but_visitors_validate_durable_state() {
+fn current_codec_validates_persisted_references_across_repeated_generations() {
     use rsi_agent_composition_protocol::DomainReferencePolicy;
-    use rsi_agent_session_protocol::{DomainStateValue, ReferenceCollector};
-    for policy in [
-        DomainReferencePolicy::None,
-        DomainReferencePolicy::Visit(|_: &bool, _: &mut ReferenceCollector| Ok(())),
-    ] {
+    use rsi_agent_session_protocol::{DomainSnapshot, ReferenceCollector, SessionId};
+    // Repeated discarded generations do not accumulate a process-wide codec registry.
+    for _ in 0..300 {
         let definition = DomainDefinition::new(
             DomainIdentity::new("reference-contract", 1).unwrap(),
-            &false,
+            &SessionId::new("child").unwrap(),
             |_| Ok(()),
-            policy,
+            DomainReferencePolicy::Visit(|id: &SessionId, refs: &mut ReferenceCollector| {
+                refs.session(id)
+            }),
         )
         .unwrap();
         let catalog = DomainCatalog::new([definition.registration()]).unwrap();
-        let codec = catalog.reference_codecs().remove(0);
-        let invalid_typed_state = DomainStateValue::new(serde_json::json!("not boolean")).unwrap();
-        let mut references = ReferenceCollector::default();
-        let result = codec.references(&invalid_typed_state, &mut references);
-        assert_eq!(
-            result.is_ok(),
-            matches!(policy, DomainReferencePolicy::None)
-        );
-        assert!(references.iter().next().is_none());
+        let snapshot = catalog.baseline()[0].clone();
+        assert_eq!(snapshot.references().iter().count(), 1);
+        catalog.validate_snapshot(&snapshot).unwrap();
+        let stripped = DomainSnapshot::new(snapshot.identity().clone(), snapshot.state().clone());
+        assert!(catalog.validate_snapshot(&stripped).is_err());
+        drop(definition);
+        drop(catalog);
     }
 }
 

@@ -712,7 +712,7 @@ async fn read_observed_controls(
     inner: &Arc<KernelInner>,
     session: &SessionId,
     cursor: u64,
-) -> TurnResult<(Vec<ObservedControl>, u64)> {
+) -> TurnResult<(Vec<ObservedControl>, Vec<u64>, u64)> {
     let limit = MAXIMUM_FACTS_PER_READ;
     let ((page, limit), _read, _lease) = store_reads::page(
         inner,
@@ -739,7 +739,7 @@ async fn read_observed_controls(
     let retained = inner
         .observation_retention
         .retain_controls(page.records.into_iter().map(Arc::new).collect())?;
-    Ok((retained, page.durable_seq))
+    Ok((retained, page.fact_cursors, page.durable_seq))
 }
 
 pub(super) async fn fill_observation_page(
@@ -753,20 +753,24 @@ pub(super) async fn fill_observation_page(
             !state.read_facts
         };
         if controls {
-            let (records, durable_control_seq) =
+            let (records, fact_cursors, durable_control_seq) =
                 read_observed_controls(inner, &state.session_id, state.control_seq).await?;
             if let Some(last) = records.last() {
                 state.control_seq = last.seq();
             }
             state.read_controls = state.control_seq < durable_control_seq;
-            state.pending.extend(
-                records
-                    .into_iter()
-                    .map(|record| SessionObservation::Control {
-                        record,
-                        durable_control_seq,
-                    }),
-            );
+            state
+                .pending
+                .extend(
+                    records
+                        .into_iter()
+                        .zip(fact_cursors)
+                        .map(|(record, fact_cursor)| SessionObservation::Control {
+                            record,
+                            fact_cursor,
+                            durable_control_seq,
+                        }),
+                );
         } else {
             let (facts, durable_fact_seq) =
                 read_observed_facts(inner, &state.session_id, state.fact_seq).await?;

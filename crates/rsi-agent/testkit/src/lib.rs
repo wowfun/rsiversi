@@ -56,6 +56,7 @@ pub struct MemoryStore {
     window_reads: AtomicUsize,
     activity_cut_failure: Mutex<Option<StoreError>>,
     activity_cut_pause: Mutex<Option<ActivityCutPause>>,
+    cas_read_pause: Mutex<Option<ActivityCutPause>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -94,6 +95,8 @@ struct MemorySession {
     last_settled_control_seq: u64,
     control_prefix_digest: [u8; 32],
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
+    domain_removals: BTreeMap<String, Vec<u64>>,
+    generation_selections: BTreeSet<u64>,
     queue_mutations: BTreeMap<rsi_agent_session_protocol::QueueOperationId, u64>,
     domain_requests: BTreeMap<rsi_agent_session_protocol::DomainRequestId, u64>,
     domain_usage: BTreeMap<TurnId, (u64, u64)>,
@@ -108,6 +111,28 @@ struct MemoryTurnBoundary {
 }
 
 impl MemoryStore {
+    /// Pauses the next CAS read until its sender is sent/dropped; reports entry.
+    ///
+    /// # Panics
+    /// Panics if a pause is already installed or the fixture mutex is poisoned.
+    pub fn pause_next_cas_read(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        assert!(
+            self.cas_read_pause
+                .lock()
+                .unwrap()
+                .replace((entered, blocked))
+                .is_none()
+        );
+        (started, release)
+    }
+
     /// Creates an empty deterministic Store.
     pub fn new() -> Self {
         Self::default()
@@ -224,7 +249,9 @@ mod program_graph;
 mod store_contract;
 
 pub use contribution::activate_contribution_owner;
-pub use domain_contract::{assert_control_fact_order, assert_domain_store_contract};
+pub use domain_contract::{
+    assert_control_fact_order, assert_domain_store_contract, assert_generation_store_contract,
+};
 pub use store_contract::{
     assert_inbox_pause_store_contract, assert_mechanical_store_contract,
     assert_metadata_only_cas_retention, assert_program_store_contract, assert_queue_store_contract,

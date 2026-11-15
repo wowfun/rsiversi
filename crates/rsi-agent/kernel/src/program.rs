@@ -464,21 +464,42 @@ impl AgentKernel {
     }
 }
 impl KernelInner {
-    pub(super) fn revoke_program_guards(&self, changes: &[(SessionId, String)]) {
+    pub(super) fn program_guard_revocations(
+        &self,
+        commit: &AtomicAgentCommit,
+    ) -> Vec<CancellationToken> {
         let registry = self
             .programs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (session, domain) in changes {
-            if let Some(run) = registry.get(session).and_then(Weak::upgrade)
-                && run
-                    .descriptor
-                    .guard
-                    .as_ref()
-                    .is_some_and(|guard| guard.domain.id() == domain)
-            {
-                run.cancellation.cancel();
-            }
-        }
+        commit
+            .sessions
+            .iter()
+            .filter_map(|append| {
+                let run = registry.get(&append.session_id)?.upgrade()?;
+                let guard = run.descriptor.guard.as_ref()?;
+                let revoked = append.controls.iter().any(|record| {
+                    let AgentControlRecordBody::DomainStateCommitted { commit } = record.body()
+                    else {
+                        return false;
+                    };
+                    match commit
+                        .updates()
+                        .iter()
+                        .find(|update| update.snapshot().identity().id() == guard.domain.id())
+                    {
+                        Some(update) => {
+                            update.revision() != guard.revision
+                                || update.snapshot().identity() != &guard.domain
+                        }
+                        None => commit
+                            .removed()
+                            .iter()
+                            .any(|identity| identity == &guard.domain),
+                    }
+                });
+                revoked.then(|| run.cancellation.clone())
+            })
+            .collect()
     }
 }

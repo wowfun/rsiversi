@@ -2,31 +2,13 @@ use super::*;
 use rsi_agent_session_protocol::TurnOutcome;
 use rsi_agent_store_protocol::{PurgeRequest, PurgeTarget, StoreMaintenance};
 
-fn strict_policy(store: &SqliteStore) -> bool {
-    store
-        .inner
-        .connections
-        .writer
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .query_row(
-            "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-}
-
 #[tokio::test]
-async fn refused_maintenance_preserves_reference_policy() {
+async fn refused_maintenance_preserves_sessions_and_cas() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let mut request = seed(&store, "refused-policy", 1).await;
     request.targets[0].fact_seq += 1;
     assert!(store.begin_purge(request).await.unwrap().is_err());
-    assert!(!strict_policy(&store));
     drop(
         store
             .put_cas(Arc::from(b"unreferenced".as_slice()))
@@ -39,7 +21,6 @@ async fn refused_maintenance_preserves_reference_policy() {
         store.collect_cas("stale-generation", target).await,
         Err(StoreError::Invalid(_))
     ));
-    assert!(!strict_policy(&store));
     let target = store.preview_cas_gc(1).await.unwrap().remove(0);
     assert!(
         store
@@ -48,7 +29,12 @@ async fn refused_maintenance_preserves_reference_policy() {
             .unwrap()
             .complete
     );
-    assert!(strict_policy(&store));
+    assert!(
+        store
+            .header(&SessionId::new("refused-policy").unwrap())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -155,7 +141,7 @@ async fn reference_proof_survives_a_known_refusal_without_writes() {
 }
 
 #[tokio::test]
-async fn complete_non_strict_writes_preserve_the_reference_audit() {
+async fn canonical_writes_preserve_the_reference_audit() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     seed(&store, "first-proof", 1).await;
@@ -168,7 +154,6 @@ async fn complete_non_strict_writes_preserve_the_reference_audit() {
     );
     seed(&store, "next-proof", 1).await;
     store.validate_references().await.unwrap();
-    assert!(!strict_policy(&store));
     assert_eq!(store.inner.reference_audits.load(Ordering::Relaxed), 1);
 }
 
@@ -758,21 +743,6 @@ async fn purge_refuses_changed_versions_and_extra_reference_edges_before_retirem
             .blockers
             .is_empty()
     );
-    let strict: bool = store
-        .inner
-        .connections
-        .writer
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .query_row(
-            "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!strict, "preview must not change durable reference policy");
     let mut changed = request.clone();
     changed.targets[0].fact_seq += 1;
     assert!(
@@ -979,13 +949,13 @@ async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_aft
         .as_ref()
         .unwrap()
         .execute(
-            "UPDATE reference_records SET complete=0 WHERE session_id='unrelated-gc'",
+            "UPDATE reference_records SET sha256='invalid' WHERE session_id='unrelated-gc'",
             [],
         )
         .unwrap();
     assert!(matches!(
         store.preview_cas_gc(8).await,
-        Err(StoreError::Unsupported(_))
+        Err(StoreError::Corrupt(_))
     ));
     assert!(matches!(
         store.retain_cas(&target.object).await,
@@ -1048,19 +1018,15 @@ async fn reference_rebuild_and_compact_are_explicit_and_exclusive() {
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute("UPDATE reference_records SET complete=0", [])
+        .execute("UPDATE reference_records SET sha256='invalid'", [])
         .unwrap();
     assert!(matches!(
         store.preview_purge(&request).await,
-        Err(StoreError::Unsupported(_))
+        Err(StoreError::Corrupt(_))
     ));
     drop(store);
     assert_eq!(
-        SqliteStore::rebuild_reference_index(
-            root.path(),
-            &rsi_agent_store_protocol::ReferenceCodecs::default()
-        )
-        .unwrap(),
+        SqliteStore::rebuild_reference_index(root.path()).unwrap(),
         37
     );
     let store = SqliteStore::open(root.path()).unwrap();
@@ -1222,14 +1188,7 @@ async fn mixed_program_references_validate_rebuild_and_preserve_cas_roots() {
     assert!(store.preview_purge(&request).await.unwrap().blockers.iter().any(|blocker| matches!(blocker, rsi_agent_store_protocol::PurgeBlocker::Busy { session_id } if session_id == &id)));
     drop(store);
     SqliteStore::verify(root.path()).unwrap();
-    assert!(
-        SqliteStore::rebuild_reference_index(
-            root.path(),
-            &rsi_agent_store_protocol::ReferenceCodecs::default()
-        )
-        .unwrap()
-            > 0
-    );
+    assert!(SqliteStore::rebuild_reference_index(root.path()).unwrap() > 0);
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(store.preview_cas_gc(256).await.unwrap().is_empty());
 }
@@ -1283,7 +1242,7 @@ async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring
         before,
         "no live-history replay on a retiring batch"
     );
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("INSERT INTO reference_records(session_id,stream,seq,sha256,complete) VALUES('selected','fact',999,?1,1)", ["a".repeat(64)]).unwrap();
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES('selected','fact',999,?1)", ["a".repeat(64)]).unwrap();
     assert!(matches!(
         store.purge_batch(request.operation_id.as_str()).await,
         Err(StoreError::Corrupt(_))
@@ -1299,28 +1258,11 @@ async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring
 }
 
 #[tokio::test]
-async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_policy() {
+async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_session() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-verification", 600).await;
-    store
-        .inner
-        .connections
-        .writer
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .execute(
-            "UPDATE reference_records SET complete=0 WHERE stream='header'",
-            [],
-        )
-        .unwrap();
-    assert!(matches!(
-        store.begin_purge(request.clone()).await,
-        Err(StoreError::Unsupported(_))
-    ));
-    let strict: bool = store
+    let header_digest: String = store
         .inner
         .connections
         .writer
@@ -1329,12 +1271,11 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_policy
         .as_ref()
         .unwrap()
         .query_row(
-            "SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)",
+            "SELECT sha256 FROM reference_records WHERE stream='header'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!strict, "failed maintenance cannot latch strict admission");
     store
         .inner
         .connections
@@ -1344,8 +1285,25 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_policy
         .as_ref()
         .unwrap()
         .execute(
-            "UPDATE reference_records SET complete=1 WHERE stream='header'",
+            "UPDATE reference_records SET sha256='invalid' WHERE stream='header'",
             [],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.begin_purge(request.clone()).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    store
+        .inner
+        .connections
+        .writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .execute(
+            "UPDATE reference_records SET sha256=?1 WHERE stream='header'",
+            [header_digest],
         )
         .unwrap();
     store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -1589,7 +1547,7 @@ async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it
             store
                 .with_writer(|connection| {
                     connection
-                        .execute("UPDATE reference_policy SET strict=0", [])
+                        .execute("UPDATE reference_records SET sha256=sha256", [])
                         .map_err(sql_error)?;
                     Ok(())
                 })

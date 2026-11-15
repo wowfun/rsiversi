@@ -1,13 +1,20 @@
-//! Pure bounded reference extraction from exact Domain codecs.
+//! Bounded canonical references, independent of plugin execution.
 
-use crate::{DomainIdentity, DomainStateValue, SessionId};
-use std::{any::TypeId, collections::BTreeSet, fmt};
+use crate::SessionId;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Maximum distinct durable references in one canonical record.
 pub const MAXIMUM_RECORD_REFERENCES: usize = 1024;
 
 /// A typed durable edge; arbitrary strings and Media addresses are not Agent-CAS roots.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "reference",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum DurableReference {
     /// Another Session retained by this record.
     Session(SessionId),
@@ -21,7 +28,8 @@ pub enum DurableReference {
 }
 
 /// Bounded deduplicating output owned by the canonical record reader.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct ReferenceCollector(BTreeSet<DurableReference>);
 impl ReferenceCollector {
     /// Adds one typed Session edge, rejecting overflow before allocation.
@@ -50,31 +58,50 @@ impl ReferenceCollector {
     pub fn iter(&self) -> impl Iterator<Item = &DurableReference> {
         self.0.iter()
     }
+    /// Combines already validated canonical references, preserving the record bound.
+    pub fn extend(&mut self, other: &Self) -> Result<(), String> {
+        for reference in other.iter() {
+            self.insert(reference.clone())?;
+        }
+        Ok(())
+    }
 }
 
-/// Immutable effect-free exact-version decoder retained independently of execution.
-pub trait DomainReferenceCodec: fmt::Debug + Send + Sync + 'static {
-    /// Exact durable Domain identity/version.
-    fn identity(&self) -> &DomainIdentity;
-    /// Process-local definition identity; rebinding one version to another policy is forbidden.
-    fn definition_key(&self) -> (TypeId, usize, usize);
-    /// Decodes and validates the typed state before visiting its references.
-    fn references(
-        &self,
-        state: &DomainStateValue,
-        output: &mut ReferenceCollector,
-    ) -> Result<(), String>;
-}
-
-/// Store-owned admission of pure codecs, without retaining their composition generation.
-pub trait ReferenceCodecRegistration: fmt::Debug + Send + Sync + 'static {
-    /// Installs a complete bounded set atomically; an exact identity cannot change semantics.
-    fn install(&self, codecs: Vec<std::sync::Arc<dyn DomainReferenceCodec>>) -> Result<(), String>;
-}
-/// Optional Local maintenance capability supplied by the durable Store owner.
-#[derive(Debug)]
-pub struct ReferenceCodecRegistrationContract;
-impl rsi_meta_contract::LocalContract for ReferenceCodecRegistrationContract {
-    const KEY: &'static str = "rsi.agent.reference-codecs";
-    type Service = dyn ReferenceCodecRegistration;
+impl<'de> Deserialize<'de> for ReferenceCollector {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct CanonicalReferences;
+        impl<'de> serde::de::Visitor<'de> for CanonicalReferences {
+            type Value = ReferenceCollector;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a bounded sorted unique set of durable references")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut output = ReferenceCollector::default();
+                while let Some(value) = sequence.next_element::<DurableReference>()? {
+                    if output.0.len() == MAXIMUM_RECORD_REFERENCES
+                        || output.0.last().is_some_and(|previous| previous >= &value)
+                    {
+                        return Err(serde::de::Error::custom(
+                            "canonical references require a bounded sorted unique set",
+                        ));
+                    }
+                    if let DurableReference::Cas { sha256, byte_len } = &value {
+                        crate::validate_sha256("durable CAS reference", sha256)
+                            .map_err(serde::de::Error::custom)?;
+                        if *byte_len == 0 || *byte_len > 64 * 1024 * 1024 {
+                            return Err(serde::de::Error::custom(
+                                "durable CAS reference length exceeds its bound",
+                            ));
+                        }
+                    }
+                    output.0.insert(value);
+                }
+                Ok(output)
+            }
+        }
+        deserializer.deserialize_seq(CanonicalReferences)
+    }
 }

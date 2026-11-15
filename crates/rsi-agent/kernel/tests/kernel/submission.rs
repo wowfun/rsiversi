@@ -143,26 +143,31 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
     let memory = Arc::new(MemoryStore::new());
     let session_id = SessionId::new("session-blocked-retry").unwrap();
     let turn_id = TurnId::new("turn-blocked-retry").unwrap();
+    append_creation(
+        memory.as_ref(),
+        header(session_id.as_str()),
+        SessionFact::new(
+            1,
+            1,
+            SessionFactBody::TurnAccepted {
+                reasoning_effort: None,
+                turn_id: turn_id.clone(),
+                text: "retry body".into(),
+                model: None,
+                sandbox: SandboxMode::WorkspaceWrite,
+                require_approval: false,
+            },
+        )
+        .unwrap(),
+    )
+    .await;
     rsi_agent_testkit::append_history_fixture(
         memory.as_ref(),
         AppendBatch {
             session_id: session_id.clone(),
-            expected_seq: 0,
-            header: Some(header(session_id.as_str())),
-            facts: (vec![
-                SessionFact::new(
-                    1,
-                    1,
-                    SessionFactBody::TurnAccepted {
-                        reasoning_effort: None,
-                        turn_id: turn_id.clone(),
-                        text: "retry body".into(),
-                        model: None,
-                        sandbox: SandboxMode::WorkspaceWrite,
-                        require_approval: false,
-                    },
-                )
-                .unwrap(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![Arc::new(
                 SessionFact::new(
                     2,
                     2,
@@ -173,10 +178,7 @@ async fn blocked_retry_does_not_serialize_an_independent_session_submission() {
                     },
                 )
                 .unwrap(),
-            ])
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+            )],
         },
     )
     .await
@@ -719,7 +721,7 @@ async fn resume_preparation_uses_the_resident_pin_when_the_source_is_unavailable
 }
 
 #[tokio::test]
-async fn cold_resume_after_process_restart_pins_the_current_generation() {
+async fn cold_resume_selects_current_code_without_historical_reconstruction() {
     let store = Arc::new(MemoryStore::new());
     append_terminal_history(&store, "session-cold-generation-b", 1).await;
     let composition = Arc::new(MutableComposition::new('a'));
@@ -732,24 +734,24 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
             .unwrap();
     let worker = kernel.start_workers();
 
+    let prepared = kernel
+        .prepare_resume(&SessionId::new("session-cold-generation-b").unwrap())
+        .await
+        .unwrap();
     kernel
         .submit(SubmitTurn {
-            reasoning_effort: None,
+            session: SubmitSession::Resume(prepared),
             turn_id: client_turn_id(),
-            session: resume(
-                &kernel,
-                SessionId::new("session-cold-generation-b").unwrap(),
-            )
-            .await,
-            text: "cold session uses current B".into(),
+            text: "current plugins".into(),
             model: None,
+            reasoning_effort: None,
             sandbox: None,
         })
         .await
         .unwrap();
-    let _lease = kernel.register("executor-cold-b".into()).unwrap();
+    let _current_lease = kernel.register("current-plugins".into()).unwrap();
     let claim = kernel
-        .claim("executor-cold-b", CancellationToken::new())
+        .claim("current-plugins", CancellationToken::new())
         .await
         .unwrap()
         .unwrap();
@@ -761,7 +763,7 @@ async fn cold_resume_after_process_restart_pins_the_current_generation() {
 }
 
 #[tokio::test]
-async fn resume_after_idle_eviction_pins_the_current_generation() {
+async fn resume_after_idle_eviction_selects_current_code() {
     let store = Arc::new(MemoryStore::new());
     let composition = Arc::new(MutableComposition::new('a'));
     let store_contract: Arc<dyn SessionStore> = store;
@@ -814,22 +816,23 @@ async fn resume_after_idle_eviction_pins_the_current_generation() {
     let prepared = kernel.prepare_resume(&first.session_id).await.unwrap();
     kernel
         .submit(SubmitTurn {
-            reasoning_effort: None,
-            turn_id: client_turn_id(),
             session: SubmitSession::Resume(prepared),
-            text: "generation B".into(),
+            turn_id: client_turn_id(),
+            text: "current plugins".into(),
             model: None,
+            reasoning_effort: None,
             sandbox: None,
         })
         .await
         .unwrap();
-    let second_claim = kernel
-        .claim("executor-eviction", CancellationToken::new())
+    let _current_lease = kernel.register("current-plugins".into()).unwrap();
+    let claim = kernel
+        .claim("current-plugins", CancellationToken::new())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        kernel.composition(&second_claim).unwrap().source_digest(),
+        kernel.composition(&claim).unwrap().source_digest(),
         "b".repeat(64)
     );
     assert_eq!(composition.calls.load(Ordering::Acquire), 2);
@@ -1880,7 +1883,7 @@ async fn message_admission_waits_for_terminal_control_before_and_after_store_app
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(receipt.accepted_control_seq, 2);
+        assert_eq!(receipt.accepted_control_seq, 3);
         assert_eq!(receipt.observed_fact_seq, 2);
         let controls = memory
             .read_controls(
@@ -1891,12 +1894,12 @@ async fn message_admission_waits_for_terminal_control_before_and_after_store_app
             )
             .await
             .unwrap();
-        assert_eq!(controls.records.len(), 2);
+        assert_eq!(controls.records.len(), 3);
         assert!(
-            matches!(controls.records[0].body(), AgentControlRecordBody::TurnBoundaryRecorded { turn_id, terminal_fact_seq: 2 } if turn_id == &submitted.turn_id)
+            matches!(controls.records[1].body(), AgentControlRecordBody::TurnBoundaryRecorded { turn_id, terminal_fact_seq: 2 } if turn_id == &submitted.turn_id)
         );
         assert!(
-            matches!(controls.records[1].body(), AgentControlRecordBody::MessageAccepted { message: committed, .. } if committed == &message)
+            matches!(controls.records[2].body(), AgentControlRecordBody::MessageAccepted { message: committed, .. } if committed == &message)
         );
         assert_eq!(
             kernel

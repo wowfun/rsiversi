@@ -124,6 +124,15 @@ impl Drop for SessionWatch {
 }
 
 impl KernelInner {
+    pub(super) fn notify_committed(
+        &self,
+        committed: &rsi_agent_store_protocol::AtomicAgentCommitResult,
+    ) {
+        for watermark in &committed.sessions {
+            self.session_changes.committed(&watermark.session_id);
+        }
+    }
+
     pub(super) async fn commit_agent(
         &self,
         mut commit: AtomicAgentCommit,
@@ -140,28 +149,7 @@ impl KernelInner {
                     .clone()
             })
             .collect::<Vec<_>>();
-        let domain_changes = commit
-            .sessions
-            .iter()
-            .flat_map(|append| {
-                append
-                    .controls
-                    .iter()
-                    .flat_map(|record| match record.body() {
-                        AgentControlRecordBody::DomainStateCommitted { commit } => commit
-                            .updates()
-                            .iter()
-                            .map(|update| {
-                                (
-                                    append.session_id.clone(),
-                                    update.snapshot().identity().id().to_owned(),
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                        _ => Vec::new(),
-                    })
-            })
-            .collect::<Vec<_>>();
+        let revoked_programs = self.program_guard_revocations(&commit);
         let retired_messages = commit
             .sessions
             .iter()
@@ -210,15 +198,15 @@ impl KernelInner {
             }
         }
         if result.is_ok() || matches!(&result, Err(rsi_agent_store_protocol::StoreError::Io(_))) {
-            self.revoke_program_guards(&domain_changes);
+            for cancellation in revoked_programs {
+                cancellation.cancel();
+            }
         }
         if let Ok(committed) = &result {
             for (session, message) in &retired_messages {
                 self.execution_messages.remove(session, message);
             }
-            for watermark in &committed.sessions {
-                self.session_changes.committed(&watermark.session_id);
-            }
+            self.notify_committed(committed);
         }
         // An I/O error can lose the acknowledgement of a committed creation.
         // Membership watches carry only requery hints, so failed attempts may wake them.

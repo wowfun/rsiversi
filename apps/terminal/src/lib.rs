@@ -184,6 +184,8 @@ struct InteractionEnvelope<'a> {
     data: &'a rsi_session_protocol::InteractionSnapshot,
 }
 
+const JSONL_VERSION: u32 = 7;
+
 impl CliEvent {
     fn json_line(&self) -> std::result::Result<String, serde_json::Error> {
         match self {
@@ -191,22 +193,22 @@ impl CliEvent {
                 "model snapshots require bounded page delivery",
             )),
             Self::Projections { snapshot } => serde_json::to_string(
-                &serde_json::json!({"version":6,"type":"projections","data":snapshot}),
+                &serde_json::json!({"version":JSONL_VERSION,"type":"projections","data":snapshot}),
             ),
             Self::Interactions { snapshot } => serde_json::to_string(&InteractionEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "interactions",
                 data: snapshot,
             }),
-            Self::Notice { kind, value } => {
-                serde_json::to_string(&serde_json::json!({"version":6,"type":kind,"data":value}))
-            }
+            Self::Notice { kind, value } => serde_json::to_string(
+                &serde_json::json!({"version":JSONL_VERSION,"type":kind,"data":value}),
+            ),
             Self::Message {
                 session_id,
                 message_id,
                 accepted_control_seq,
             } => serde_json::to_string(&MessageEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "message",
                 session_id,
                 message_id,
@@ -218,7 +220,7 @@ impl CliEvent {
                 turn_id,
                 claimed_fact_seq,
             } => serde_json::to_string(&TurnEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "turn",
                 session_id,
                 message_id,
@@ -230,7 +232,7 @@ impl CliEvent {
                 record,
                 durable_control_seq,
             } => serde_json::to_string(&ControlEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "control",
                 data: ControlData {
                     session_id,
@@ -243,7 +245,7 @@ impl CliEvent {
                 fact,
                 durable_seq,
             } => serde_json::to_string(&LiveFactEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "fact",
                 session_id,
                 fact,
@@ -255,7 +257,7 @@ impl CliEvent {
                 outcome,
                 durable_seq,
             } => serde_json::to_string(&OutcomeEnvelope {
-                version: 6,
+                version: JSONL_VERSION,
                 kind: "outcome",
                 session_id,
                 turn_id,
@@ -1348,7 +1350,7 @@ pub(crate) fn write_jsonl_event(stdout: &mut impl Write, event: &CliEvent) -> Re
         for page in snapshot.pages() {
             serde_json::to_writer(
                 &mut *stdout,
-                &serde_json::json!({"version":6,"type":"model","data":page}),
+                &serde_json::json!({"version":JSONL_VERSION,"type":"model","data":page}),
             )
             .map_err(|error| RsiError::Run(error.to_string()))?;
             stdout

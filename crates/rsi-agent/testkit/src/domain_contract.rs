@@ -150,6 +150,238 @@ fn atomic(
     }
 }
 
+/// Exercises atomic executable selection, active-set replacement and historical reads.
+///
+/// # Panics
+/// Panics when a Store loses the recipe/state commit boundary or historical membership.
+#[allow(clippy::too_many_lines)] // One shared transaction scenario checks both Store implementations.
+pub async fn assert_generation_store_contract(
+    store: &dyn SessionStore,
+    header: SessionHeader,
+    accepted: SessionFact,
+) {
+    use rsi_agent_session_protocol::GenerationSelection;
+    let first = GenerationSelection::new("a".repeat(64)).unwrap();
+    let second = GenerationSelection::new("b".repeat(64)).unwrap();
+    let initial = control(
+        1,
+        None,
+        DomainMutationSource::Generation {
+            selection: first.clone(),
+            turn_id: None,
+        },
+        vec![update("a", 0, false), update("b", 0, true)],
+    );
+    let turn_id = accepted.body().turn_id().clone();
+    store
+        .commit_agent(atomic(&header, 0, 0, true, vec![accepted], vec![initial]))
+        .await
+        .unwrap();
+    let next = DomainMutationSource::Generation {
+        selection: second.clone(),
+        turn_id: Some(turn_id.clone()),
+    };
+    let invalid = control(
+        2,
+        None,
+        next.clone(),
+        vec![update("a", 9, true), update("c", 0, false)],
+    );
+    assert!(matches!(
+        store
+            .commit_agent(atomic(&header, 1, 1, false, vec![], vec![invalid]))
+            .await,
+        Err(StoreError::DomainRevisionConflict { .. })
+    ));
+    let introduced = |id, seq, enabled| {
+        DomainStateUpdate::introduced(seq, update(id, 0, enabled).snapshot().clone()).unwrap()
+    };
+    for updates in [vec![update("c", 0, false)]] {
+        let invalid = control(2, None, next.clone(), updates);
+        assert!(matches!(
+            store
+                .commit_agent(atomic(&header, 1, 1, false, vec![], vec![invalid]))
+                .await,
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    let unchanged = store
+        .read_domain_states(header.session_id(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        unchanged.generation.as_ref().map(|entry| entry.control_seq),
+        Some(1)
+    );
+    assert_eq!(unchanged.durable_control_seq, 1);
+    assert_eq!(unchanged.states.len(), 2);
+    let replacement = control(2, None, next.clone(), vec![introduced("c", 2, false)]);
+    let replacement = with_removed(&replacement, &["b"]);
+    let references = rsi_agent_store_protocol::native_control_references(&replacement).unwrap();
+    assert!(
+        references.iter().next().is_none(),
+        "diagnostic selections are not CAS roots"
+    );
+    store
+        .commit_agent(atomic(&header, 1, 1, false, vec![], vec![replacement]))
+        .await
+        .unwrap();
+    let reintroduce = with_removed(
+        &control(3, None, next.clone(), vec![introduced("b", 3, true)]),
+        &["a", "c"],
+    );
+    store
+        .commit_agent(atomic(&header, 1, 2, false, vec![], vec![reintroduce]))
+        .await
+        .unwrap();
+    let empty = with_removed(&control(4, None, next.clone(), vec![]), &["b"]);
+    store
+        .commit_agent(atomic(&header, 1, 3, false, vec![], vec![empty]))
+        .await
+        .unwrap();
+    for (horizon, expected) in [
+        (1, vec!["a", "b"]),
+        (2, vec!["a", "c"]),
+        (3, vec!["b"]),
+        (4, vec![]),
+    ] {
+        let page = store
+            .read_domain_states(header.session_id(), Some(horizon), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.generation.as_ref().map(|entry| entry.control_seq),
+            Some(horizon)
+        );
+        assert_eq!(
+            page.generation.as_ref().unwrap().selection,
+            if horizon == 1 {
+                first.clone()
+            } else {
+                second.clone()
+            }
+        );
+        assert_eq!(
+            page.states
+                .iter()
+                .map(|state| state.head.identity.id())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for id in ["a", "b", "c", "absent"] {
+            let named = store
+                .read_domain_states(header.session_id(), Some(horizon), Some(id))
+                .await
+                .unwrap();
+            assert!(
+                named.generation.is_none(),
+                "named reads omit unrelated generation metadata"
+            );
+            assert_eq!(
+                named.states,
+                page.states
+                    .iter()
+                    .filter(|state| state.head.identity.id() == id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+        }
+        if horizon == 2 {
+            assert_eq!(page.states[0].head.revision.get(), 1);
+            assert_eq!(
+                page.states[0].head.control_seq, 1,
+                "unchanged snapshots keep their source position"
+            );
+            assert_eq!(page.states[1].head.revision.get(), 2);
+        }
+        if horizon == 3 {
+            assert_eq!(page.states[0].head.revision.get(), 3);
+        }
+    }
+    let current = store
+        .read_domain_states(header.session_id(), None, None)
+        .await
+        .unwrap();
+    assert!(current.states.is_empty());
+    assert_eq!(
+        current.generation.as_ref().map(|entry| entry.control_seq),
+        Some(4)
+    );
+    use rsi_agent_session_protocol::{SessionFactBody, TurnOutcome};
+    let cancel = SessionFact::new(
+        2,
+        2,
+        SessionFactBody::CancelRequested {
+            turn_id: turn_id.clone(),
+            reason: None,
+        },
+    )
+    .unwrap();
+    let terminal = SessionFact::new(
+        3,
+        3,
+        SessionFactBody::TurnTerminal {
+            turn_id,
+            outcome: TurnOutcome::Cancelled,
+            result: None,
+        },
+    )
+    .unwrap();
+    let boundary = AgentControlRecord::new(
+        5,
+        terminal.timestamp_ms(),
+        AgentControlRecordBody::TurnBoundaryRecorded {
+            turn_id: terminal.body().turn_id().clone(),
+            terminal_fact_seq: terminal.seq(),
+        },
+    )
+    .unwrap();
+    store
+        .commit_agent(atomic(
+            &header,
+            1,
+            4,
+            false,
+            vec![cancel, terminal],
+            vec![boundary],
+        ))
+        .await
+        .unwrap();
+    let rejected = control(6, None, next, vec![introduced("late", 6, true)]);
+    assert!(
+        matches!(store.commit_agent(atomic(&header,3,5,false,vec![],vec![rejected])).await,
+        Err(StoreError::Invalid(reason)) if reason.contains("open originating Turn"))
+    );
+    let after = store
+        .read_domain_states(header.session_id(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(after.durable_control_seq, 5);
+    assert!(after.states.is_empty());
+    store.validate_session(header.session_id()).await.unwrap();
+}
+
+fn with_removed(record: &AgentControlRecord, ids: &[&str]) -> AgentControlRecord {
+    let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
+        unreachable!()
+    };
+    AgentControlRecord::new(
+        record.seq(),
+        record.timestamp_ms(),
+        AgentControlRecordBody::DomainStateCommitted {
+            commit: commit
+                .clone()
+                .with_removed(
+                    ids.iter()
+                        .map(|id| rsi_agent_session_protocol::DomainIdentity::new(*id, 1).unwrap())
+                        .collect(),
+                )
+                .unwrap(),
+        },
+    )
+    .unwrap()
+}
+
 fn bind_fact(control: &AgentControlRecord, fact: &SessionFact) -> AgentControlRecord {
     let AgentControlRecordBody::DomainStateCommitted { commit } = control.body() else {
         unreachable!("domain fixture control")

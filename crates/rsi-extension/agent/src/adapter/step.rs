@@ -98,16 +98,6 @@ impl BeforeStepContributor for AgentAdapter {
             .load_current(header, Some(captured.revision), cancellation.clone())
             .await
             .map_err(invalid)?;
-        self.unobserved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                session.clone(),
-                Unobserved {
-                    turn: context.captured.turn_id.clone(),
-                    effect: effect.clone(),
-                },
-            );
         let (previous, paged) = match context.previous {
             Some(decision) if decision.encoded_len() > 256 * 1024 => {
                 let encoded = serde_json::to_string(decision).map_err(invalid)?;
@@ -126,6 +116,19 @@ impl BeforeStepContributor for AgentAdapter {
                 paged,
             )
             .map_err(invalid)?;
+        let ownership =
+            super::Ownership::reserve(&self.operations).ok_or(ContributionError::Capacity)?;
+        self.unobserved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                session.clone(),
+                Unobserved {
+                    _ownership: ownership.clone(),
+                    turn: context.captured.turn_id.clone(),
+                    effect: effect.clone(),
+                },
+            );
         let response = self.connection.request("agent.before-step", json!({
             "session_id": session, "operation_id": effect, "turn_id": context.captured.turn_id,
             "previous": previous, "model_selection": context.selection, "step_id": context.captured.step_id, "tools": context.tools, "fact_horizon": context.captured.horizon.fact_seq,
@@ -196,6 +199,7 @@ impl BeforeStepContributor for AgentAdapter {
             }
         };
         let operation = Arc::new(Pending {
+            ownership,
             connection: self.connection.clone(),
             session: session.clone(),
             effect,

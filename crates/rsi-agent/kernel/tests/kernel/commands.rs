@@ -770,8 +770,14 @@ async fn draft_commands_bind_the_actual_first_baseline_and_reject_cross_draft_or
     };
     let mutation = prepared.execute(CancellationToken::new()).await.unwrap();
     let receipt = draft.apply_command(mutation).finish().await.unwrap();
-    assert_eq!(receipt.state_sha256(), draft.baseline().digest());
-    assert_ne!(receipt.state_sha256(), before.baseline().digest());
+    assert_eq!(
+        receipt.state_sha256(),
+        draft.freeze().initial_commit().unwrap().request_sha256()
+    );
+    assert_ne!(
+        receipt.state_sha256(),
+        before.initial_commit().unwrap().request_sha256()
+    );
     let DraftCommandPreparation::Completed(retry) = draft.prepare_command(input).unwrap() else {
         panic!("exact retry")
     };
@@ -850,3 +856,75 @@ mod publication;
 
 #[path = "commands/inputs.rs"]
 mod inputs;
+
+#[tokio::test]
+async fn cold_current_generation_adoption_requires_a_new_review_before_callback() {
+    let store = Arc::new(MemoryStore::new());
+    let fixture = Fixture::start(store.clone(), false).await;
+    let invocation = fixture.invocation("cold-review", true).await;
+    let old = fixture.composition.pin.read().unwrap().clone();
+    let current = AgentCompositionPin::new(
+        old.preset_id().clone(),
+        "d".repeat(64),
+        old.tools(),
+        old.context_builder(),
+        old.domains().clone(),
+        old.contributions().clone(),
+        Arc::new(()),
+    )
+    .unwrap();
+    *fixture.composition.pin.write().unwrap() = current.clone();
+    let result = fixture
+        .kernel
+        .execute(
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            invocation.clone(),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(TurnError::CommandRevisionConflict { .. })),
+        "adoption changes the reviewed revision: {result:?}"
+    );
+    assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 0);
+    let page = store
+        .read_domain_states(&fixture.session_id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(&page.generation.unwrap().selection, current.selection());
+    let reviewed = fixture.invocation("cold-review", true).await;
+    fixture
+        .kernel
+        .execute(
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            reviewed.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 1);
+    fixture
+        .kernel
+        .execute(
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            reviewed,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.callback.calls.load(Ordering::SeqCst),
+        1,
+        "durable receipt prevents callback replay"
+    );
+    fixture.stop().await;
+}

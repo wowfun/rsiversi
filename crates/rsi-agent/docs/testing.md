@@ -22,6 +22,12 @@ curated-result bounds without Node. Native Node tests require explicit `RSI_TEST
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
+The manually dispatched `extension-generations` workflow accepts an immutable
+rsiversi-dsh commit, builds the original Todo/Plan cohort from its pinned upstream
+revision, and runs the two process-generation tests with `RSI_EXTENSION_NODE` and
+`RSI_DSH_INSTALLED_COHORT`. It records package receipts and test logs. Dispatch
+requires a published bridge commit containing the tested protocol; a dirty local
+bridge checkout is local acceptance evidence, not proof of a runnable CI revision.
 Time-context tests cover the default refresh interval, exact expiry, clock
 rollback and zero interval. Context tests distinguish claimed, omitted, emptied
 and entered input, including checkpoint recovery, selected fork history and Turn
@@ -193,11 +199,17 @@ withdrawal, and distinguish aggregate byte rejection from complete small
 invocation results.
 Draft and composition tests cover default and explicit selection, failed
 replacement preserving the prior pin, drop without Store state, single-flight
-generation construction, source-digest replacement, resident old-generation
-stability, cold-resume rebinding, broken-source failure before admission, and
+generation construction, current-selection replacement, retained old-generation
+stability, current-plugin cold recovery, broken-source failure before admission, and
 last-pin reclamation. Kernel tests prove the fresh pin moves exactly once into
 resident state, resume tokens preserve resident pins, token failure/drop
-releases cold pins, and every claim returns the exact admitted pin. Standard
+releases cold pins, and each request series captures one exact admitted pin.
+Generation tests cover unpublished candidate drop, current-state loading,
+changed Domain membership, stale handles, lost acknowledgements and caller
+detachment across publication. Cold recovery prepares current plugins against
+committed state, rejects incompatible retained codecs, and keeps removed owners
+readable in historical cuts. Delta tests preserve unchanged canonical positions
+and prove repeated selections do not duplicate large payloads. Standard
 application tests also prove generation preparation precedes durable Workspace
 registration for both fresh and resumed sessions.
 Composition snapshot tests replace only the executable catalog while leaving the

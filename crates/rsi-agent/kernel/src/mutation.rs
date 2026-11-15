@@ -375,10 +375,10 @@ impl AgentKernel {
             .expect("validated claim owner")
             .mutations;
         let mut admission = gate.lock();
-        if admission.admission != MutationAdmission::Open
-            || (turn.cancellation.is_cancelled() && !tool_settlement)
-            || cancellation.is_cancelled()
-        {
+        if (turn.cancellation.is_cancelled() && !tool_settlement) || cancellation.is_cancelled() {
+            return Err(TurnError::Cancelled);
+        }
+        if admission.admission != MutationAdmission::Open {
             return Err(TurnError::StaleClaim);
         }
         let execution = if tool_settlement {
@@ -503,7 +503,7 @@ impl AgentKernel {
         cancellation: &CancellationToken,
     ) -> TurnResult<CancelResult> {
         let admission = self.inner.submission_admission.acquire(session_id).await?;
-        self.ensure_session_loaded(session_id).await?;
+        let admission = self.ensure_session_loaded(session_id, admission).await?;
         let wait = {
             let state = lock_state(&self.inner);
             let session = state

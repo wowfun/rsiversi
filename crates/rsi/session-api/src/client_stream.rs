@@ -157,10 +157,10 @@ pub(super) async fn observe(
             let message = message.map_err(|error| stream_error(Operation::Observe, error))?;
             let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&handle, Operation::Observe, &message)?;
             let retained = match update {
-                wire::Observation::Control { record, durable_control_seq } => {
+                wire::Observation::Control { record, fact_cursor, durable_control_seq } => {
                     advance(&mut observed.control_seq, &mut durable.control_seq, record.seq(), durable_control_seq)?;
                     let record = handle.state.observations.retain_controls(vec![Arc::new(record)]).map_err(|error| retention_error(&error))?.pop().expect("one admitted control");
-                    SessionObservation::Control { record, durable_control_seq }
+                    SessionObservation::Control { record, fact_cursor, durable_control_seq }
                 }
                 wire::Observation::Fact { fact, durable_fact_seq } => {
                     advance(&mut observed.fact_seq, &mut durable.fact_seq, fact.seq(), durable_fact_seq)?;

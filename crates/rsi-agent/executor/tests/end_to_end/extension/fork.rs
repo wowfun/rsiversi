@@ -167,7 +167,7 @@ async fn original_plugins_fork_at_the_captured_terminal_without_replaying_parent
         &cohort.join("node_modules/rsi-dsh-plugin-bridge/src/index.mjs"),
     )
     .await;
-    let definition = rsi_extension_agent::definition("a".repeat(64)).unwrap();
+    let definition = rsi_extension_agent::definition().unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = domains.bind(&definition).unwrap();
     *stack.composition.domains.lock().unwrap() = domains;
@@ -180,7 +180,6 @@ async fn original_plugins_fork_at_the_captured_terminal_without_replaying_parent
             .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
             .unwrap(),
         handle.clone(),
-        "a".repeat(64),
     )
     .unwrap();
     let transform = Arc::new(CountedTransform {

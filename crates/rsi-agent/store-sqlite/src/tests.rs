@@ -1080,24 +1080,14 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
         admit_append(
             &transaction,
             &batch,
-            &reference_index::Writer::new(
-                &transaction,
-                &batch.session_id,
-                &rsi_agent_store_protocol::ReferenceCodecs::default(),
-            )
-            .unwrap(),
+            &reference_index::Writer::new(&transaction, &batch.session_id).unwrap(),
         )
         .unwrap();
         insert_fact(
             &transaction,
             &batch.session_id,
             &batch.facts[0],
-            &reference_index::Writer::new(
-                &transaction,
-                &batch.session_id,
-                &rsi_agent_store_protocol::ReferenceCodecs::default(),
-            )
-            .unwrap(),
+            &reference_index::Writer::new(&transaction, &batch.session_id).unwrap(),
         )
         .unwrap();
         advance_watermark(&transaction, &batch).unwrap();
@@ -3592,7 +3582,7 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
             .iter()
             .enumerate()
             {
-                if sql.contains(table) {
+                if sql.contains(table) && !sql.starts_with("SELECT durable_seq,control_seq,") {
                     let mut counts = QUERIES.get();
                     counts[index] += 1;
                     QUERIES.set(counts);
@@ -3623,7 +3613,7 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
         (Some("missing"), None, [0, 1, 0]),
         (Some("b"), Some(1), [0, 1, 1]),
         (None, None, [1, 0, 1]),
-        (None, Some(1), [1, 2, 1]),
+        (None, Some(1), [0, 1, 1]),
     ] {
         QUERIES.set([0; 3]);
         domain::read_states(&connection, &id, horizon, domain_id).unwrap();
@@ -3632,6 +3622,144 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
             expected,
             "domain={domain_id:?}, horizon={horizon:?}"
         );
+    }
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One isolated Store follows mixed control positions through batching and deliberate canonical corruption"
+)]
+async fn domain_reads_batch_distinct_controls_and_reject_missing_canonical_rows() {
+    use rsi_agent_session_protocol::{
+        DomainIdentity, DomainMutationSource, DomainRequestId, DomainRevision, DomainSnapshot,
+        DomainStateCommit, DomainStateUpdate, DomainStateValue,
+    };
+    thread_local! {
+        static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn trace(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(statement, _) = event
+            && statement.sql().contains("FROM agent_controls")
+        {
+            READS.set(READS.get() + 1);
+        }
+    }
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("domain-batch");
+    let session = header.session_id().clone();
+    let accepted = test_fact(1);
+    let turn = accepted.body().turn_id().clone();
+    let update = |id, revision, enabled| {
+        DomainStateUpdate::new(
+            DomainRevision::new(revision),
+            DomainSnapshot::new(
+                DomainIdentity::new(id, 1).unwrap(),
+                DomainStateValue::new(serde_json::Value::Bool(enabled)).unwrap(),
+            ),
+        )
+        .unwrap()
+    };
+    for (seq, source, updates) in [
+        (
+            1,
+            DomainMutationSource::Baseline,
+            vec![
+                update("a", 0, false),
+                update("b", 0, false),
+                update("c", 0, false),
+            ],
+        ),
+        (
+            2,
+            DomainMutationSource::Turn { turn_id: turn },
+            vec![update("b", 1, true)],
+        ),
+    ] {
+        let commit = DomainStateCommit::new(
+            (seq > 1).then(|| DomainRequestId::new("change-b").unwrap()),
+            source,
+            updates,
+        )
+        .unwrap();
+        store
+            .commit_agent(AtomicAgentCommit {
+                sessions: vec![AtomicSessionAppend {
+                    session_id: session.clone(),
+                    expected_fact_seq: u64::from(seq > 1),
+                    expected_control_seq: seq - 1,
+                    header: (seq == 1).then(|| header.clone()),
+                    facts: if seq == 1 {
+                        vec![accepted.clone().into()]
+                    } else {
+                        vec![]
+                    },
+                    controls: vec![
+                        AgentControlRecord::new(
+                            seq,
+                            seq,
+                            AgentControlRecordBody::DomainStateCommitted { commit },
+                        )
+                        .unwrap(),
+                    ],
+                }],
+                required_active_activations: vec![],
+                quiescent_descendants_of: None,
+            })
+            .await
+            .unwrap();
+    }
+    let mut connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(trace),
+        )
+        .unwrap();
+    for horizon in [None, Some(1)] {
+        READS.set(0);
+        let page = domain::read_states(&connection, &session, horizon, None).unwrap();
+        assert_eq!(
+            page.states
+                .iter()
+                .map(|state| state.head.identity.id())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            page.states
+                .iter()
+                .map(|state| state.snapshot.state().value().as_bool().unwrap())
+                .collect::<Vec<_>>(),
+            [false, horizon.is_none(), false]
+        );
+        assert_eq!(READS.get(), 1, "distinct controls must share one SQL query");
+    }
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    for mutation in [
+        "DELETE FROM agent_controls WHERE session_id = ?1 AND seq = 1",
+        "DELETE FROM agent_controls WHERE session_id = ?1 AND seq = 2",
+        "UPDATE agent_controls SET control_json = json_set(control_json, '$.seq', 3) WHERE session_id = ?1 AND seq = 2",
+        "UPDATE agent_controls SET control_json = json_set(control_json, '$.padding', hex(zeroblob(1048576))) WHERE session_id = ?1 AND seq = 2",
+    ] {
+        connection
+            .execute_batch("SAVEPOINT corrupt_domain")
+            .unwrap();
+        connection.execute(mutation, [session.as_str()]).unwrap();
+        assert!(
+            matches!(
+                domain::read_states(&connection, &session, None, None),
+                Err(StoreError::Corrupt(_))
+            ),
+            "{mutation}"
+        );
+        connection
+            .execute_batch("ROLLBACK TO corrupt_domain; RELEASE corrupt_domain")
+            .unwrap();
     }
 }
 

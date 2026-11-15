@@ -15,13 +15,14 @@ async fn sqlite_history(store: &SqliteStore, name: &str) -> SessionId {
         },
     )
     .unwrap();
+    append_creation(store, header(name), accepted_fact(1, &turn)).await;
     rsi_agent_testkit::append_history_fixture(
         store,
         AppendBatch {
             session_id: id.clone(),
-            expected_seq: 0,
-            header: Some(header(name)),
-            facts: vec![accepted_fact(1, &turn).into(), terminal.into()],
+            expected_seq: 1,
+            header: None,
+            facts: vec![terminal.into()],
         },
     )
     .await

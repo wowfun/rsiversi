@@ -193,6 +193,7 @@ async fn render_observation(
         SessionObservation::Control {
             record,
             durable_control_seq,
+            ..
         } => {
             sink.send(CliEvent::Control {
                 session_id: session.clone(),

@@ -119,10 +119,8 @@ impl SqliteStore {
             if decode_u64("CAS bytes",current.0)?!=selected.object.byte_len || decode_u64("CAS generation",current.1)?!=selected.generation { return Err(StoreError::Invalid("CAS publication changed".into())); }
             let referenced=transaction.query_row("SELECT EXISTS(SELECT 1 FROM reference_edges WHERE target_kind='cas' AND target_id=?1)",[&selected.object.sha256],|row| row.get::<_,bool>(0)).map_err(sql_error)?;
             if referenced { return Err(StoreError::Invalid("CAS object is referenced".into())); }
-            super::maintenance::enable_strict(&transaction, &owner)?;
             transaction.execute("INSERT INTO cas_deletions(operation_id,sha256,byte_len,generation,state) VALUES(?1,?2,?3,?4,'deleting')",params![id,selected.object.sha256,sqlite_u64("CAS bytes",selected.object.byte_len)?,sqlite_u64("CAS generation",selected.generation)?]).map_err(sql_error)?;
             transaction.commit().map_err(sql_error)?;
-            super::reference_validation::strict(&owner);
             Ok(())
         }).await?;
         let directory = self.inner.cas_dir.clone();

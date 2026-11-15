@@ -32,6 +32,11 @@ commands, including `host stop`, `config show` and package installation.
 preserve credentials, installed packages and unrelated files. Stop an active Host
 first. See the [launch/reset contract](../crates/rsi/core/docs/launch.md).
 
+Cold Agent recovery uses the current plugins and validates retained state at each
+owning plugin boundary. Rebuilding does not itself require resetting history;
+incompatible retained state is rejected before execution. Already admitted work
+keeps its immutable generation. See the [generation contract](../crates/rsi-agent/docs/subsystems/composition-generations.md).
+
 ## Observe configuration and source
 
 ```bash

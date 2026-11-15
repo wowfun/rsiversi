@@ -6,6 +6,12 @@ model routes, JSON values, Facts, Tool results, Media references, batch sizes,
 and CAS bytes all have explicit finite bounds. Custom deserialization must not
 bypass constructor invariants.
 
+Generation metadata contains a diagnostic digest, not evaluated executable recipes.
+Domain state and its explicit durable references remain private Session contents.
+Current plugins validate retained state before execution. Offline maintenance
+verifies canonical framing and references without loading historical plugins.
+Configure credentials through owning credential references, not literal secrets.
+
 The durable Agent preset identity uses the same lowercase alphanumeric-and-dash
 grammar as its eventual directory segment. It cannot contain separators,
 dot-segments, absolute-path syntax, or an unbounded name; resolving that
@@ -118,10 +124,10 @@ horizon fields. Mutating a public projection cannot manufacture either live
 claim authority or the post-terminal maintenance authority used for checkpoint
 rebuilds.
 The Kernel issues a move-only resume token only after pinning the resident or
-current cold composition. The standard application obtains that token before
+restoring its committed exact executable selection. The standard application obtains that token before
 durably registering the Header's workspace, and the Kernel rejects tokens
 issued by another service instance. The executor receives only the resulting
-opaque resident pin. Neither module receives preset paths, Profile resolver
+opaque execution pin. Neither module receives preset paths, Profile resolver
 authority, or a mutable Tool registrar.
 
 Local contracts are safe-Rust, process-local authority. Session identities are
@@ -148,3 +154,11 @@ validates and persists the opaque namespace/key with the first admission; it
 does not interpret product access policy or grant authority from serialized
 data. Product Session, history, reference and export adapters enforce the scope
 for their actual callers. Evidence retention never removes Header protection.
+
+Domain state admission derives its bounded Session/CAS references through the
+current owning definition and persists them in the same canonical snapshot.
+External callers cannot supply trusted reference sets in place of that derivation.
+Store checks durable framing, bounds and index correspondence without executing
+historical plugins. Offline verification does not re-prove the visitor semantics
+of an unloaded plugin. In-process validated proposals retain their catalog binding
+and need no second semantic validation before mechanical Store publication.

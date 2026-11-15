@@ -11,7 +11,7 @@ use serde_json::json;
 #[tokio::test]
 async fn staged_segment_restores_exactly_and_receipt_must_bind_its_content() {
     let store = MemoryStore::default();
-    let definition = definition("a".repeat(64)).unwrap();
+    let definition = definition().unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = catalog.bind(&definition).unwrap();
     let initial = handle.decode(&catalog.baseline()[0]).unwrap();
@@ -31,6 +31,11 @@ async fn staged_segment_restores_exactly_and_receipt_must_bind_its_content() {
     .unwrap();
     let state = handle.decode(prepared.proposal().snapshot()).unwrap();
     let budget = rsi_api_protocol::ByteBudget::new(1024 * 1024).unwrap();
+    let tiny = rsi_api_protocol::ByteBudget::new(1).unwrap();
+    assert!(matches!(
+        restore(&store, &state, || tiny.clone().into()).await,
+        Err(rsi_extension_agent::Error::Capacity)
+    ));
     assert_eq!(
         restore(&store, &state, || budget.clone().into())
             .await
@@ -86,7 +91,7 @@ async fn staged_segment_restores_exactly_and_receipt_must_bind_its_content() {
 #[tokio::test]
 async fn rejected_preparation_preserves_the_prior_snapshot() {
     let store = MemoryStore::default();
-    let definition = definition("a".repeat(64)).unwrap();
+    let definition = definition().unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = catalog.bind(&definition).unwrap();
     let initial = handle.decode(&catalog.baseline()[0]).unwrap();
@@ -112,7 +117,7 @@ async fn rejected_preparation_preserves_the_prior_snapshot() {
 #[tokio::test]
 async fn small_mutations_pack_without_losing_history_beyond_the_segment_count() {
     let store = MemoryStore::default();
-    let definition = definition("a".repeat(64)).unwrap();
+    let definition = definition().unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = catalog.bind(&definition).unwrap();
     let mut journal = handle.decode(&catalog.baseline()[0]).unwrap();
@@ -150,7 +155,7 @@ async fn small_mutations_pack_without_losing_history_beyond_the_segment_count() 
 #[tokio::test]
 async fn packed_suffix_obeys_event_and_read_budgets_without_changing_the_prefix() {
     let store = MemoryStore::default();
-    let definition = definition("a".repeat(64)).unwrap();
+    let definition = definition().unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = catalog.bind(&definition).unwrap();
     let empty = handle.decode(&catalog.baseline()[0]).unwrap();

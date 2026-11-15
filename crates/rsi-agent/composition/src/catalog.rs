@@ -203,6 +203,25 @@ impl AgentContributionCatalog {
         }
         format!("{:x}", digest.finalize())
     }
+
+    pub(crate) fn durable_digest(&self) -> String {
+        let factories: Vec<_> = self
+            .factories
+            .values()
+            .map(|factory| (factory.identity(), factory.update_mode()))
+            .collect();
+        let local: Vec<_> = self.local_contracts.keys().collect();
+        let events: Vec<_> = self.local_events.keys().collect();
+        let bytes = serde_json::to_vec(&(
+            factories,
+            local,
+            events,
+            &self.local_isolations,
+            &self.portable_isolations,
+        ))
+        .expect("declared catalog identities serialize");
+        format!("{:x}", Sha256::digest(bytes))
+    }
 }
 
 fn register_marker(

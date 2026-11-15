@@ -157,6 +157,7 @@ mod tests {
         let pending = Pending::default();
         let id = SessionId::new("released").unwrap();
         let in_flight = pending.reserve(&id).unwrap();
+        let old_capture = in_flight.id.clone();
         pending.release_session(&id);
         let fresh = pending.reserve(&id).unwrap();
         assert!(matches!(
@@ -164,6 +165,7 @@ mod tests {
             Err(ReferenceError::Cancelled)
         ));
         pending.publish(id.clone(), object(1), fresh).unwrap();
+        pending.release(&id, &old_capture);
         assert_eq!(pending.slots.available_permits(), 255);
         pending.release_session(&id);
         assert_eq!(pending.slots.available_permits(), 256);

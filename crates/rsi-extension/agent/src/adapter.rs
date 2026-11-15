@@ -26,7 +26,11 @@ use tokio_util::sync::CancellationToken;
 
 mod command;
 mod fork;
+mod generation;
 mod lanes;
+mod load;
+mod ownership;
+use ownership::Ownership;
 mod resource;
 mod step;
 
@@ -39,6 +43,37 @@ fn acknowledged(value: &Value) -> bool {
 
 fn tool_error(error: impl std::fmt::Display) -> ToolError {
     ToolError::Execution(error.to_string())
+}
+
+fn load_error(error: rsi_extension::Error) -> ToolError {
+    match error {
+        rsi_extension::Error::Cancelled => ToolError::Cancelled,
+        rsi_extension::Error::Disconnected => {
+            tool_error("extension disconnected while loading state before execution")
+        }
+        rsi_extension::Error::Capacity => ToolError::Capacity,
+        other => tool_error(other),
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+    #[test]
+    fn load_disconnect_does_not_claim_an_uncertain_business_effect() {
+        assert!(matches!(
+            load_error(rsi_extension::Error::Disconnected),
+            ToolError::Execution(_)
+        ));
+        assert_eq!(
+            load_error(rsi_extension::Error::Cancelled),
+            ToolError::Cancelled
+        );
+        assert_eq!(
+            load_error(rsi_extension::Error::Capacity),
+            ToolError::Capacity
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,12 +97,14 @@ enum ToolReply {
 
 #[derive(Clone, Debug)]
 struct Unobserved {
+    _ownership: Arc<Ownership>,
     turn: TurnId,
     effect: EffectId,
 }
 
 #[derive(Debug)]
 struct Pending {
+    ownership: Arc<Ownership>,
     connection: Arc<Connection>,
     session: SessionId,
     effect: EffectId,
@@ -190,6 +227,7 @@ impl PublicationObserver for Pending {
         )
         .await?;
         self.state.store(1, Ordering::Release);
+        self.ownership.release();
         Ok(())
     }
     async fn rejected(&self) -> ContributionResult<()> {
@@ -199,6 +237,7 @@ impl PublicationObserver for Pending {
         )
         .await?;
         self.state.store(2, Ordering::Release);
+        self.ownership.release();
         Ok(())
     }
     fn unconfirmed(&self) {
@@ -213,13 +252,14 @@ pub struct AgentAdapter {
     store: Arc<dyn SessionStore>,
     turns: Arc<dyn rsi_agent_turn_protocol::TurnExecution>,
     handle: DomainHandle<ExtensionJournal>,
-    artifact_sha256: String,
     pending: Mutex<BTreeMap<SessionId, Arc<Pending>>>,
     unobserved: Mutex<BTreeMap<SessionId, Unobserved>>,
     // This only serializes staging. Waiting for a question occurs in the process;
     // commands must use their own Session transaction admission, not this lock.
     staging: Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     commands: command::Commands,
+    loads: Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+    operations: Arc<tokio::sync::Semaphore>,
     read_budget: rsi_api_protocol::ByteBudget,
     history: Arc<crate::history::HistoryRouter>,
     _history_registrations: [rsi_extension::HandlerRegistration; 2],
@@ -240,9 +280,7 @@ impl AgentAdapter {
         store: Arc<dyn SessionStore>,
         turns: Arc<dyn rsi_agent_turn_protocol::TurnExecution>,
         handle: DomainHandle<ExtensionJournal>,
-        artifact_sha256: String,
     ) -> Result<Arc<Self>, crate::Error> {
-        crate::definition(artifact_sha256.clone())?;
         let history = Arc::new(crate::history::HistoryRouter::default());
         let register = |method| {
             connection
@@ -260,12 +298,13 @@ impl AgentAdapter {
             store,
             turns,
             handle,
-            artifact_sha256,
             questions: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             unobserved: Mutex::new(BTreeMap::new()),
             staging: Mutex::new(BTreeMap::new()),
             commands: command::Commands::default(),
+            loads: Mutex::default(),
+            operations: Arc::new(tokio::sync::Semaphore::new(256)),
             read_budget: rsi_api_protocol::ByteBudget::new(64 * 1024 * 1024)
                 .map_err(crate::error)?,
         }))
@@ -433,8 +472,7 @@ impl AgentAdapter {
         &self,
         session: &SessionId,
     ) -> rsi_tools_protocol::Result<Arc<tokio::sync::Mutex<()>>> {
-        lanes::acquire(&self.staging, session)
-            .ok_or_else(|| tool_error("extension Session capacity"))
+        lanes::acquire(&self.staging, session).ok_or(ToolError::Capacity)
     }
 
     async fn load_current(
@@ -472,9 +510,6 @@ impl AgentAdapter {
             }
             pending
                 .retain(|_, operation| !matches!(operation.state.load(Ordering::Acquire), 1 | 2));
-            if pending.len() >= 256 {
-                return Err(tool_error("extension Session capacity"));
-            }
         }
         let page = self
             .store
@@ -494,7 +529,7 @@ impl AgentAdapter {
             return Err(tool_error("journal changed after Step capture"));
         }
         let journal = self.handle.decode(&view.snapshot).map_err(tool_error)?;
-        self.load_snapshot(header, view.head.revision, &journal, cancellation)
+        self.load_snapshot(header, view.head.revision, &journal, false, cancellation)
             .await?;
         Ok((view.head.revision, journal))
     }
@@ -503,47 +538,51 @@ impl AgentAdapter {
         header: &rsi_agent_session_protocol::SessionHeader,
         revision: rsi_agent_session_protocol::DomainRevision,
         journal: &ExtensionJournal,
+        reload: bool,
         cancellation: CancellationToken,
     ) -> rsi_tools_protocol::Result<()> {
-        if journal.artifact_sha256 != self.artifact_sha256 {
-            return Err(tool_error("journal artifact cohort mismatch"));
-        }
+        let lane = lanes::acquire(&self.loads, header.session_id()).ok_or(ToolError::Capacity)?;
+        let lane = tokio::select! { biased;
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+            lane = lane.lock_owned() => lane,
+        };
+        let mut load = load::Load::new(self.connection.clone(), header.session_id().clone(), lane);
         let transferred = async {
             let count: u64 = journal.segments.iter().map(|segment| segment.count).sum();
             let local_cwd = (header.coordinates().location() == &rsi_execution::ExecutionLocation::Local)
                 .then(|| header.canonical_cwd());
             let boundary = json!({
                 "session_id": header.session_id(), "created_at": header.created_at_ms(),
-                "local_cwd": local_cwd, "revision": revision.get(), "count": count,
+                "local_cwd": local_cwd, "revision": revision.get(), "count": count, "reload": reload,
             });
             let action = self.connection.request("agent.load.begin", boundary, cancellation.clone())
-                .await.map_err(tool_error)?;
+                .await.map_err(load_error)?;
             match action.as_str() {
-                Some("current") if revision.get() > 0 => return Ok(()),
+                Some("current") if !reload && revision.get() > 0 => return Ok(()),
                 Some("transfer") => {}
                 _ => return Err(tool_error("invalid journal load disposition")),
             }
             for segment in &journal.segments {
                 let events = restore_segment(self.store.as_ref(), segment, self.read_budget.clone().into())
-                    .await.map_err(tool_error)?;
+                    .await.map_err(|error| match error {
+                        crate::Error::Capacity => ToolError::Capacity,
+                        other @ crate::Error::Invalid(_) => tool_error(other),
+                    })?;
                 let page = json!({"session_id": header.session_id(), "offset": segment.first, "events": events});
                 self.connection.request("agent.load.events", page, cancellation.clone())
-                    .await.map_err(tool_error)?;
+                    .await.map_err(load_error)?;
             }
             let finish = json!({"session_id": header.session_id(), "checkpoint": journal.checkpoint});
             self.connection.request("agent.load.finish", finish, cancellation.clone())
-                .await.map_err(tool_error)?;
+                .await.map_err(load_error)?;
             Ok(())
         }.await;
         if transferred.is_err() {
-            let _ = self
-                .connection
-                .request(
-                    "agent.load.abort",
-                    json!({"session_id": header.session_id()}),
-                    CancellationToken::new(),
-                )
-                .await;
+            if let Some(cleanup) = load.abort() {
+                let _ = cleanup.await;
+            }
+        } else {
+            load.finish();
         }
         transferred
     }
@@ -583,16 +622,6 @@ impl AgentAdapter {
                 &execution.cancellation,
             )
             .map_err(tool_error)?;
-        self.unobserved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                caller.session_id().clone(),
-                Unobserved {
-                    effect: effect.clone(),
-                    turn: caller.turn_id().clone(),
-                },
-            );
         let _question_scope = self
             .questions
             .lock()
@@ -601,6 +630,18 @@ impl AgentAdapter {
             .map(|(router, _)| router.enter(&execution))
             .transpose()
             .map_err(tool_error)?;
+        let ownership = Ownership::reserve(&self.operations).ok_or(ToolError::Capacity)?;
+        self.unobserved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                caller.session_id().clone(),
+                Unobserved {
+                    _ownership: ownership.clone(),
+                    effect: effect.clone(),
+                    turn: caller.turn_id().clone(),
+                },
+            );
         let response = self.connection.request("agent.tool", json!({
             "session_id": caller.session_id(), "operation_id": effect.as_str(), "name": name, "arguments": arguments, "fact_horizon": captured.through_seq,
         }), execution.cancellation.clone()).await.map_err(|_| ToolError::OutcomeUnknown)?;
@@ -656,6 +697,7 @@ impl AgentAdapter {
             .insert(
                 caller.session_id().clone(),
                 Arc::new(Pending {
+                    ownership,
                     connection: self.connection.clone(),
                     session: caller.session_id().clone(),
                     effect: effect.clone(),

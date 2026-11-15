@@ -33,8 +33,7 @@ pub use maintenance::{
     PurgeReceipt, PurgeRequest, PurgeTarget, StoreMaintenance,
 };
 pub use references::{
-    ReferenceCodecs, control_references, fact_references, header_references,
-    native_control_references,
+    control_references, fact_references, header_references, native_control_references,
 };
 mod domain;
 pub use activity::*;
@@ -49,7 +48,7 @@ mod suffix;
 mod window;
 pub use domain::{
     StoreDomainFactCheck, StoreDomainHead, StoreDomainState, StoreDomainStatePage,
-    StoreTurnDomainUsage, domain_heads_after,
+    StoreDomainWatermarks, StoreGenerationSelection, StoreTurnDomainUsage, domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
@@ -58,7 +57,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 47;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 50;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -419,7 +418,7 @@ impl AtomicSessionAppend {
     }
 
     fn validate_domain_commits(&self) -> Result<()> {
-        use rsi_agent_session_protocol::{AgentControlRecordBody, DomainMutationSource};
+        use rsi_agent_session_protocol::AgentControlRecordBody;
         if !self.has_referenced_claims()
             && let Some(mut check) = StoreDomainFactCheck::new(&self.controls)
         {
@@ -447,7 +446,7 @@ impl AtomicSessionAppend {
                         ));
                     }
                 }
-                if matches!(commit.source(), DomainMutationSource::Baseline) {
+                if commit.source().is_initial() {
                     let acceptance = self.facts.iter().any(|fact| {
                         matches!(
                             fact.body(),
@@ -2057,6 +2056,16 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         sessions: &[SessionId],
     ) -> Result<Vec<Result<StoreActivityCut>>>;
 
+    /// Reads payload-free Domain and Fact cuts for state-sensitive preparation.
+    async fn read_domain_watermarks(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StoreDomainWatermarks> {
+        let _ = session_id;
+        Err(StoreError::Unsupported(
+            "this Store does not support Domain watermarks".into(),
+        ))
+    }
     /// Reads the selected domain (or all domains) at the same durable snapshot as the watermarks.
     async fn read_domain_states(
         &self,

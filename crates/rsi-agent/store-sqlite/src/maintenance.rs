@@ -54,19 +54,6 @@ impl SqliteStore {
     }
 }
 
-pub(super) fn enable_strict(
-    transaction: &Transaction<'_>,
-    owner: &super::StoreInner,
-) -> Result<()> {
-    let proof = owner.reference_proof.lock().expect("reference proof");
-    match proof.as_ref() {
-        None => return Err(StoreError::ValidationBusy),
-        Some(proof) if proof.strict => return Ok(()),
-        Some(_) => {}
-    }
-    transaction.execute("INSERT INTO reference_policy(id,strict) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET strict=1", []).map_err(sql_error)?;
-    Ok(())
-}
 fn preview(
     connection: &Connection,
     request: &PurgeRequest,
@@ -309,7 +296,6 @@ impl StoreMaintenance for SqliteStore {
                 owner.purge_binding_fault.store(true, std::sync::atomic::Ordering::Release);
                 return Err(StoreError::Io("injected pre-commit admission failure".into()));
             }
-            enable_strict(&transaction, &owner)?;
             let json = serde_json::to_string(&request).map_err(|e| StoreError::Invalid(e.to_string()))?;
             let locations = serde_json::to_string(&locations).map_err(|e| StoreError::Invalid(e.to_string()))?;
             let digest = location_digest(&request, &locations)?;
@@ -322,7 +308,6 @@ impl StoreMaintenance for SqliteStore {
             // may be uncertain; only an admitted retirement latches this flag.
             owner.retirement_started.store(true, std::sync::atomic::Ordering::Release);
             transaction.commit().map_err(sql_error)?;
-            super::reference_validation::strict(&owner);
             #[cfg(feature = "test-support")]
             if fault == Some(true) {
                 owner.purge_binding_fault.store(true, std::sync::atomic::Ordering::Release);
@@ -368,15 +353,13 @@ impl StoreMaintenance for SqliteStore {
         MaintenanceOperationId::new(operation_id)
             .map_err(|e| StoreError::Invalid(e.to_string()))?;
         let operation = operation_id.to_owned();
-        let codecs = self.inner.reference_codecs.clone();
+
         self.with_writer(move |connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
             let complete = transaction.query_row("SELECT complete FROM purge_operations WHERE operation_id=?1", [&operation], |row| row.get::<_, bool>(0)).optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(operation.clone()))?;
             reference_index::validate_retirement_bindings(&transaction, Some(&operation))?;
             if complete { return Ok(()); }
-            let strict: bool = transaction.query_row("SELECT COALESCE((SELECT strict FROM reference_policy WHERE id=1),0)", [], |row| row.get(0)).map_err(sql_error)?;
-            if !strict { return Err(StoreError::Corrupt("retirement requires strict reference admission".into())); }
-            let (records,bytes) = delete_batch(&transaction,&operation,&codecs)?;
+            let (records,bytes) = delete_batch(&transaction,&operation)?;
             let remaining = transaction.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE operation_id=?1))",[&operation],|row| row.get::<_,bool>(0)).map_err(sql_error)?;
             transaction.execute("UPDATE purge_operations SET complete=?2,deleted_records=deleted_records+?3,deleted_payload_bytes=deleted_payload_bytes+?4 WHERE operation_id=?1",params![operation,!remaining,records,bytes]).map_err(sql_error)?;
             if !remaining { transaction.execute("UPDATE session_tombstones SET state='purged' WHERE operation_id=?1",[&operation]).map_err(sql_error)?; }
@@ -394,7 +377,9 @@ impl StoreMaintenance for SqliteStore {
 const STAGES: &[(&str, Option<&str>)] = &[
     ("domain_heads", None),
     ("domain_versions", None),
+    ("domain_removals", None),
     ("domain_requests", None),
+    ("generation_selections", None),
     ("queue_mutations", None),
     ("ready_messages", None),
     ("agent_messages", None),
@@ -410,11 +395,7 @@ const STAGES: &[(&str, Option<&str>)] = &[
 ];
 // Largest valid checkpoint plus its Session identity and two hexadecimal digests.
 const MAXIMUM_BATCH_PAYLOAD: i64 = 64 * 1024 * 1024 + 256 + 2 * 64;
-fn delete_batch(
-    transaction: &Transaction<'_>,
-    operation: &str,
-    codecs: &rsi_agent_store_protocol::ReferenceCodecs,
-) -> Result<(i64, i64)> {
+fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, i64)> {
     let mut removed = 0_i64;
     let mut bytes = 0_i64;
     for &(table, stream) in STAGES {
@@ -466,7 +447,7 @@ fn delete_batch(
         drop(statement);
         for (rowid, session, seq) in keys {
             if let Some(stream) = stream {
-                verify_selected(transaction, codecs, table, stream, rowid, &session, seq)?;
+                verify_selected(transaction, table, stream, rowid, &session, seq)?;
                 reference_index::remove(transaction, &session, stream, seq)?;
             }
             transaction
@@ -521,7 +502,7 @@ fn payload_expression(connection: &Connection, table: &str) -> Result<String> {
 // Keys come only from the schema-owned stage query, never from external SQL.
 fn verify_selected(
     transaction: &Transaction<'_>,
-    codecs: &rsi_agent_store_protocol::ReferenceCodecs,
+
     table: &str,
     stream: &str,
     rowid: i64,
@@ -550,7 +531,6 @@ fn verify_selected(
     let id = SessionId::new(session).map_err(|e| StoreError::Corrupt(e.to_string()))?;
     reference_index::verify_encoded(
         transaction,
-        codecs,
         &id,
         stream,
         decode_u64("reference sequence", seq)?,

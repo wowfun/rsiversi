@@ -262,17 +262,12 @@ impl SessionStore for SqliteStore {
         {
             self.ensure_session_validated(&session_id).await?;
         }
-        let owner = self.inner.clone();
         let commit = self
             .with_writer(move |connection| {
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(sql_error)?;
-                let references = reference_index::Writer::new(
-                    &transaction,
-                    &batch.session_id,
-                    &owner.reference_codecs,
-                )?;
+                let references = reference_index::Writer::new(&transaction, &batch.session_id)?;
                 admit_append(&transaction, &batch, &references)?;
                 for fact in &batch.facts {
                     insert_fact(&transaction, &batch.session_id, fact, &references)?;
@@ -348,7 +343,7 @@ impl SessionStore for SqliteStore {
                         rsi_agent_store_protocol::ProgramGraphChecks::capture(&commit.sessions);
                     let mut sessions = Vec::with_capacity(commit.sessions.len());
                     for append in commit.sessions {
-                        sessions.push(apply_atomic_sqlite_append(&transaction, append, &owner.reference_codecs)?);
+                        sessions.push(apply_atomic_sqlite_append(&transaction, append)?);
                     }
                     graph.validate(&program_graph::Graph(&transaction))?;
                     let subtree = validate_sqlite_quiescence_guard(
@@ -429,6 +424,16 @@ impl SessionStore for SqliteStore {
         self.read_summary_row(session_id).await
     }
 
+    async fn read_domain_watermarks(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainWatermarks> {
+        let session_id = session_id.clone();
+        self.with_reader_named(StoreOperation::Watermarks, move |connection| {
+            super::domain::read_watermarks(connection, &session_id)
+        })
+        .await
+    }
     async fn read_domain_states(
         &self,
         session_id: &SessionId,

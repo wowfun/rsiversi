@@ -3,6 +3,80 @@ use rsi_agent_session_protocol::{
 };
 
 #[test]
+fn aggregate_domain_references_are_rejected_before_publication() {
+    use rsi_agent_session_protocol::*;
+    let updates = (0..3)
+        .map(|domain| {
+            let mut references = ReferenceCollector::default();
+            for index in 0..400 {
+                references
+                    .session(&SessionId::new(format!("ref-{}", domain * 400 + index)).unwrap())
+                    .unwrap();
+            }
+            DomainStateUpdate::introduced(
+                1,
+                DomainSnapshot::new(
+                    DomainIdentity::new(format!("domain-{domain}"), 1).unwrap(),
+                    DomainStateValue::new(false.into()).unwrap(),
+                )
+                .with_references(references),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert!(DomainStateCommit::new(None, DomainMutationSource::Baseline, updates).is_err());
+}
+
+#[test]
+fn snapshot_size_matches_wire_for_bounded_state_values() {
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!(u64::MAX),
+        serde_json::json!({"escaped": "\n\t\"\\中文", "nested": [{"n": -1.25}, false]}),
+        serde_json::json!("x".repeat(MAXIMUM_DOMAIN_STATE_BYTES - 2)),
+    ] {
+        let snapshot = DomainSnapshot::new(
+            DomainIdentity::new("sample.state", u32::MAX).unwrap(),
+            DomainStateValue::new(value).unwrap(),
+        );
+        assert_eq!(
+            snapshot.encoded_len().unwrap(),
+            serde_json::to_vec(&snapshot).unwrap().len()
+        );
+        let decoded: DomainSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(
+            decoded.encoded_len().unwrap(),
+            snapshot.encoded_len().unwrap()
+        );
+    }
+}
+
+#[test]
+fn updates_require_advanced_revisions_and_explicit_wire_successors() {
+    use rsi_agent_session_protocol::*;
+    let snapshot = DomainSnapshot::new(
+        DomainIdentity::new("policy", 1).unwrap(),
+        DomainStateValue::new(true.into()).unwrap(),
+    );
+    let update = DomainStateUpdate::new(DomainRevision::new(7), snapshot.clone()).unwrap();
+    let wire = serde_json::to_value(&update).unwrap();
+    assert_eq!(
+        serde_json::from_value::<DomainStateUpdate>(wire.clone()).unwrap(),
+        update
+    );
+    for successor in [0, 6, 7, 9] {
+        let mut invalid = wire.clone();
+        invalid["revision"] = successor.into();
+        assert!(serde_json::from_value::<DomainStateUpdate>(invalid).is_err());
+    }
+    let mut missing = wire;
+    missing.as_object_mut().unwrap().remove("revision");
+    assert!(serde_json::from_value::<DomainStateUpdate>(missing).is_err());
+    assert!(DomainStateUpdate::introduced(0, snapshot).is_err());
+}
+
+#[test]
 fn input_only_commits_bind_provenance_and_cannot_be_emptied() {
     use rsi_agent_session_protocol::*;
     let invocation = SessionCommandInvocation {
@@ -164,7 +238,7 @@ fn opaque_domain_states_validate_identity_revision_and_json_at_decode() {
     let encoded = serde_json::to_string(&null).unwrap();
     assert_eq!(
         encoded,
-        r#"{"identity":{"id":"example.plan","version":1},"state":null}"#
+        r#"{"identity":{"id":"example.plan","version":1},"state":null,"references":[]}"#
     );
     assert_eq!(
         serde_json::from_str::<DomainSnapshot>(&encoded).unwrap(),

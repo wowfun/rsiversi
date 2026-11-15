@@ -32,7 +32,7 @@ async fn extension_journal_and_later_rejection_publish_once_without_native_promp
     let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/extension-step-receipt.mjs");
     let (process, extension, connection) = connect(&stack, &cohort, &entry).await;
-    let definition = rsi_extension_agent::definition("a".repeat(64)).unwrap();
+    let definition = rsi_extension_agent::definition().unwrap();
     let domains = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = domains.bind(&definition).unwrap();
     *stack.composition.domains.lock().unwrap() = domains;
@@ -45,7 +45,6 @@ async fn extension_journal_and_later_rejection_publish_once_without_native_promp
             .lookup_local::<rsi_agent_turn_protocol::TurnExecutionContract>()
             .unwrap(),
         handle.clone(),
-        "a".repeat(64),
     )
     .unwrap();
     let rejection = Arc::new(RejectAfterExtension(AtomicUsize::new(0)));

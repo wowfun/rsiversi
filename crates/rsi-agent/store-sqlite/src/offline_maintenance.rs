@@ -33,17 +33,14 @@ fn writable(offline: &filesystem::OfflineStore) -> Result<Connection> {
 }
 impl SqliteStore {
     /// Rebuilds derived reference coverage from valid canonical history offline.
-    pub fn rebuild_reference_index(
-        root: impl AsRef<Path>,
-        codecs: &rsi_agent_store_protocol::ReferenceCodecs,
-    ) -> Result<u64> {
+    pub fn rebuild_reference_index(root: impl AsRef<Path>) -> Result<u64> {
         let offline = filesystem::open_offline_store(root.as_ref())?;
         let mut connection = writable(&offline)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        let count = reference_index::rebuild(&transaction, codecs)?;
-        reference_index::validate_all(&transaction, codecs)?;
+        let count = reference_index::rebuild(&transaction)?;
+        reference_index::validate_all(&transaction)?;
         transaction.commit().map_err(sql_error)?;
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")

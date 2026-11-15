@@ -13,7 +13,7 @@ pub(super) struct Flight {
     identity: Arc<()>,
     session: SessionId,
     header: String,
-    pin: AgentCompositionPin,
+    pin: Option<AgentCompositionPin>,
     fact_seq: u64,
     control_seq: u64,
     capture: WeakShared<Capture>,
@@ -184,7 +184,7 @@ impl AgentKernel {
         session: &SessionId,
         deadline: tokio::time::Instant,
     ) -> TurnResult<SessionProjectionSnapshot> {
-        let (header, pin) = self.projection_generation(session).await?;
+        let (header, pin) = self.projection_selection(session).await?;
         let fingerprint = header
             .fingerprint()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
@@ -205,7 +205,11 @@ impl AgentKernel {
                 .find(|entry| {
                     entry.session == *session
                         && entry.header == fingerprint
-                        && entry.pin.same_generation(&pin)
+                        && match (&entry.pin, &pin) {
+                            (Some(left), Some(right)) => left.same_generation(right),
+                            (None, None) => true,
+                            _ => false,
+                        }
                         && entry.fact_seq == demand.durable_fact_seq
                         && entry.control_seq == demand.durable_control_seq
                 })
@@ -252,7 +256,12 @@ impl AgentKernel {
                 capture
             }
         };
-        capture.await
+        let snapshot = capture.await?;
+        let status = self.generation_status(session).await?;
+        snapshot
+            .with_generation_rebuilding(status.as_ref().is_some_and(|status| status.rebuilding))
+            .with_generation_rejection(status.and_then(|status| status.rejection))
+            .map_err(|error| TurnError::Invalid(error.to_string()))
     }
 
     pub(super) async fn projection_generation(
@@ -260,8 +269,27 @@ impl AgentKernel {
         session_id: &SessionId,
     ) -> TurnResult<(Arc<SessionHeader>, AgentCompositionPin)> {
         loop {
+            let (header, pin) = self.projection_selection(session_id).await?;
+            if let Some(pin) = pin {
+                return Ok((header, pin));
+            }
+            let prepared = self.pin_cold_composition(&header).await;
+            // Even failed cold resolution yields to a concurrently published resident pin.
             match select_generation(&self.inner, session_id)? {
                 Selection::Resident(header, pin) => return Ok((header, pin)),
+                Selection::Loading(load) => load.wait().await?,
+                Selection::Cold => return Ok((header, prepared?)),
+            }
+        }
+    }
+
+    async fn projection_selection(
+        &self,
+        session_id: &SessionId,
+    ) -> TurnResult<(Arc<SessionHeader>, Option<AgentCompositionPin>)> {
+        loop {
+            match select_generation(&self.inner, session_id)? {
+                Selection::Resident(header, pin) => return Ok((header, Some(pin))),
                 Selection::Loading(load) => {
                     load.wait().await?;
                     continue;
@@ -271,15 +299,13 @@ impl AgentKernel {
             let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
-            let prepared = self.pin_cold_composition(&header).await;
-            // Even failed cold resolution must yield to a concurrently published resident pin.
             match select_generation(&self.inner, session_id)? {
-                Selection::Resident(header, pin) => return Ok((header, pin)),
+                Selection::Resident(header, pin) => return Ok((header, Some(pin))),
                 Selection::Loading(load) => {
                     load.wait().await?;
                 }
                 Selection::Cold => {
-                    return Ok((Arc::new(header), prepared?));
+                    return Ok((Arc::new(header), None));
                 }
             }
         }
@@ -289,7 +315,7 @@ impl AgentKernel {
         &self,
         session_id: &SessionId,
         header: Arc<SessionHeader>,
-        pin: AgentCompositionPin,
+        pin: Option<AgentCompositionPin>,
         minimum_fact_seq: u64,
         minimum_control_seq: u64,
         cancellation: CancellationToken,
@@ -304,6 +330,31 @@ impl AgentKernel {
                 "projection capture precedes requested durable watermarks".into(),
             ));
         }
+        let selection = &page
+            .generation
+            .as_ref()
+            .ok_or_else(|| {
+                TurnError::Invalid("Session projection has no executable selection".into())
+            })?
+            .selection;
+        let pin = match pin {
+            Some(pin) if pin.selection() == selection => pin,
+            _ => {
+                let prepared = self.pin_cold_composition_at(&header, Some(&page)).await;
+                // Cold resolution can race a successful resume using an already retained pin.
+                loop {
+                    match select_generation(&self.inner, session_id)? {
+                        Selection::Resident(_, pin) if pin.selection() == selection => {
+                            break pin;
+                        }
+                        Selection::Loading(load) if prepared.is_err() => {
+                            load.wait().await?;
+                        }
+                        _ => break prepared?,
+                    }
+                }
+            }
+        };
         let context = SessionProjectionContext::new(
             header,
             ProjectionCursor::Durable {

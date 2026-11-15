@@ -398,34 +398,49 @@ async fn snapshot_is_one_captured_cut_even_when_a_command_commits_during_its_cal
 }
 
 #[tokio::test]
-async fn cold_projection_does_not_hydrate_or_require_unrelated_domain_codecs() {
+async fn cold_projection_uses_current_code_without_hydrating_execution() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
-    // The completed Session is cold. Publish a new generation with no executable domain catalog.
+    // Current code renders retained state without installing a resident Session.
     let old = fixture.composition.pin.read().unwrap().clone();
     let pin = AgentCompositionPin::new(
         old.preset_id().clone(),
         "d".repeat(64),
         old.tools(),
         old.context_builder(),
-        DomainCatalog::default(),
+        old.domains().clone(),
         old.contributions().clone(),
         Arc::new(()),
     )
     .unwrap();
     *fixture.composition.pin.write().unwrap() = pin;
     let calls = fixture.composition.calls.load(Ordering::SeqCst);
+    assert!(
+        fixture
+            .kernel
+            .projection_snapshot(&fixture.session_id)
+            .await
+            .is_ok()
+    );
+    assert!(
+        fixture
+            .kernel
+            .prepare_resume(&fixture.session_id)
+            .await
+            .is_ok()
+    );
+    *fixture.composition.pin.write().unwrap() = old.clone();
     for _ in 0..2 {
         let snapshot = fixture
             .kernel
             .projection_snapshot(&fixture.session_id)
             .await
             .unwrap();
-        assert_eq!(snapshot.generation_sha256(), "d".repeat(64));
+        assert_eq!(snapshot.generation_sha256(), old.source_digest());
         assert_eq!(snapshot.entries()[0].view().unwrap().value(), &false);
     }
     assert_eq!(
         fixture.composition.calls.load(Ordering::SeqCst),
-        calls + 2,
+        calls + 4,
         "read capture must not publish a resident execution"
     );
     assert!(
@@ -433,7 +448,7 @@ async fn cold_projection_does_not_hydrate_or_require_unrelated_domain_codecs() {
             .kernel
             .prepare_resume(&fixture.session_id)
             .await
-            .is_err()
+            .is_ok()
     );
     assert!(
         !fixture
@@ -585,25 +600,26 @@ async fn projection_rejects_a_historical_page_returned_for_current_state() {
 }
 
 #[tokio::test]
-async fn same_digest_different_generation_flights_keep_the_sixteen_caller_bound() {
+async fn different_cold_sessions_keep_the_sixteen_caller_bound() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     fixture.projection.blocked.store(true, Ordering::SeqCst);
     let mut tasks = Vec::new();
-    for _ in 0..16 {
-        let old = fixture.composition.pin.read().unwrap().clone();
-        *fixture.composition.pin.write().unwrap() = AgentCompositionPin::new(
-            old.preset_id().clone(),
-            old.source_digest(),
-            old.tools(),
-            old.context_builder(),
-            old.domains().clone(),
-            old.contributions().clone(),
-            Arc::new(()),
-        )
-        .unwrap();
+    for index in 0..16 {
+        let id = SessionId::new(format!("cold-capture-{index}")).unwrap();
+        let pin = fixture.composition.pin.read().unwrap().clone();
+        fixture
+            .kernel
+            .submit_message(SubmitMessage {
+                session: SubmitSession::Fresh(
+                    PreparedFreshSession::new(header(id.as_str()), pin).unwrap(),
+                ),
+                message: mailbox_message("initial"),
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            })
+            .await
+            .unwrap();
         tasks.push(tokio::spawn({
             let kernel = fixture.kernel.clone();
-            let id = fixture.session_id.clone();
             async move { kernel.projection_snapshot(&id).await }
         }));
         fixture.projection.entered.acquire().await.unwrap().forget();
@@ -789,5 +805,105 @@ async fn capture_uses_actual_cut_when_a_commit_follows_its_demand_watermark() {
         }
     );
     assert_eq!(snapshot.entries()[0].view().unwrap().value(), &true);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn projection_pairs_new_state_with_new_code_before_resident_installation_is_acknowledged() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, DomainMutationSource, DomainStateCommit, DomainStateUpdate,
+    };
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
+    let fixture = Fixture::start(store.clone(), false).await;
+    let submitted = fixture
+        .kernel
+        .submit(SubmitTurn {
+            reasoning_effort: None,
+            session: SubmitSession::Resume(
+                fixture
+                    .kernel
+                    .prepare_resume(&fixture.session_id)
+                    .await
+                    .unwrap(),
+            ),
+            turn_id: TurnId::new("projection-generation-race").unwrap(),
+            text: "resident old generation".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let old = fixture.composition.pin.read().unwrap().clone();
+    let next = AgentCompositionPin::new(
+        old.preset_id().clone(),
+        "d".repeat(64),
+        old.tools(),
+        old.context_builder(),
+        old.domains().clone(),
+        old.contributions().clone(),
+        Arc::new(()),
+    )
+    .unwrap();
+    let before = store
+        .read_domain_states(&fixture.session_id, None, None)
+        .await
+        .unwrap();
+    let commit = DomainStateCommit::new(
+        None,
+        DomainMutationSource::Generation {
+            selection: next.selection().clone(),
+            turn_id: Some(submitted.turn_id),
+        },
+        before
+            .states
+            .iter()
+            .map(|state| {
+                DomainStateUpdate::new(state.head.revision, state.snapshot.clone()).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    store.pause_domain_read.store(true, Ordering::Release);
+    let capture = tokio::spawn({
+        let kernel = fixture.kernel.clone();
+        let id = fixture.session_id.clone();
+        async move { kernel.projection_snapshot(&id).await }
+    });
+    store.domain_read_entered.notified().await;
+    *fixture.composition.pin.write().unwrap() = next.clone();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: fixture.session_id.clone(),
+                expected_fact_seq: before.durable_fact_seq,
+                expected_control_seq: before.durable_control_seq,
+                header: None,
+                facts: vec![],
+                controls: vec![
+                    AgentControlRecord::new(
+                        before.durable_control_seq + 1,
+                        42,
+                        AgentControlRecordBody::DomainStateCommitted { commit },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    store.release_domain_read.notify_one();
+    let snapshot = capture.await.unwrap().unwrap();
+    assert_eq!(snapshot.generation_sha256(), next.source_digest());
+    let rsi_agent_turn_protocol::ResidentComposition::Resident { source_digest, .. } = fixture
+        .kernel
+        .resident_composition(&fixture.session_id)
+        .unwrap()
+    else {
+        panic!("resident")
+    };
+    assert_eq!(source_digest, old.source_digest());
     fixture.stop().await;
 }

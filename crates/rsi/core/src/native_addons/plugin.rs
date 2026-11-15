@@ -94,6 +94,7 @@ impl PluginFactory for SharedNativeAddonFactory {
                 Arc::new(ServiceAgentSource {
                     manager: self.staging.manager.clone(),
                     presets: self.presets.clone(),
+                    cached: Mutex::new(None),
                 }),
                 &self.paths,
             )?)?;
@@ -106,12 +107,75 @@ impl PluginFactory for SharedNativeAddonFactory {
 struct ServiceAgentSource {
     manager: Arc<NativeAddonManager>,
     presets: AgentPresetCatalog,
+    cached: Mutex<Option<ServiceSnapshot>>,
+}
+#[derive(Debug)]
+struct ServiceSnapshot {
+    publication: Arc<rsi_agent_composition::AgentCompositionSnapshot>,
+    snapshot: Arc<rsi_agent_composition::AgentCompositionSnapshot>,
+}
+
+#[cfg(test)]
+#[test]
+fn unchanged_service_capture_reuses_its_compiler_and_catalog_snapshot() {
+    use rsi_agent_composition::AgentCompositionSource as _;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let paths =
+        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+    let composition = crate::StandardComposition::new(
+        paths,
+        std::collections::BTreeMap::new(),
+        None,
+        crate::ApplicationCatalogMetadata::default(),
+    );
+    let store = Arc::new(crate::NativeAddonStore::open(root.join("addons")).unwrap());
+    let loader = rsi_meta_native_loader::NativeCatalog::new(
+        rsi_meta_native_loader::CatalogOptions::new(root.join("loader")),
+    )
+    .unwrap();
+    let manager = composition.native_addon_manager(store, loader).unwrap();
+    let source = ServiceAgentSource {
+        presets: manager.presets.clone(),
+        manager: manager.clone(),
+        cached: Mutex::new(None),
+    };
+    let first = source.snapshot().unwrap();
+    assert!(Arc::ptr_eq(&first, &source.snapshot().unwrap()));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _cached = source.cached.lock().unwrap();
+        panic!("interrupted cache owner");
+    }));
+    assert!(Arc::ptr_eq(&first, &source.snapshot().unwrap()));
+    manager.state().failed = true;
+    assert!(
+        source.snapshot().is_err(),
+        "cached publication cannot bypass fresh admission failure"
+    );
 }
 impl rsi_agent_composition::AgentCompositionSource for ServiceAgentSource {
     fn snapshot(
         &self,
     ) -> rsi_meta_profile::Result<Arc<rsi_agent_composition::AgentCompositionSnapshot>> {
-        self.manager.capture(Some(&self.presets))
+        let publication = self.manager.capture(None)?;
+        if let Some(cached) = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            && Arc::ptr_eq(&publication, &cached.publication)
+        {
+            return Ok(cached.snapshot.clone());
+        }
+        let snapshot = self.manager.capture(Some(&self.presets))?;
+        *self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ServiceSnapshot {
+            publication,
+            snapshot: snapshot.clone(),
+        });
+        Ok(snapshot)
     }
 }
 impl std::fmt::Debug for NativeAddonFactory {

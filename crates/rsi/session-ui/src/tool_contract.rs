@@ -4,9 +4,7 @@ use super::{
 };
 use futures_util::StreamExt;
 use rsi_agent_composition_protocol::ToolOutputCatalog;
-use rsi_agent_session_protocol::{
-    AgentControlRecordBody, DomainMutationSource, SessionFact, SessionFactBody,
-};
+use rsi_agent_session_protocol::{AgentControlRecordBody, SessionFact, SessionFactBody};
 use rsi_agent_turn_protocol::{ObservationCursor, SessionObservation};
 use rsi_conversation::{BlockIdentity, FactField};
 
@@ -154,29 +152,76 @@ async fn recorded(target: &Context, entry: Entry) -> Result<UiView> {
         .await
         .map_err(|_| unavailable())?;
     let (name, result) = resolve(&entry, &intent.facts, &result.facts)?;
-    let mut stream = session
-        .observe(ObservationCursor::default())
+    let stream = session
+        .observe(ObservationCursor {
+            control_seq: 0,
+            fact_seq: entry.result.seq,
+        })
         .await
         .map_err(|_| unavailable())?;
-    let catalog = match stream.next().await {
-        Some(Ok(SessionObservation::Control { record, .. })) if record.seq() == 1 => {
-            match record.body() {
-                AgentControlRecordBody::DomainStateCommitted { commit }
-                    if matches!(commit.source(), DomainMutationSource::Baseline) =>
-                {
-                    let baseline = commit
-                        .updates()
-                        .iter()
-                        .map(|update| update.snapshot().clone())
-                        .collect::<Vec<_>>();
-                    ToolOutputCatalog::from_baseline(&baseline).map_err(|error| error.to_string())
-                }
-                _ => Ok(None),
+    let catalog = catalog_at_intent(stream, entry.intent.seq).await;
+    Ok(view(name, result, catalog))
+}
+
+async fn catalog_at_intent(
+    mut stream: rsi_session_protocol::SessionObservationStream,
+    intent_seq: u64,
+) -> std::result::Result<Option<ToolOutputCatalog>, String> {
+    let mut catalog = Err("missing generation".into());
+    while let Some(update) = stream.next().await {
+        let SessionObservation::Control {
+            record,
+            fact_cursor,
+            durable_control_seq,
+        } = update.map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let initial = record.seq() == 1
+            && matches!(record.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.source().is_initial());
+        if fact_cursor >= intent_seq && !initial {
+            break;
+        }
+        if matches!(record.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.source().is_generation())
+        {
+            catalog = generation_catalog(&record, catalog);
+        }
+        if fact_cursor >= intent_seq || record.seq() == durable_control_seq {
+            break;
+        }
+    }
+    catalog
+}
+
+fn generation_catalog(
+    record: &rsi_agent_session_protocol::AgentControlRecord,
+    previous: std::result::Result<Option<ToolOutputCatalog>, String>,
+) -> std::result::Result<Option<ToolOutputCatalog>, String> {
+    match record.body() {
+        AgentControlRecordBody::DomainStateCommitted { commit }
+            if commit.source().is_generation() =>
+        {
+            let id = ToolOutputCatalog::identity();
+            if let Some(update) = commit
+                .updates()
+                .iter()
+                .find(|update| update.snapshot().identity().id() == id.id())
+            {
+                ToolOutputCatalog::from_baseline(std::slice::from_ref(update.snapshot()))
+                    .map_err(|error| error.to_string())
+            } else if commit.source().is_initial()
+                || commit
+                    .removed()
+                    .iter()
+                    .any(|removed| removed.id() == id.id())
+            {
+                Ok(None)
+            } else {
+                previous
             }
         }
-        _ => Err("missing baseline".into()),
-    };
-    Ok(view(name, result, catalog))
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +229,138 @@ mod tests {
     use super::*;
     use rsi_tools_protocol::{ToolOutputDeclaration, ToolResult};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn historical_intents_use_their_generation_even_after_later_adoptions() {
+        use rsi_agent_session_protocol::{
+            AgentControlRecord, DomainMutationSource, DomainRevision, DomainSnapshot,
+            DomainStateCommit, DomainStateUpdate, DomainStateValue, GenerationSelection,
+        };
+        for (intent, expected) in [(4, 1), (12, 2), (24, 3), (34, 3)] {
+            let mut records: Vec<_> = (1..=3)
+                .map(|version| {
+                    let catalog = ToolOutputCatalog::new(std::collections::BTreeMap::from([(
+                        "echo".into(),
+                        ToolOutputDeclaration::new(
+                            "fixture.echo",
+                            version,
+                            json!({"type":"string"}),
+                        )
+                        .unwrap(),
+                    )]))
+                    .unwrap();
+                    let source = if version == 1 {
+                        DomainMutationSource::Generation {
+                            selection: GenerationSelection::new("a".repeat(64)).unwrap(),
+                            turn_id: None,
+                        }
+                    } else {
+                        DomainMutationSource::Recovery {
+                            selection: GenerationSelection::new("b".repeat(64)).unwrap(),
+                        }
+                    };
+                    let commit = DomainStateCommit::new(
+                        None,
+                        source,
+                        vec![
+                            DomainStateUpdate::new(
+                                DomainRevision::new(u64::from(version - 1)),
+                                DomainSnapshot::new(
+                                    ToolOutputCatalog::identity(),
+                                    DomainStateValue::new(serde_json::to_value(catalog).unwrap())
+                                        .unwrap(),
+                                ),
+                            )
+                            .unwrap(),
+                        ],
+                    )
+                    .unwrap();
+                    std::sync::Arc::new(
+                        AgentControlRecord::new(
+                            u64::from(version),
+                            1,
+                            AgentControlRecordBody::DomainStateCommitted { commit },
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect();
+            records.push(std::sync::Arc::new(
+                AgentControlRecord::new(
+                    4,
+                    1,
+                    AgentControlRecordBody::DomainStateCommitted {
+                        commit: DomainStateCommit::new(
+                            None,
+                            DomainMutationSource::Recovery {
+                                selection: GenerationSelection::new("c".repeat(64)).unwrap(),
+                            },
+                            vec![],
+                        )
+                        .unwrap(),
+                    },
+                )
+                .unwrap(),
+            ));
+            let retained = rsi_agent_turn_protocol::ObservationRetention::default()
+                .retain_controls(records)
+                .unwrap();
+            let observations =
+                retained
+                    .into_iter()
+                    .zip([7, 8, 20, 30])
+                    .map(|(record, fact_cursor)| {
+                        Ok(SessionObservation::Control {
+                            record,
+                            fact_cursor,
+                            durable_control_seq: 4,
+                        })
+                    });
+            let catalog =
+                catalog_at_intent(Box::pin(futures_util::stream::iter(observations)), intent)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(catalog.get("echo").unwrap().version(), expected);
+        }
+    }
+
+    #[test]
+    fn fresh_generation_control_supplies_the_recorded_output_contract() {
+        use rsi_agent_session_protocol::{
+            AgentControlRecord, DomainMutationSource, DomainRevision, DomainSnapshot,
+            DomainStateCommit, DomainStateUpdate, DomainStateValue, GenerationSelection,
+        };
+        let catalog = ToolOutputCatalog::new(std::collections::BTreeMap::from([(
+            "echo".into(),
+            ToolOutputDeclaration::new("fixture.echo", 1, json!({"type":"string"})).unwrap(),
+        )]))
+        .unwrap();
+        let snapshot = DomainSnapshot::new(
+            ToolOutputCatalog::identity(),
+            DomainStateValue::new(serde_json::to_value(&catalog).unwrap()).unwrap(),
+        );
+        let record = AgentControlRecord::new(
+            1,
+            1,
+            AgentControlRecordBody::DomainStateCommitted {
+                commit: DomainStateCommit::new(
+                    None,
+                    DomainMutationSource::Generation {
+                        selection: GenerationSelection::new("a".repeat(64)).unwrap(),
+                        turn_id: None,
+                    },
+                    vec![DomainStateUpdate::new(DomainRevision::new(0), snapshot).unwrap()],
+                )
+                .unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            generation_catalog(&record, Ok(None)).unwrap(),
+            Some(catalog)
+        );
+    }
 
     #[test]
     fn recorded_pair_rejects_other_effect_owner_turn_and_wrong_coordinates() {

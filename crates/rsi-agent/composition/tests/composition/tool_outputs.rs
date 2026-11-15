@@ -10,7 +10,7 @@ fn typed_profile(kind: &str) -> String {
 }
 
 #[tokio::test]
-async fn frozen_outputs_reject_changed_restores_and_keep_old_pins_readable() {
+async fn current_outputs_replace_saved_declarations_and_keep_old_pins_readable() {
     let fixture = Fixture::new(&typed_profile("object")).await;
     let first = fixture.service.pin(&fixture.id, None).await.unwrap();
     let saved = AgentGenerationSeed::new(first.domains().baseline().to_vec()).unwrap();
@@ -29,14 +29,7 @@ async fn frozen_outputs_reject_changed_restores_and_keep_old_pins_readable() {
     assert_eq!(restored.domains().baseline(), first.domains().baseline());
     fixture.replace_source(&typed_profile("string"));
     let current = fixture.service.pin(&fixture.id, None).await.unwrap();
-    assert_eq!(
-        fixture
-            .service
-            .pin(&fixture.id, Some(&saved))
-            .await
-            .unwrap_err(),
-        AgentCompositionError::OutputCatalogMismatch
-    );
+    assert!(fixture.service.pin(&fixture.id, Some(&saved)).await.is_ok());
     assert_eq!(
         first.tools().output_declarations()["probe-stable"].schema(),
         &serde_json::json!({"type":"object"})
@@ -60,20 +53,13 @@ async fn frozen_outputs_reject_changed_restores_and_keep_old_pins_readable() {
             .same_generation(&current)
     );
     fixture.replace_source(&profile("stable"));
-    assert_eq!(
-        fixture
-            .service
-            .pin(&fixture.id, Some(&saved))
-            .await
-            .unwrap_err(),
-        AgentCompositionError::OutputCatalogMismatch
-    );
+    assert!(fixture.service.pin(&fixture.id, Some(&saved)).await.is_ok());
     drop((first, restored, current));
     fixture.stop().await;
 }
 
 #[tokio::test]
-async fn legacy_missing_and_unknown_output_baselines_fail_before_publication() {
+async fn new_output_domain_is_initialized_but_unknown_stored_codecs_are_rejected() {
     let fixture = Fixture::new(&typed_profile("object")).await;
     let missing = AgentGenerationSeed::default();
     assert!(
@@ -81,13 +67,12 @@ async fn legacy_missing_and_unknown_output_baselines_fail_before_publication() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(
+    assert!(
         fixture
             .service
             .pin(&fixture.id, Some(&missing))
             .await
-            .unwrap_err(),
-        AgentCompositionError::MissingOutputCatalog
+            .is_ok()
     );
     let unknown = AgentGenerationSeed::new(vec![DomainSnapshot::new(
         DomainIdentity::new("rsi.tools.outputs", 2).unwrap(),
@@ -99,13 +84,12 @@ async fn legacy_missing_and_unknown_output_baselines_fail_before_publication() {
         Err(AgentCompositionError::UnsupportedSeedCodec { .. })
     ));
     fixture.replace_source(&profile("stable"));
-    let untyped = fixture
-        .service
-        .pin(&fixture.id, Some(&missing))
-        .await
-        .unwrap();
-    assert!(untyped.tools().output_declarations().is_empty());
-    assert!(untyped.domains().baseline().is_empty());
-    drop(untyped);
+    assert!(
+        fixture
+            .service
+            .pin(&fixture.id, Some(&missing))
+            .await
+            .is_ok()
+    );
     fixture.stop().await;
 }

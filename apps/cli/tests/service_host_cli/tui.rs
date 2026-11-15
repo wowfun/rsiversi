@@ -39,6 +39,7 @@ struct TerminalClient {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     output: Arc<std::sync::Mutex<RawCapture>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    reader_end: Arc<std::sync::Mutex<Option<String>>>,
     screen: Arc<std::sync::Mutex<vt100::Parser>>,
     capture_name: String,
     capture_count: usize,
@@ -738,11 +739,20 @@ plugin = "rsi.application.tui"
         let captured = output.clone();
         let screen = Arc::new(std::sync::Mutex::new(vt100::Parser::new(30, 110, 0)));
         let rendered = screen.clone();
+        let reader_end = Arc::new(std::sync::Mutex::new(None));
+        let ended = reader_end.clone();
         let reader = std::thread::spawn(move || {
             let mut bytes = [0; 8192];
             loop {
                 match source.read(&mut bytes) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        *ended.lock().unwrap() = Some("EOF".into());
+                        break;
+                    }
+                    Err(error) => {
+                        *ended.lock().unwrap() = Some(error.to_string());
+                        break;
+                    }
                     Ok(count) => {
                         captured.lock().unwrap().push(&bytes[..count]);
                         rendered.lock().unwrap().process(&bytes[..count]);
@@ -756,6 +766,7 @@ plugin = "rsi.application.tui"
             child,
             output,
             reader: Some(reader),
+            reader_end,
             screen,
             capture_name: arguments.last().unwrap_or(&"tui").replace('/', "_"),
             capture_count: 0,
@@ -889,31 +900,35 @@ plugin = "rsi.application.tui"
         let seconds = if self.awaiting_first_screen { 210 } else { 20 };
         let deadline = Instant::now() + Duration::from_secs(seconds);
         loop {
+            // Observe EOF before the screen so an ended reader's final bytes
+            // are included in the snapshot checked below.
+            let reader_end = self.reader_end.lock().unwrap().clone();
             let output = self.screen.lock().unwrap().screen().contents();
             if matches(&output) {
                 self.awaiting_first_screen = false;
                 self.capture();
                 return;
             }
-            if Instant::now() >= deadline {
+            let status = self.child.try_wait().unwrap();
+            // Process exit may precede the reader's final PTY bytes.
+            if Instant::now() >= deadline || reader_end.is_some() {
                 self.capture();
+                let capture = self.output.lock().unwrap();
+                let mut tail = capture
+                    .prefix
+                    .iter()
+                    .chain(&capture.tail)
+                    .rev()
+                    .take(8192)
+                    .copied()
+                    .collect::<Vec<_>>();
+                tail.reverse();
+                panic!(
+                    "terminal never produced {text:?}: child={status:?} reader={reader_end:?} discarded={} screen={output:?} raw_tail={:?}",
+                    capture.discarded,
+                    String::from_utf8_lossy(&tail)
+                );
             }
-            assert!(
-                Instant::now() < deadline,
-                "terminal never produced {text:?}: {}",
-                output
-                    .chars()
-                    .rev()
-                    .take(2048)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
-            assert!(
-                self.child.try_wait().unwrap().is_none(),
-                "terminal exited before {text}: {output}"
-            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }

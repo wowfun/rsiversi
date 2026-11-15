@@ -1,9 +1,9 @@
 //! Typed definitions and exact frozen-generation proposals. No persistence authority.
 
 use rsi_agent_session_protocol::{
-    DomainIdentity, DomainMutationSource, DomainReferenceCodec, DomainRevision, DomainSnapshot,
-    DomainStateCommit, DomainStateUpdate, DomainStateValue, MAXIMUM_DOMAIN_BASELINE_BYTES,
-    MAXIMUM_SESSION_DOMAINS, ReferenceCollector,
+    DomainIdentity, DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
+    DomainStateUpdate, DomainStateValue, MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS,
+    ReferenceCollector,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Arc};
@@ -75,10 +75,11 @@ impl<T> Clone for DomainReferencePolicy<T> {
     }
 }
 
-trait Codec: DomainReferenceCodec {
+trait Codec: fmt::Debug + Send + Sync {
+    fn identity(&self) -> &DomainIdentity;
+    fn references(&self, state: &DomainStateValue) -> Result<ReferenceCollector>;
     fn fork_policy(&self) -> DomainForkPolicy;
     fn initial(&self) -> &DomainSnapshot;
-    fn validate(&self, state: &DomainStateValue) -> Result<()>;
 }
 
 struct TypedCodec<T> {
@@ -110,44 +111,23 @@ impl<T: DeserializeOwned + Send + Sync> TypedCodec<T> {
     }
 }
 
-impl<T: DeserializeOwned + Send + Sync + 'static> DomainReferenceCodec for TypedCodec<T> {
+impl<T: DeserializeOwned + Send + Sync + 'static> Codec for TypedCodec<T> {
     fn identity(&self) -> &DomainIdentity {
         self.initial.identity()
     }
-    fn definition_key(&self) -> (std::any::TypeId, usize, usize) {
-        (
-            std::any::TypeId::of::<T>(),
-            self.validate as usize,
-            match self.references {
-                DomainReferencePolicy::None => 0,
-                DomainReferencePolicy::Visit(visit) => visit as usize,
-            },
-        )
-    }
-    fn references(
-        &self,
-        state: &DomainStateValue,
-        output: &mut ReferenceCollector,
-    ) -> std::result::Result<(), String> {
-        match self.references {
-            DomainReferencePolicy::None => Ok(()),
-            DomainReferencePolicy::Visit(visit) => {
-                let value = self.decode(state).map_err(|error| error.to_string())?;
-                visit(&value, output)
-            }
+    fn references(&self, state: &DomainStateValue) -> Result<ReferenceCollector> {
+        let value = self.decode(state)?;
+        let mut output = ReferenceCollector::default();
+        if let DomainReferencePolicy::Visit(visit) = self.references {
+            visit(&value, &mut output).map_err(|reason| invalid(self.identity(), &reason))?;
         }
+        Ok(output)
     }
-}
-
-impl<T: DeserializeOwned + Send + Sync + 'static> Codec for TypedCodec<T> {
     fn fork_policy(&self) -> DomainForkPolicy {
         self.fork_policy
     }
     fn initial(&self) -> &DomainSnapshot {
         &self.initial
-    }
-    fn validate(&self, state: &DomainStateValue) -> Result<()> {
-        self.decode(state).map(|_| ())
     }
 }
 
@@ -181,18 +161,20 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainDefinition<T
         validate: fn(&T) -> std::result::Result<(), String>,
         references: DomainReferencePolicy<T>,
     ) -> Result<Self> {
-        validate(initial).map_err(|reason| invalid(&identity, &reason))?;
         let state = encode(&identity, initial)?;
-        let codec = Arc::new(TypedCodec {
+        let mut codec = TypedCodec {
             initial: DomainSnapshot::new(identity, state),
             fork_policy: DomainForkPolicy::Inherit,
             validate,
             references,
             marker: PhantomData,
-        });
-        // Validate the serialized representation as well: linked serializers may differ from T.
-        codec.validate(codec.initial.state())?;
-        Ok(Self { codec })
+        };
+        // The serialized representation is the state that will actually be committed.
+        let references = codec.references(codec.initial.state())?;
+        codec.initial = codec.initial.with_references(references);
+        Ok(Self {
+            codec: Arc::new(codec),
+        })
     }
     /// Creates a definition with an explicit generation-frozen fork policy.
     #[must_use]
@@ -382,14 +364,6 @@ struct Catalog {
 }
 
 impl DomainCatalog {
-    /// Pure exact-version reference codecs, independent of generation authority.
-    pub fn reference_codecs(&self) -> Vec<Arc<dyn DomainReferenceCodec>> {
-        self.inner
-            .definitions
-            .values()
-            .map(|entry| entry.codec.clone() as Arc<dyn DomainReferenceCodec>)
-            .collect()
-    }
     /// Freezes unique domain names and validates aggregate initial-state bounds.
     ///
     /// # Errors
@@ -438,7 +412,14 @@ impl DomainCatalog {
             .get(identity.id())
             .filter(|entry| entry.codec.identity() == identity)
             .ok_or_else(|| DomainError::Unsupported(identity.clone()))?;
-        entry.codec.validate(snapshot.state())
+        let references = entry.codec.references(snapshot.state())?;
+        if &references != snapshot.references() {
+            return Err(invalid(
+                identity,
+                "canonical references differ from the owning definition",
+            ));
+        }
+        Ok(())
     }
 
     /// Validates the entire frozen set without importing defaults for missing state.
@@ -771,13 +752,12 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> DomainHandle<T> {
         value: &T,
     ) -> Result<ValidatedDomainProposal> {
         let identity = self.definition.identity();
-        (self.definition.codec.validate)(value).map_err(|reason| invalid(identity, &reason))?;
         let state = encode(identity, value)?;
-        self.definition.codec.validate(&state)?;
+        let references = self.definition.codec.references(&state)?;
         Ok(ValidatedDomainProposal {
             binding: self.binding.clone(),
             expected_revision,
-            snapshot: DomainSnapshot::new(identity.clone(), state),
+            snapshot: DomainSnapshot::new(identity.clone(), state).with_references(references),
             retained: None,
         })
     }

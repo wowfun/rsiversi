@@ -1,4 +1,68 @@
 use super::*;
+
+#[tokio::test]
+async fn offline_inspection_includes_unloaded_domain_cas_references() {
+    use rsi_agent_session_protocol::{
+        DomainIdentity, DomainMutationSource, DomainSnapshot, DomainStateCommit, DomainStateUpdate,
+        DomainStateValue, ReferenceCollector,
+    };
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let header = test_header("domain-inspection");
+    let id = header.session_id().clone();
+    let object = store
+        .put_cas(Arc::from(b"domain private bytes".as_slice()))
+        .await
+        .unwrap();
+    let mut references = ReferenceCollector::default();
+    references.cas(&object.sha256, object.byte_len).unwrap();
+    let snapshot = DomainSnapshot::new(
+        DomainIdentity::new("removed.plugin", 1).unwrap(),
+        DomainStateValue::new(false.into()).unwrap(),
+    )
+    .with_references(references);
+    let commit = DomainStateCommit::new(
+        None,
+        DomainMutationSource::Baseline,
+        vec![DomainStateUpdate::introduced(1, snapshot).unwrap()],
+    )
+    .unwrap();
+    store
+        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                session_id: id,
+                expected_fact_seq: 0,
+                expected_control_seq: 0,
+                header: Some(header),
+                facts: vec![test_fact(1).into()],
+                controls: vec![
+                    AgentControlRecord::new(
+                        1,
+                        1,
+                        AgentControlRecordBody::DomainStateCommitted { commit },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
+    let digest = object.sha256.clone();
+    drop(object);
+    drop(store);
+    fs::remove_file(root.path().join("cas").join(&digest)).unwrap();
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    connection
+        .execute("DELETE FROM cas_objects WHERE sha256 = ?1", [&digest])
+        .unwrap();
+    drop(connection);
+    let (summary, events) = inspect(root.path(), CasInspectionMode::Full).await;
+    assert_eq!(summary.references, 1);
+    assert!(events.iter().any(|event| event.issue == Some(CasInspectionIssue::Missing)
+        && matches!(&event.location, CasInspectionLocation::Reference { stream: CasInspectionStream::Control, sha256, .. } if sha256 == &digest)));
+}
 use std::ops::ControlFlow;
 use tokio_util::sync::CancellationToken;
 

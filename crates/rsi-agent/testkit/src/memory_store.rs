@@ -598,6 +598,8 @@ impl SessionStore for MemoryStore {
                     last_settled_control_seq: 0,
                     control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
                     domain_versions: BTreeMap::new(),
+                    domain_removals: BTreeMap::new(),
+                    generation_selections: BTreeSet::new(),
                     queue_mutations: BTreeMap::new(),
                     domain_requests: BTreeMap::new(),
                     domain_usage: BTreeMap::new(),
@@ -733,6 +735,25 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
     }
 
+    async fn read_domain_watermarks(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainWatermarks> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
+        Ok(rsi_agent_store_protocol::StoreDomainWatermarks {
+            fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+            control_seq,
+            domain_seq: domain_cut(session, control_seq),
+        })
+    }
     async fn read_domain_states(
         &self,
         session_id: &SessionId,
@@ -756,6 +777,11 @@ impl SessionStore for MemoryStore {
             ));
         }
         let mut states = Vec::new();
+        let generation = session
+            .generation_selections
+            .range(..=selected_control_seq)
+            .next_back()
+            .copied();
         let bound = domain.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Included);
         for (_, versions) in session.domain_versions.range::<str, _>((bound, bound)) {
             let Some(index) = versions
@@ -765,29 +791,35 @@ impl SessionStore for MemoryStore {
                 continue;
             };
             let head = &versions[index];
-            let record = domain_control(session, head.control_seq)?;
-            let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
-                return Err(StoreError::Corrupt(
-                    "domain index points to another control kind".into(),
-                ));
-            };
-            let update = commit.updates().get(head.update_index).ok_or_else(|| {
-                StoreError::Corrupt("domain update offset exceeds canonical request".into())
-            })?;
-            if update.revision() != head.revision {
-                return Err(StoreError::Corrupt(
-                    "domain indexed revision differs from canonical update".into(),
-                ));
+            if session
+                .domain_removals
+                .get(head.identity.id())
+                .is_some_and(|cuts| {
+                    cuts.iter()
+                        .any(|cut| *cut > head.control_seq && *cut <= selected_control_seq)
+                })
+            {
+                continue;
             }
+            let record = domain_control(session, head.control_seq)?;
             states.push(StoreDomainState {
                 head: head.clone(),
-                snapshot: update.snapshot().clone(),
+                snapshot: head.snapshot_from(record)?.clone(),
             });
         }
         let page = StoreDomainStatePage {
             durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
             durable_control_seq,
             selected_control_seq,
+            domain_control_seq: domain_cut(session, selected_control_seq),
+            generation: generation
+                .filter(|_| domain.is_none())
+                .map(|seq| {
+                    rsi_agent_store_protocol::StoreGenerationSelection::from_record(domain_control(
+                        session, seq,
+                    )?)
+                })
+                .transpose()?,
             states,
         };
         page.validate()?;
@@ -2043,6 +2075,11 @@ impl SessionStore for MemoryStore {
         object: &CasObjectRef,
         admission: rsi_api_protocol::ByteAdmission,
     ) -> Result<rsi_api_protocol::RetainedBytes> {
+        let pause = self.cas_read_pause.lock().unwrap().take();
+        if let Some((entered, release)) = pause {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         object.validate()?;
         let bytes = self
             .inner
@@ -2066,6 +2103,25 @@ impl SessionStore for MemoryStore {
     }
 }
 
+fn domain_cut(session: &MemorySession, horizon: u64) -> u64 {
+    session
+        .domain_versions
+        .values()
+        .filter_map(|versions| {
+            versions
+                .partition_point(|head| head.control_seq <= horizon)
+                .checked_sub(1)
+                .map(|index| versions[index].control_seq)
+        })
+        .chain(session.domain_removals.values().filter_map(|cuts| {
+            cuts.partition_point(|seq| *seq <= horizon)
+                .checked_sub(1)
+                .map(|index| cuts[index])
+        }))
+        .max()
+        .unwrap_or(0)
+}
+
 fn domain_control(session: &MemorySession, seq: u64) -> Result<&AgentControlRecord> {
     let index = seq
         .checked_sub(1)
@@ -2083,7 +2139,6 @@ fn apply_domain_updates(
     minimum_fact_seq: u64,
     controls: &[AgentControlRecord],
 ) -> Result<()> {
-    use rsi_agent_session_protocol::DomainMutationSource;
     for record in controls {
         let AgentControlRecordBody::DomainStateCommitted { commit } = record.body() else {
             continue;
@@ -2095,7 +2150,7 @@ fn apply_domain_updates(
                 request_id: request.to_string(),
             });
         }
-        if let DomainMutationSource::Turn { turn_id, .. } = commit.source() {
+        if let Some(turn_id) = commit.source().turn_id() {
             let live = session.turns.get(turn_id).is_some_and(|turn| {
                 turn.terminal_seq
                     .is_none_or(|terminal| terminal >= minimum_fact_seq)
@@ -2105,6 +2160,12 @@ fn apply_domain_updates(
                     "domain mutation has no open originating Turn".into(),
                 ));
             }
+        }
+        if let Some(turn_id) = commit
+            .source()
+            .turn_id()
+            .filter(|_| commit.request_id().is_some())
+        {
             let usage = session.domain_usage.entry(turn_id.clone()).or_default();
             usage.0 = usage
                 .0
@@ -2119,8 +2180,24 @@ fn apply_domain_updates(
             .domain_versions
             .values()
             .filter_map(|versions| versions.last().cloned())
+            .filter(|head| {
+                session
+                    .domain_removals
+                    .get(head.identity.id())
+                    .is_none_or(|cuts| cuts.last().is_none_or(|cut| *cut < head.control_seq))
+            })
             .collect();
         let next = rsi_agent_store_protocol::domain_heads_after(&heads, record.seq(), commit)?;
+        if commit.source().is_generation() {
+            session.generation_selections.insert(record.seq());
+        }
+        for removed in commit.removed() {
+            session
+                .domain_removals
+                .entry(removed.id().into())
+                .or_default()
+                .push(record.seq());
+        }
         for head in next
             .into_iter()
             .filter(|head| head.control_seq == record.seq())
@@ -2151,7 +2228,7 @@ fn validate_cas_references(
         .chain(
             controls
                 .iter()
-                .map(rsi_agent_store_protocol::native_control_references),
+                .map(rsi_agent_store_protocol::control_references),
         );
     for references in projections {
         for reference in references?.iter() {
@@ -2315,6 +2392,8 @@ fn apply_atomic_memory_append(
                 last_settled_control_seq: 0,
                 control_prefix_digest: control_digest,
                 domain_versions: BTreeMap::new(),
+                domain_removals: BTreeMap::new(),
+                generation_selections: BTreeSet::new(),
                 queue_mutations: BTreeMap::new(),
                 domain_requests: BTreeMap::new(),
                 domain_usage: BTreeMap::new(),

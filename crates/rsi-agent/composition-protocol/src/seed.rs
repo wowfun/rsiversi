@@ -41,13 +41,13 @@ impl AgentGenerationSeed {
     /// # Errors
     /// Rejects duplicate or unsorted identities and complete baseline count/byte overflow.
     pub fn new(states: Vec<DomainSnapshot>) -> Result<Self> {
-        if states.len() > MAXIMUM_SESSION_DOMAINS
+        if states.len() > 2 * MAXIMUM_SESSION_DOMAINS
             || states
                 .windows(2)
                 .any(|pair| pair[0].identity().id() >= pair[1].identity().id())
         {
             return Err(AgentCompositionError::InvalidInput(
-                "Generation seed requires at most 64 sorted unique domains".into(),
+                "Generation seed requires at most 128 sorted unique domains".into(),
             ));
         }
         let mut bytes = 0usize;
@@ -61,9 +61,9 @@ impl AgentGenerationSeed {
                 .ok_or_else(|| {
                     AgentCompositionError::InvalidInput("Generation seed size overflow".into())
                 })?;
-            if bytes > MAXIMUM_DOMAIN_BASELINE_BYTES {
+            if bytes > 2 * MAXIMUM_DOMAIN_BASELINE_BYTES {
                 return Err(AgentCompositionError::InvalidInput(
-                    "Generation seed exceeds the 1 MiB baseline limit".into(),
+                    "Generation seed exceeds the 2 MiB input limit".into(),
                 ));
             }
         }
@@ -229,7 +229,7 @@ mod tests {
             AgentGenerationSeed::new(vec![state("z", true.into()), state("a", false.into())])
                 .is_err()
         );
-        let states = (0..5)
+        let states = (0..9)
             .map(|i| state(&format!("domain-{i}"), "x".repeat(250 * 1024).into()))
             .collect();
         assert!(AgentGenerationSeed::new(states).is_err());

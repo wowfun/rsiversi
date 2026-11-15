@@ -15,9 +15,10 @@ The durable boundary is deliberately narrower than the runtime boundary.
 `rsi-agent-session-protocol` owns validated session identities, the immutable
 session header, and append-only Facts. `rsi-agent-store-protocol` owns only the
 mechanical persistence seam and its compare-and-append rules.
-Domain definitions also export pure exact-version reference codecs through a
-Store-owned registration contract. Store retains only these decoders and their
-bounded typed visitors, never a composition pin, Tool authority or runtime scope.
+Domain definitions validate and project typed references at state admission.
+Canonical Domain snapshots persist these bounded references with their state.
+Store verifies their structural integrity and derived indexes without loading
+historical plugin codecs; catalogs retain only codecs needed by live owners.
 `rsi-agent-turn-protocol` owns the process-local submit, cancel, observation,
 and outcome service. Runtime scheduling and recovery policy belong to the
 Kernel, with their shared boundary described in [Sessions and recovery](subsystems/sessions-and-recovery.md).
