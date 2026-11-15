@@ -1,5 +1,8 @@
 # rsi-conversation
 
+Entered runtime context carries the explicit participant label `Runtime context`.
+Labels follow typed provenance; identical human text remains human input.
+
 Entered file attachments retain a borrowed `FileRef` and an `InputFile` source
 coordinate. Detail reads expose immutable file metadata, never the file bytes
 or a stored host path. Presenters may label the file without loading its contents.

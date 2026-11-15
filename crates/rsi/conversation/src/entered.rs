@@ -51,6 +51,7 @@ impl<'a> EnteredInput<'a> {
                 child_session_id, ..
             } => Some(format!("Completion from {child_session_id}").into()),
             InputMessageSource::Continuation { .. } => Some("Goal continuation".into()),
+            InputMessageSource::RuntimeContext => Some("Runtime context".into()),
             _ => None,
         }
     }

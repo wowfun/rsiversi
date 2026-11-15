@@ -8,6 +8,32 @@ use rsi_conversation::{
 use rsi_media_protocol::{FileRef, MediaId};
 
 #[test]
+fn runtime_context_label_follows_provenance_instead_of_message_text() {
+    let human = InputMessageSource::Human {
+        message_id: MessageId::new("human").unwrap(),
+        attribution: None,
+    };
+    let runtime = InputMessageSource::RuntimeContext;
+    let input = EnteredInput {
+        index: 0,
+        source: Some(&human),
+        seq: 1,
+        offset: 0,
+        content: EnteredContent::Direct("Runtime context"),
+    };
+    assert_eq!(input.attribution(), None);
+    assert_eq!(
+        EnteredInput {
+            source: Some(&runtime),
+            ..input
+        }
+        .attribution()
+        .as_deref(),
+        Some("Runtime context")
+    );
+}
+
+#[test]
 fn file_input_has_an_exact_detail_source_without_loading_or_storing_paths() {
     let file = FileRef::new(MediaId::new("a".repeat(64)).unwrap(), "report.csv", 123).unwrap();
     let fact = SessionFact::new(
