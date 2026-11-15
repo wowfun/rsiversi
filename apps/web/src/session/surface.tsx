@@ -22,6 +22,7 @@ import {
 } from "./projections.tsx";
 import { useSelected, useView } from "../bridge.ts";
 import { sessionSurfaces, type SessionSurfaceOwner } from "./state.ts";
+import {ConversationAnnouncements, generationRejectionText} from './announcements.js';
 
 function NativeSurface({
   owner,
@@ -38,6 +39,14 @@ function NativeSurface({
   const data = owner.staged?.data;
   const empty = !data?.transcript.blocks.length;
   const [tab, setTab] = useState("conversation");
+  const [announcements] = useState(() => new ConversationAnnouncements());
+  const [announcement, announce] = useState<{revision: number; text: string}>();
+  useLayoutEffect(() => {
+    const changedSession = data && announcements.session !== data.session;
+    const next = announcements.update(data, selected);
+    if (next !== undefined) announce(next ?? undefined);
+    else if (!selected || changedSession) announce(undefined);
+  }, [announcements, data, selected]);
   const tabId = useId();
   const coordinates = data
     ? `${data.path} · ${data.session}`
@@ -83,6 +92,9 @@ function NativeSurface({
       hidden={!selected}
       aria-label={`${label} conversation`}
     >
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement && <span key={announcement.revision}>{announcement.text}</span>}
+      </div>
       <header className="pane-header" hidden={empty}>
         <div className="pane-heading">
           <span className="pane-status" hidden>{data?.historical ? "History" : data?.transcript.status || "Ready"}</span>
@@ -133,6 +145,7 @@ function NativeSurface({
           mode={tab === "activity" ? "verbose" : mode}
         />
         <button ref={ref("bottom")} type="button" className={`back-bottom ${chat.bottom}`}
+          onClick={() => elements.current.transcript.focus({preventScroll: true})}
           aria-label="Back to bottom" title="Back to bottom" hidden={!owner.readingSummary}>
           <IconChevronDownOutlineRegular />
         </button>
@@ -141,6 +154,8 @@ function NativeSurface({
       <PendingInputs data={data} owner={owner} register={ref("queueList")} />
       <PendingInteractions data={data} owner={owner} />
       <div className="pane-notice">{data?.notice}</div>
+      {data?.projections?.generation_rebuilding && <p className="pane-notice" role="status">Updating plugins: rebuilding conversation context…</p>}
+      {data?.projections?.generation_rejection && <p className="pane-notice">{generationRejectionText(data.projections.generation_rejection)}</p>}
       <div className="pane-notice" hidden={!data?.protected}>
         <p>
           Protected investigation. Use Deployment checks to cancel or create a

@@ -27,6 +27,8 @@ export interface SessionProjections {
   };
   projections?: {
     cursor: { kind: string };
+    generation_rejection?: string | null;
+    generation_rebuilding?: boolean;
     entries: {
       producer: string;
       content: { kind: string; message?: string; value?: unknown };

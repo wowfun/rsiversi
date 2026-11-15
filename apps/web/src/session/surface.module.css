@@ -249,6 +249,10 @@
   margin: 0;
   line-height: 1.5rem;
 }
+:global(.draft-error):where(.scope, .scope *) {
+  color: var(--error);
+  font-weight: 600;
+}
 :global(.draft-status button):where(.scope, .scope *) {
   margin: 0 5px 8px 0;
   font-size: 0.72rem;

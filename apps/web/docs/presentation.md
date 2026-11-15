@@ -1,5 +1,9 @@
 # Presentation design
 
+Closing the saved-draft panel or successfully opening a saved conversation
+returns focus to the composer. Generation failures first observed in a background
+pane are announced once when that pane is selected, if still outstanding.
+
 Each completed native Turn offers a fork into a new draft: full history, a positive
 number of recent local Turns, or no history. The action flushes the local editor
 and binds the current pane generation before requesting creation. The Session
@@ -399,6 +403,18 @@ unmodified Escape; IME composition never dismisses them.
 Verbose source actions remain inline and do not participate in disclosure dismissal.
 Closing a menu action restores focus to its summary if focus was inside the menu.
 Transcript regions are named and keyboard focusable without announcing every streamed text change.
+Completion and attention announcements track turn and pending-request identities.
+Initial history, reconnects and completed background activity are not replayed on selection;
+new attention requests received in the background announce when selected if still pending.
+unchanged turn and pending projections require no repeated history scan.
+Each surface remembers the latest 4,096 event identities for its current Session,
+including identities that leave the visible window. Switching Sessions resets
+this bounded memory; an older evicted identity can be announced if it reappears.
+Rejected plugin replacement appears beside the conversation as a notice that the
+previous plugins remain in use, independently of the collapsed extension views.
+Its current failure message also uses the always-mounted polite live region,
+including when first opening the selected pane. Draft save
+failures have their own mounted status region beside the retained input.
 Stable tab hosts retain visited terminal
 followers across selection, movement, floating and fullscreen. Closing a tab
 detaches; only explicit termination ends its shell. Restoring terminal coordinates

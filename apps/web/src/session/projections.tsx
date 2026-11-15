@@ -128,13 +128,13 @@ export function SessionCommands({
         </Fragment>
       ))}
       {receipt && result && (
-        <p className="command-receipt">
-          {receipt.command} ·{" "}
+        <details className="command-receipt">
+          <summary>{receipt.command} · {result.kind === "draft_changed" ? "Draft changed" : "Committed"}</summary>
           {result.kind === "draft_changed"
-            ? `Draft changed · revision ${result.revision}`
-            : `Committed · control ${result.control_seq}`}{" "}
-          · {receipt.request_id}
-        </p>
+            ? `Revision ${result.revision}`
+            : `Control ${result.control_seq}`}{" "}
+          · Request {receipt.request_id}
+        </details>
       )}
     </div>
   );

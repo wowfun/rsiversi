@@ -29,10 +29,14 @@ export function mergePresentationFrame(view, frameId, frame) {
         for (const block of delta.upsert) blocks.set(block.key, block);
         const order = delta.order ?? pane.transcript.blocks.map(block => block.key);
         if (new Set(order).size !== order.length || order.length !== blocks.size || order.some(key => !blocks.has(key))) throw new Error("Invalid block order");
-        const turns = { ...pane.transcript.turns?.entries };
-        for (const key of (delta.turns?.remove ?? [])) delete turns[key];
-        Object.assign(turns, delta.turns?.upsert);
-        pane.transcript = { ...pane.transcript, ...delta.fields, turns: { revision: delta.turns?.revision ?? pane.transcript.turns?.revision, entries: turns }, blocks: order.map(key => {const block=blocks.get(key);if(!block) throw new Error("Missing block");return block;}) };
+        let turns = pane.transcript.turns;
+        if (delta.turns) {
+          const entries = { ...turns?.entries };
+          for (const key of delta.turns.remove) delete entries[key];
+          Object.assign(entries, delta.turns.upsert);
+          turns = { revision: delta.turns.revision ?? turns?.revision, entries };
+        }
+        pane.transcript = { ...pane.transcript, ...delta.fields, turns, blocks: order.map(key => {const block=blocks.get(key);if(!block) throw new Error("Missing block");return block;}) };
       }
       next.surfaces[change.surface] = pane;
     }

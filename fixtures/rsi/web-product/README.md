@@ -28,6 +28,10 @@ ordinary notices, borderless composer focus in ordinary themes and a system-colo
 outline in forced colors. It also checks transparent resize hit areas during hover
 and drag, keyboard boundary indicators and pointer/arrow-key resizing on both
 sides. This is component/CSS evidence, separate from Worker/HTTP verification.
+`review-announcements.mjs` checks selected-pane Session replacement with an
+outstanding plugin rejection in the production document, including identity-stable
+updates and clearing a stale announcement. It checks unsaved-input error styling
+and contrast in light and dark themes in Chromium and Firefox; transport is scripted.
 The document projection fixture preserves completion option nodes during arrow
 selection and checks current transcript visibility without per-block scroll
 geometry reads. Initial inline-card visibility waits for the first intersection

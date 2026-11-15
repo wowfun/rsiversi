@@ -55,6 +55,10 @@ publishes settled resource accounting to the product browser fixtures.
 After assembling the complete bundle, the build runs the native WebAssets provider preflight and
 reports success only after its default bundle and renderer graph are admitted.
 
+Presentation patches retain the previous immutable turn registry when it has no
+delta. Consumers can skip unchanged turn classification by identity; snapshots
+and turn deltas replace that identity even when the number of turns is unchanged.
+
 These assets render the views of the ordinary [Rust Web application](../../web-worker/README.md).
 The document owns DOM nodes, focus and input delivery; the Dedicated Worker owns
 the actual Rust Profile and application. One view crosses the bridge at a time,

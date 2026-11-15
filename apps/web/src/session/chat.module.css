@@ -370,8 +370,12 @@
   border: 0;
   padding: 8px 4px;
 }
-:global(.draft-status:empty):where(.scope, .scope *) {
-  display: none;
+:global(.draft-status:has(> [role="status"]:empty:only-child)):where(.scope, .scope *) {
+  min-height: 0;
+  padding-block: 0;
+}
+:global(.draft-status > [role="status"]:empty):where(.scope, .scope *) {
+  margin: 0;
 }
 :global(.source-actions button):where(.scope, .scope *) {
   font-size: 10px;
