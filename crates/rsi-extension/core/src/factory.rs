@@ -151,14 +151,14 @@ impl ExtensionFactory {
             Duration::from_secs(10),
             connection.request(
                 "extension.hello",
-                serde_json::json!({"protocol":1}),
+                serde_json::json!({"protocol":2}),
                 CancellationToken::new(),
             ),
         )
         .await
         .map_err(meta)?
         .map_err(meta)?;
-        if hello != serde_json::json!({"protocol":1}) {
+        if hello != serde_json::json!({"protocol":2}) {
             return Err(meta("extension handshake mismatch"));
         }
         connection.start_watchdog();

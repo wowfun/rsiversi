@@ -31,12 +31,14 @@ factories are opt-in and add no DSH policy to the standard preset or Meta.
 The [extension contract](../../rsi-extension/README.md) owns transport, trust and
 canonical publication semantics.
 
-CLI and application package imports use the same `import_packages` operation.
+CLI `import_packages` and application `stage_packages` share importer preparation.
 Its caller freezes the importer, executable, workspace, requested specs, an
 optional importer-defined JSON options object of at most 64 KiB, and
 available protocols. The operation retains the exact importer, supervises
 private staging, settles the process, then admits its complete output into
 PackageStore in one publication. Cancellation reaches staging and publication.
+Stage cancellation is confirmed after cleanup; it never masks an unrelated
+Store admission error.
 Registry imports inherit the Host's HTTP(S) proxy and bypass settings after
 the standard child environment scrub. Proxy URLs containing user information are
 excluded. The importer retains its private home and configuration.

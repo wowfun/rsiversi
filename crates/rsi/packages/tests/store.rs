@@ -237,7 +237,7 @@ fn profiles_retain_independent_versions_and_their_dependencies_through_restart_a
 }
 
 #[test]
-fn candidate_admission_reserves_the_profile_without_changing_cli_or_other_profiles() {
+fn candidate_leases_survive_gc_and_handoff_without_persisting_staging() {
     let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();
     let global = store
@@ -265,65 +265,108 @@ fn candidate_admission_reserves_the_profile_without_changing_cli_or_other_profil
         plugin.manifest = serde_json::to_vec(&manifest).unwrap();
         vec![private, plugin]
     };
-    let empty = BTreeMap::new();
     let first = store
-        .stage_for_profile("one", &empty, &input(b"first"), &[], "portable", || Ok(()))
+        .stage_for_process("one", &input(b"first"), &[], "portable", || Ok(()))
         .unwrap();
-    let second = store
-        .stage_for_profile("two", &empty, &input(b"second"), &[], "portable", || Ok(()))
+    let same = store
+        .stage_for_process("one", &input(b"first"), &[], "portable", || Ok(()))
         .unwrap();
-    assert_eq!(
-        first.roots,
-        BTreeMap::from([(first.packages["extension"].clone(), "extension".into())])
-    );
+    let digest = &first.packages["extension"];
+    assert!(std::sync::Arc::ptr_eq(
+        &first.leases[digest],
+        &same.leases[digest]
+    ));
+    assert_eq!(first.leases.len(), 1);
+    assert!(store.profile_roots("one").unwrap().is_empty());
+    assert!(store.profile_roots("two").unwrap().is_empty());
     assert_eq!(store.resolution().unwrap().packages, global.packages);
+    assert!(store.collect().unwrap().is_empty());
+    let roots = BTreeMap::from([(digest.clone(), "extension".into())]);
+    store
+        .replace_profile_roots("one", &BTreeMap::new(), &roots)
+        .unwrap();
+    drop(first);
+    drop(same);
+    assert!(store.collect().unwrap().is_empty());
     let candidate = store
-        .stage_for_profile(
-            "one",
-            &first.roots,
-            &input(b"third"),
+        .stage_for_process("one", &input(b"next"), &[], "portable", || Ok(()))
+        .unwrap();
+    let discarded = candidate.packages.clone();
+    assert!(store.collect().unwrap().is_empty());
+    drop(candidate);
+    let freed = store.collect().unwrap();
+    assert!(discarded.values().all(|digest| freed.contains(digest)));
+    assert!(
+        store
+            .stage_for_process("one", &input(b"cancel"), &[], "portable", || Err(
+                Error::Invalid("cancelled".into())
+            ))
+            .is_err()
+    );
+    assert_eq!(store.profile_roots("one").unwrap(), roots);
+    assert!(store.collect().unwrap().is_empty());
+    store
+        .replace_profile_roots("one", &roots, &BTreeMap::new())
+        .unwrap();
+    assert_eq!(store.collect().unwrap().len(), 2);
+}
+
+#[test]
+fn candidate_process_loss_releases_only_temporary_roots() {
+    use std::io::{BufRead, Write};
+    const CHILD: &str = "RSI_STAGING_PROCESS_TEST";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let store = PackageStore::open(&root.join("store")).unwrap();
+        let candidate = store
+            .stage_for_process(
+                "one",
+                &[source(&root, "candidate", b"new")],
+                &[],
+                "portable",
+                || Ok(()),
+            )
+            .unwrap();
+        println!("LEASED {}", candidate.packages["candidate"]);
+        std::io::stdout().flush().unwrap();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        // Simulate abrupt loss: no Rust destructors release the process lease.
+        std::process::exit(71);
+    }
+    let root = temporary_root();
+    let store = PackageStore::open(&root.path().join("store")).unwrap();
+    let active = store
+        .install(
+            &[source(root.path(), "active", b"old")],
+            &[],
             &[],
             "portable",
-            || Ok(()),
         )
         .unwrap();
-    assert_eq!(candidate.roots.len(), 2);
-    assert!(
-        store
-            .stage_for_profile(
-                "one",
-                &first.roots,
-                &input(b"conflict"),
-                &[],
-                "portable",
-                || Ok(())
-            )
-            .is_err()
-    );
-    store
-        .replace_profile_roots("one", &candidate.roots, &first.roots)
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "candidate_process_loss_releases_only_temporary_roots",
+            "--nocapture",
+        ])
+        .env(CHILD, root.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
-    let freed = store.collect().unwrap();
-    assert!(
-        candidate
-            .packages
-            .values()
-            .all(|digest| freed.contains(digest))
-    );
-    assert!(
-        store
-            .stage_for_profile(
-                "two",
-                &second.roots,
-                &input(b"cancel"),
-                &[],
-                "portable",
-                || Err(Error::Invalid("cancelled".into()))
-            )
-            .is_err()
-    );
-    assert_eq!(store.profile_roots("two").unwrap(), second.roots);
-    assert!(store.collect().unwrap().is_empty());
+    let digest = std::io::BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map(std::result::Result::unwrap)
+        .find_map(|line| line.strip_prefix("LEASED ").map(str::to_owned))
+        .unwrap();
+    let retained = store.collect().unwrap();
+    child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(71));
+    assert!(retained.is_empty());
+    assert_eq!(store.collect().unwrap(), [digest]);
+    assert!(store.profile_roots("one").unwrap().is_empty());
+    assert_eq!(store.resolution().unwrap().packages, active.packages);
 }
 
 #[test]
@@ -705,9 +748,28 @@ fn retained_store_parent_does_not_follow_a_replaced_root() {
             "linux-x86_64",
         )
         .unwrap();
+    let lease = store.acquire("web").unwrap();
+    let exported = lease
+        .export("main", ExportKind::ApplicationProfile)
+        .unwrap();
+    assert_eq!(std::fs::read(&exported).unwrap(), b"original");
     std::fs::rename(&selected, root.path().join("retained")).unwrap();
     std::fs::create_dir(&selected).unwrap();
+    std::fs::create_dir_all(exported.parent().unwrap()).unwrap();
+    std::fs::write(&exported, b"replacement").unwrap();
+    assert!(
+        lease
+            .export("main", ExportKind::ApplicationProfile)
+            .is_err()
+    );
     assert_eq!(store.acquire("web").unwrap().manifest().files[0].bytes, 8);
+    assert!(
+        store
+            .acquire("web")
+            .unwrap()
+            .export("main", ExportKind::ApplicationProfile)
+            .is_err()
+    );
 }
 
 #[test]
@@ -755,6 +817,70 @@ fn manifest_integer_tokens_and_duplicate_fields_are_not_silently_coerced() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn absent_generations_do_not_accumulate_leases_or_poison_purge() {
+    let root = temporary_root();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    for index in 0..257 {
+        assert!(
+            store
+                .acquire_exact("missing", &format!("{index:064x}"))
+                .is_err()
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(path.join("leases"))
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_name().to_string_lossy().len() == 64)
+            .count(),
+        0
+    );
+    assert!(store.collect().unwrap().is_empty());
+    store.into_purge().unwrap().purge().unwrap();
+}
+
+#[test]
+fn orphan_lease_repair_is_bounded_and_preserves_busy_generations() {
+    let root = temporary_root();
+    let path = root.path().join("packages");
+    let store = PackageStore::open(&path).unwrap();
+    let leases =
+        rsi_files_native_fs::open_absolute_directory_no_follow(&path.join("leases")).unwrap();
+    for index in 0..1000 {
+        rsi_files_native_fs::create_relative_private_file_no_follow(
+            &leases,
+            std::path::Path::new(&format!("{index:064x}")),
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let result = store.collect();
+        assert!(
+            matches!(result, Err(Error::MaintenanceIncomplete { removed: 384 })),
+            "{result:?}"
+        );
+    }
+    assert!(store.collect().unwrap().is_empty());
+    let busy_path = path.join("leases").join(format!("{:064x}", 1001));
+    let file = rsi_files_native_fs::create_relative_private_file_no_follow(
+        &leases,
+        busy_path.file_name().unwrap().as_ref(),
+    )
+    .unwrap();
+    file.lock_shared().unwrap();
+    assert!(store.collect().unwrap().is_empty());
+    assert!(busy_path.exists());
+    assert!(matches!(
+        PackageStore::open(&path).unwrap().into_purge(),
+        Err(Error::Busy)
+    ));
+    drop(file);
+    store.into_purge().unwrap().purge().unwrap();
+    assert!(!busy_path.exists());
 }
 
 #[test]

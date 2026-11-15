@@ -105,16 +105,21 @@ or held by the Store's process leases. Collection retains the transitive
 closure of every profile's roots.
 The Host Store bounds the number of profiles and roots per profile to its
 package count limit. An empty set removes the profile's reservation.
-A profile import admits its produced objects under the same Store writer
-lock and producer fence as a CLI installation. It retains all produced
-digests in that profile before replying, leaving the CLI's selected names
-unchanged. Its exact dependencies must be in the transaction or already
-admitted to the global selection, profile closure or a live process lease.
-Owners may namespace root sets as `owner/profile`.
-The profile then chooses the roots
-it needs for its working view.
+Candidate admission publishes immutable objects and acquires process closure
+leases under the same Store writer lock and producer fence. It changes neither
+the CLI selection nor persistent profile roots. The returned owner holds every
+produced root and its transitive dependencies until discarded or retained by a
+profile. Dependencies must be in the transaction or already admitted to the global
+selection, invoking profile closure or a live process lease. Process leases reuse
+exact live generations without repeating installation's content verification.
+Owners may namespace persistent root sets as `owner/profile`.
 
 A consumer leases its complete resolved closure before exposing paths.
+Before exporting a path, Unix verifies that the object's absolute namespace still
+names its retained directory. Handle-based reads survive a moved Store; exported
+pathnames do not. The owner must keep the Store and its ancestors in place while
+consumers retain paths (including subprocesses). A check cannot prevent a later
+same-user rename. Windows namespace leases prevent the corresponding rename.
 Updating the resolution lock does not mutate
 already leased bytes. Garbage collection may reclaim only unselected objects
 whose exclusive lease can be acquired. Home reset preserves this store and
@@ -133,7 +138,15 @@ Read-only resolution and acquisition share the coordinator; mutation and GC
 require exclusive ownership. Each coordinator or generation lease explicitly
 unlocks when its owning guard ends, before closing the descriptor. A concurrent
 fork retaining that descriptor cannot extend the completed owner's lock.
-Acquisition pins objects before releasing that coordinator. Installation removes
+Acquisition pins objects before releasing that coordinator.
+Read acquisition validates each object's identity before creating its generation
+anchor. Exclusive collection and purge admission remove unleased generation
+anchors whose objects are absent, including anchors retained by a prior purge.
+One repair visits at most 384 entries; a larger directory reports retryable
+maintenance-incomplete progress after syncing removals. An unrecognized lease
+name stops repair with an error; it is not removed. Busy leases are retained.
+Writer and namespace coordination anchors are never removed.
+Installation removes
 abandoned `stage-<id>` trees, including a
 stage interrupted before its manifest was written. It accounts for existing
 and incoming digests together under the writer lease. Complete retired

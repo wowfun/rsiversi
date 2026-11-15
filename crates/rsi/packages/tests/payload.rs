@@ -466,7 +466,7 @@ fn process_source(
     }];
     manifest.requires = vec![Interface {
         name: "rsi.extension.process".into(),
-        version: 1,
+        version: 2,
     }];
     manifest.files.push(FileRecord {
         path: "process.json".into(),
@@ -505,7 +505,7 @@ fn fresh_process_launch_skips_archives_and_unused_files_but_requires_its_entry()
             &[],
             &[Interface {
                 name: "rsi.extension.process".into(),
-                version: 1,
+                version: 2,
             }],
             "portable",
         )
@@ -549,7 +549,7 @@ fn process_admission_authenticates_every_manifest_and_requires_payload_roots() {
             &[],
             &[Interface {
                 name: "rsi.extension.process".into(),
-                version: 1,
+                version: 2,
             }],
             "portable",
         )
@@ -603,7 +603,7 @@ fn each_launch_authenticates_its_descriptor_even_with_a_live_lease() {
             &[],
             &[Interface {
                 name: "rsi.extension.process".into(),
-                version: 1,
+                version: 2,
             }],
             "portable",
         )
@@ -641,7 +641,7 @@ fn process_paths_retain_exact_dependencies_and_reject_invalid_updates_before_sel
     let old = hash(&bridge.manifest);
     let interfaces = [Interface {
         name: "rsi.extension.process".into(),
-        version: 1,
+        version: 2,
     }];
     store
         .install(&[first, bridge], &[], &interfaces, "windows-x86_64")
@@ -757,7 +757,7 @@ fn importer_role_and_protocol_are_admitted_before_selection() {
     let interfaces = [
         Interface {
             name: "rsi.extension.process".into(),
-            version: 1,
+            version: 2,
         },
         importer_protocol_descriptor(),
     ];

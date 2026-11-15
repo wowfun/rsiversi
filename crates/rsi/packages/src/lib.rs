@@ -16,8 +16,8 @@ pub use repository::{
 };
 pub use rsi_api_protocol::ProtocolDescriptor as Interface;
 pub use store::{
-    InstallSource, MaterializedPayload, PackageLease, PackagePurge, PackageStore, ProfileAdmission,
-    Resolution, ResolvedProcessExtension, Selection,
+    InstallSource, MaterializedPayload, PackageLease, PackagePurge, PackageStore, Resolution,
+    ResolvedProcessExtension, Selection, StagedPackages,
 };
 
 /// Maximum bounded encoded manifest, repository or resolution document.
@@ -38,6 +38,14 @@ pub enum Error {
     /// Another package writer holds the store.
     #[error("package store is busy")]
     Busy,
+    /// A bounded maintenance batch made progress; retry the operation to continue.
+    #[error(
+        "package maintenance incomplete after removing {removed} orphan leases; retry collection or purge"
+    )]
+    MaintenanceIncomplete {
+        /// Number of orphan generation anchors removed in this batch.
+        removed: usize,
+    },
     /// Signature, freshness or rollback check failed.
     #[error("package trust check failed: {0}")]
     Trust(String),

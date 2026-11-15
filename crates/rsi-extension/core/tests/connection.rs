@@ -183,6 +183,192 @@ fn pair(a: Arc<dyn Handler>, b: Arc<dyn Handler>) -> (Arc<Connection>, Arc<Conne
 }
 #[derive(Debug)]
 struct Stalled;
+
+#[derive(Debug, Default)]
+struct Saturated {
+    entered: std::sync::atomic::AtomicUsize,
+    pinged: std::sync::atomic::AtomicUsize,
+    closed: std::sync::atomic::AtomicUsize,
+}
+#[async_trait]
+impl Handler for Saturated {
+    async fn call(
+        &self,
+        method: &str,
+        _: Value,
+        _: CancellationToken,
+    ) -> rsi_extension::Result<Value> {
+        use std::sync::atomic::Ordering::SeqCst;
+        match method {
+            "work" => {
+                self.entered.fetch_add(1, SeqCst);
+                std::future::pending().await
+            }
+            "extension.ping" => {
+                self.pinged.fetch_add(1, SeqCst);
+                Ok(Value::Null)
+            }
+            "extension.close" => {
+                self.closed.fetch_add(1, SeqCst);
+                Ok(Value::Null)
+            }
+            _ => Ok(Value::Null),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bidirectional_business_saturation_preserves_heartbeat_and_close() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let a = Arc::new(Saturated::default());
+    let b = Arc::new(Saturated::default());
+    let (left, right) = pair(a.clone(), b.clone());
+    let mut requests = Vec::new();
+    for connection in [&left, &right] {
+        for _ in 0..64 {
+            let connection = connection.clone();
+            requests.push(tokio::spawn(async move {
+                connection
+                    .request("work", Value::Null, CancellationToken::new())
+                    .await
+            }));
+        }
+    }
+    for _ in 0..10000 {
+        if a.entered.load(SeqCst) == 64 && b.entered.load(SeqCst) == 64 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!((a.entered.load(SeqCst), b.entered.load(SeqCst)), (64, 64));
+    assert_eq!(
+        left.request("overflow", Value::Null, CancellationToken::new())
+            .await,
+        Err(Error::Capacity)
+    );
+    left.start_watchdog();
+    right.start_watchdog();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    for _ in 0..10000 {
+        if a.pinged.load(SeqCst) == 1 && b.pinged.load(SeqCst) == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!((a.pinged.load(SeqCst), b.pinged.load(SeqCst)), (1, 1));
+    assert_eq!(left.disconnect_cause(), None);
+    left.shutdown().await.unwrap();
+    assert_eq!(b.closed.load(SeqCst), 1);
+    right.shutdown().await.unwrap();
+    for request in requests {
+        assert!(request.await.unwrap().is_err());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_deadline_starts_after_write_and_missing_ack_disconnects() {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    let (stream, peer) = tokio::io::duplex(1);
+    let connection = Arc::new(
+        Connection::new(process(stream), "deadline".into(), Arc::new(RejectRequests)).unwrap(),
+    );
+    let token = CancellationToken::new();
+    let request = tokio::spawn({
+        let connection = connection.clone();
+        let token = token.clone();
+        async move { connection.request("work", Value::Null, token).await }
+    });
+    tokio::task::yield_now().await;
+    token.cancel();
+    assert_eq!(request.await.unwrap(), Err(Error::Cancelled));
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        connection.disconnect_cause(),
+        None,
+        "queued Cancel is not a missed acknowledgement"
+    );
+    let mut peer = BufReader::new(peer);
+    for _ in 0..2 {
+        let mut line = String::new();
+        peer.read_line(&mut line).await.unwrap();
+    }
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        connection.disconnect_cause(),
+        Some(("cancellation acknowledgement deadline", Error::Disconnected))
+    );
+    connection.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn acknowledged_cancellation_churn_leaves_no_expiring_deadlines() {
+    let review = Arc::new(Echo::default());
+    let (left, right) = pair(Arc::new(RejectRequests), review.clone());
+    for _ in 0..512 {
+        let token = CancellationToken::new();
+        let cancellation = token.clone();
+        let connection = left.clone();
+        let request = tokio::spawn(async move {
+            connection
+                .request("review", Value::Null, cancellation)
+                .await
+        });
+        review.review_started.notified().await;
+        token.cancel();
+        assert_eq!(request.await.unwrap(), Err(Error::Cancelled));
+        assert_eq!(
+            left.request("echo", Value::Null, CancellationToken::new())
+                .await
+                .unwrap(),
+            Value::Null
+        );
+    }
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    assert_eq!(
+        left.request("echo", Value::Null, CancellationToken::new())
+            .await
+            .unwrap(),
+        Value::Null
+    );
+    assert_eq!(left.disconnect_cause(), None);
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocked_ping_uses_the_write_deadline_until_its_frame_is_sent() {
+    let (stream, _peer) = tokio::io::duplex(1);
+    let connection = Arc::new(
+        Connection::new(
+            process(stream),
+            "blocked-ping".into(),
+            Arc::new(RejectRequests),
+        )
+        .unwrap(),
+    );
+    connection.start_watchdog();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        connection.disconnect_cause(),
+        None,
+        "an unsent Ping has no response deadline"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        connection.disconnect_cause(),
+        Some(("write peer input", Error::Disconnected))
+    );
+    connection.shutdown().await.unwrap();
+}
 #[async_trait]
 impl Handler for Stalled {
     async fn call(&self, _: &str, _: Value, _: CancellationToken) -> rsi_extension::Result<Value> {
@@ -308,6 +494,51 @@ async fn mismatched_generation_fails_both_pending_directions() {
             .await
             .is_err()
     );
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+}
+
+#[derive(Debug, Default)]
+struct Draining {
+    started: Notify,
+    cancelled: Notify,
+    finish: Notify,
+}
+#[async_trait]
+impl Handler for Draining {
+    fn drain_on_cancel(&self, _: &str) -> bool {
+        true
+    }
+    async fn call(
+        &self,
+        _: &str,
+        _: Value,
+        cancellation: CancellationToken,
+    ) -> rsi_extension::Result<Value> {
+        self.started.notify_one();
+        cancellation.cancelled().await;
+        self.cancelled.notify_one();
+        self.finish.notified().await;
+        Err(Error::Cancelled)
+    }
+}
+#[tokio::test]
+async fn withdrawing_a_draining_handler_waits_for_cleanup_before_reply() {
+    let handler = Arc::new(Draining::default());
+    let (left, right) = pair(Arc::new(RejectRequests), Arc::new(RejectRequests));
+    let registration = right.register_handler("cleanup", handler.clone()).unwrap();
+    let client = left.clone();
+    let work = tokio::spawn(async move {
+        client
+            .request("cleanup", Value::Null, CancellationToken::new())
+            .await
+    });
+    handler.started.notified().await;
+    drop(registration);
+    handler.cancelled.notified().await;
+    assert!(!work.is_finished());
+    handler.finish.notify_one();
+    assert!(work.await.unwrap().is_err());
     left.shutdown().await.unwrap();
     right.shutdown().await.unwrap();
 }

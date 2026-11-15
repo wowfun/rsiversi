@@ -9,10 +9,10 @@ createInterface({input:process.stdin}).on('line', async line => {
   const {message} = JSON.parse(line);
   if(message.kind === 'cancel' && pending.delete(message.id)) {send(message.id,null);return;}
   if(message.kind !== 'request') return;
-  if(message.method === 'extension.hello') {send(message.id,{protocol:1});return;}
+  if(message.method === 'extension.hello') {send(message.id,{protocol:2});return;}
   if(message.method !== 'package.import') {send(message.id,null);return;}
   if(message.payload.specifications[0] === 'escape') {send(message.id,{format:1,directories:['../outside']});return;}
-  if(message.payload.specifications[0] === 'wait') {pending.add(message.id);await writeFile(message.payload.specifications[1],'entered');return;}
+  if(message.payload.specifications[0] === 'wait') {pending.add(message.id);await writeFile(message.payload.specifications[1],JSON.stringify({pid:process.pid,staging:message.payload.staging}));return;}
   const directory=join(message.payload.staging,'imported');
   await mkdir(directory);
   const bytes=Buffer.from('verified native importer publication');

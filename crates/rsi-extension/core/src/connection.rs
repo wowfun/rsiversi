@@ -11,12 +11,19 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{Notify, mpsc, oneshot},
+    time::Instant,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Recipient-owned validation and authority for calls arriving from a child.
 #[async_trait]
 pub trait Handler: fmt::Debug + Send + Sync + 'static {
+    /// Await this method's cooperative cleanup instead of dropping its future on cancellation.
+    fn drain_on_cancel(&self, _method: &str) -> bool {
+        false
+    }
     /// This callback may await other requests without blocking the byte pumps.
     async fn call(
         &self,
@@ -41,11 +48,53 @@ impl Handler for RejectRequests {
 struct State {
     next: u64,
     last_incoming: u64,
-    pending: BTreeMap<u64, Option<oneshot::Sender<Result<Value>>>>,
-    incoming: BTreeMap<u64, CancellationToken>,
+    pending: BTreeMap<u64, Pending>,
+    incoming: BTreeMap<u64, (Class, CancellationToken)>,
     failure: Option<(&'static str, Error)>,
     watchdog: bool,
+    closing: bool,
     handlers: BTreeMap<String, (Arc<dyn Handler>, CancellationToken)>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    Business,
+    Ping,
+    Close,
+}
+impl Class {
+    fn of(method: &str) -> Self {
+        match method {
+            "extension.ping" => Self::Ping,
+            "extension.close" => Self::Close,
+            _ => Self::Business,
+        }
+    }
+    fn capacity(self) -> usize {
+        if self == Self::Business {
+            MAXIMUM_PENDING_REQUESTS
+        } else {
+            1
+        }
+    }
+}
+#[derive(Debug)]
+struct Pending {
+    class: Class,
+    sender: Option<oneshot::Sender<Result<Value>>>,
+    replied: bool,
+    cancelled: bool,
+    writes: usize,
+    deadline: Option<Instant>,
+}
+#[derive(Debug)]
+struct Queued {
+    bytes: Vec<u8>,
+    completion: Completion,
+}
+#[derive(Clone, Copy, Debug)]
+enum Completion {
+    Outbound { id: u64, cancel: bool },
+    Inbound(u64),
 }
 
 /// Owns one exact inbound method and its in-flight callback lifetime.
@@ -73,59 +122,73 @@ struct Shared {
     generation: String,
     process: ManagedDuplexProcess,
     state: Mutex<State>,
-    writer: mpsc::Sender<Vec<u8>>,
+    writer: mpsc::Sender<Queued>,
+    deadlines: Notify,
     stop: CancellationToken,
     tasks: TaskTracker,
 }
 impl Shared {
     fn fail(&self, operation: &'static str, error: Error) {
         let mut state = self.state.lock().expect("extension state");
+        self.fail_locked(&mut state, operation, error);
+    }
+    fn fail_locked(&self, state: &mut State, operation: &'static str, error: Error) {
         let pending = std::mem::take(&mut state.pending);
-        for sender in pending.into_values().flatten() {
+        for sender in pending.into_values().filter_map(|pending| pending.sender) {
             let _ = sender.send(Err(error.clone()));
         }
         if state.failure.is_none() {
             state.failure = Some((operation, error));
         }
-        for token in state.incoming.values() {
+        for (_, token) in state.incoming.values() {
             token.cancel();
         }
         self.stop.cancel();
         self.process.terminate();
     }
     fn send(&self, message: Message) -> Result<()> {
+        let completion = match &message {
+            Message::Request { id, .. } => Completion::Outbound {
+                id: *id,
+                cancel: false,
+            },
+            Message::Cancel { id } => Completion::Outbound {
+                id: *id,
+                cancel: true,
+            },
+            Message::Reply { id, .. } => Completion::Inbound(*id),
+        };
         let bytes = Frame {
             generation: self.generation.clone(),
             message,
         }
         .encode()?;
-        self.writer.try_send(bytes).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => Error::Capacity,
-            mpsc::error::TrySendError::Closed(_) => Error::Disconnected,
-        })
+        self.writer
+            .try_send(Queued { bytes, completion })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => Error::Capacity,
+                mpsc::error::TrySendError::Closed(_) => Error::Disconnected,
+            })
     }
     fn cancel(self: &Arc<Self>, id: u64) {
-        {
+        let sent = {
             let mut state = self.state.lock().expect("extension state");
             let Some(slot) = state.pending.get_mut(&id) else {
                 return;
             };
-            *slot = None;
-        }
-        if let Err(error) = self.send(Message::Cancel { id }) {
-            self.fail("send cancellation", error);
-            return;
-        }
-        let shared = self.clone();
-        self.tasks.spawn(async move {
-            tokio::select! {
-                () = shared.stop.cancelled() => {},
-                () = tokio::time::sleep(Duration::from_secs(5)) => {
-                    let unsettled = shared.state.lock().expect("extension state").pending.contains_key(&id);
-                    if unsettled { shared.fail("cancellation acknowledgement deadline",Error::Disconnected); }
-                }
+            if slot.replied || slot.cancelled {
+                return;
             }
-        });
+            slot.sender = None;
+            slot.writes += 1;
+            slot.cancelled = true;
+            slot.deadline = None;
+            self.send(Message::Cancel { id })
+        };
+        self.deadlines.notify_one();
+        if let Err(error) = sent {
+            self.fail("send cancellation", error);
+        }
     }
 }
 struct RequestGuard {
@@ -190,6 +253,9 @@ impl Connection {
             },
         }
         .validate()?;
+        if Class::of(method) != Class::Business {
+            return Err(Error::Protocol);
+        }
         let mut state = self.shared.state.lock().expect("extension state");
         if let Some((_, error)) = &state.failure {
             return Err(error.clone());
@@ -233,20 +299,31 @@ impl Connection {
                 let Some(connection) = weak.upgrade() else {
                     return;
                 };
-                let result = tokio::time::timeout(
-                    Duration::from_secs(3),
-                    connection.request("extension.ping", Value::Null, stop.child_token()),
-                )
-                .await;
-                if !matches!(result, Ok(Ok(Value::Null))) {
-                    connection.shared.fail(
-                        if result.is_err() {
-                            "heartbeat deadline"
-                        } else {
-                            "heartbeat reply"
-                        },
-                        Error::Disconnected,
-                    );
+                if connection
+                    .shared
+                    .state
+                    .lock()
+                    .expect("extension state")
+                    .closing
+                {
+                    return;
+                }
+                let result = connection
+                    .request_inner("extension.ping", Value::Null, stop.child_token())
+                    .await;
+                if !matches!(result, Ok(Value::Null)) {
+                    if connection
+                        .shared
+                        .state
+                        .lock()
+                        .expect("extension state")
+                        .closing
+                    {
+                        return;
+                    }
+                    connection
+                        .shared
+                        .fail("heartbeat reply", Error::Disconnected);
                     return;
                 }
             }
@@ -263,17 +340,23 @@ impl Connection {
             message: Message::Cancel { id: 1 },
         }
         .validate()?;
-        let (writer, receive) = mpsc::channel(2 * MAXIMUM_PENDING_REQUESTS);
+        // Each direction has 64 business + ping + close slots. Each outbound
+        // slot owns at most request + cancel; each inbound slot one reply: 3 * 66 = 198.
+        // Pending.writes and Completion retain slots until queued writes settle;
+        // changing those lifetimes or frame classes requires revisiting this bound.
+        let (writer, receive) = mpsc::channel(3 * (MAXIMUM_PENDING_REQUESTS + 2));
         let shared = Arc::new(Shared {
             generation,
             process,
             writer,
+            deadlines: Notify::new(),
             state: Mutex::new(State::default()),
             stop: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });
         shared.tasks.spawn(write_loop(shared.clone(), receive));
         shared.tasks.spawn(read_loop(shared.clone(), handler));
+        shared.tasks.spawn(deadline_loop(shared.clone()));
         Ok(Self { shared })
     }
     /// Calls a method once; cancellation never permits automatic replay.
@@ -281,6 +364,17 @@ impl Connection {
     /// # Panics
     /// Panics if an internal connection-state lock has been poisoned.
     pub async fn request(
+        &self,
+        method: &str,
+        payload: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value> {
+        if Class::of(method) != Class::Business {
+            return Err(Error::Protocol);
+        }
+        self.request_inner(method, payload, cancellation).await
+    }
+    async fn request_inner(
         &self,
         method: &str,
         payload: Value,
@@ -295,7 +389,18 @@ impl Connection {
             if let Some((_, error)) = &state.failure {
                 return Err(error.clone());
             }
-            if state.pending.len() >= MAXIMUM_PENDING_REQUESTS || state.next == MAXIMUM_ID {
+            let class = Class::of(method);
+            if state.closing && class != Class::Close {
+                return Err(Error::Disconnected);
+            }
+            if state
+                .pending
+                .values()
+                .filter(|pending| pending.class == class)
+                .count()
+                >= class.capacity()
+                || state.next == MAXIMUM_ID
+            {
                 return Err(Error::Capacity);
             }
             let id = state.next + 1;
@@ -305,7 +410,17 @@ impl Connection {
                 payload,
             })?;
             state.next = id;
-            state.pending.insert(id, Some(sender));
+            state.pending.insert(
+                id,
+                Pending {
+                    class,
+                    sender: Some(sender),
+                    replied: false,
+                    cancelled: false,
+                    writes: 1,
+                    deadline: None,
+                },
+            );
             id
         };
         let mut guard = RequestGuard {
@@ -319,10 +434,14 @@ impl Connection {
         }
     }
     /// Requests graceful close before forced termination and complete Process settlement.
+    ///
+    /// # Panics
+    /// Panics if the internal connection-state mutex was poisoned.
     pub async fn shutdown(&self) -> Result<()> {
+        self.shared.state.lock().expect("extension state").closing = true;
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            self.request("extension.close", Value::Null, CancellationToken::new()),
+            self.request_inner("extension.close", Value::Null, CancellationToken::new()),
         )
         .await;
         self.shared.fail("shutdown", Error::Disconnected);
@@ -335,21 +454,76 @@ impl Connection {
             .map_err(|_| Error::Disconnected)
     }
 }
-async fn write_loop(shared: Arc<Shared>, mut receive: mpsc::Receiver<Vec<u8>>) {
+async fn deadline_loop(shared: Arc<Shared>) {
+    loop {
+        let notified = shared.deadlines.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let deadline = shared
+            .state
+            .lock()
+            .expect("extension state")
+            .pending
+            .values()
+            .filter_map(|pending| pending.deadline)
+            .min();
+        tokio::select! {
+            () = shared.stop.cancelled() => return,
+            () = &mut notified => {},
+            () = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
+                let mut state = shared.state.lock().expect("extension state");
+                if let Some(expired) = state.pending.values().find(|pending| pending.deadline.is_some_and(|deadline| deadline <= Instant::now())) {
+                    let operation = if expired.cancelled { "cancellation acknowledgement deadline" } else { "heartbeat deadline" };
+                    shared.fail_locked(&mut state, operation, Error::Disconnected); return;
+                }
+            },
+        }
+    }
+}
+async fn write_loop(shared: Arc<Shared>, mut receive: mpsc::Receiver<Queued>) {
     let input = shared.process.stdin();
     let pump = async {
-        while let Some(bytes) = receive.recv().await {
-            for chunk in bytes.chunks(MAXIMUM_DUPLEX_CHUNK_BYTES) {
-                let mut offset = 0;
-                while offset < chunk.len() {
-                    let count = input
-                        .write(&chunk[offset..])
-                        .await
-                        .map_err(|_| Error::Disconnected)?;
-                    if count == 0 || count > chunk.len() - offset {
-                        return Err(Error::Protocol);
+        while let Some(queued) = receive.recv().await {
+            if let Completion::Inbound(id) = queued.completion {
+                shared
+                    .state
+                    .lock()
+                    .expect("extension state")
+                    .incoming
+                    .remove(&id);
+            }
+            tokio::time::timeout(Duration::from_secs(30), async {
+                for chunk in queued.bytes.chunks(MAXIMUM_DUPLEX_CHUNK_BYTES) {
+                    let mut offset = 0;
+                    while offset < chunk.len() {
+                        let count = input
+                            .write(&chunk[offset..])
+                            .await
+                            .map_err(|_| Error::Disconnected)?;
+                        if count == 0 || count > chunk.len() - offset {
+                            return Err(Error::Protocol);
+                        }
+                        offset += count;
                     }
-                    offset += count;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| Error::Disconnected)??;
+            if let Completion::Outbound { id, cancel } = queued.completion {
+                let mut state = shared.state.lock().expect("extension state");
+                if let Some(pending) = state.pending.get_mut(&id) {
+                    pending.writes -= 1;
+                    if !pending.replied
+                        && (cancel || (pending.class == Class::Ping && !pending.cancelled))
+                    {
+                        pending.deadline =
+                            Some(Instant::now() + Duration::from_secs(if cancel { 5 } else { 3 }));
+                        shared.deadlines.notify_one();
+                    }
+                    if pending.writes == 0 && pending.replied {
+                        state.pending.remove(&id);
+                    }
                 }
             }
         }
@@ -389,21 +563,30 @@ fn dispatch(shared: &Arc<Shared>, handler: Arc<dyn Handler>, message: Message) -
     let mut state = shared.state.lock().expect("extension state");
     match message {
         Message::Reply { id, result } => {
-            let sender = state.pending.remove(&id).ok_or(Error::Protocol)?;
-            if let Some(sender) = sender {
+            let pending = state.pending.get_mut(&id).ok_or(Error::Protocol)?;
+            if pending.replied {
+                return Err(Error::Protocol);
+            }
+            pending.replied = true;
+            pending.deadline = None;
+            if let Some(sender) = pending.sender.take() {
                 let result = match result {
                     Response::Ok(value) => Ok(value),
                     Response::Error(error) => Err(Error::Remote(error)),
                 };
                 let _ = sender.send(result);
             }
+            if pending.writes == 0 {
+                state.pending.remove(&id);
+            }
+            shared.deadlines.notify_one();
         }
         Message::Cancel { id } => {
             // A cancellation can cross the already emitted reply.
             if id > state.last_incoming {
                 return Err(Error::Protocol);
             }
-            if let Some(token) = state.incoming.get(&id) {
+            if let Some((_, token)) = state.incoming.get(&id) {
                 token.cancel();
             }
         }
@@ -415,12 +598,19 @@ fn dispatch(shared: &Arc<Shared>, handler: Arc<dyn Handler>, message: Message) -
             if id <= state.last_incoming {
                 return Err(Error::Protocol);
             }
-            if state.incoming.len() >= MAXIMUM_PENDING_REQUESTS {
+            let class = Class::of(&method);
+            if state
+                .incoming
+                .values()
+                .filter(|(entry, _)| *entry == class)
+                .count()
+                >= class.capacity()
+            {
                 return Err(Error::Capacity);
             }
             let cancellation = shared.stop.child_token();
             state.last_incoming = id;
-            state.incoming.insert(id, cancellation.clone());
+            state.incoming.insert(id, (class, cancellation.clone()));
             let active = shared.clone();
             let (handler, registered) = state
                 .handlers
@@ -429,10 +619,18 @@ fn dispatch(shared: &Arc<Shared>, handler: Arc<dyn Handler>, message: Message) -
                 .unwrap_or_else(|| (handler, shared.stop.child_token()));
             shared.tasks.spawn(async move {
                 let _cancel = cancellation.clone().drop_guard();
+                let work = handler.call(&method, payload, cancellation.clone());
+                tokio::pin!(work);
                 let result = tokio::select! { biased;
-                    () = cancellation.cancelled() => Err(Error::Cancelled),
-                    () = registered.cancelled() => Err(Error::Cancelled),
-                    result = handler.call(&method, payload, cancellation.clone()) => result,
+                    () = async { tokio::select! {
+                        () = cancellation.cancelled() => {},
+                        () = registered.cancelled() => {},
+                    }} => {
+                        cancellation.cancel();
+                        if handler.drain_on_cancel(&method) { work.await }
+                        else { Err(Error::Cancelled) }
+                    },
+                    result = &mut work => result,
                 };
                 let result = match result {
                     Ok(value) => Response::Ok(value),
@@ -446,8 +644,7 @@ fn dispatch(shared: &Arc<Shared>, handler: Arc<dyn Handler>, message: Message) -
                         Response::Error(text)
                     }
                 };
-                let mut state = active.state.lock().expect("extension state");
-                state.incoming.remove(&id);
+                let state = active.state.lock().expect("extension state");
                 let sent = if state.failure.is_none() {
                     active.send(Message::Reply { id, result })
                 } else {

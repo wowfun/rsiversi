@@ -18,7 +18,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
         rsi_packages::importer_protocol_descriptor(),
         rsi_api_protocol::ProtocolDescriptor {
             name: "rsi.extension.process".into(),
-            version: 1,
+            version: 2,
         },
         rsi_api_protocol::ProtocolDescriptor {
             name: "rsi.extension.agent".into(),

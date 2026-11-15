@@ -71,7 +71,26 @@ struct Imports {
     workspace: PathBuf,
     store: Arc<rsi_packages::PackageStore>,
     lane: tokio::sync::Mutex<()>,
-    leases: tokio::sync::Mutex<std::collections::BTreeMap<String, Arc<rsi_packages::PackageLease>>>,
+    leases: tokio::sync::Mutex<ImportLeases>,
+}
+#[derive(Debug, Default)]
+struct ImportLeases {
+    payloads: std::collections::BTreeMap<String, Arc<rsi_packages::PackageLease>>,
+    stages: std::collections::BTreeMap<String, rsi_packages::StagedPackages>,
+    next: u64,
+}
+impl ImportLeases {
+    fn digests(&self) -> std::collections::BTreeSet<&str> {
+        self.payloads
+            .keys()
+            .map(String::as_str)
+            .chain(
+                self.stages
+                    .values()
+                    .flat_map(|stage| stage.leases.keys().map(String::as_str)),
+            )
+            .collect()
+    }
 }
 fn register_methods(
     connection: &rsi_extension::Connection,
@@ -101,7 +120,7 @@ impl Imports {
             workspace,
             store,
             lane: tokio::sync::Mutex::new(()),
-            leases: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
+            leases: tokio::sync::Mutex::default(),
         });
         connection.retain_until_settled(imports.clone());
         let handler: Arc<dyn rsi_extension::Handler> = imports;
@@ -109,12 +128,36 @@ impl Imports {
             connection,
             &handler,
             &[
-                "application.import",
+                "application.stage",
+                "application.stage.release",
                 "application.payloads",
                 "application.release",
                 "application.roots",
             ],
         )
+    }
+    async fn retain_stage(
+        &self,
+        result: rsi_packages::StagedPackages,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> rsi_extension::Result<ConfigValue> {
+        let mut leases = tokio::select! { biased;
+            () = stop.cancelled() => return Ok(serde_json::json!({"cancelled":true})),
+            leases = self.leases.lock() => leases,
+        };
+        let mut digests = leases.digests();
+        digests.extend(result.leases.keys().map(String::as_str));
+        if digests.len() > 32 || leases.stages.len() >= 32 {
+            return Err(rsi_extension::Error::Capacity);
+        }
+        leases.next = leases
+            .next
+            .checked_add(1)
+            .ok_or(rsi_extension::Error::Capacity)?;
+        let stage = leases.next.to_string();
+        let reply = serde_json::json!({"packages":result.packages,"stage":stage});
+        leases.stages.insert(stage, result);
+        Ok(reply)
     }
     async fn payloads(
         &self,
@@ -132,10 +175,11 @@ impl Imports {
         let input: Request =
             serde_json::from_value(payload).map_err(|_| rsi_extension::Error::Protocol)?;
         let mut leases = self.leases.lock().await;
-        let lease = if let Some(lease) = leases.get(&input.digest) {
+        let lease = if let Some(lease) = leases.payloads.get(&input.digest) {
             lease.clone()
         } else {
-            if leases.len() >= 32 {
+            let held = leases.digests();
+            if !held.contains(input.digest.as_str()) && held.len() >= 32 {
                 return Err(rsi_extension::Error::Capacity);
             }
             let store = self.store.clone();
@@ -163,7 +207,7 @@ impl Imports {
             return Err(rsi_extension::Error::Cancelled);
         }
         let reply = serde_json::json!({"profile":profile.path(),"roots":roots});
-        leases.insert(input.digest, lease);
+        leases.payloads.insert(input.digest, lease);
         Ok(reply)
     }
     async fn release(&self, payload: ConfigValue) -> rsi_extension::Result<ConfigValue> {
@@ -174,7 +218,21 @@ impl Imports {
         }
         let request: Request =
             serde_json::from_value(payload).map_err(|_| rsi_extension::Error::Protocol)?;
-        self.leases.lock().await.remove(&request.digest);
+        self.leases.lock().await.payloads.remove(&request.digest);
+        Ok(ConfigValue::Null)
+    }
+    async fn release_stage(&self, payload: ConfigValue) -> rsi_extension::Result<ConfigValue> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            stage: String,
+        }
+        let request: Request =
+            serde_json::from_value(payload).map_err(|_| rsi_extension::Error::Protocol)?;
+        if request.stage.len() > 20 {
+            return Err(rsi_extension::Error::Protocol);
+        }
+        self.leases.lock().await.stages.remove(&request.stage);
         Ok(ConfigValue::Null)
     }
     async fn roots(&self, payload: ConfigValue) -> rsi_extension::Result<ConfigValue> {
@@ -336,6 +394,9 @@ impl rsi_extension::Handler for Sessions {
 }
 #[async_trait]
 impl rsi_extension::Handler for Imports {
+    fn drain_on_cancel(&self, method: &str) -> bool {
+        method == "application.stage"
+    }
     async fn call(
         &self,
         method: &str,
@@ -347,7 +408,6 @@ impl rsi_extension::Handler for Imports {
         struct Request {
             specifications: Vec<String>,
             options: Option<ConfigValue>,
-            expected_roots: std::collections::BTreeMap<String, String>,
         }
         if method == "application.payloads" {
             return self.payloads(payload, &stop).await;
@@ -358,13 +418,16 @@ impl rsi_extension::Handler for Imports {
         if method == "application.roots" {
             return self.roots(payload).await;
         }
-        if method != "application.import" {
+        if method == "application.stage.release" {
+            return self.release_stage(payload).await;
+        }
+        if method != "application.stage" {
             return Err(rsi_extension::Error::Protocol);
         }
         let request: Request =
             serde_json::from_value(payload).map_err(|_| rsi_extension::Error::Protocol)?;
-        let _lane = tokio::select! { biased; () = stop.cancelled() => return Err(rsi_extension::Error::Cancelled), lane=self.lane.lock()=>lane };
-        let result = rsi::import_profile_packages(
+        let _lane = tokio::select! { biased; () = stop.cancelled() => return Ok(serde_json::json!({"cancelled":true})), lane=self.lane.lock()=>lane };
+        let result = rsi::stage_packages(
             self.store.clone(),
             rsi::PackageImport {
                 package: self.selection.package.clone(),
@@ -376,15 +439,17 @@ impl rsi_extension::Handler for Imports {
                 options: request.options,
             },
             super::supported_protocols(),
-            stop,
+            stop.clone(),
             self.profile.clone(),
-            request.expected_roots,
         )
         .await
         .map_err(|error| {
             rsi_extension::Error::Remote(error.to_string().chars().take(1000).collect())
         })?;
-        Ok(serde_json::json!({"packages":result.packages,"roots":result.roots}))
+        let Some(result) = result else {
+            return Ok(serde_json::json!({"cancelled":true}));
+        };
+        self.retain_stage(result, &stop).await
     }
 }
 #[derive(Deserialize)]
@@ -441,7 +506,7 @@ async fn open_application(
     tools: Option<&tools::Publisher>,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
-    const PROTOCOL: u32 = 12;
+    const PROTOCOL: u32 = 13;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
     if let Some(source) = tools {
         payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});

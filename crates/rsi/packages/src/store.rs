@@ -44,7 +44,7 @@ use std::{
 type Candidates<'a> = BTreeMap<String, (String, Manifest, &'a InstallSource)>;
 const MAX_PACKAGES: usize = 128;
 mod profile;
-pub use profile::ProfileAdmission;
+pub use profile::StagedPackages;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod migration_tests;
@@ -128,7 +128,7 @@ pub struct MaterializedPayload {
     path: PathBuf,
 }
 impl MaterializedPayload {
-    /// Immutable tree root; valid while this lease is retained.
+    /// Immutable tree root; Unix callers must also retain the Store namespace.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -154,6 +154,11 @@ impl PackageLease {
             .dependency_payloads
             .get(&(package.to_owned(), export.to_owned()))
             .ok_or_else(|| invalid("missing direct dependency payload"))?;
+        self.directories
+            .iter()
+            .find(|directory| path.starts_with(&directory.path))
+            .expect("dependency payload belongs to the leased closure")
+            .verify_namespace()?;
         Ok(MaterializedPayload {
             package: self.clone(),
             path: path.clone(),
@@ -169,6 +174,7 @@ impl PackageLease {
     }
     /// Resolves an admitted named export of the expected role.
     pub fn export(&self, name: &str, kind: ExportKind) -> Result<PathBuf> {
+        self.directories[0].verify_namespace()?;
         let export = self
             .manifest
             .exports
@@ -194,6 +200,7 @@ impl PackageStore {
     pub fn into_purge(self) -> Result<PackagePurge> {
         let mut locks = vec![self.root.lock("writer.lock", false)?];
         self.resolution_unlocked()?;
+        self.repair_orphan_leases(true)?;
         for (name, kind) in self.leases.names(MAX_OBJECTS)? {
             crate::hash(&name)?;
             if kind != EntryKind::File {
@@ -659,6 +666,22 @@ impl PackageStore {
         let mut timing = Timing::start();
         let _writer = self.root.lock("writer.lock", true)?;
         timing.mark(digest, "lock");
+        self.acquire_process_unlocked(name, digest)
+    }
+    fn acquire_process_unlocked(&self, name: &str, digest: &str) -> Result<Arc<PackageLease>> {
+        if let Some(lease) = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(digest)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            if lease.manifest().name != name {
+                return Err(invalid("package identity differs from manifest"));
+            }
+            return Ok(lease);
+        }
+        let mut timing = Timing::start();
         let lease = Arc::new(self.acquire_unlocked(name, digest, Verification::Metadata)?);
         timing.mark(digest, "closure");
         let mut active = self
@@ -736,10 +759,10 @@ impl PackageStore {
             return Err(invalid("process generation"));
         }
         if !manifest.requires.iter().any(|requirement| {
-            requirement.name == "rsi.extension.process" && requirement.version == 1
+            requirement.name == "rsi.extension.process" && requirement.version == 2
         }) {
             return Err(invalid(
-                "process export requires rsi.extension.process version 1",
+                "process export requires rsi.extension.process version 2",
             ));
         }
         if kind == ExportKind::PackageImporter
@@ -797,6 +820,7 @@ impl PackageStore {
                     }
                 }
             }
+            tree.verify_namespace()?;
             Ok(tree.path.join(relative))
         };
         let cwd = resolve(&descriptor.cwd, true)?;
@@ -835,7 +859,6 @@ impl PackageStore {
             if seen.len() > MAX_OBJECTS {
                 return Err(invalid("package closure capacity"));
             }
-            files.push(self.leases.lock(&current_digest, true)?);
             let (directory, manifest) = match verification {
                 Verification::Full => self.verify_object(&current_digest)?,
                 Verification::Metadata => {
@@ -851,6 +874,7 @@ impl PackageStore {
             if manifest.name != name {
                 return Err(invalid("package identity differs from manifest"));
             }
+            files.push(self.leases.lock(&current_digest, true)?);
             for dependency in &manifest.dependencies {
                 pending.push((dependency.name.clone(), dependency.digest.clone()));
             }
@@ -906,7 +930,65 @@ impl PackageStore {
     /// Reclaims unselected, unleased generations and abandoned installation stages.
     pub fn collect(&self) -> Result<Vec<String>> {
         let _writer = self.root.lock("writer.lock", false)?;
+        self.repair_orphan_leases(false)?;
         self.collect_unlocked(|_| true)
+    }
+
+    // The caller holds the exclusive writer throughout lease removal. Take a
+    // bounded directory prefix before mutation so native enumeration is stable.
+    fn repair_orphan_leases(&self, purge: bool) -> Result<()> {
+        let mut entries = Vec::new();
+        let mut more = false;
+        for entry in self.leases.directory.entries()? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            #[cfg(windows)]
+            if name == ".rsi-namespace-pin" {
+                continue;
+            }
+            if entries.len() == MAX_OBJECTS + MAX_PACKAGES {
+                more = true;
+                break;
+            }
+            entries.push((name, entry.file_type()?));
+        }
+        let mut removed = 0;
+        let result = (|| {
+            for (name, kind) in entries {
+                crate::hash(&name)?;
+                if kind != EntryKind::File {
+                    return Err(invalid("package lease is not a file"));
+                }
+                let absent = || match self.objects.directory.child_kind(Path::new(&name)) {
+                    Ok(_) => Ok(false),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                    Err(error) => Err(Error::Io(error)),
+                };
+                if !absent()? {
+                    continue;
+                }
+                let lease = match self.leases.lock(&name, false) {
+                    Err(Error::Busy) if !purge => continue,
+                    result => result?,
+                };
+                if absent()? {
+                    // Shared-writer acquisition cannot open a replacement anchor
+                    // between unlock and unlink. Windows requires closing first.
+                    drop(lease);
+                    self.leases.directory.remove_child(Path::new(&name))?;
+                    removed += 1;
+                }
+            }
+            if more {
+                Err(Error::MaintenanceIncomplete { removed })
+            } else {
+                Ok(())
+            }
+        })();
+        if removed > 0 {
+            self.leases.directory.sync_all()?;
+        }
+        result
     }
     fn selected_objects(&self) -> Result<BTreeSet<String>> {
         let resolution = self.resolution_unlocked()?;

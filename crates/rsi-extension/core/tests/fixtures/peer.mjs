@@ -14,7 +14,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       setTimeout(() => process.stdin.resume(), 1200);
       return;
     }
-    const value = message.method === 'extension.hello' ? { protocol: 1 } : message.payload;
+    const value = message.method === 'extension.hello' ? { protocol: 2 } : message.payload;
     send({ kind: 'reply', id: message.id, result: { status: 'ok', value } });
   }
 });

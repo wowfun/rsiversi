@@ -1,19 +1,20 @@
-use super::{Candidates, MAX_OBJECTS, MAX_PACKAGES, PackageStore};
+use super::{Candidates, MAX_OBJECTS, MAX_PACKAGES, PackageLease, PackageStore};
 use crate::{Error, Result, invalid};
 use crate::{InstallSource, Interface};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(super) const DOCUMENT: &str = "profile-roots.json";
 type Roots = BTreeMap<String, String>;
 
-/// Newly admitted packages and the profile reservation that keeps them alive.
+/// Newly admitted packages and temporary leases that keep their closures alive.
 #[derive(Debug)]
-pub struct ProfileAdmission {
+pub struct StagedPackages {
     /// Package names produced by the importer and their exact manifest digests.
     pub packages: BTreeMap<String, String>,
-    /// Retained root digests and package names after admission.
-    pub roots: BTreeMap<String, String>,
+    /// Produced root digests and their process leases; dropping these releases staging.
+    pub leases: BTreeMap<String, Arc<PackageLease>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -150,30 +151,26 @@ impl PackageStore {
         self.root.write(DOCUMENT, &bytes, true)
     }
 
-    /// Admits local importer output and reserves its closure in one profile.
-    /// Other profiles and the CLI retain their own package selections.
-    pub fn stage_for_profile(
+    /// Admits importer output and pins its roots without changing any selection.
+    /// Profile roots supply already admitted dependencies, not publication authority.
+    pub fn stage_for_process(
         &self,
         profile: &str,
-        expected: &BTreeMap<String, String>,
         sources: &[InstallSource],
         interfaces: &[Interface],
         target: &str,
         check: impl FnOnce() -> Result<()>,
-    ) -> Result<ProfileAdmission> {
+    ) -> Result<StagedPackages> {
         profile_key(profile)?;
-        validate(expected)?;
         if sources.is_empty() || sources.len() > MAX_PACKAGES {
             return Err(invalid("installation source count"));
         }
         let _writer = self.root.lock("writer.lock", false)?;
         let document = self.read_profiles()?;
-        if document.profiles.get(profile).unwrap_or(&Roots::new()) != expected {
-            return Err(invalid("profile roots changed"));
-        }
+        let previous_roots = document.profiles.get(profile).cloned().unwrap_or_default();
         let global = self.resolution_unlocked()?;
         let candidates = Self::admit_sources(sources, &[], interfaces, target, &global)?;
-        let mut previous = self.walk_profile_roots(expected.clone().into_iter().collect())?;
+        let mut previous = self.walk_profile_roots(previous_roots.into_iter().collect())?;
         for lease in self
             .processes
             .lock()
@@ -218,17 +215,16 @@ impl PackageStore {
         for name in candidates.keys() {
             visit_candidate(name, &candidates, &mut BTreeSet::new(), &mut done)?;
         }
-        let mut roots = expected.clone();
-        roots.extend(
-            packages
+        self.publish_objects(&candidates, check, || {
+            let leases = packages
                 .iter()
                 .filter(|(_, digest)| !referenced.contains(*digest))
-                .map(|(name, digest)| (digest.clone(), name.clone())),
-        );
-        validate(&roots)?;
-        self.publish_objects(&candidates, check, || {
-            self.write_profile(document, profile, &roots)?;
-            Ok(ProfileAdmission { packages, roots })
+                .map(|(name, digest)| {
+                    self.acquire_process_unlocked(name, digest)
+                        .map(|lease| (digest.clone(), lease))
+                })
+                .collect::<Result<_>>()?;
+            Ok(StagedPackages { packages, leases })
         })
     }
 

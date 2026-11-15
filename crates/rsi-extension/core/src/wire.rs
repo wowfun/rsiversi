@@ -4,7 +4,8 @@ use serde_json::Value;
 
 /// Largest encoded frame, excluding its newline delimiter.
 pub const MAXIMUM_FRAME_BYTES: usize = 1024 * 1024;
-/// Maximum active requests in each direction, including cancelled requests.
+/// Maximum business requests in each direction, including cancelled requests.
+/// Ping and close each have one independent reserved slot.
 pub const MAXIMUM_PENDING_REQUESTS: usize = 64;
 pub(crate) const MAXIMUM_ID: u64 = (1_u64 << 53) - 1;
 

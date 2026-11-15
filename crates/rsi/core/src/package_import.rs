@@ -112,7 +112,9 @@ pub async fn import_packages(
     protocols: Vec<rsi_api_protocol::ProtocolDescriptor>,
     stop: CancellationToken,
 ) -> crate::Result<PackageAdmission> {
-    let prepared = prepare_import(&store, invocation, &stop).await?;
+    let prepared = prepare_import(&store, invocation, &stop)
+        .await?
+        .ok_or_else(|| error("import cancelled"))?;
     prepared
         .publish(move |sources, names, target| {
             let resolution = store
@@ -122,24 +124,48 @@ pub async fn import_packages(
         .await
 }
 
-/// Resolves the same installed importer but reserves its outputs in the invoking profile.
-pub async fn import_profile_packages(
+/// Resolves the installed importer and pins candidates without changing selections.
+/// Returns `None` after a cancelled importer and its admission have settled.
+pub async fn stage_packages(
     store: Arc<PackageStore>,
     invocation: PackageImport,
     protocols: Vec<rsi_api_protocol::ProtocolDescriptor>,
     stop: CancellationToken,
     profile: String,
-    expected: BTreeMap<String, String>,
-) -> crate::Result<rsi_packages::ProfileAdmission> {
-    let prepared = prepare_import(&store, invocation, &stop).await?;
-    prepared
+) -> crate::Result<Option<rsi_packages::StagedPackages>> {
+    let Some(prepared) = prepare_import(&store, invocation, &stop).await? else {
+        return Ok(None);
+    };
+    let producer = stop.clone();
+    let result = prepared
         .publish(move |sources, _, target| {
-            store.stage_for_profile(&profile, &expected, sources, &protocols, target, || {
-                producer_active(&stop)
-            })
+            settled_stage(
+                store.stage_for_process(&profile, sources, &protocols, target, || {
+                    producer_active(&producer)
+                }),
+                &producer,
+            )
         })
-        .await
+        .await?;
+    // The importer and the blocking admission have both settled before cancellation
+    // is acknowledged. No lease escapes a cancelled stage.
+    Ok(result.filter(|_| !stop.is_cancelled()))
 }
+
+fn settled_stage<T>(
+    result: rsi_packages::Result<T>,
+    stop: &CancellationToken,
+) -> rsi_packages::Result<Option<T>> {
+    match result {
+        Err(rsi_packages::Error::Invalid(reason))
+            if stop.is_cancelled() && reason == "import cancelled" =>
+        {
+            Ok(None)
+        }
+        result => result.map(|value| (!stop.is_cancelled()).then_some(value)),
+    }
+}
+
 fn producer_active(stop: &CancellationToken) -> rsi_packages::Result<()> {
     if stop.is_cancelled() {
         Err(rsi_packages::Error::Invalid("import cancelled".into()))
@@ -177,7 +203,7 @@ async fn prepare_import(
     store: &Arc<PackageStore>,
     invocation: PackageImport,
     stop: &CancellationToken,
-) -> crate::Result<PreparedImport> {
+) -> crate::Result<Option<PreparedImport>> {
     invocation.validate()?;
     let selected = match invocation.digest {
         Some(digest) => digest,
@@ -219,7 +245,7 @@ async fn prepare_import(
     };
     let resolved = Arc::new(verification.await.map_err(error)?.map_err(error)?);
     if stop.is_cancelled() {
-        return Err(error("import cancelled"));
+        return Ok(None);
     }
     let stage = root.join("staging");
     std::fs::create_dir(&stage).map_err(error)?;
@@ -255,17 +281,20 @@ async fn prepare_import(
             retained.display()
         )));
     }
+    if stop.is_cancelled() {
+        return Ok(None);
+    }
     let imported = result?;
     let (sources, names) = imported_sources(&imported, &stage, &root)?;
     if stop.is_cancelled() {
-        return Err(error("import cancelled"));
+        return Ok(None);
     }
-    Ok(PreparedImport {
+    Ok(Some(PreparedImport {
         scratch,
         lease: resolved,
         sources,
         names,
-    })
+    }))
 }
 
 fn imported_sources(
@@ -395,6 +424,34 @@ async fn start_importer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cancellation_preserves_concurrent_admission_failures() {
+        for failure in [
+            rsi_packages::Error::Trust("rollback".into()),
+            rsi_packages::Error::Invalid("capacity".into()),
+            rsi_packages::Error::Io(std::io::Error::other("disk full")),
+        ] {
+            let stop = CancellationToken::new();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let admitted = tokio::spawn({
+                let stop = stop.clone();
+                async move {
+                    let result: rsi_packages::Result<()> = receive.await.unwrap();
+                    settled_stage(result, &stop)
+                }
+            });
+            stop.cancel();
+            let message = failure.to_string();
+            send.send(Err(failure)).unwrap();
+            assert_eq!(admitted.await.unwrap().unwrap_err().to_string(), message);
+            assert!(
+                settled_stage(producer_active(&stop), &stop)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(settled_stage(Ok(()), &stop).unwrap().is_none());
+        }
+    }
     #[test]
     fn importer_keeps_only_noncredential_network_settings_and_os_inputs() {
         let variables = [

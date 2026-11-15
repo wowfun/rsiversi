@@ -1,5 +1,11 @@
 # rsi-serve
 
+Each application generation admits at most 256 captured Tool views, including
+captures with an uncertain outcome and dropped views awaiting release. Admission
+reserves ownership before dispatch and release retries retain it until a definite
+reply or generation retirement. Exhaustion rejects new captures with capacity;
+it does not discard cleanup or accumulate unbounded retry tasks.
+
 Application capture carries each exact registration's required `timeout_ms`
 field: `null` means no execution deadline; a number is the DSH `timeoutMs`
 declaration. Serve checks finite positive numbers and converts milliseconds to
@@ -81,7 +87,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 12, a private profile directory
+host sends `application.open` with protocol 13, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -106,7 +112,7 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 15 owns capture, input
+loopback listener in its opening reply. Tool protocol 16 owns capture, input
 preparation, stopping, start, outcome, cancellation and view release. Before an
 idle language Turn settles, `POST /v1/stopping` names its producing view.
 The application returns JSON null once its stopping listeners and their native
@@ -130,6 +136,10 @@ forward requests to this listener. HTTP 400 can carry a short JSON `error`
 diagnostic for the caller. The native source resolves registrations
 against the initiating local Session and a started model call admitted by the
 ordinary execution policy. Application origin alone does not add an approval.
+Each captured registration declares `requires_full_access`; native admission
+attaches that trusted declaration to the exact Tool definition. A true value
+requires full access in the actual Turn or native per-call approval before start.
+It does not infer authority from the application's operator-level process mode.
 Outcome reads and cancellation carry the registration and exact identity from
 the durable Tool intent. Start returns the settled outcome after the Worker has
 committed it. A lost start response triggers only read-only outcome queries.
@@ -149,6 +159,12 @@ application context, with an empty string meaning no system contribution. Native
 admission applies the Step instruction bound before retaining the request view.
 Capture, preparation and start use the caller's cancellation/deadline. Receipt
 queries and control requests retain their ten-second transport timeout.
+Dropping the final request view delivers an idempotent release to its original
+listener. Uncertain delivery and capacity refusals retry with a bounded backoff
+until acknowledged or that process generation retires. Definite endpoint refusals
+end delivery; a replacement listener never receives an old
+view's release. Release does not prove that a non-cooperative callback returned.
+The process supervisor owns forced termination after graceful close expires.
 The Host supplies a profile-specific receipt directory at application open.
 An application result can include ordered text context messages with source
 metadata. A confirmed receipt returns the same result and deferred input on
@@ -227,11 +243,17 @@ committed receipt. Baselines have neither: a draft baseline folds multiple
 changes together and cannot identify an individual command by matching its value.
 
 The optional `importer` selection names the package, manifest digest, export and executable
-allowed to handle `application.import`. A callback supplies package
+allowed to handle `application.stage`. A callback supplies package
 specifications and optional importer options. Serve fixes its workspace to the application profile and
 passes process cancellation to the shared PackageStore import operation.
-The callback includes the profile's expected roots. Its reply contains the
-admitted package digests and the updated reservation for that profile.
+The callback returns admitted package digests and an opaque stage handle owned by
+this application connection, without changing persistent profile roots.
+`application.stage.release` idempotently drops that handle. A cancelled stage
+returns `{ "cancelled": true }` only after importer and admission cleanup settle.
+Unrelated admission failures remain errors even when cancellation races them;
+confirmation does not wait for another payload operation's lease-map lock. Cancellation and
+process retirement release candidates; published selections retain their own
+roots and payload leases. Staged and materialized roots share the 32-digest budget.
 The process can materialize an exact installed selection with
 `application.payloads`. The reply contains its named payload and the named
 payload of each direct dependency. Reads of the same digest share one closure

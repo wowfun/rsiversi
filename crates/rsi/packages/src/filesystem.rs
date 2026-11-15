@@ -48,6 +48,20 @@ mod tests {
     }
 }
 impl Dir {
+    pub fn verify_namespace(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let named = rsi_files_native_fs::open_absolute_directory_no_follow(&self.path)?
+                .dir_metadata()?;
+            let retained = self.directory.dir_metadata()?;
+            if (named.dev(), named.ino()) != (retained.dev(), retained.ino()) {
+                return Err(invalid("package directory namespace changed"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn open(path: &Path, create: bool) -> Result<Self> {
         let directory = if create {
             rsi_files_native_fs::create_absolute_directory_no_follow(path)?
