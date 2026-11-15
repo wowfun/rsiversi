@@ -19,6 +19,72 @@ fn provider(stack: &BaseStack, scripts: Vec<Vec<LanguageEvent>>) -> Arc<Language
 }
 
 #[tokio::test]
+async fn malformed_terminal_settles_the_accepted_prefix_without_tools_or_retry() {
+    let mut text = answer_script();
+    *text.last_mut().unwrap() = LanguageEvent::Finished {
+        reason: FinishReason::ToolCalls,
+        replay: None,
+    };
+    let mut tool = tool_calls_script(&[("never-execute", "echo", "{}")]);
+    *tool.last_mut().unwrap() = LanguageEvent::Finished {
+        reason: FinishReason::Stop,
+        replay: None,
+    };
+    let empty = vec![
+        LanguageEvent::Usage {
+            usage: rsi_ai_protocol::TokenUsage::default(),
+        },
+        LanguageEvent::Finished {
+            reason: FinishReason::Stop,
+            replay: None,
+        },
+    ];
+    for script in [text, tool, empty] {
+        let accepted = script[..script.len() - 1].to_vec();
+        let stack = BaseStack::activate().await;
+        let fixture = provider(&stack, vec![script]);
+        let language = stack
+            .activate_language("test.output.invalid-terminal", fixture.clone())
+            .await;
+        let executor = stack.activate_executor("invalid-terminal").await;
+        let (first, outcome) = stack.submit_and_wait("retain evidence").await;
+        assert!(matches!(outcome, TurnOutcome::Failed { .. }), "{outcome:?}");
+        assert_eq!(fixture.starts.load(Ordering::SeqCst), 1);
+        let facts = stack
+            .store
+            .read_facts(
+                &first.session_id,
+                0,
+                512,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap()
+            .facts;
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::ToolIntent { .. }))
+        );
+        let attempts: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact.body() {
+                SessionFactBody::ModelAttemptSettled { attempt, .. } => Some(attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attempts.len(), 1);
+        let events: Vec<_> = attempts[0].events().map(|event| event.unwrap().1).collect();
+        assert_eq!(&events[..events.len() - 1], accepted.as_slice());
+        assert!(
+            matches!(events.last(), Some(LanguageEvent::Failed { error, .. })
+            if error.kind() == ErrorKind::Protocol)
+        );
+        stack.dispose(language, executor).await;
+    }
+}
+
+#[tokio::test]
 async fn steering_at_the_output_limit_continues_the_same_turn_and_preserves_its_outcome() {
     use rsi_agent_session_protocol::{
         AgentMessage, AgentMessageContent, AgentMessageSource, MessageDelivery, MessageId,

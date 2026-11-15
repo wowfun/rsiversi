@@ -1065,7 +1065,6 @@ impl Driver {
                 continue;
             }
             combined.cancel();
-            let output = assembler.finish();
             let retain_context = match &event {
                 LanguageEvent::Failed { error, .. } => {
                     !should_retry(snapshot, error, retry_attempt)
@@ -1106,7 +1105,7 @@ impl Driver {
                     .retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
                     .await;
             }
-            return match output {
+            return match assembler.finish() {
                 Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
                 Err(LanguageAssemblyError::Incomplete { .. }) => Ok(ModelAttempt::Incomplete),
                 Err(LanguageAssemblyError::Provider { error, .. }) => {
