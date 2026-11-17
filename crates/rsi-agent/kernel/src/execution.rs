@@ -94,7 +94,7 @@ impl ClaimFactRead {
             }));
         }
         kernel.validate_claim(&lock_state(&kernel.inner), claim)?;
-        if scanned < limit && through_seq < live_seq {
+        if scanned < limit && through_seq >= durable_seq && through_seq < live_seq {
             let pending_after = through_seq;
             for fact in pending
                 .into_iter()
@@ -524,32 +524,13 @@ impl TurnExecution for AgentKernel {
         Ok(domains)
     }
 
-    async fn read_fork_sources(&self, claim: &TurnClaim) -> TurnResult<Vec<SessionHeader>> {
-        {
-            let state = lock_state(&self.inner);
-            self.validate_claim(&state, claim)?;
-        }
-        observation::fork_sources_from_header(&self.inner, claim.header()).await
-    }
-
-    async fn read_fork_facts(
+    async fn open_fork_history(
         &self,
         claim: &TurnClaim,
-        source: &SessionId,
-        after_parent_seq: u64,
-        limit: usize,
-    ) -> TurnResult<Option<ForkFactPage>> {
-        if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
-            return Err(TurnError::Invalid(
-                "fork Fact read limit is out of bounds".into(),
-            ));
-        }
-        {
-            let state = lock_state(&self.inner);
-            self.validate_claim(&state, claim)?;
-        }
-        read_fork_page_from_header(&self.inner, claim.header(), source, after_parent_seq, limit)
-            .await
+    ) -> TurnResult<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>> {
+        fork_history::open(self, claim, false)
+            .await?
+            .ok_or(TurnError::StaleClaim)
     }
 
     #[allow(clippy::too_many_lines)] // Safe-boundary entry atomically binds ordered messages, context, and one new Step.
@@ -845,55 +826,11 @@ impl TurnExecution for AgentKernel {
         }))
     }
 
-    async fn read_checkpoint_fork_sources(
+    async fn open_checkpoint_fork_history(
         &self,
         claim: &TurnClaim,
-    ) -> TurnResult<Option<Vec<SessionHeader>>> {
-        self.validate_issued_claim(claim)?;
-        if read_stored_outcome(&self.inner, claim.session_id(), claim.turn_id())
-            .await?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        observation::fork_sources_from_header(&self.inner, claim.header())
-            .await
-            .map(Some)
-    }
-
-    async fn read_checkpoint_fork_facts(
-        &self,
-        claim: &TurnClaim,
-        source: &SessionId,
-        after_parent_seq: u64,
-        limit: usize,
-    ) -> TurnResult<Option<ForkFactPage>> {
-        self.validate_issued_claim(claim)?;
-        if limit == 0 || limit > MAXIMUM_FACTS_PER_READ {
-            return Err(TurnError::Invalid(
-                "checkpoint fork Fact read limit is out of bounds".into(),
-            ));
-        }
-        let resident_is_stable = {
-            let state = lock_state(&self.inner);
-            state
-                .sessions
-                .get(claim.session_id())
-                .is_none_or(|session| {
-                    session
-                        .live_seq()
-                        .is_ok_and(|live| live == session.durable_seq)
-                })
-        };
-        if !resident_is_stable
-            || read_stored_outcome(&self.inner, claim.session_id(), claim.turn_id())
-                .await?
-                .is_none()
-        {
-            return Ok(None);
-        }
-        read_fork_page_from_header(&self.inner, claim.header(), source, after_parent_seq, limit)
-            .await
+    ) -> TurnResult<Option<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>>> {
+        fork_history::open(self, claim, true).await
     }
 
     async fn read_context_checkpoint(

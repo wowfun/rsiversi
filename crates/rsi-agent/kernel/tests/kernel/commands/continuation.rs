@@ -118,6 +118,43 @@ async fn shutdown_fences_an_arm_blocked_in_its_domain_binding_read() {
 }
 
 #[tokio::test]
+async fn durable_continuation_retains_its_generation_after_resident_eviction() {
+    let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    let lease = arm(&fixture).await;
+    assert_ne!(lease.binding().revision.get(), 0);
+    let pins = fixture.composition.calls.load(Ordering::SeqCst);
+    fixture.composition.reject.store(true, Ordering::SeqCst);
+    reserve(&fixture, &lease).await;
+    claim(&fixture).await.unwrap();
+    finish_initial_turn(&fixture.kernel).await;
+    let request = invocation(&fixture, "settle", "settlement-after-eviction", false).await;
+    SessionContinuations::execute(
+        &fixture.kernel,
+        &lease,
+        fixture
+            .kernel
+            .prepare_resume(&fixture.session_id)
+            .await
+            .unwrap(),
+        request,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.composition.calls.load(Ordering::SeqCst), pins);
+    assert_eq!(fixture.callback.calls.load(Ordering::SeqCst), 2);
+    drop(lease);
+    assert!(
+        fixture
+            .kernel
+            .prepare_resume(&fixture.session_id)
+            .await
+            .is_err()
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn a_new_generation_cannot_use_the_old_generations_continuation_lease() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let lease = arm(&fixture).await;
@@ -125,7 +162,7 @@ async fn a_new_generation_cannot_use_the_old_generations_continuation_lease() {
     let old = fixture.composition.pin.read().unwrap().clone();
     let replacement = AgentCompositionPin::new(
         old.preset_id().clone(),
-        "c".repeat(64),
+        "d".repeat(64),
         old.tools().clone(),
         old.context_builder().clone(),
         old.domains().clone(),
@@ -134,7 +171,47 @@ async fn a_new_generation_cannot_use_the_old_generations_continuation_lease() {
     )
     .unwrap();
     assert!(!old.same_generation(&replacement));
-    *fixture.composition.pin.write().unwrap() = replacement;
+    assert_ne!(old.selection(), replacement.selection());
+    *fixture.composition.pin.write().unwrap() = replacement.clone();
+    let page = fixture
+        .store
+        .read_domain_states(&fixture.session_id, None, None)
+        .await
+        .unwrap();
+    // A source edit alone does not replace an owned generation. Commit a new
+    // canonical selection to exercise rejection of the retained old owner.
+    fixture
+        .store
+        .commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+            sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                session_id: fixture.session_id.clone(),
+                expected_fact_seq: page.durable_fact_seq,
+                expected_control_seq: page.durable_control_seq,
+                header: None,
+                facts: vec![],
+                controls: vec![
+                    rsi_agent_session_protocol::AgentControlRecord::new(
+                        page.durable_control_seq + 1,
+                        42,
+                        AgentControlRecordBody::DomainStateCommitted {
+                            commit: rsi_agent_session_protocol::DomainStateCommit::new(
+                                None,
+                                DomainMutationSource::Recovery {
+                                    selection: replacement.selection().clone(),
+                                },
+                                vec![],
+                            )
+                            .unwrap(),
+                        },
+                    )
+                    .unwrap(),
+                ],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await
+        .unwrap();
     let prepared = fixture
         .kernel
         .prepare_resume(&fixture.session_id)
@@ -1260,6 +1337,7 @@ async fn queued_automatic_domains_alternate_without_charging_the_loser() {
                 domain.replace('.', "-"),
                 "Reserve automatic round",
                 false,
+                None,
             )
             .unwrap();
             (

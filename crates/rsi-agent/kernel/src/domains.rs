@@ -133,14 +133,6 @@ impl AgentKernel {
                 .map_err(turn_kernel_error)?
         };
         self.flush(claim, live).await?;
-        let page = observation::read_domain_states_bounded(&self.inner, claim.session_id(), None)
-            .await
-            .map_err(turn_store_error)?;
-        if page.durable_fact_seq != live {
-            return Err(TurnError::Invariant(
-                "domain mutation lost its flushed Fact prefix".into(),
-            ));
-        }
         let now = self.inner.clock.now_ms().max(1);
         let facts = request
             .facts
@@ -176,34 +168,35 @@ impl AgentKernel {
             self.validate_agent_caller(&caller)?;
             return Ok(existing);
         }
+        let page = observation::read_domain_admission_bounded(&self.inner, claim.session_id())
+            .await
+            .map_err(turn_store_error)?;
+        if page.watermarks().fact_seq != live {
+            return Err(TurnError::Invariant(
+                "domain mutation lost its flushed Fact prefix".into(),
+            ));
+        }
         for guard in &request.guards {
             let actual = page
-                .states
+                .heads()
                 .iter()
-                .find(|state| state.head.identity == guard.domain)
+                .find(|state| state.identity == guard.domain)
                 .ok_or_else(|| TurnError::Invalid("guarded domain is absent".into()))?;
-            if actual.head.revision != guard.revision {
+            if actual.revision != guard.revision {
                 return Err(TurnError::DomainRevisionConflict {
                     domain: guard.domain.id().into(),
                     expected: guard.revision,
-                    actual: actual.head.revision,
+                    actual: actual.revision,
                 });
             }
         }
         let seq = page
-            .durable_control_seq
+            .watermarks()
+            .control_seq
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("control sequence exhausted".into()))?;
-        rsi_agent_store_protocol::domain_heads_after(
-            &page
-                .states
-                .iter()
-                .map(|state| state.head.clone())
-                .collect::<Vec<_>>(),
-            seq,
-            &commit,
-        )
-        .map_err(turn_store_error)?;
+        rsi_agent_store_protocol::domain_heads_after(page.heads(), seq, &commit)
+            .map_err(turn_store_error)?;
         let control = AgentControlRecord::new(
             seq,
             now,
@@ -256,7 +249,7 @@ impl AgentKernel {
         let candidate = Candidate {
             caller,
             original_fact_seq: live,
-            original_control_seq: page.durable_control_seq,
+            original_control_seq: page.watermarks().control_seq,
             turn: staged,
             facts: facts.into_iter().map(Arc::new).collect(),
             control,

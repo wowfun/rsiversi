@@ -1544,6 +1544,67 @@ async fn claim_fact_read_never_skips_a_prefix_committed_during_store_io() {
 }
 
 #[tokio::test]
+async fn claim_fact_read_drains_a_byte_limited_durable_prefix_before_pending_facts() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store).await;
+    let worker = kernel.start_workers();
+    submit(&kernel, "session-byte-limited-claim", "hello").await;
+    let _lease = kernel.register("executor".into()).unwrap();
+    let claim = kernel
+        .claim("executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    tool_origin::flush_bodies(&kernel, &claim, vec![start_step(claim.turn_id())]).await;
+    let path = "x".repeat(16 * 1024 - 1);
+    let durable = kernel
+        .publish(
+            &claim,
+            (0..80).map(|_| touched(claim.turn_id(), &path)).collect(),
+        )
+        .await
+        .unwrap()
+        .published();
+    let durable_end = durable.last().unwrap().seq();
+    kernel.flush(&claim, durable_end).await.unwrap();
+    worker.abort().await;
+    let pending = kernel
+        .publish(&claim, vec![touched(claim.turn_id(), "pending-tail")])
+        .await
+        .unwrap()
+        .published();
+    let live_end = pending.last().unwrap().seq();
+
+    let first = kernel
+        .read_facts(&claim, 0, MAXIMUM_FACTS_PER_READ)
+        .await
+        .unwrap();
+    assert!(first.facts.len() < MAXIMUM_FACTS_PER_READ);
+    assert!(
+        first.through_seq < durable_end,
+        "a byte-limited page must not skip unread durable Facts to the pending tail"
+    );
+    let mut through = first.through_seq;
+    let mut sequences = first
+        .facts
+        .iter()
+        .map(|fact| fact.seq())
+        .collect::<Vec<_>>();
+    while through < live_end {
+        let page = kernel
+            .read_facts(&claim, through, MAXIMUM_FACTS_PER_READ)
+            .await
+            .unwrap();
+        assert!(page.through_seq > through);
+        through = page.through_seq;
+        sequences.extend(page.facts.iter().map(|fact| fact.seq()));
+    }
+    assert_eq!(sequences, (1..=live_end).collect::<Vec<_>>());
+    let worker = kernel.start_workers();
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 async fn claim_fact_read_does_not_cross_the_live_horizon_captured_before_store_io() {
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory));

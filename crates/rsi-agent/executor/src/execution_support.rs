@@ -508,6 +508,10 @@ pub(super) fn tool_start_extensions(
 ) -> std::result::Result<rsi_tools_protocol::ToolExecutionExtensions, TurnError> {
     let caller = turns.tool_caller(claim, effect_id)?;
     let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
+        .with(Arc::new(rsi_tools_protocol::ToolExecutionSession {
+            scope: rsi_spill::SpillScope::new("session", claim.session_id().as_str()),
+        }))
+        .map_err(|error| TurnError::Invalid(error.to_string()))?
         .with(Arc::new(
             rsi_jobs::JobOrigin::new(effect_id.as_str().to_owned())
                 .map_err(|error| TurnError::Invalid(error.to_string()))?,

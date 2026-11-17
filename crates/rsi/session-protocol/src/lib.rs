@@ -36,7 +36,9 @@ pub mod terminal;
 pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead};
 mod model_selection;
 pub use model_selection::{ModelAvailability, ModelSelectionRead};
-pub use reads::{SessionReadContract, SessionReadLease, SessionReads, SessionTarget};
+pub use reads::{
+    SessionReadContract, SessionReadFence, SessionReadLease, SessionReads, SessionTarget,
+};
 
 mod source;
 pub use source::{SessionSource, SessionSourceContract, SessionSourceLease};
@@ -821,24 +823,26 @@ impl rsi_meta_contract::LocalContract for SessionDraftControlContract {
 /// Product cleanup state, separate from canonical Store retirement.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NavigationCleanup {
+pub enum CleanupStatus {
     /// Session purge has not completed.
     Pending,
-    /// Navigation metadata is absent durably.
+    /// The selected owner has removed its records or generated cache objects.
     Complete,
-    /// This Host does not supply navigation cleanup.
+    /// This Host does not supply this cleanup owner.
     Unavailable,
     /// Cleanup failed and can be retried with the original operation.
     Failed,
 }
-/// Product maintenance receipt with independent navigation outcome.
+/// Product maintenance receipt with independent cleanup outcomes.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionPurgeReceipt {
     /// Mechanical durable deletion receipt.
     pub store: rsi_agent_store_protocol::PurgeReceipt,
     /// Separately acknowledged metadata cleanup.
-    pub navigation: NavigationCleanup,
+    pub navigation: CleanupStatus,
+    /// Separately acknowledged best-effort output cleanup.
+    pub spill: CleanupStatus,
 }
 /// Local owner for idempotent metadata cleanup after canonical retirement.
 #[async_trait]
@@ -846,7 +850,7 @@ pub trait SessionPurgeCleanup: fmt::Debug + Send + Sync {
     /// Resolves the completed Store operation itself before removing exact metadata.
     async fn cleanup(&self, operation_id: &str) -> Result<()>;
     /// Observes durable metadata absence without starting cleanup.
-    async fn status(&self, operation_id: &str) -> Result<NavigationCleanup>;
+    async fn status(&self, operation_id: &str) -> Result<CleanupStatus>;
 }
 /// Optional metadata-owner contract, looked up at execution time.
 #[derive(Debug)]

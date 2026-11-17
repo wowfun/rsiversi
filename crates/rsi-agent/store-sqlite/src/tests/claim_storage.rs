@@ -309,7 +309,7 @@ async fn normalized_claim_preserves_selected_fork_history_after_reopen() {
     let origin = interval.source.history_origin().unwrap();
     let page = store
         .read_facts(
-            interval.parent.session_id(),
+            &origin.parent_session_id,
             origin.resolved_after_seq,
             64,
             MAXIMUM_STORE_FACT_PAGE_BYTES,

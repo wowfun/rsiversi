@@ -313,26 +313,11 @@ impl TurnExecution for CheckpointFixture {
         unreachable!("checkpoint writer test does not resolve composition")
     }
 
-    async fn read_fork_sources(
-        &self,
-        claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
-        Ok(claim
-            .header()
-            .history_origin()
-            .map(|_| claim.header().clone())
-            .into_iter()
-            .collect())
-    }
-
-    async fn read_fork_facts(
+    async fn open_fork_history(
         &self,
         _claim: &TurnClaim,
-        _source: &SessionId,
-        _after_parent_seq: u64,
-        _limit: usize,
-    ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
-        unreachable!("checkpoint writer uses only maintenance fork reads")
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>> {
+        unreachable!("this fixture never reconstructs live fork history")
     }
 
     async fn claim_pending_step_messages(
@@ -405,33 +390,15 @@ impl TurnExecution for CheckpointFixture {
         }))
     }
 
-    async fn read_checkpoint_fork_sources(
+    async fn open_checkpoint_fork_history(
         &self,
         claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Option<Vec<SessionHeader>>> {
-        Ok(Some(vec![claim.header().clone()]))
-    }
-
-    async fn read_checkpoint_fork_facts(
-        &self,
-        _claim: &TurnClaim,
-        _source: &SessionId,
-        after_parent_seq: u64,
-        limit: usize,
-    ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
-        let facts = self
-            .fork_facts
-            .iter()
-            .filter(|fact| fact.seq() > after_parent_seq)
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-        let terminal_parent_seq = self.fork_facts.last().map_or(0, |fact| fact.seq());
-        Ok(Some(ForkFactPage {
-            through_parent_seq: facts.last().map_or(after_parent_seq, |fact| fact.seq()),
-            terminal_parent_seq,
-            facts,
-        }))
+    ) -> rsi_agent_turn_protocol::Result<Option<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>>>
+    {
+        Ok(Some(Arc::new(CheckpointForkReader {
+            sources: vec![claim.header().clone()],
+            facts: self.fork_facts.clone(),
+        })))
     }
 
     async fn write_context_checkpoint(
@@ -564,26 +531,11 @@ impl TurnExecution for FullBeforePublish {
         unreachable!("terminal publication test does not resolve composition")
     }
 
-    async fn read_fork_sources(
-        &self,
-        claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
-        Ok(claim
-            .header()
-            .history_origin()
-            .map(|_| claim.header().clone())
-            .into_iter()
-            .collect())
-    }
-
-    async fn read_fork_facts(
+    async fn open_fork_history(
         &self,
         _claim: &TurnClaim,
-        _source: &SessionId,
-        _after_parent_seq: u64,
-        _limit: usize,
-    ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
-        unreachable!("terminal publication test does not read fork Facts")
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>> {
+        unreachable!("this fixture never reconstructs live fork history")
     }
 
     async fn claim_pending_step_messages(
@@ -1867,5 +1819,39 @@ async fn checkpoint_writer_preserves_failure_phase_and_declines() {
             u64::from(fault >= 6)
         );
         assert!(fixture.writes.lock().unwrap().is_empty());
+    }
+}
+
+#[derive(Debug)]
+struct CheckpointForkReader {
+    sources: Vec<SessionHeader>,
+    facts: Vec<Arc<SessionFact>>,
+}
+#[async_trait]
+impl rsi_agent_turn_protocol::ForkHistoryReader for CheckpointForkReader {
+    fn sources(&self) -> &[SessionHeader] {
+        &self.sources
+    }
+    async fn read_facts(
+        &self,
+        _source: &SessionId,
+        after_parent_seq: u64,
+        limit: usize,
+    ) -> rsi_agent_turn_protocol::Result<Option<ForkFactPage>> {
+        let facts = self
+            .facts
+            .iter()
+            .filter(|fact| fact.seq() > after_parent_seq)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !facts.is_empty(),
+            "checkpoint reconstruction must stop at the known inherited boundary"
+        );
+        Ok(Some(ForkFactPage {
+            through_parent_seq: facts.last().map_or(after_parent_seq, |fact| fact.seq()),
+            facts,
+        }))
     }
 }

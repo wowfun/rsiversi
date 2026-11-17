@@ -80,9 +80,7 @@ impl AgentKernel {
         if matches!(
             selection,
             rsi_agent_session_protocol::ForkTurnSelection::All
-        ) && observation::fork_sources_from_header(&self.inner, source)
-            .await?
-            .len()
+        ) && fork_history::capture(&self.inner, source).await?.len()
             >= rsi_agent_session_protocol::MAXIMUM_FORK_HISTORY_DEPTH
         {
             return Err(TurnError::Capacity);

@@ -280,22 +280,21 @@ async fn seed_checkpoint(
     scan: &mut Scan,
     fold: &mut ModelContextState,
 ) -> Result<bool, Outcome> {
-    let Some(sources) = turns
-        .read_checkpoint_fork_sources(&request.claim)
+    let Some(reader) = turns
+        .open_checkpoint_fork_history(&request.claim)
         .await
         .map_err(|error| turn_outcome(&error))?
     else {
         return Ok(false);
     };
-    for source in &sources {
+    for source in reader.sources() {
         fold.ingest(ContextPage::ForkSource(source))
             .map_err(|error| context_outcome(&error))?;
         let origin = source.history_origin().ok_or(Outcome::Invalid)?;
         let mut parent_cursor = origin.resolved_after_seq;
-        loop {
-            let page = turns
-                .read_checkpoint_fork_facts(
-                    &request.claim,
+        while parent_cursor < origin.resolved_terminal_seq {
+            let page = reader
+                .read_facts(
                     source.session_id(),
                     parent_cursor,
                     rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
@@ -305,10 +304,7 @@ async fn seed_checkpoint(
             let Some(page) = page else { return Ok(false) };
             scan.page(true, &page.facts);
             if page.through_parent_seq <= parent_cursor {
-                if parent_cursor != page.terminal_parent_seq {
-                    return Err(Outcome::Invalid);
-                }
-                break;
+                return Err(Outcome::Invalid);
             }
             fold.ingest(ContextPage::ForkSeed(&page.facts))
                 .map_err(|error| context_outcome(&error))?;

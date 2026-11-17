@@ -375,6 +375,7 @@ impl StoreMaintenance for SqliteStore {
 // Dependency stages are schema-owned. Each metadata item or canonical record with
 // its reference projection is one logical deletion; payload lengths are read first.
 const STAGES: &[(&str, Option<&str>)] = &[
+    ("domain_membership_cuts", None),
     ("domain_heads", None),
     ("domain_versions", None),
     ("domain_removals", None),

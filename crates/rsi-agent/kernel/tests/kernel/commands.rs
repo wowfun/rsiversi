@@ -252,9 +252,16 @@ impl Fixture {
             contexts: std::sync::Mutex::new(vec![]),
         });
         let id = ContributionId::new("fixture.command").unwrap();
-        let descriptor =
-            SessionCommandDescriptor::new(id.clone(), "toggle", "Toggle the fixture state", true)
-                .unwrap();
+        let descriptor = SessionCommandDescriptor::new(
+            id.clone(),
+            "toggle",
+            "Toggle the fixture state",
+            true,
+            Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                hint: "Arguments".into(),
+            }),
+        )
+        .unwrap();
         let projection = Arc::new(projection::ToggleView::new(
             domains.bind(&definition).unwrap(),
         ));
@@ -290,9 +297,16 @@ impl Fixture {
             ),
         ] {
             let id = ContributionId::new(format!("fixture.{name}")).unwrap();
-            let descriptor =
-                SessionCommandDescriptor::new(id.clone(), name, "Internal fixture command", false)
-                    .unwrap();
+            let descriptor = SessionCommandDescriptor::new(
+                id.clone(),
+                name,
+                "Internal fixture command",
+                false,
+                Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                    hint: "Arguments".into(),
+                }),
+            )
+            .unwrap();
             registrations.push((
                 ContributionRegistration::new(
                     id,

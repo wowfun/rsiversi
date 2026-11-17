@@ -179,14 +179,14 @@ fn next_pin(
         AgentPresetId::new("test-agent").unwrap(),
         "c".repeat(64),
         stage.seal().unwrap(),
-        if !matches!(rejection, Rejection::None) {
+        if matches!(rejection, Rejection::None) {
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default())
+        } else {
             Arc::new(RejectingBuilder(
-                Default::default(),
+                rsi_agent_context::DefaultContextBuilder::default(),
                 rejections.clone(),
                 rejection,
             ))
-        } else {
-            Arc::new(rsi_agent_context::DefaultContextBuilder::default())
         },
         rsi_agent_composition_protocol::DomainCatalog::default(),
         rsi_agent_composition_protocol::ContributionCatalog::default(),
@@ -338,10 +338,10 @@ async fn running_turn_switches_only_after_the_old_tool_batch_and_context_accepta
             .unwrap();
         assert_eq!(
             *calls.lock().unwrap(),
-            if !matches!(rejection, Rejection::None) {
-                vec!["old", "old", "old"]
-            } else {
+            if matches!(rejection, Rejection::None) {
                 vec!["old", "old", "new"]
+            } else {
+                vec!["old", "old", "old"]
             }
         );
         let status = turns
@@ -410,6 +410,10 @@ async fn running_turn_switches_only_after_the_old_tool_batch_and_context_accepta
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One concurrent generation conflict verifies the running Turn, retained context and subsequent recovery"
+)]
 async fn candidate_commit_conflict_keeps_the_running_turn_and_old_context() {
     use rsi_agent_session_protocol::{
         AgentControlRecord, AgentControlRecordBody, DomainMutationSource, DomainStateCommit,

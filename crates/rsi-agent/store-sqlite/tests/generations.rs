@@ -42,12 +42,13 @@ fn accepted() -> SessionFact {
 
 #[tokio::test]
 async fn generation_selections_survive_reopen_with_complete_historical_membership() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = SqliteStore::open(&root).unwrap();
     rsi_agent_testkit::assert_generation_store_contract(&store, header(), accepted()).await;
     drop(store);
-    SqliteStore::verify(root.path()).unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    SqliteStore::verify(&root).unwrap();
+    let store = SqliteStore::open(&root).unwrap();
     let id = header().session_id().clone();
     let current = store.read_domain_states(&id, None, None).await.unwrap();
     assert!(current.states.is_empty());
@@ -71,16 +72,17 @@ async fn generation_selections_survive_reopen_with_complete_historical_membershi
         &serde_json::json!(false)
     );
     drop(store);
-    SqliteStore::verify(root.path()).unwrap();
+    SqliteStore::verify(&root).unwrap();
 }
 
 #[tokio::test]
 async fn missing_generation_index_is_rejected_by_cold_reads_and_offline_verification() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = SqliteStore::open(&root).unwrap();
     rsi_agent_testkit::assert_generation_store_contract(&store, header(), accepted()).await;
     drop(store);
-    let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let connection = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
     connection
         .execute(
             "DELETE FROM generation_selections WHERE control_seq = 2",
@@ -88,7 +90,7 @@ async fn missing_generation_index_is_rejected_by_cold_reads_and_offline_verifica
         )
         .unwrap();
     drop(connection);
-    let store = SqliteStore::open(root.path()).unwrap();
+    let store = SqliteStore::open(&root).unwrap();
     assert!(matches!(
         store
             .read_domain_states(header().session_id(), None, None)
@@ -97,9 +99,39 @@ async fn missing_generation_index_is_rejected_by_cold_reads_and_offline_verifica
     ));
     drop(store);
     assert!(matches!(
-        SqliteStore::verify(root.path()),
+        SqliteStore::verify(&root),
         Err(StoreError::Corrupt(_))
     ));
+}
+
+#[tokio::test]
+async fn invalid_membership_index_is_rejected_by_cold_reads_and_offline_verification() {
+    for tamper in [
+        "UPDATE domain_membership_cuts SET names_json='[\"fabricated\"]' WHERE control_seq=2",
+        "DELETE FROM domain_membership_cuts WHERE control_seq=2",
+        "INSERT INTO domain_membership_cuts(session_id, control_seq, names_json) VALUES('generations', 5, '[]')",
+    ] {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("store");
+        let store = SqliteStore::open(&root).unwrap();
+        rsi_agent_testkit::assert_generation_store_contract(&store, header(), accepted()).await;
+        drop(store);
+        let connection = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
+        connection.execute(tamper, []).unwrap();
+        drop(connection);
+        let store = SqliteStore::open(&root).unwrap();
+        assert!(matches!(
+            store
+                .read_domain_states(header().session_id(), None, None)
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        drop(store);
+        assert!(matches!(
+            SqliteStore::verify(&root),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
 }
 
 #[tokio::test]
@@ -112,8 +144,9 @@ async fn purging_history_releases_explicit_roots_without_loading_removed_plugins
         AtomicAgentCommit, AtomicSessionAppend, MaintenanceOperationId, PurgeRequest, PurgeTarget,
     };
     use std::sync::Arc;
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = SqliteStore::open(&root).unwrap();
     let first = store
         .put_cas(Arc::from(b"recipe one".as_slice()))
         .await
@@ -257,10 +290,11 @@ async fn purging_history_releases_explicit_roots_without_loading_removed_plugins
     ));
     assert_eq!(store.preview_cas_gc(8).await.unwrap().len(), 2);
     drop(store);
-    SqliteStore::verify(root.path()).unwrap();
-    let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    SqliteStore::verify(&root).unwrap();
+    let connection = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
     for table in [
         "generation_selections",
+        "domain_membership_cuts",
         "domain_heads",
         "domain_versions",
         "domain_requests",
@@ -278,8 +312,9 @@ async fn purging_history_releases_explicit_roots_without_loading_removed_plugins
 #[tokio::test]
 async fn unchanged_large_state_is_stored_once_across_generation_history() {
     use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = SqliteStore::open(&root).unwrap();
     let state = DomainSnapshot::new(
         DomainIdentity::new("large", 1).unwrap(),
         DomainStateValue::new(serde_json::json!("x".repeat(200 * 1024))).unwrap(),
@@ -334,16 +369,25 @@ async fn unchanged_large_state_is_stored_once_across_generation_history() {
     assert_eq!(current.states[0].head.revision, DomainRevision::new(1));
     assert_eq!(current.states[0].snapshot, state);
     drop(store);
-    let connection = rusqlite::Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    let connection = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
     let (versions, bytes): (i64, i64) = connection.query_row("SELECT (SELECT COUNT(*) FROM domain_versions), (SELECT SUM(length(CAST(control_json AS BLOB))) FROM agent_controls)", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     assert_eq!(versions, 1);
+    let memberships: i64 = connection
+        .query_row("SELECT COUNT(*) FROM domain_membership_cuts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        memberships, 1,
+        "unchanged names must not duplicate membership cuts"
+    );
     assert!(
         bytes < 300 * 1024,
         "unchanged payload was duplicated: {bytes}"
     );
     drop(connection);
-    SqliteStore::verify(root.path()).unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    SqliteStore::verify(&root).unwrap();
+    let store = SqliteStore::open(&root).unwrap();
     assert_eq!(
         store
             .read_domain_states(header().session_id(), Some(50), Some("large"))
@@ -362,8 +406,9 @@ async fn unchanged_large_state_is_stored_once_across_generation_history() {
 )]
 async fn large_domain_command_round_trips_states_and_receipt() {
     use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("store");
+    let store = SqliteStore::open(&root).unwrap();
     let states: Vec<_> = (0..4)
         .map(|n| {
             DomainSnapshot::new(
@@ -480,8 +525,8 @@ async fn large_domain_command_round_trips_states_and_receipt() {
     assert_eq!(page.states.len(), 4);
     assert_eq!(page.states[0].snapshot, states[0]);
     drop(store);
-    SqliteStore::verify(root.path()).unwrap();
-    let reopened = SqliteStore::open(root.path()).unwrap();
+    SqliteStore::verify(&root).unwrap();
+    let reopened = SqliteStore::open(&root).unwrap();
     assert_eq!(
         reopened
             .read_domain_request(header().session_id(), &invocation.request_id)

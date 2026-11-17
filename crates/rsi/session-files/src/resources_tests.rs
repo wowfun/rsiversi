@@ -341,6 +341,11 @@ impl Files for Backend {
         _: usize,
         _: CancellationToken,
     ) -> Result<FilePage> {
+        let pause = self.pause.lock().unwrap().take();
+        if let Some((entered, finish)) = pause {
+            let _ = entered.send(());
+            let _ = finish.await;
+        }
         self.continued.lock().unwrap().push(token);
         Err(FilesError::Unavailable)
     }
@@ -352,6 +357,11 @@ impl Files for Backend {
         _: usize,
         _: CancellationToken,
     ) -> Result<DirectoryPage> {
+        let pause = self.pause.lock().unwrap().take();
+        if let Some((entered, finish)) = pause {
+            let _ = entered.send(());
+            let _ = finish.await;
+        }
         self.continued.lock().unwrap().push(token);
         Err(FilesError::Unavailable)
     }
@@ -745,4 +755,105 @@ fn test_read() -> Arc<rsi_session_protocol::SessionReadLease> {
         (),
         gate.attach().unwrap().read().unwrap(),
     ))
+}
+
+#[tokio::test]
+async fn idle_file_token_retains_only_the_read_fence() {
+    let fixture = Fixture::new("idle-read");
+    let read = test_read();
+    let weak = Arc::downgrade(&read);
+    let view = FilesView::new(
+        fixture.owners.clone(),
+        fixture.lease.clone(),
+        fixture.target.clone(),
+        &CallOrigin::Local,
+        read,
+    );
+    let opened = view
+        .open(
+            fixture.binding.clone(),
+            RelativePath::new(b"file").unwrap(),
+            FileKind::File,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    drop(view);
+    assert!(
+        weak.upgrade().is_none(),
+        "idle tokens must release draft activity immediately"
+    );
+    assert_eq!(fixture.owners.entries.lock().unwrap().len(), 1);
+    assert!(
+        fixture
+            .view()
+            .describe(&fixture.binding, &opened.token)
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn abandoned_continuations_keep_the_fresh_read_until_provider_completion() {
+    for directory in [false, true] {
+        let fixture = Fixture::new("finite-io");
+        let kind = if directory {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        let opened = fixture
+            .view()
+            .open(
+                fixture.binding.clone(),
+                RelativePath::new(b"file").unwrap(),
+                kind,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let read = test_read();
+        let weak = Arc::downgrade(&read);
+        let view = FilesView::new(
+            fixture.owners.clone(),
+            fixture.lease.clone(),
+            fixture.target.clone(),
+            &CallOrigin::Local,
+            read,
+        );
+        let (entered, entering) = oneshot::channel();
+        let (finish, finishing) = oneshot::channel();
+        *fixture.backend.pause.lock().unwrap() = Some((entered, finishing));
+        let binding = fixture.binding.clone();
+        let waiter = tokio::spawn(async move {
+            if directory {
+                let _ = view
+                    .list(binding, opened.token, 0, 1, CancellationToken::new())
+                    .await;
+            } else {
+                let _ = view
+                    .read(binding, opened.token, 0, 1, CancellationToken::new())
+                    .await;
+            }
+        });
+        entering.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(
+            weak.upgrade().is_some(),
+            "actual provider work must retain its finite read"
+        );
+        finish.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture.owners.entries.lock().unwrap().len(),
+            1,
+            "idle token remains independently owned"
+        );
+    }
 }

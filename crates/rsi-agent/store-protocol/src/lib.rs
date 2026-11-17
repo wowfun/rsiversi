@@ -47,8 +47,9 @@ mod evidence;
 mod suffix;
 mod window;
 pub use domain::{
-    StoreDomainFactCheck, StoreDomainHead, StoreDomainState, StoreDomainStatePage,
-    StoreDomainWatermarks, StoreGenerationSelection, StoreTurnDomainUsage, domain_heads_after,
+    StoreDomainAdmissionSnapshot, StoreDomainFactCheck, StoreDomainHead, StoreDomainState,
+    StoreDomainStatePage, StoreDomainWatermarks, StoreGenerationSelection, StoreTurnDomainUsage,
+    domain_heads_after,
 };
 pub use evidence::{EvidenceDigests, EvidenceOriginal, EvidenceResolveError};
 pub use suffix::{MAXIMUM_STORE_SUFFIX_FACTS, StoreFactSuffix, validate_suffix_limits};
@@ -57,7 +58,7 @@ pub use window::{
 };
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 50;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 51;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -2011,6 +2012,8 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<StoreOrderSeed>;
     /// Validates the selected history and retains its proof through dependent reads.
     /// Call before acquiring a payload materialization reservation.
+    /// Proof-retention capacity refuses with `ValidationBusy` rather than waiting
+    /// for other leases that the same dependent operation may already hold.
     async fn prepare_session(&self, session_id: &SessionId) -> Result<SessionValidationLease>;
     /// Reads both durable cursors from one metadata snapshot without replaying history.
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks>;
@@ -2066,6 +2069,11 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Store does not support Domain watermarks".into(),
         ))
     }
+    /// Reads complete current heads and watermarks from one validated snapshot.
+    async fn read_domain_admission(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<StoreDomainAdmissionSnapshot>;
     /// Reads the selected domain (or all domains) at the same durable snapshot as the watermarks.
     async fn read_domain_states(
         &self,
@@ -2545,7 +2553,7 @@ pub enum StoreError {
     /// A required provider or platform capability is unavailable before Store admission.
     #[error("Agent Store capability unsupported: {0}")]
     Unsupported(String),
-    /// Cold read validation refused admission; the requested durable mutation
+    /// Validation or proof retention refused admission; the requested durable mutation
     /// has not been admitted or applied. This is not an uncertain write outcome.
     #[error("Agent Store validation capacity is busy")]
     ValidationBusy,

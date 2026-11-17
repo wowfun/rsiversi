@@ -80,13 +80,20 @@ const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 23] = [
+const EXPECTED_TABLES: [(&str, &str); 24] = [
     ("domain_removals", "CREATE TABLE domain_removals (
         session_id TEXT NOT NULL,
         domain_id TEXT NOT NULL,
         control_seq INTEGER NOT NULL CHECK (control_seq > 0),
         codec_version INTEGER NOT NULL CHECK (codec_version > 0),
         PRIMARY KEY (session_id, domain_id, control_seq),
+        FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
+    ) STRICT"),
+    ("domain_membership_cuts", "CREATE TABLE domain_membership_cuts (
+        session_id TEXT NOT NULL,
+        control_seq INTEGER NOT NULL CHECK (control_seq > 0),
+        names_json TEXT NOT NULL,
+        PRIMARY KEY (session_id, control_seq),
         FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
     ) STRICT"),
     ("generation_selections", "CREATE TABLE generation_selections (
@@ -538,7 +545,6 @@ struct StoreInner {
     ready_rows_decoded: AtomicU64,
     pins: Mutex<BTreeMap<SessionId, std::sync::Weak<preparation::PinnedProof>>>,
     pin_admission: Arc<Semaphore>,
-    pin_changed: tokio::sync::Notify,
     #[cfg(test)]
     pin_entries_examined: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
@@ -842,7 +848,6 @@ impl SqliteStore {
                 ready_rows_decoded: AtomicU64::new(0),
                 pins: Mutex::new(BTreeMap::new()),
                 pin_admission: Arc::new(Semaphore::new(VALIDATED_SESSION_CACHE_CAPACITY)),
-                pin_changed: tokio::sync::Notify::new(),
                 #[cfg(test)]
                 pin_entries_examined: AtomicU64::new(0),
                 #[cfg(any(test, feature = "test-support"))]

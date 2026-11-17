@@ -40,8 +40,8 @@ an unavailable backend description also removes the matching owner. Unavailable
 read/list replies require a description check before eviction; transport failure
 alone does not release token ownership. In-flight continuations
 retain their scope and Session read lease until the actual provider work settles,
-even after the waiter is cancelled. Idle tokens retain a cancellable Session read
-lease; Session retirement removes them and waits for in-flight readers to drain.
+even after the waiter is cancelled. Idle tokens retain only a Session retirement
+fence; Session retirement removes them and waits for in-flight readers to drain.
 An open racing retirement cannot publish a usable token: subsequent admission is
 refused and the retained token is removed when cancellation is observed. Release and endpoint
 retirement dispose retained scopes outside the owner-map lock.

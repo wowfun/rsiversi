@@ -222,9 +222,17 @@ async fn assert_commands_survive_unavailable_skills(
     app: &Arc<rsi_gui::GuiApplication>,
     generation: &str,
 ) {
-    app.command(&json!({"action":"completions","pane":"main","generation":generation,"query":"pl","sequence":"1","refresh":true}).to_string()).await.unwrap();
+    app.command(&json!({"action":"completions","pane":"main","generation":generation,"query":"","sequence":"1","refresh":true}).to_string()).await.unwrap();
     let completion = view(app)["surfaces"]["main"]["completions"].clone();
-    assert_eq!(completion["entries"][0]["replacement"], "/plan");
+    let entries = completion["entries"].as_array().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["export", "plan"]
+    );
+    assert_eq!(entries[1]["replacement"], "/plan");
     assert!(
         completion["notice"]
             .as_str()

@@ -577,13 +577,15 @@ impl GuiApplication {
                         .owned
                         .lock()
                         .expect("Web pending identities poisoned");
-                    if owned.len() == 1024 && !owned.contains(&input.message_id) {
+                    if owned.len() == 1024 && !owned.contains_key(&input.message_id) {
                         return Settlement::rejected(
                             mode,
                             "Pending message identity capacity is full",
                         );
                     }
-                    owned.insert(input.message_id.clone())
+                    let newly_owned = !owned.contains_key(&input.message_id);
+                    owned.entry(input.message_id.clone()).or_insert(None);
+                    newly_owned
                 };
                 let id = input.message_id.clone();
                 let result = match mode {
@@ -607,18 +609,21 @@ impl GuiApplication {
                                 .into(),
                         };
                     }
+                    let mut owned = attached
+                        .submission
+                        .owned
+                        .lock()
+                        .expect("Web pending identities poisoned");
                     if matches!(
                         receipt.state,
                         rsi_agent_turn_protocol::MessageState::Claimed { .. }
                             | rsi_agent_turn_protocol::MessageState::Discarded { .. }
                     ) {
-                        attached
-                            .submission
-                            .owned
-                            .lock()
-                            .expect("Web pending identities poisoned")
-                            .remove(&id);
+                        owned.remove(&id);
+                    } else if let Some(accepted) = owned.get_mut(&id) {
+                        *accepted = Some(receipt.accepted_control_seq);
                     }
+                    drop(owned);
                     if !attached
                         .durable
                         .swap(true, std::sync::atomic::Ordering::AcqRel)

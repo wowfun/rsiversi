@@ -7,6 +7,11 @@ Unchanged heads keep their canonical positions and revisions. Historical reads a
 forks resolve membership at their cut. See the
 [generation contract](../docs/subsystems/composition-generations.md).
 
+`read_domain_admission` returns complete current heads and Fact/control/domain
+watermarks from one validated Store snapshot. It does not decode snapshot values
+or generation payloads. Mutation admission uses this metadata; consumers of
+values keep the separate domain-state read.
+
 Complete order membership includes immutable creation time and current activity
 from the same Store snapshot. Shared Workspace account order uses creation time;
 activity-based views retain the separate activity value. Neither requires loading
@@ -217,9 +222,12 @@ reported durable control tail. Structural page validation alone cannot distingui
 a valid historical page returned in place of current state.
 
 A reader of an authorized Session's inherited history captures its parent
-intervals in replay order. Each interval holds a Store validation lease and
-matches its recorded parent Header fingerprint, effective turns, Fact boundary
-and control boundary. An `all` interval follows the parent's own inheritance.
+intervals in replay order. Each interval contains its source Header, the
+authenticated parent's creation timestamp and a Store validation lease; the
+source origin owns the parent identity and selected cut.
+Capture matches the parent Header fingerprint, effective turns, Fact boundary
+and control boundary without retaining a second parent Header. An `all` interval
+follows the parent's own inheritance.
 Other selections stop the walk at that parent.
 
 ## Correlated terminal commits

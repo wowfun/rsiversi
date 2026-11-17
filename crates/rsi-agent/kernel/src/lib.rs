@@ -935,6 +935,7 @@ mod execution;
 mod execution_admission;
 mod finalization;
 mod fork_domains;
+mod fork_history;
 mod generations;
 mod human_wait;
 mod inbox;
@@ -962,9 +963,9 @@ use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path, completion_message,
     completion_message_id, control_tail, descendant_session_ids, durable_observation_next,
     fill_observation_page, list_agent_descendants, list_direct_agent_children, message_receipt,
-    observation_next, observe_agent_wait_change, read_facts_bounded, read_fork_page_from_header,
-    read_header_bounded, read_mailbox_claim, read_observed_facts, read_turn_boundary_bounded,
-    read_turn_facts_bounded, read_validated_header_bounded, scan_durable_messages,
+    observation_next, observe_agent_wait_change, read_facts_bounded, read_header_bounded,
+    read_mailbox_claim, read_observed_facts, read_turn_boundary_bounded, read_turn_facts_bounded,
+    read_validated_header_bounded, scan_durable_messages,
 };
 use recovery::{
     is_terminal_fact, load_control_state, read_stored_outcome, repair_unfinished_session,

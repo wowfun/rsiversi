@@ -3,7 +3,28 @@ use async_trait::async_trait;
 use rsi_agent_session_protocol::{SessionHeader, SessionId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// Revocation signals for idle resources, without retaining finite read activity.
+#[derive(Clone, Debug)]
+pub struct SessionReadFence(Arc<ReadFence>);
+#[derive(Debug)]
+struct ReadFence {
+    retiring: CancellationToken,
+    lifecycle: CancellationToken,
+    _guard: tokio_util::sync::DropGuard,
+}
+impl SessionReadFence {
+    /// Notification of scope revocation or Session retirement.
+    pub fn retiring(&self) -> &CancellationToken {
+        &self.0.retiring
+    }
+    /// Check retirement synchronously, without waiting for the notification relay.
+    pub fn is_retiring(&self) -> bool {
+        self.0.retiring.is_cancelled() || self.0.lifecycle.is_cancelled()
+    }
+}
 
 /// Current Session/Header correlation, never an authentication credential.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -34,7 +55,7 @@ impl SessionTarget {
 /// Finite read binding retaining the actual unpublished draft activity owner.
 pub struct SessionReadLease {
     header: SessionHeader,
-    retiring: CancellationToken,
+    fence: SessionReadFence,
     _activity: Box<dyn Send + Sync>,
     lifecycle: crate::SessionLifecycleActivity,
 }
@@ -55,7 +76,11 @@ impl SessionReadLease {
     ) -> Self {
         Self {
             header,
-            retiring,
+            fence: SessionReadFence(Arc::new(ReadFence {
+                _guard: retiring.clone().drop_guard(),
+                retiring,
+                lifecycle: lifecycle.retiring().clone(),
+            })),
             _activity: Box::new(activity),
             lifecycle,
         }
@@ -66,11 +91,15 @@ impl SessionReadLease {
     }
     /// Cancel a read when its owning Session service retires or scoped View is revoked.
     pub fn retiring(&self) -> &CancellationToken {
-        &self.retiring
+        self.fence.retiring()
     }
     /// Synchronously rejects a closed Session generation or revoked read scope.
     pub fn is_retiring(&self) -> bool {
-        self.retiring.is_cancelled() || self.lifecycle.retiring().is_cancelled()
+        self.fence.is_retiring()
+    }
+    /// Retain revocation signals without retaining this finite read's activity.
+    pub fn fence(&self) -> SessionReadFence {
+        self.fence.clone()
     }
     pub(crate) fn promote(&mut self) -> Result<()> {
         self.lifecycle.promote()

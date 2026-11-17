@@ -145,7 +145,7 @@ fn principal(origin: &CallOrigin) -> Option<DeviceId> {
 struct Entry {
     marker: Arc<()>,
     released: CancellationToken,
-    read: Arc<rsi_session_protocol::SessionReadLease>,
+    read: rsi_session_protocol::SessionReadFence,
     resource: ExecutionFiles,
     provider_token: FileToken,
     target: SessionTarget,
@@ -275,11 +275,13 @@ impl FilesView {
         let (reply, result) = oneshot::channel();
         tokio::spawn(async move {
             let opened = files.open(binding, path, kind, cancellation).await;
+            let fence = read.fence();
+            drop(read);
             let _ = reply.send(opened.map(|opened| {
                 let entry = Arc::new(Entry {
                     marker: Arc::new(()),
                     released: CancellationToken::new(),
-                    read,
+                    read: fence,
                     provider_token: opened.token.clone(),
                     resource,
                     target,
@@ -305,7 +307,9 @@ impl FilesView {
         let files = self.view(&entry)?;
         let retained = entry.clone();
         let selected_binding = binding.clone();
+        let read = self.read.clone();
         let result = tokio::spawn(async move {
+            let _read = read;
             files
                 .read(
                     selected_binding,
@@ -337,7 +341,9 @@ impl FilesView {
         let files = self.view(&entry)?;
         let retained = entry.clone();
         let selected_binding = binding.clone();
+        let read = self.read.clone();
         let result = tokio::spawn(async move {
+            let _read = read;
             files
                 .list(
                     selected_binding,

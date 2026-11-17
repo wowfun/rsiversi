@@ -177,6 +177,39 @@ pub struct StoreDomainWatermarks {
     pub domain_seq: u64,
 }
 
+/// Complete payload-free state used for current Domain mutation admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreDomainAdmissionSnapshot {
+    watermarks: StoreDomainWatermarks,
+    heads: Vec<StoreDomainHead>,
+}
+impl StoreDomainAdmissionSnapshot {
+    /// Validates one provider-owned read snapshot at its materialization boundary.
+    pub fn new(watermarks: StoreDomainWatermarks, heads: Vec<StoreDomainHead>) -> Result<Self> {
+        validate_domain_heads(heads.iter())?;
+        if watermarks.domain_seq > watermarks.control_seq
+            || heads
+                .iter()
+                .any(|head| head.control_seq > watermarks.domain_seq)
+        {
+            return Err(StoreError::Corrupt(
+                "domain heads exceed their read snapshot".into(),
+            ));
+        }
+        Ok(Self { watermarks, heads })
+    }
+    /// Returns the simultaneous durable stream cuts.
+    #[must_use]
+    pub const fn watermarks(&self) -> StoreDomainWatermarks {
+        self.watermarks
+    }
+    /// Returns the complete sorted current heads without snapshot payloads.
+    #[must_use]
+    pub fn heads(&self) -> &[StoreDomainHead] {
+        &self.heads
+    }
+}
+
 /// Selected domain states and executable identity at one Store snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreDomainStatePage {

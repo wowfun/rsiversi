@@ -5,9 +5,10 @@ use super::{ForkTurnSelection, SessionHeader, SessionStore, SessionValidationLea
 pub struct InheritedInterval {
     /// Session whose immutable origin specifies this interval.
     pub source: SessionHeader,
-    /// Verified parent Header at that origin.
-    pub parent: SessionHeader,
-    /// Keeps this interval readable throughout the consumer's operation.
+    /// Creation time from the authenticated parent Header, for history presentation.
+    pub parent_created_at_ms: u64,
+    /// Retains the parent's validation proof throughout the consumer's operation.
+    /// Does not prevent retirement; readers still check current availability.
     pub lease: SessionValidationLease,
 }
 
@@ -61,7 +62,7 @@ pub async fn capture_inherited_intervals(
         let inherited = matches!(origin.requested_turns, ForkTurnSelection::All);
         intervals.push(InheritedInterval {
             source,
-            parent: parent.clone(),
+            parent_created_at_ms: parent.created_at_ms(),
             lease,
         });
         if !inherited {

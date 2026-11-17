@@ -69,6 +69,10 @@ Store commits, this transition cannot abandon another selected gate halfway thro
 `SessionReadLease::is_retiring` checks the Session gate synchronously as well as
 scope revocation. Resource publication uses this check; `retiring()` is a wakeup
 notification and may observe the Session transition after a relay is scheduled.
+An idle resource retains only `SessionReadFence`, the revocation and retirement
+signals. It retains neither draft activity nor a lifecycle read count. Actual I/O
+retains its fresh finite read lease until provider completion, even if its waiter
+disappears.
 
 `SubmitInput.content` is an immutable `ValidatedSessionInput`. Construction and
 external decoding apply the same complete-input bounds before any provider,
@@ -356,7 +360,7 @@ result acknowledgment.
 Both question operations preserve broker shutdown and capacity as typed Session
 errors; malformed or conflicting answers remain invalid operations.
 
-Completed-output reads belong to the Process `ProcessOutputCacheContract`.
+Completed text and command-output reads belong to Spill's `SpillReaderContract`.
 Clients inject that read-only capability independently of Session. An output
 identity and raw byte cursor suffice; attaching a Session is not a prerequisite
 for a read. The cache remains independent of durable Session history.
@@ -517,8 +521,10 @@ query. Device-scoped callers are rejected; Session purge never implies CAS colle
 An uncertain maintenance mutation returns `MaintenanceOutcomeUnknown` with its
 operation kind and original identity; clients reconcile through that kind's status
 endpoint and retain the same request for any retry. Local I/O failures after mutation
-dispatch cannot establish that no commit occurred. Navigation
-status observes durable metadata absence; only explicit purge retries perform cleanup.
+dispatch cannot establish that no commit occurred. Navigation and Spill
+status independently observe absence; only explicit purge retries perform cleanup.
+The receipt carries `store`, `navigation` and `spill`; cleanup failures do not
+reclassify a completed canonical deletion.
 
 Workflow readiness/history/detail and Goal snapshots hold cancellable read ownership.
 Goal arm/retain-for-settlement and initial-round reservation hold hard ownership:

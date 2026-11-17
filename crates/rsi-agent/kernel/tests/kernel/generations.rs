@@ -528,6 +528,10 @@ impl rsi_agent_composition_protocol::GenerationValidator for StalledValidation {
 }
 
 #[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One retained validator proves deadline and caller cancellation release admission before a successful retry"
+)]
 async fn cold_validation_deadline_and_dropped_submission_cancel_callbacks_and_release_admission() {
     use rsi_agent_composition_protocol::{
         ContributionCatalog, ContributionKind, ContributionRegistration,
@@ -888,6 +892,99 @@ async fn retained_draft_owner_cannot_override_the_committed_cold_generation() {
     drop(draft);
     run.stop().await;
 }
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Retain two public leases across selection publication, eviction and cold admission.
+async fn cold_composition_finds_the_matching_selection_after_an_older_domain_lease() {
+    use rsi_agent_turn_protocol::{ContinuationBinding, SessionContinuations};
+    let store = Arc::new(MemoryStore::new());
+    let old = pin('a', 1, true, false).0;
+    let source = Arc::new(Source::new(old.clone()));
+    let run = Run::start(store, source.clone()).await;
+    let draft = |pin: AgentCompositionPin, domain: &str| {
+        let session = PreparedFreshSession::new(run.claim.header().clone(), pin).unwrap();
+        let snapshot = session
+            .baseline()
+            .initial_states()
+            .into_iter()
+            .find(|snapshot| snapshot.identity().id() == domain)
+            .unwrap();
+        let binding = ContinuationBinding {
+            domain: snapshot.identity().clone(),
+            owner: DomainRequestId::new("retained-owner").unwrap(),
+            revision: DomainRevision::new(0),
+            snapshot_sha256: snapshot.sha256().unwrap(),
+        };
+        (SubmitSession::Fresh(session), binding)
+    };
+    let (session, binding) = draft(old.clone(), "fixture.extra");
+    let older = SessionContinuations::arm(&run.kernel, session, binding)
+        .await
+        .unwrap();
+    let selected = old.clone().with_selection(
+        rsi_agent_session_protocol::GenerationSelection::new("b".repeat(64)).unwrap(),
+    );
+    assert!(old.same_generation(&selected));
+    assert_ne!(old.selection(), selected.selection());
+    source.select(selected.clone());
+    run.kernel
+        .prepare_composition(&run.claim)
+        .await
+        .unwrap()
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    let (session, binding) = draft(selected.clone(), "fixture.state");
+    let matching = SessionContinuations::arm(&run.kernel, session, binding)
+        .await
+        .unwrap();
+    assert!(older.is_armed() && matching.is_armed());
+    run.kernel
+        .finish_turn(&run.claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    assert!(matches!(
+        run.kernel
+            .resident_composition(run.claim.session_id())
+            .unwrap(),
+        rsi_agent_turn_protocol::ResidentComposition::NotResident
+    ));
+    let builds = source.seeds.lock().unwrap().len();
+    source.select(pin('c', 1, true, false).0);
+    let prepared = run
+        .kernel
+        .prepare_resume(run.claim.session_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        source.seeds.lock().unwrap().len(),
+        builds,
+        "an earlier mismatched lease must not force cold reconstruction"
+    );
+    run.kernel
+        .submit(SubmitTurn {
+            session: SubmitSession::Resume(prepared),
+            turn_id: client_turn_id(),
+            text: "resume the retained selection".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    let resumed = run
+        .kernel
+        .claim("generation-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let actual = run.kernel.composition(&resumed).unwrap();
+    assert!(actual.same_generation(&selected));
+    assert_eq!(actual.selection(), selected.selection());
+    drop((older, matching));
+    run.stop().await;
+}
+
 impl Run {
     async fn start(store: Arc<dyn SessionStore>, source: Arc<Source>) -> Self {
         let initial = PreparedFreshSession::new(

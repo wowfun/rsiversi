@@ -160,7 +160,7 @@ fn windows_archival_reset_refuses_before_filesystem_effects() {
 mod inspection;
 
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() {
     use cas::{PublicationPhase as Phase, PublicationStep as Step};
     for step in [
@@ -230,7 +230,7 @@ async fn cas_publication_faults_never_admit_metadata_and_retry_resynchronizes() 
 }
 
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -239,7 +239,18 @@ async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
         .path()
         .join("cas")
         .join(hex::encode(Sha256::digest(&bytes)));
-    fs::write(&target, b"wrong").unwrap();
+    let write_body = |body: &[u8]| {
+        let directory =
+            rsi_files_native_fs::open_absolute_directory_no_follow(&root.path().join("cas"))
+                .unwrap();
+        let mut file = rsi_files_native_fs::create_relative_private_file_no_follow(
+            &directory,
+            Path::new(target.file_name().unwrap()),
+        )
+        .unwrap();
+        file.write_all(body).unwrap();
+    };
+    write_body(b"wrong");
     assert!(matches!(
         store.put_cas(bytes.clone()).await,
         Err(StoreError::Corrupt(_))
@@ -249,13 +260,13 @@ async fn cas_existing_corrupt_or_linked_target_is_never_replaced() {
     store.put_cas(bytes.clone()).await.unwrap();
     // A successful local put does not authorize trusting a later file incarnation.
     fs::remove_file(&target).unwrap();
-    fs::write(&target, b"wrong").unwrap();
+    write_body(b"wrong");
     assert!(matches!(
         store.put_cas(bytes.clone()).await,
         Err(StoreError::Corrupt(_))
     ));
     fs::remove_file(&target).unwrap();
-    fs::write(&target, &bytes).unwrap();
+    write_body(&bytes);
     for step in [
         cas::PublicationStep::ExistingFileSync,
         cas::PublicationStep::NamespaceSync,
@@ -1141,7 +1152,7 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
     for kind in ["reader", "validation", "writer", "cas", "publication"] {
         let root = private_tempdir();
@@ -1197,7 +1208,7 @@ async fn cancelled_blocking_jobs_retain_the_root_writer_lease() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn cas_publication_does_not_occupy_the_payload_read_lane() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -2576,6 +2587,42 @@ async fn mixed_archive_scans_preserve_hot_validation_proofs_and_allow_writes() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn nested_preparation_refuses_saturated_pins_without_waiting_for_held_leases() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..4 {
+        ids.push(seed_session(&store, &format!("nested-pin-{index}")).await);
+    }
+    // Other operations retain all but two slots. Each partial reconstruction
+    // takes one remaining slot before it asks for its next ancestor's proof.
+    let occupied = store
+        .inner
+        .pin_admission
+        .clone()
+        .acquire_many_owned(u32::try_from(VALIDATED_SESSION_CACHE_CAPACITY - 2).unwrap())
+        .await
+        .unwrap();
+    let first = store.prepare_session(&ids[0]).await.unwrap();
+    let second = store.prepare_session(&ids[1]).await.unwrap();
+    let (next_first, next_second) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            store.prepare_session(&ids[2]),
+            store.prepare_session(&ids[3])
+        )
+    })
+    .await
+    .expect("nested readers must not wait for their held proof leases");
+    assert!(matches!(next_first, Err(StoreError::ValidationBusy)));
+    assert!(matches!(next_second, Err(StoreError::ValidationBusy)));
+    let shared = store.prepare_session(&ids[0]).await.unwrap();
+    drop((first, second, shared, occupied));
+    let retry = store.prepare_session(&ids[2]).await.unwrap();
+    drop(retry);
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -2608,15 +2655,13 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), before);
     store.validate_session(&ids[256]).await.unwrap();
     let (first, second) = {
-        let mut first = store.prepare_session(&ids[256]);
-        let mut second = store.prepare_session(&ids[256]);
-        std::future::poll_fn(|cx| {
-            assert!(first.as_mut().poll(cx).is_pending());
-            assert!(second.as_mut().poll(cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-        // Trusted writes may advance this exact Session while its proof waits for capacity.
+        let (first, second) = tokio::join!(
+            store.prepare_session(&ids[256]),
+            store.prepare_session(&ids[256])
+        );
+        assert!(matches!(first, Err(StoreError::ValidationBusy)));
+        assert!(matches!(second, Err(StoreError::ValidationBusy)));
+        // Trusted writes can advance this Session between a refusal and retry.
         store
             .append(AppendBatch {
                 session_id: ids[256].clone(),
@@ -2627,11 +2672,10 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
             .await
             .unwrap();
         drop(leases.pop());
-        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(first, second)
-        })
-        .await
-        .unwrap();
+        let (first, second) = tokio::join!(
+            store.prepare_session(&ids[256]),
+            store.prepare_session(&ids[256])
+        );
         (first.unwrap(), second.unwrap())
     };
     assert_eq!(store.inner.pin_admission.available_permits(), 0);
@@ -2820,46 +2864,6 @@ async fn scalar_watermarks_never_authorize_a_corrupt_session_commit() {
         (watermark.durable_fact_seq, watermark.durable_control_seq),
         (1, 0)
     );
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn unrelated_pin_notifications_preserve_distinct_session_waiter_order() {
-    let root = private_tempdir();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let mut ids = vec![];
-    for index in 0..258 {
-        ids.push(seed_session(&store, &format!("fair-pin-{index}")).await);
-    }
-    let mut leases = vec![];
-    for id in &ids[..256] {
-        leases.push(store.prepare_session(id).await.unwrap());
-    }
-    let mut first = store.prepare_session(&ids[256]);
-    let mut second = store.prepare_session(&ids[257]);
-    std::future::poll_fn(|cx| {
-        assert!(first.as_mut().poll(cx).is_pending());
-        assert!(second.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    store.inner.pin_changed.notify_waiters();
-    // A notification about a different Session must not put the first waiter last.
-    std::future::poll_fn(|cx| {
-        assert!(first.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    drop(leases.pop());
-    let first_result =
-        std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx))).await;
-    assert!(
-        first_result.is_ready(),
-        "the earlier distinct-session waiter lost its FIFO position"
-    );
-    drop(first_result);
-    drop(second);
-    drop(leases);
 }
 
 #[cfg(feature = "test-support")]
@@ -3609,11 +3613,31 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
     connection
         .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace))
         .unwrap();
+    QUERIES.set([0; 3]);
+    let metadata = domain::read_admission(&connection, &id).unwrap();
+    assert_eq!(
+        QUERIES.get(),
+        [1, 0, 0],
+        "admission must not materialize canonical payloads"
+    );
+    let current = store.read_domain_states(&id, None, None).await.unwrap();
+    assert_eq!(
+        metadata.watermarks().control_seq,
+        current.durable_control_seq
+    );
+    assert_eq!(
+        metadata.heads(),
+        current
+            .states
+            .iter()
+            .map(|state| state.head.clone())
+            .collect::<Vec<_>>()
+    );
     for (domain_id, horizon, expected) in [
         (Some("missing"), None, [0, 1, 0]),
         (Some("b"), Some(1), [0, 1, 1]),
         (None, None, [1, 0, 1]),
-        (None, Some(1), [0, 1, 1]),
+        (None, Some(1), [0, 2, 1]),
     ] {
         QUERIES.set([0; 3]);
         domain::read_states(&connection, &id, horizon, domain_id).unwrap();

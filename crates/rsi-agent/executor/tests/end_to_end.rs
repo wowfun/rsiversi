@@ -255,26 +255,11 @@ impl TurnExecution for FailingClaimFixture {
         Err(TurnError::StaleClaim)
     }
 
-    async fn read_fork_sources(
-        &self,
-        claim: &TurnClaim,
-    ) -> rsi_agent_turn_protocol::Result<Vec<SessionHeader>> {
-        Ok(claim
-            .header()
-            .fork_origin()
-            .map(|_| claim.header().clone())
-            .into_iter()
-            .collect())
-    }
-
-    async fn read_fork_facts(
+    async fn open_fork_history(
         &self,
         _claim: &TurnClaim,
-        _source: &SessionId,
-        _after_parent_seq: u64,
-        _limit: usize,
-    ) -> rsi_agent_turn_protocol::Result<Option<rsi_agent_turn_protocol::ForkFactPage>> {
-        unreachable!("the failing claim fixture never reads fork Facts")
+    ) -> rsi_agent_turn_protocol::Result<Arc<dyn rsi_agent_turn_protocol::ForkHistoryReader>> {
+        unreachable!("this fixture never reconstructs live fork history")
     }
 
     async fn claim_pending_step_messages(

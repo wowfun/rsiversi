@@ -3,10 +3,14 @@ use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One captured boundary is reused across pages and nested Full/Last descendants.
-async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor() {
+async fn fork_reader_authenticates_once_and_reuses_its_immutable_boundary() {
     let store = Arc::new(MemoryStore::new());
     append_terminal_history(&store, "session-fork-page-root", 300).await;
-    let kernel = kernel(store.clone()).await;
+    let faults = Arc::new(FactReadRaceStore::new(store.clone()));
+    let kernel =
+        AgentKernel::recover_with_clock(faults.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
     let worker = kernel.start_workers();
     let root_id = SessionId::new("session-fork-page-root").unwrap();
     kernel
@@ -49,21 +53,28 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
         .unwrap()
         .unwrap();
     assert_eq!(child_claim.session_id(), &child_id);
-    let first = kernel
-        .read_fork_facts(
-            &child_claim,
-            child_claim.session_id(),
-            0,
-            MAXIMUM_FACTS_PER_READ,
-        )
+    let reader = kernel.open_fork_history(&child_claim).await.unwrap();
+    let (_, _, header_reads) = store.activity_read_counts();
+    let first = reader
+        .read_facts(child_claim.session_id(), 0, MAXIMUM_FACTS_PER_READ)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(first.facts.len(), MAXIMUM_FACTS_PER_READ);
     assert_eq!(store.fork_boundary_resolution_count(), 2);
-    let second = kernel
-        .read_fork_facts(
-            &child_claim,
+    *faults.watermark_read_fault.lock().unwrap() =
+        Some((root_id.clone(), StoreError::NotFound(root_id.to_string())));
+    assert!(
+        matches!(
+            reader
+                .read_facts(child_claim.session_id(), first.through_parent_seq, 1)
+                .await,
+            Err(TurnError::SessionNotFound(_))
+        ),
+        "a retained proof cannot bypass current parent availability"
+    );
+    let second = reader
+        .read_facts(
             child_claim.session_id(),
             first.through_parent_seq,
             MAXIMUM_FACTS_PER_READ,
@@ -71,7 +82,30 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(second.through_parent_seq, second.terminal_parent_seq);
+    let (_, _, subsequent_header_reads) = store.activity_read_counts();
+    *faults.watermark_read_fault.lock().unwrap() =
+        Some((root_id.clone(), StoreError::NotFound(root_id.to_string())));
+    assert!(
+        matches!(
+            reader
+                .read_facts(child_claim.session_id(), second.through_parent_seq, 1)
+                .await,
+            Err(TurnError::SessionNotFound(_))
+        ),
+        "the final empty page must still observe parent retirement"
+    );
+    assert_eq!(
+        subsequent_header_reads, header_reads,
+        "pages must not re-read ancestry Headers"
+    );
+    assert_eq!(
+        second.through_parent_seq,
+        child_claim
+            .header()
+            .history_origin()
+            .unwrap()
+            .resolved_terminal_seq
+    );
     assert_eq!(second.facts.len(), 88);
     assert_eq!(
         store.fork_boundary_resolution_count(),
@@ -107,28 +141,50 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
             .await
             .unwrap()
             .unwrap();
-        let sources = kernel.read_fork_sources(&claim).await.unwrap();
+        let reader = kernel.open_fork_history(&claim).await.unwrap();
+        let sources = reader.sources();
         assert_eq!(sources.len(), expected);
         assert_eq!(sources.last().unwrap(), claim.header());
         if expected == 2 {
             assert_eq!(sources[0], *child_claim.header());
-            let inherited = kernel
-                .read_fork_facts(&claim, sources[0].session_id(), 0, 1)
+            let inherited = reader
+                .read_facts(sources[0].session_id(), 0, MAXIMUM_FACTS_PER_READ)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(inherited.facts[0], first.facts[0]);
-        }
-        assert!(
-            kernel
-                .read_fork_facts(&claim, &root_id, 0, 1)
+            let last = reader
+                .read_facts(
+                    sources[0].session_id(),
+                    inherited.through_parent_seq,
+                    MAXIMUM_FACTS_PER_READ,
+                )
                 .await
-                .is_err()
-        );
+                .unwrap()
+                .unwrap();
+            assert_eq!(last.through_parent_seq, second.through_parent_seq);
+            *faults.watermark_read_fault.lock().unwrap() =
+                Some((root_id.clone(), StoreError::NotFound(root_id.to_string())));
+            assert!(
+                matches!(
+                    reader.read_facts(sources[1].session_id(), 0, 1).await,
+                    Err(TurnError::SessionNotFound(_))
+                ),
+                "a consumed ancestor still belongs to the authenticated chain"
+            );
+        }
+        assert!(reader.read_facts(&root_id, 0, 1).await.is_err());
         kernel
             .finish_turn(&claim, &TurnOutcome::Completed)
             .await
             .unwrap();
+        assert!(
+            reader
+                .read_facts(sources[0].session_id(), 0, 1)
+                .await
+                .is_err(),
+            "retained history cannot outlive its claim"
+        );
         drop(lease);
     }
 
@@ -136,6 +192,48 @@ async fn fork_replay_validates_its_immutable_boundary_only_at_the_initial_cursor
         .finish_turn(&child_claim, &TurnOutcome::Completed)
         .await
         .unwrap();
+    let checkpoint = kernel
+        .open_checkpoint_fork_history(&child_claim)
+        .await
+        .unwrap()
+        .unwrap();
+    faults.pause_next_read();
+    let checkpoint_page = tokio::spawn({
+        let reader = checkpoint.clone();
+        let child_id = child_id.clone();
+        let after = first.through_parent_seq;
+        async move {
+            reader
+                .read_facts(&child_id, after, MAXIMUM_FACTS_PER_READ)
+                .await
+        }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        faults.read_captured.notified(),
+    )
+    .await
+    .expect("checkpoint did not reach its final inherited page");
+    *faults.boundary_read_refusal.lock().unwrap() =
+        Some((child_id.clone(), StoreError::NotFound(child_id.to_string())));
+    faults.release_read.notify_one();
+    assert!(
+        matches!(
+            checkpoint_page.await.unwrap(),
+            Err(TurnError::SessionNotFound(_))
+        ),
+        "the last page must observe child retirement during its Store read"
+    );
+    *faults.boundary_read_refusal.lock().unwrap() = None;
+    assert_eq!(
+        checkpoint
+            .read_facts(&child_id, first.through_parent_seq, MAXIMUM_FACTS_PER_READ)
+            .await
+            .unwrap()
+            .unwrap()
+            .facts,
+        second.facts
+    );
     kernel
         .finish_turn(&root_claim, &TurnOutcome::Completed)
         .await

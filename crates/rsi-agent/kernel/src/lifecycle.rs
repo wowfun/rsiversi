@@ -41,6 +41,12 @@ pub(super) fn initial_controls(
     Ok(controls)
 }
 
+enum ResumeState {
+    Resident(PreparedResumeSession),
+    Loading(Arc<SessionLoad>),
+    Cold,
+}
+
 impl AgentKernel {
     pub(super) async fn validate_fresh_baseline(
         &self,
@@ -1067,11 +1073,7 @@ impl AgentKernel {
                 return Ok((pin.selection() == selection).then_some(pin));
             }
         }
-        let continuation = self
-            .session_continuations(header.session_id())
-            .into_iter()
-            .find(|lease| lease.binding().revision.get() == 0);
-        if let Some(lease) = continuation {
+        for lease in self.session_continuations(header.session_id()) {
             let (retained_header, pin) = self.inner.continuation_issuer.inspect(&lease)?;
             if retained_header == header && pin.selection() == selection {
                 return Ok(Some(pin.clone()));
@@ -1080,35 +1082,47 @@ impl AgentKernel {
         Ok(None)
     }
 
+    fn resume_state(&self, session_id: &SessionId) -> TurnResult<ResumeState> {
+        let state = lock_state(&self.inner);
+        if !state.accepting {
+            return Err(TurnError::ShuttingDown);
+        }
+        if let Some(session) = state.sessions.get(session_id) {
+            return self
+                .inner
+                .resume_issuer
+                .issue(
+                    session.header.as_ref().clone(),
+                    session.composition.clone(),
+                    None,
+                )
+                .map(ResumeState::Resident);
+        }
+        if state.fresh_reservations.contains(session_id) {
+            return Err(TurnError::Invalid(
+                "resume selected a session that is still being created".into(),
+            ));
+        }
+        Ok(state
+            .loading_sessions
+            .get(session_id)
+            .cloned()
+            .map_or(ResumeState::Cold, ResumeState::Loading))
+    }
+
     pub(super) async fn prepare_resume_session(
         &self,
         session_id: &SessionId,
     ) -> TurnResult<PreparedResumeSession> {
         loop {
-            let concurrent_load = {
-                let state = lock_state(&self.inner);
-                if !state.accepting {
-                    return Err(TurnError::ShuttingDown);
+            match self.resume_state(session_id)? {
+                ResumeState::Resident(prepared) => return Ok(prepared),
+                ResumeState::Loading(load) => {
+                    load.wait().await?;
+                    continue;
                 }
-                if let Some(session) = state.sessions.get(session_id) {
-                    return self.inner.resume_issuer.issue(
-                        session.header.as_ref().clone(),
-                        session.composition.clone(),
-                        None,
-                    );
-                }
-                if state.fresh_reservations.contains(session_id) {
-                    return Err(TurnError::Invalid(
-                        "resume selected a session that is still being created".into(),
-                    ));
-                }
-                state.loading_sessions.get(session_id).cloned()
-            };
-            if let Some(load) = concurrent_load {
-                load.wait().await?;
-                continue;
+                ResumeState::Cold => {}
             }
-
             let header = read_validated_header_bounded(&self.inner, session_id)
                 .await
                 .map_err(turn_store_error)?;
@@ -1128,62 +1142,28 @@ impl AgentKernel {
             .await
             {
                 Ok(composition) => composition,
-                Err(error) => {
-                    let concurrent_load = {
-                        let state = lock_state(&self.inner);
-                        if !state.accepting {
-                            return Err(TurnError::ShuttingDown);
-                        }
-                        if let Some(session) = state.sessions.get(session_id) {
-                            return self.inner.resume_issuer.issue(
-                                session.header.as_ref().clone(),
-                                session.composition.clone(),
-                                None,
-                            );
-                        }
-                        if state.fresh_reservations.contains(session_id) {
-                            return Err(TurnError::Invalid(
-                                "resume selected a session that is still being created".into(),
-                            ));
-                        }
-                        state.loading_sessions.get(session_id).cloned()
-                    };
-                    if let Some(load) = concurrent_load {
+                Err(error) => match self.resume_state(session_id)? {
+                    ResumeState::Resident(prepared) => return Ok(prepared),
+                    ResumeState::Loading(load) => {
                         load.wait().await?;
                         continue;
                     }
-                    return Err(error);
-                }
+                    ResumeState::Cold => return Err(error),
+                },
             };
-
-            let concurrent_load = {
-                let state = lock_state(&self.inner);
-                if !state.accepting {
-                    return Err(TurnError::ShuttingDown);
+            match self.resume_state(session_id)? {
+                ResumeState::Resident(prepared) => return Ok(prepared),
+                ResumeState::Loading(load) => {
+                    load.wait().await?;
                 }
-                if let Some(session) = state.sessions.get(session_id) {
+                ResumeState::Cold => {
                     return self.inner.resume_issuer.issue(
-                        session.header.as_ref().clone(),
-                        session.composition.clone(),
-                        None,
+                        header,
+                        composition,
+                        Some(page.domain_control_seq),
                     );
                 }
-                if state.fresh_reservations.contains(session_id) {
-                    return Err(TurnError::Invalid(
-                        "resume selected a session that is still being created".into(),
-                    ));
-                }
-                state.loading_sessions.get(session_id).cloned()
-            };
-            if let Some(load) = concurrent_load {
-                load.wait().await?;
-                continue;
             }
-            return self.inner.resume_issuer.issue(
-                header,
-                composition,
-                Some(page.domain_control_seq),
-            );
         }
     }
 
@@ -1255,25 +1235,22 @@ impl AgentKernel {
                     Err(TurnError::ShuttingDown)
                 } else if state.sessions.contains_key(session_id) {
                     Ok(())
+                } else if let Err(error) = published {
+                    Err(error)
                 } else {
-                    match published {
-                        Err(error) => Err(error),
-                        Ok(()) => {
-                            let mut session = SessionRuntime::new(
-                                header.clone(),
-                                composition.clone(),
-                                loaded.fact_seq,
-                                false,
-                            );
-                            session.turns = loaded.turns;
-                            session.turn_order = loaded.order;
-                            for turn_id in &session.turn_order {
-                                enqueue(&mut state, session_id.clone(), turn_id.clone());
-                            }
-                            state.sessions.insert(session_id.clone(), session);
-                            Ok(())
-                        }
+                    let mut session = SessionRuntime::new(
+                        header.clone(),
+                        composition.clone(),
+                        loaded.fact_seq,
+                        false,
+                    );
+                    session.turns = loaded.turns;
+                    session.turn_order = loaded.order;
+                    for turn_id in &session.turn_order {
+                        enqueue(&mut state, session_id.clone(), turn_id.clone());
                     }
+                    state.sessions.insert(session_id.clone(), session);
+                    Ok(())
                 }
             };
             load_guard.complete(result.clone());

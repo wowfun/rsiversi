@@ -1,5 +1,14 @@
 # rsi-agent-kernel
 
+Fork reconstruction captures authenticated inherited intervals once per reader,
+using the Store protocol's interval capture and retained validation leases.
+Each page still checks the issuing claim and live source availability. A reader
+cannot select a source outside its captured chain or extend its immutable cut;
+checkpoint readers retain the terminal, durable-only maintenance checks before
+and after each page. Source availability covers the whole captured chain even
+when a caller has finished an earlier interval; validation leases do not prevent
+retirement. The [reader contract](../turn-protocol/README.md) owns its lifetime.
+
 The [composition generation contract](../docs/subsystems/composition-generations.md)
 owns candidate preparation, rejection, replacement and cold recovery. Kernel owns
 the atomic selection/Domain commit. Fact and control writers share submission admission with
@@ -277,11 +286,15 @@ reads. Revocation prevents subsequent admission; an already admitted Store
 transaction may settle during the overlapping control operation. Pause waits
 for pending-only discard under the same Session submission admission, so a
 concurrently committed claim is observed as claimed before Pause returns.
-A fresh draft continuation lease retains its exact Header and composition through
-first mailbox publication. Publishing that first entry must not replace the
-generation that authorized it. A retained draft or Program pin can be reused only
+A continuation lease retains its exact Header and composition across mailbox
+publication and resident Session eviction, whether armed from a draft or durable
+state. Publishing an entry must not replace the generation that authorized it.
+A retained continuation or Program pin can be reused only
 when its selection matches the committed digest and its codecs validate retained
-states. Otherwise cold recovery prepares the current composition.
+states. Continuation lookup searches every retained domain for that Header and
+selection: pins can share one linked owner while carrying different captured
+selections. Registry order must not choose the cold composition. If no retained
+pin matches, cold recovery prepares the current composition.
 A later generation cannot be overridden by an older retained owner. Changed
 generations still reject the old continuation's authority.
 
@@ -529,7 +542,11 @@ permit before joining the FIFO budget queue for the exact reported record size.
 Every page uses a fixed cursor; a second capacity refusal or an invalid reported
 size is Store corruption. The preparation lease remains pinned across this single
 fallback, never a held-permit upgrade. Returned pages must match their requested
-cursor, turn and effective count, including speculative Fact merging. The indexed mailbox
+cursor, turn and effective count, including speculative Fact merging. A claim
+page appends its captured speculative suffix only after scanning through its
+captured durable watermark. A byte-limited Store page can contain fewer Facts
+than the requested count while leaving durable Facts unread; its cursor must not
+jump over those Facts to the pending suffix. The indexed mailbox
 retains its fixed pending-prefix admission. Checkpoint reads reserve their actual
 encoded length through ByteAdmission: global pressure is a cache miss, while the
 caller's Context admission failure keeps its original meaning. The global permit
@@ -538,6 +555,11 @@ skip only blobs larger than the configured read budget; smaller caches remain us
 Indexed turn-boundary and cold Header reads use the same admission. Retry checks
 read and compare the small Header before materializing the acceptance, then
 consume that acceptance without cloning it across another Store round trip.
+Fork capture reserves one Header read at a time. Completed source Headers become
+operation-owned retention: at most 32 Headers, each bounded to 1 MiB encoded.
+That 32 MiB encoded bound is separate from transient Store-read admission; it is
+not a process-wide retained-heap limit. Reader leases and Kernel ownership also
+remain live until the reader is released.
 Capacity and completion paths use the Store's metadata-only mailbox summary,
 so reading an exact count and Fact/control tails does not reserve or decode the
 payload prefix. Identity-only Agent-tree scheduling and settlement reuse the

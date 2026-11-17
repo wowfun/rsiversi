@@ -9,17 +9,7 @@ pub(super) struct ValidatedSessionProof;
 
 pub(super) struct PinnedProof {
     proof: Arc<ValidatedSessionProof>,
-    slot: Option<OwnedSemaphorePermit>,
-    owner: Arc<StoreInner>,
-}
-
-impl Drop for PinnedProof {
-    fn drop(&mut self) {
-        // An upgrade may be the last strong reference while the registry is locked.
-        // Never relock it here. Release capacity before notifying waiting sessions.
-        drop(self.slot.take());
-        self.owner.pin_changed.notify_waiters();
-    }
+    _slot: OwnedSemaphorePermit,
 }
 
 impl StoreInner {
@@ -53,41 +43,24 @@ impl StoreInner {
 
 impl SqliteStore {
     pub(super) async fn pin_session(&self, id: &SessionId) -> Result<SessionValidationLease> {
-        // Validation never waits for a pin slot while holding the validation lane.
         let proof = self.session_proof(id).await?;
         self.ensure_not_retired(id).await?;
-        let acquire = Arc::clone(&self.inner.pin_admission).acquire_owned();
-        tokio::pin!(acquire);
-        loop {
-            let changed = self.inner.pin_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if let Some(pin) = self.inner.pinned(id) {
-                return Ok(SessionValidationLease::new(pin));
-            }
-            let slot = tokio::select! {
-                result = &mut acquire =>
-                    result.map_err(|_| StoreError::Io("SQLite pin admission closed".into()))?,
-                () = &mut changed => continue,
-            };
-            let mut pins = self
-                .inner
-                .pins
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pins.retain(|_, proof| proof.strong_count() > 0);
-            if let Some(pin) = pins.get(id).and_then(std::sync::Weak::upgrade) {
-                return Ok(SessionValidationLease::new(pin));
-            }
-            let pin = Arc::new(PinnedProof {
-                proof,
-                slot: Some(slot),
-                owner: Arc::clone(&self.inner),
-            });
-            pins.insert(id.clone(), Arc::downgrade(&pin));
-            drop(pins);
-            self.inner.pin_changed.notify_waiters();
+        let mut pins = self
+            .inner
+            .pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pin) = pins.get(id).and_then(std::sync::Weak::upgrade) {
             return Ok(SessionValidationLease::new(pin));
         }
+        // Nested captures retain earlier ancestors. Waiting here can make every
+        // partial capture wait for capacity owned by another partial capture.
+        let slot = Arc::clone(&self.inner.pin_admission)
+            .try_acquire_owned()
+            .map_err(|_| StoreError::ValidationBusy)?;
+        pins.retain(|_, proof| proof.strong_count() > 0);
+        let pin = Arc::new(PinnedProof { proof, _slot: slot });
+        pins.insert(id.clone(), Arc::downgrade(&pin));
+        Ok(SessionValidationLease::new(pin))
     }
 }

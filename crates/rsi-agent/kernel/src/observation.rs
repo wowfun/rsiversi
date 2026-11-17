@@ -49,6 +49,22 @@ pub(super) async fn read_controls_bounded(
     Ok(page)
 }
 
+pub(super) async fn read_domain_admission_bounded(
+    inner: &Arc<KernelInner>,
+    session_id: &SessionId,
+) -> std::result::Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot, StoreError> {
+    // At most 64 heads, each with a 256-byte name and fixed-size metadata.
+    let (page, _permit, _lease) = store_reads::read(
+        inner,
+        session_id,
+        rsi_agent_session_protocol::MAXIMUM_SESSION_DOMAINS * 512,
+        true,
+        |store, id| async move { store.read_domain_admission(&id).await },
+    )
+    .await?;
+    Ok(page)
+}
+
 pub(super) async fn read_domain_states_bounded(
     inner: &Arc<KernelInner>,
     session_id: &SessionId,
@@ -120,134 +136,6 @@ pub(super) async fn read_domain_request_bounded(
         ));
     }
     Ok(Some(receipt))
-}
-
-pub(super) async fn fork_sources_from_header(
-    inner: &Arc<KernelInner>,
-    header: &SessionHeader,
-) -> TurnResult<Vec<SessionHeader>> {
-    let mut sources = Vec::new();
-    let mut current = header.clone();
-    while let Some(origin) = current.history_origin() {
-        if sources.len() >= rsi_agent_session_protocol::MAXIMUM_FORK_HISTORY_DEPTH {
-            return Err(TurnError::Invariant(
-                "fork source chain exceeds lineage depth".into(),
-            ));
-        }
-        let parent = read_validated_header_bounded(inner, &origin.parent_session_id)
-            .await
-            .map_err(turn_store_error)?;
-        if parent
-            .fingerprint()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?
-            != origin.parent_header_fingerprint
-        {
-            return Err(TurnError::Invariant(
-                "fork source Header binding changed".into(),
-            ));
-        }
-        let include_parent = matches!(
-            origin.requested_turns,
-            rsi_agent_session_protocol::ForkTurnSelection::All
-        );
-        sources.push(current);
-        if !include_parent {
-            break;
-        }
-        current = parent;
-    }
-    sources.reverse();
-    Ok(sources)
-}
-
-pub(super) async fn read_fork_page_from_header(
-    inner: &Arc<KernelInner>,
-    header: &SessionHeader,
-    source: &SessionId,
-    after_parent_seq: u64,
-    limit: usize,
-) -> TurnResult<Option<ForkFactPage>> {
-    let sources = fork_sources_from_header(inner, header).await?;
-    let header = sources
-        .iter()
-        .find(|header| header.session_id() == source)
-        .ok_or_else(|| {
-            TurnError::Invalid("fork source is outside the immutable selection".into())
-        })?;
-    let Some(origin) = header.history_origin().cloned() else {
-        return Ok(None);
-    };
-    if after_parent_seq < origin.resolved_after_seq
-        || after_parent_seq > origin.resolved_terminal_seq
-    {
-        return Err(TurnError::Invalid(
-            "fork parent cursor is outside the immutable inherited interval".into(),
-        ));
-    }
-    if after_parent_seq == origin.resolved_after_seq {
-        let parent_header = read_validated_header_bounded(inner, &origin.parent_session_id)
-            .await
-            .map_err(turn_store_error)?;
-        if parent_header
-            .fingerprint()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?
-            != origin.parent_header_fingerprint
-        {
-            return Err(TurnError::Invariant(
-                "fork parent Header fingerprint changed".into(),
-            ));
-        }
-        let boundary = inner
-            .store
-            .resolve_fork_boundary(
-                &origin.parent_session_id,
-                &origin.point,
-                origin.requested_turns.clone(),
-            )
-            .await
-            .map_err(turn_store_error)?;
-        if boundary.resolved_after_seq != origin.resolved_after_seq
-            || boundary.resolved_terminal_seq != origin.resolved_terminal_seq
-            || boundary.terminal_prefix_sha256 != origin.terminal_prefix_sha256
-            || boundary.resolved_terminal_control_seq != origin.resolved_terminal_control_seq
-            || boundary.terminal_control_prefix_sha256 != origin.terminal_control_prefix_sha256
-            || boundary.effective_turns != origin.effective_turns
-        {
-            return Err(TurnError::Invariant(
-                "fork parent boundary changed after child creation".into(),
-            ));
-        }
-    }
-    if after_parent_seq == origin.resolved_terminal_seq {
-        return Ok(Some(ForkFactPage {
-            facts: Vec::new(),
-            through_parent_seq: after_parent_seq,
-            terminal_parent_seq: origin.resolved_terminal_seq,
-        }));
-    }
-    let (page, _) = read_facts_bounded(inner, &origin.parent_session_id, after_parent_seq, limit)
-        .await
-        .map_err(turn_store_error)?;
-    let facts = page
-        .facts
-        .into_iter()
-        .take_while(|fact| fact.seq() <= origin.resolved_terminal_seq)
-        .map(Arc::new)
-        .collect::<Vec<_>>();
-    let through_parent_seq = facts
-        .last()
-        .map_or(after_parent_seq, |fact| fact.seq())
-        .min(origin.resolved_terminal_seq);
-    if through_parent_seq == after_parent_seq {
-        return Err(TurnError::Invariant(
-            "fork parent Fact page made no progress".into(),
-        ));
-    }
-    Ok(Some(ForkFactPage {
-        facts,
-        through_parent_seq,
-        terminal_parent_seq: origin.resolved_terminal_seq,
-    }))
 }
 
 pub(super) async fn observe_agent_wait_change(

@@ -257,6 +257,14 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn read_domain_admission(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot>
+    {
+        self.inner.read_domain_admission(id).await
+    }
+
     async fn session_summary(
         &self,
         session_id: &SessionId,

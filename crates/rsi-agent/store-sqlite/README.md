@@ -5,12 +5,16 @@ query, decoding each control once and retaining only selected snapshots. Both
 current and historical reads preserve domain ordering and reject missing,
 oversized or mismatched canonical records. Retained-state checks stay inside the
 write transaction so revision admission observes the same state as publication.
-Historical membership seeks successive Domain names and each name's latest
-version at the requested cut, using the existing primary key. Work grows with
-distinct historical names, not every revision of a long-lived Domain; removals
-still filter membership at the same cut. No secondary payload cache is stored.
+Historical membership selects the last bounded name-set projection at its cut,
+then seeks each selected name's latest version. Work is independent of names
+retired before that cut and names introduced later. Canonical control replay
+verifies every membership change and rejects missing or extra projections. This
+derived index contains names only, never a second snapshot payload. The initial
+Domain commit always anchors membership, including an empty name set. Replay
+checks that one baseline row as well as subsequent membership changes; later
+commits with unchanged membership create no row.
 
-Schema 50 stores Header format 38 with separate history provenance and Agent
+Schema 51 stores Header format 39 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -297,7 +301,9 @@ admission hints, never as validation proofs. Failed validations publish no hint
 or proof. The serialized validation lane checks the cache again after admission;
 miss checks alone never change queue membership. Metadata reads neither fill nor touch the cache. The
 cache reuse and post-commit marking are optional: poisoning disables both,
-while in-use pins remain independent. Cache failure cannot turn a successful
+while in-use pins remain independent. Pins retain proof and admission capacity,
+not the Store or its writer lock; they confer no authority after the Store closes.
+Cache failure cannot turn a successful
 durable commit into an error. Cold proof publication still requires a usable cache,
 as described by the validation failure contract below. Cold validation
 still runs before any indexed execution/history read. Kernel prepares a proof
@@ -450,7 +456,10 @@ Ready pages join mailbox source metadata by its complete primary key, rejecting
 missing or inconsistent projections without decoding message bodies. Waiting
 pages use a partial Session-id index containing only waiting activations, so
 unrelated running or parked activations do not determine page work.
-CAS file work has a separate single-slot blocking admission. Hashing and
+Each immutable CAS candidate is hashed once under bounded publication admission;
+publication consumes that private prepared value. Existing durable bytes still
+receive independent integrity verification. CAS reads retain their separate
+single-slot blocking admission. Hashing and
 immutable file publication do not hold a SQLite connection mutex; metadata is
 checked or inserted only after the file phase completes.
 
@@ -500,10 +509,11 @@ for binding and validating the opaque checkpoint bytes and their exact prefix.
 
 Prepared operations retain real validation proofs independently of the evictable
 cache. At most 256 distinct Sessions are pinned at once; concurrent preparations
-of one Session share a pin. Distinct-session waiters retain semaphore FIFO position
-across unrelated pin notifications; same-session waiters can still share a newly
-published pin immediately. Waiting for a pin holds neither a validation lane nor
-payload admission. The pin retains the Store owner; ordinary cache proofs do not.
+of one Session share a pin. A new distinct pin at capacity refuses with
+`ValidationBusy` instead of waiting while a nested reader retains earlier pins.
+Sharing an existing pin remains available at capacity. A pin retains its validation
+proof and admission permit, independently of the Store owner. Active I/O retains
+the Store separately until that work completes.
 Only successful validation or committed typed writes establish proofs.
 Cache insertion returns its retained proof, reusing an existing proof on a hit.
 Pin lookups examine only the selected identity. Insertion sweeps dead

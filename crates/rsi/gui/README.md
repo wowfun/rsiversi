@@ -135,6 +135,11 @@ and summarizes running work; Standard shows the current work and completed
 summaries; Detailed expands running steps; Verbose preserves full chronological
 content. Expansion is bounded to the pane's loaded Turn window. Scroll updates
 preserve the reading anchor unless the reader is following the end.
+Process blocks are the disclosure units, not a count of Agent Steps. Compact
+omits process previews; Standard and Detailed show live detail and settled
+reasoning previews. Detailed keeps running process bodies open. Normal completion
+folds process in every mode except Verbose while preserving assistant replies.
+Failed and incomplete Turns remain expanded. Mode changes retain message nodes.
 
 Native panes expose Export and `/export`, sharing the terminal argument parser.
 Export bypasses model submission and is bound to the pane attachment generation.
@@ -355,7 +360,10 @@ never authorizes reconciliation of a partial membership.
 Inputs enter a closed Rust command grammar with non-queued admission. The application
 admits at most eight commands globally and one submission awaiting a receipt per
 saved Session owner. Each pane retains at most 64 such owners and at most 1,024
-owned pending message IDs per Session. The application retains no editable composer
+owned pending message IDs per Session. Reopening reconciles accepted identities against the inspection's durable
+control cut and pending set. Unknown outcomes and receipts newer than that cut
+remain retained. This uses the existing inspection without per-message status reads.
+The application retains no editable composer
 mirror. Ordinary command documents are limited to 1 MiB plus their small envelope;
 submission preparation and opaque execution have separate 8 MiB message and 32 KiB
 command bounds. Encoded views use a separate 32 MiB reservation.

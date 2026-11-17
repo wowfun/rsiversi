@@ -434,6 +434,22 @@ impl SessionStore for SqliteStore {
         })
         .await
     }
+    async fn read_domain_admission(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot> {
+        self.ensure_session_validated(session_id).await?;
+        let session_id = session_id.clone();
+        self.with_reader_named(StoreOperation::Watermarks, move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let page = domain::read_admission(&transaction, &session_id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(page)
+        })
+        .await
+    }
     async fn read_domain_states(
         &self,
         session_id: &SessionId,
@@ -2383,7 +2399,10 @@ impl SessionStore for SqliteStore {
                 "CAS bytes must be nonempty and bounded".into(),
             ));
         }
-        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let candidate = self
+            .with_cas_publication(move || Ok(cas::PreparedCandidate::new(bytes)))
+            .await?;
+        let hash = candidate.reference().sha256.clone();
         let ownership = self.inner.cas_ownership.acquire(&hash, false)?;
         let retained = ownership.clone();
         self.with_reader(move |connection| {
@@ -2394,7 +2413,7 @@ impl SessionStore for SqliteStore {
         let owner = Arc::clone(&self.inner);
         let reference = self
             .with_cas_publication(move || {
-                let reference = install_cas(&owner.cas_dir, &bytes, &owner.cas_publication)?;
+                let reference = install_cas(&owner.cas_dir, candidate, &owner.cas_publication)?;
                 rsi_agent_store_protocol::PreparedCasObject::new(reference, ownership)
             })
             .await?;

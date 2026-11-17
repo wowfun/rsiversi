@@ -332,6 +332,9 @@ impl SessionHandle for Backend {
                     "plan",
                     "Plan on or off",
                     true,
+                    Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        hint: "Arguments".into(),
+                    }),
                 )
                 .unwrap(),
                 SessionCommandDescriptor::new(
@@ -339,6 +342,7 @@ impl SessionHandle for Backend {
                     "model-selection",
                     "Select model and effort",
                     true,
+                    None,
                 )
                 .unwrap(),
             ],

@@ -1,4 +1,7 @@
 use super::*;
+fn locator(byte: &str) -> rsi_spill::SpillLocator {
+    rsi_spill::SpillLocator::parse(format!("{}-{}", "0".repeat(64), byte.repeat(32))).unwrap()
+}
 use serde_json::{Value, json};
 use sources::view;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,36 +20,37 @@ impl Drop for Active<'_> {
     }
 }
 #[async_trait]
-impl rsi_process::ProcessOutputCache for Cache {
+impl rsi_spill::SpillReader for Cache {
     async fn read(
         &self,
-        id: &str,
+        id: &rsi_spill::SpillLocator,
         offset: u64,
         limit: usize,
-    ) -> rsi_process::Result<rsi_process::OutputPage> {
-        self.reads.lock().unwrap().push((id.into(), offset));
+    ) -> rsi_spill::Result<rsi_spill::SpillPage> {
+        self.reads.lock().unwrap().push((id.to_string(), offset));
         self.active.fetch_add(1, Ordering::SeqCst);
         let _active = Active(&self.active);
         if self.block.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
         if self.unavailable.load(Ordering::SeqCst) {
-            return Err(rsi_process::ProcessError::InvalidInput(
+            return Err(rsi_spill::SpillError::Unavailable(
                 "completed output is unavailable".into(),
             ));
         }
-        let mut bytes = if id.starts_with('a') {
-            b"STDOUT\n".to_vec()
-        } else {
-            b"STDERR\n".to_vec()
+        let mut bytes = match id.object_name().as_bytes()[0] {
+            b'a' => b"STDOUT\n".to_vec(),
+            b'b' => b"STDERR\n".to_vec(),
+            b'c' => b"OUTPUT\n".to_vec(),
+            _ => panic!("unexpected fixture locator"),
         };
         bytes.extend_from_slice(b"<script>literal</script>\x00\x1b\xff\n");
         bytes.resize(16 * 1024, b'x');
         bytes.extend_from_slice(b"SECOND-PAGE\x00\xff\n");
         let start = usize::try_from(offset).unwrap();
         let end = (start + limit).min(bytes.len());
-        let page = rsi_process::OutputPage {
-            id: id.into(),
+        let page = rsi_spill::SpillPage {
+            locator: id.clone(),
             offset,
             next_offset: end as u64,
             total_bytes: bytes.len() as u64,
@@ -66,7 +70,7 @@ impl PluginFactory for Supply {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let supply = plan
             .context()
-            .provide_local::<rsi_process::ProcessOutputCacheContract>(self.0.clone())?;
+            .provide_local::<rsi_spill::SpillReaderContract>(self.0.clone())?;
         plan.defer(
             "withdraw output cache",
             Box::new(move || {
@@ -110,12 +114,33 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
         .await
         .unwrap();
     assert_eq!(fiber.snapshot().state, FiberState::Active);
-    backend.facts.lock().unwrap().push(SessionFact::new(9,1,SessionFactBody::ToolResult {
-        turn_id:TurnId::new("turn").unwrap(), effect_id:EffectId::new("effect").unwrap(),
-        identity:rsi_tools_protocol::ToolResultIdentity::new("owner","invocation","call","a".repeat(64)).unwrap(),
-        result:rsi_tools_protocol::ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":"a".repeat(32)},"stderr":{"full_output":"b".repeat(32)}}),vec![],false).unwrap(),
-        conclusion: None,
-    }).unwrap());
+    let mut result = rsi_tools_protocol::ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":locator("a").to_string()},"stderr":{"full_output":locator("b").to_string()}}),vec![],false).unwrap();
+    result.spills = ["a", "b", "c"]
+        .map(|id| rsi_spill::SpillRef {
+            locator: locator(id),
+            bytes: 16_398,
+        })
+        .into();
+    backend.facts.lock().unwrap().push(
+        SessionFact::new(
+            9,
+            1,
+            SessionFactBody::ToolResult {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("effect").unwrap(),
+                identity: rsi_tools_protocol::ToolResultIdentity::new(
+                    "owner",
+                    "invocation",
+                    "call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+                result,
+                conclusion: None,
+            },
+        )
+        .unwrap(),
+    );
     let session = view(&app)["surfaces"]["main"]["session"].clone();
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
@@ -123,22 +148,30 @@ async fn output_cards_preserve_raw_stream_pages_and_fence_closed_or_replaced_vie
     let current = view(&app);
     let pane = &current["surfaces"]["main"];
     let open = json!({"action":"ui_block","pane":"main","generation":pane["generation"],"key":pane["transcript"]["blocks"][0]["key"]}).to_string();
-    for (label, id) in [("Read stdout", "a"), ("Read stderr", "b")] {
+    for (label, id, prefix) in [
+        ("Read stdout", "a", "STDOUT"),
+        ("Read stderr", "b", "STDERR"),
+        ("Read output 1", "c", "OUTPUT"),
+    ] {
         app.command(&open).await.unwrap();
         let card = super::sources::panel(&app)["ui_detail"].clone();
         assert!(card.to_string().contains("command failed"));
+        assert!(
+            !card.to_string().contains("Read output 2"),
+            "stream references must not produce duplicate generic buttons"
+        );
         let read = ui::button(&card, Some(label));
         app.command(&read.to_string()).await.unwrap();
         let first = super::sources::panel(&app)["ui_detail"].clone();
         let code = first["model"]["standard_view"]["elements"][2]["text"]
             .as_str()
             .unwrap();
-        assert!(code.starts_with(&label[5..].to_uppercase()));
+        assert!(code.starts_with(prefix));
         assert!(code.contains("<script>literal</script>���"));
         assert!(!code.contains('\u{1b}'));
         assert_eq!(
             cache.reads.lock().unwrap().last().unwrap(),
-            &(id.repeat(32), 0)
+            &(locator(id).to_string(), 0)
         );
         let next = ui::button(&first, Some("Next page"));
         app.command(&next.to_string()).await.unwrap();

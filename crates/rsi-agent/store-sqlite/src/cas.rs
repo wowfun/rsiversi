@@ -1,5 +1,27 @@
 use super::*;
 
+// Construction is private to the Store's bounded CAS worker. The same immutable
+// bytes and digest travel together through ownership admission and publication.
+pub(super) struct PreparedCandidate {
+    reference: CasObjectRef,
+    bytes: Arc<[u8]>,
+}
+impl PreparedCandidate {
+    pub(super) fn reference(&self) -> &CasObjectRef {
+        &self.reference
+    }
+
+    pub(super) fn new(bytes: Arc<[u8]>) -> Self {
+        Self {
+            reference: CasObjectRef {
+                sha256: hex::encode(Sha256::digest(&bytes)),
+                byte_len: bytes.len() as u64,
+            },
+            bytes,
+        }
+    }
+}
+
 /// One filesystem operation in immutable CAS publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicationStep {
@@ -70,7 +92,7 @@ impl Publication {
         Ok(())
     }
 
-    #[cfg(any(all(test, unix), feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn inject(&self, step: PublicationStep, phase: PublicationPhase) {
         assert!(self.fault.lock().unwrap().replace((step, phase)).is_none());
     }
@@ -165,7 +187,7 @@ impl PublicationDirectory {
 #[cfg(any(unix, windows))]
 pub(super) fn install_cas(
     cas_dir: &Path,
-    bytes: &[u8],
+    candidate: PreparedCandidate,
     publication: &Publication,
 ) -> Result<CasObjectRef> {
     let cas = PublicationDirectory::new(
@@ -180,22 +202,18 @@ pub(super) fn install_cas(
         .map_err(io_error)?,
     )
     .map_err(io_error)?;
-    install_in_namespaces(&cas, &staging, bytes, publication)
+    install_in_namespaces(&cas, &staging, candidate, publication)
 }
 
 #[cfg(any(unix, windows))]
 fn install_in_namespaces(
     cas: &PublicationDirectory,
     staging: &PublicationDirectory,
-    bytes: &[u8],
+    candidate: PreparedCandidate,
     publication: &Publication,
 ) -> Result<CasObjectRef> {
-    let reference = CasObjectRef {
-        sha256: hex::encode(Sha256::digest(bytes)),
-        byte_len: u64::try_from(bytes.len())
-            .map_err(|_| StoreError::Invalid("CAS length exceeds u64".into()))?,
-    };
-    reference.validate()?;
+    let PreparedCandidate { reference, bytes } = candidate;
+    let bytes = bytes.as_ref();
     let sha256 = &reference.sha256;
     let target = Path::new(sha256);
     match cas.open(target) {
@@ -249,7 +267,7 @@ fn install_in_namespaces(
 #[cfg(not(any(unix, windows)))]
 pub(super) fn install_cas(
     _cas_dir: &Path,
-    _bytes: &[u8],
+    _candidate: PreparedCandidate,
     _publication: &Publication,
 ) -> Result<CasObjectRef> {
     filesystem::require_native_platform()?;
@@ -281,9 +299,13 @@ mod publication_authority_tests {
         let outside = temp.path().join("outside");
         fs::create_dir(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, &original).unwrap();
-        let result =
-            install_in_namespaces(&cas, &staging, b"retained body", &Publication::default())
-                .unwrap();
+        let result = install_in_namespaces(
+            &cas,
+            &staging,
+            PreparedCandidate::new(Arc::from(b"retained body".as_slice())),
+            &Publication::default(),
+        )
+        .unwrap();
         assert_eq!(
             fs::read(moved.join(result.sha256)).unwrap(),
             b"retained body"

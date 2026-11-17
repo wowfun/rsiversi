@@ -667,6 +667,8 @@ async fn lost_domain_acknowledgements_reconcile_exact_receipts_without_reapplyin
     let memory = Arc::new(MemoryStore::new());
     let store = Arc::new(FactReadRaceStore::new(memory.clone()));
     let run = DomainRun::start(store.clone()).await;
+    let payload_reads = store.projection_reads.load(Ordering::SeqCst);
+    let metadata_reads = store.domain_admission_reads.load(Ordering::SeqCst);
     store.fail_domain_after_apply.store(true, Ordering::Release);
     let first = run
         .kernel
@@ -681,6 +683,12 @@ async fn lost_domain_acknowledgements_reconcile_exact_receipts_without_reapplyin
         first
     );
 
+    assert_eq!(store.projection_reads.load(Ordering::SeqCst), payload_reads);
+    assert_eq!(
+        store.domain_admission_reads.load(Ordering::SeqCst),
+        metadata_reads + 1,
+        "receipt retries must skip state admission reads"
+    );
     run.kernel
         .commit_domains(&run.claim, run.mutation("next", 2, false, vec![]))
         .await
@@ -2339,17 +2347,12 @@ async fn manual_fork_is_unpublished_and_uses_terminal_domains_with_independent_o
                 .iter()
                 .all(|id| id.as_str() != name)
         );
-        let sources = run.kernel.read_fork_sources(&claim).await.unwrap();
+        let reader = run.kernel.open_fork_history(&claim).await.unwrap();
+        let sources = reader.sources();
         assert_eq!(sources.len(), 1);
         let origin = sources[0].history_origin().unwrap();
-        let page = run
-            .kernel
-            .read_fork_facts(
-                &claim,
-                sources[0].session_id(),
-                origin.resolved_after_seq,
-                32,
-            )
+        let page = reader
+            .read_facts(sources[0].session_id(), origin.resolved_after_seq, 32)
             .await
             .unwrap()
             .unwrap();

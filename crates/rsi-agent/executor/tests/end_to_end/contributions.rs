@@ -956,6 +956,9 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
                         "pause",
                         "Pause report",
                         true,
+                        Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                            hint: "Arguments".into(),
+                        }),
                     )
                     .unwrap(),
                     report.clone(),
@@ -1236,8 +1239,16 @@ async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input()
             id.clone(),
             0,
             ContributionKind::Command(SessionCommandRegistration::new(
-                SessionCommandDescriptor::new(id.clone(), "selection", "Set selection", true)
-                    .unwrap(),
+                SessionCommandDescriptor::new(
+                    id.clone(),
+                    "selection",
+                    "Set selection",
+                    true,
+                    Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        hint: "Arguments".into(),
+                    }),
+                )
+                .unwrap(),
                 command,
             )),
         )],

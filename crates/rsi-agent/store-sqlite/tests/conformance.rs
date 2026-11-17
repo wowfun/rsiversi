@@ -1767,6 +1767,7 @@ fn unsupported_or_incomplete_schema_is_rejected_before_any_write() {
     let current = rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION;
     for (version, partial) in [
         (current, false),
+        (50, false),
         (45, false),
         (44, false),
         (43, false),

@@ -113,6 +113,7 @@ struct FactReadRaceStore {
     release_reply_read: Notify,
     stale_domain_read: AtomicBool,
     projection_reads: AtomicUsize,
+    domain_admission_reads: AtomicUsize,
     selected_domain_reads: AtomicUsize,
     watermark_reads: tokio::sync::Semaphore,
     pause_domain_read: AtomicBool,
@@ -222,6 +223,7 @@ impl FactReadRaceStore {
             release_reply_read: Notify::new(),
             stale_domain_read: AtomicBool::new(false),
             projection_reads: AtomicUsize::new(0),
+            domain_admission_reads: AtomicUsize::new(0),
             selected_domain_reads: AtomicUsize::new(0),
             watermark_reads: tokio::sync::Semaphore::new(0),
             pause_domain_read: AtomicBool::new(false),
@@ -521,6 +523,15 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn read_domain_admission(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot>
+    {
+        self.domain_admission_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read_domain_admission(id).await
+    }
+
     async fn session_summary(
         &self,
         session_id: &SessionId,

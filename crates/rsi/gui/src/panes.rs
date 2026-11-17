@@ -65,10 +65,23 @@ pub(crate) struct ReuseDraft {
 pub(crate) struct SubmissionState {
     model_command: rsi_client::CommandSubmission,
     receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
-    owned: Mutex<BTreeSet<MessageId>>,
+    owned: Mutex<BTreeMap<MessageId, Option<u64>>>,
     submissions: Arc<tokio::sync::Semaphore>,
 }
 impl SubmissionState {
+    fn reconcile_pending(
+        &self,
+        through: u64,
+        pending: &[rsi_agent_store_protocol::StorePendingMessage],
+    ) {
+        let pending: BTreeSet<_> = pending.iter().map(|message| &message.message_id).collect();
+        self.owned
+            .lock()
+            .expect("Web pending identities poisoned")
+            .retain(|id, accepted| {
+                accepted.is_none_or(|seq| seq > through) || pending.contains(id)
+            });
+    }
     pub(crate) fn observe(&self, update: &rsi_agent_turn_protocol::SessionObservation) {
         use rsi_agent_session_protocol::AgentControlRecordBody as Control;
         let rsi_agent_turn_protocol::SessionObservation::Control { record, .. } = update else {
@@ -89,7 +102,7 @@ impl SubmissionState {
         Self {
             model_command: rsi_client::CommandSubmission::default(),
             receipt: Mutex::new(None),
-            owned: Mutex::new(BTreeSet::new()),
+            owned: Mutex::new(BTreeMap::new()),
             submissions: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
@@ -652,6 +665,7 @@ impl GuiApplication {
                         .map_err(error)?;
                     entries.push(rsi_client::InputCompletion {
                         group: rsi_client::CompletionGroup::Command,
+                        composer_input: Some(rsi_agent_session_protocol::ComposerCommandInput::Text { hint: "Filename and export options".into() }),
                         name: "export".into(), replacement: "/export".into(),
                         description: "Export Session: [filename] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]".into(),
                         resource: None,
@@ -918,6 +932,7 @@ impl GuiApplication {
                 .durable_fact_seq
                 .checked_add(1)
                 .ok_or("History sequence exhausted")?;
+            draft.reconcile_pending(inspection.durable_control_seq, &inspection.pending);
             let history = rsi_client::read_with_capacity_retry(&self.execution, || {
                 handle.history_before(Some(before), 128)
             })
@@ -1321,7 +1336,7 @@ mod tests {
             let owner = pane
                 .submission(&SessionId::new(format!("retained-{index}")).unwrap())
                 .unwrap();
-            owner.owned.lock().unwrap().insert(message.clone());
+            owner.owned.lock().unwrap().insert(message.clone(), None);
             owners.push(owner);
         }
         let in_flight = owners[0].submissions.clone().try_acquire_owned().unwrap();
@@ -1349,7 +1364,7 @@ mod tests {
                     message_id: message.clone(),
                 },
             );
-            assert!(owner.owned.lock().unwrap().contains(&message));
+            assert!(owner.owned.lock().unwrap().contains_key(&message));
             observe(
                 owner,
                 match index % 3 {
@@ -1375,8 +1390,77 @@ mod tests {
         }
         pane.submission(&SessionId::new("next").unwrap()).unwrap();
         assert_eq!(pane.submissions.lock().unwrap().len(), 3);
-        assert!(owners[63].owned.lock().unwrap().contains(&message));
+        assert!(owners[63].owned.lock().unwrap().contains_key(&message));
         assert_eq!(owners[0].submissions.available_permits(), 0);
         drop(in_flight);
+    }
+    #[test]
+    fn reopening_reclaims_only_accepted_messages_covered_by_the_inspection() {
+        use rsi_agent_session_protocol::{
+            AgentMessageSourceKind, MessageDelivery, MessageTarget, QueueSlot,
+        };
+        let pane = Pane::default();
+        let unknown = MessageId::new("unknown").unwrap();
+        let future = MessageId::new("newer-than-inspection").unwrap();
+        let pending_id = MessageId::new("pending").unwrap();
+        let pending = rsi_agent_store_protocol::StorePendingMessage {
+            queue_slot: QueueSlot::initial(&pending_id, 1, 1),
+            source_kind: AgentMessageSourceKind::Human,
+            has_turn_options: false,
+            message_id: pending_id.clone(),
+            delivery: MessageDelivery::NextTurn,
+            target: MessageTarget::NextTurn,
+            permits_promotion: true,
+            bound_turn_id: None,
+            accepted_control_seq: 1,
+        };
+        for index in 0..64 {
+            let owner = pane
+                .submission(&SessionId::new(format!("reopened-{index}")).unwrap())
+                .unwrap();
+            owner
+                .owned
+                .lock()
+                .unwrap()
+                .insert(MessageId::new("accepted").unwrap(), Some(2));
+            if index == 0 {
+                owner.owned.lock().unwrap().insert(unknown.clone(), None);
+            }
+            if index == 1 {
+                owner.owned.lock().unwrap().insert(future.clone(), Some(4));
+            }
+            if index == 2 {
+                owner
+                    .owned
+                    .lock()
+                    .unwrap()
+                    .insert(pending_id.clone(), Some(1));
+            }
+            owner.reconcile_pending(3, std::slice::from_ref(&pending));
+        }
+        pane.submission(&SessionId::new("next").unwrap()).unwrap();
+        let owners = pane.submissions.lock().unwrap();
+        assert_eq!(owners.len(), 4);
+        assert!(
+            owners[&SessionId::new("reopened-2").unwrap()]
+                .owned
+                .lock()
+                .unwrap()
+                .contains_key(&pending_id)
+        );
+        assert!(
+            owners[&SessionId::new("reopened-0").unwrap()]
+                .owned
+                .lock()
+                .unwrap()
+                .contains_key(&unknown)
+        );
+        assert!(
+            owners[&SessionId::new("reopened-1").unwrap()]
+                .owned
+                .lock()
+                .unwrap()
+                .contains_key(&future)
+        );
     }
 }

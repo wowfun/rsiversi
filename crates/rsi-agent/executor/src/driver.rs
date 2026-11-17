@@ -1434,7 +1434,11 @@ impl Driver {
             )));
         }
         let combined = combine_cancellation(cancellation, stop);
-        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default();
+        let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
+            .with(Arc::new(rsi_tools_protocol::ToolExecutionSession {
+                scope: rsi_spill::SpillScope::new("session", claim.session_id().as_str()),
+            }))
+            .map_err(fatal)?;
         if let Some(lease) = claim.execution() {
             extensions = extensions.with(Arc::new(lease.clone())).map_err(fatal)?;
         }
@@ -2508,23 +2512,21 @@ impl Driver {
         if claim.header().history_origin().is_none() {
             return Ok(());
         }
-        let sources = self
+        let reader = self
             .turns
-            .read_fork_sources(claim)
+            .open_fork_history(claim)
             .await
             .map_err(execution_support::turn_failure)?;
-        for source in &sources {
+        for source in reader.sources() {
             fold.ingest(ContextPage::ForkSource(source))
                 .map_err(|error| context_failure("context.invalid_fork", &error))?;
             let origin = source
                 .history_origin()
                 .ok_or_else(|| failed("context.invalid_fork", "source has no fork interval"))?;
             let mut cursor = origin.resolved_after_seq;
-            loop {
-                let page = self
-                    .turns
-                    .read_fork_facts(
-                        claim,
+            while cursor < origin.resolved_terminal_seq {
+                let page = reader
+                    .read_facts(
                         source.session_id(),
                         cursor,
                         rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
@@ -2538,14 +2540,11 @@ impl Driver {
                         )
                     })?;
                 scan.page(true, &page.facts);
-                if page.through_parent_seq == cursor {
-                    if cursor != page.terminal_parent_seq {
-                        return Err(failed(
-                            "context.fork_stalled",
-                            "fork history reader made no progress",
-                        ));
-                    }
-                    break;
+                if page.through_parent_seq <= cursor {
+                    return Err(failed(
+                        "context.fork_stalled",
+                        "fork history reader made no progress",
+                    ));
                 }
                 fold.ingest(ContextPage::ForkSeed(&page.facts))
                     .map_err(|error| context_failure("context.invalid_fork", &error))?;

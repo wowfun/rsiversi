@@ -36,12 +36,7 @@ impl Sessions {
         let sources = capture_inherited_intervals(self.store.as_ref(), header)
             .await
             .map_err(|error| Error::Remote(error.to_string()))?;
-        let meta=sources.iter().map(|row|{
-            let origin=row.source.history_origin().expect("captured inherited interval");
-            json!({"parent":row.parent.session_id(),"parent_time":row.parent.created_at_ms(),"child":row.source.session_id(),
-                "child_time":row.source.created_at_ms(),"after":origin.resolved_after_seq,"through":origin.resolved_terminal_seq,
-                "full":matches!(origin.requested_turns,ForkTurnSelection::All)})
-        }).collect();
+        let meta = sources.iter().map(interval_metadata).collect();
         let selection = Arc::new(Selection {
             target: header.session_id().clone(),
             sources,
@@ -84,3 +79,16 @@ impl Sessions {
             read_facts(self.store.as_ref(),&origin.parent_session_id,read.after_seq,read.through_seq))=>result}
     }
 }
+
+fn interval_metadata(row: &InheritedInterval) -> Value {
+    let origin = row
+        .source
+        .history_origin()
+        .expect("captured inherited interval");
+    json!({"parent":origin.parent_session_id,"parent_time":row.parent_created_at_ms,"child":row.source.session_id(),
+        "child_time":row.source.created_at_ms(),"after":origin.resolved_after_seq,"through":origin.resolved_terminal_seq,
+        "full":matches!(origin.requested_turns,ForkTurnSelection::All)})
+}
+
+#[cfg(test)]
+mod tests;

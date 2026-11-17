@@ -103,24 +103,135 @@ fn generation_position(
     ).optional().map_err(sql_error)?.map(|seq| decode_u64("generation position", seq)).transpose()
 }
 
-// CROSS JOIN keeps distinct names outermost: each version lookup is an exact
-// primary-key seek instead of scanning revisions to match the recursive result.
-const HISTORICAL_HEADS_SQL: &str = "WITH RECURSIVE names(domain_id) AS (
-    SELECT MIN(domain_id) FROM domain_versions WHERE session_id = ?1
-    UNION ALL
-    SELECT (SELECT MIN(domain_id) FROM domain_versions WHERE session_id = ?1 AND domain_id > names.domain_id)
-    FROM names WHERE domain_id IS NOT NULL
-)
-SELECT d.domain_id, d.control_seq, d.update_index, d.codec_version, d.revision, d.snapshot_bytes
-FROM names CROSS JOIN domain_versions d ON d.session_id = ?1 AND d.domain_id = names.domain_id
-AND d.control_seq = (SELECT MAX(v.control_seq) FROM domain_versions v WHERE v.session_id = ?1 AND v.domain_id = names.domain_id AND v.control_seq <= ?2)
-WHERE NOT EXISTS(SELECT 1 FROM domain_removals r WHERE r.session_id = d.session_id AND r.domain_id = d.domain_id AND r.control_seq > d.control_seq AND r.control_seq <= ?2)
-ORDER BY d.domain_id LIMIT 65";
+// A membership cut contains only bounded names, never Domain snapshot bytes.
+// Validated names contain only identifier ASCII, so JSON adds quotes and commas
+// without escaping. Empty membership still needs its two array delimiters.
+const MAXIMUM_MEMBERSHIP_BYTES: usize =
+    2 + MAXIMUM_SESSION_DOMAINS * (3 + rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES);
+const MEMBERSHIP_SQL: &str = "SELECT control_seq,
+    CASE WHEN length(CAST(names_json AS BLOB)) <= ?3 THEN names_json END
+    FROM domain_membership_cuts WHERE session_id=?1 AND control_seq<=?2
+    ORDER BY control_seq DESC LIMIT 1";
+
+fn membership_changed(before: &[StoreDomainHead], after: &[StoreDomainHead]) -> bool {
+    !before
+        .iter()
+        .map(|head| head.identity.id())
+        .eq(after.iter().map(|head| head.identity.id()))
+}
+
+fn read_membership(
+    connection: &Connection,
+    session: &SessionId,
+    horizon: u64,
+) -> Result<Option<(u64, Vec<String>)>> {
+    let row = connection
+        .query_row(
+            MEMBERSHIP_SQL,
+            params![
+                session.as_str(),
+                sqlite_u64("domain horizon", horizon)?,
+                i64::try_from(MAXIMUM_MEMBERSHIP_BYTES).unwrap()
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let Some((cut, encoded)) = row else {
+        return Ok(None);
+    };
+    let encoded = encoded
+        .ok_or_else(|| StoreError::Corrupt("domain membership exceeds its byte bound".into()))?;
+    let names: Vec<String> =
+        serde_json::from_str(&encoded).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    if names.len() > MAXIMUM_SESSION_DOMAINS || names.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StoreError::Corrupt(
+            "domain membership is oversized or unordered".into(),
+        ));
+    }
+    for name in &names {
+        rsi_agent_session_protocol::validate_identifier("domain", name)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    }
+    Ok(Some((decode_u64("domain membership cut", cut)?, names)))
+}
+
+fn historical_heads(
+    connection: &Connection,
+    session: &SessionId,
+    horizon: u64,
+) -> Result<Vec<StoreDomainHead>> {
+    let Some((_, names)) = read_membership(connection, session, horizon)? else {
+        return Ok(Vec::new());
+    };
+    names
+        .into_iter()
+        .map(|name| {
+            read_version(connection, session, &name, horizon)?.ok_or_else(|| {
+                StoreError::Corrupt("domain membership has no selected version".into())
+            })
+        })
+        .collect()
+}
 
 #[test]
-fn historical_membership_seeks_names_and_cuts_without_scanning_revisions() {
+fn historical_membership_work_is_independent_of_lifetime_name_churn() {
+    // This query-work fixture supplies only the derived projection. Each cut
+    // removes the preceding name and introduces a new name at revision one;
+    // generations tests separately validate projection production and replay.
     let connection = Connection::open_in_memory().unwrap();
-    // Query-work fixture contains only derived metadata, not canonical controls.
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for (_, sql) in crate::EXPECTED_TABLES.iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "domain_versions" | "domain_removals" | "domain_membership_cuts"
+        )
+    }) {
+        connection.execute_batch(sql).unwrap();
+    }
+    let session = SessionId::new("session").unwrap();
+    for count in [64, 4096, 65_536] {
+        connection.execute_batch("DELETE FROM domain_versions; DELETE FROM domain_removals; DELETE FROM domain_membership_cuts;").unwrap();
+        connection
+            .execute(
+                "WITH RECURSIVE n(seq) AS (VALUES(1) UNION ALL SELECT seq+1 FROM n WHERE seq<?1)
+            INSERT INTO domain_versions SELECT 'session',printf('d%06d',seq),seq,0,1,1,10 FROM n",
+                [count],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO domain_removals SELECT session_id,domain_id,control_seq+1,1 FROM domain_versions WHERE control_seq<?1", [count]).unwrap();
+        connection.execute("INSERT INTO domain_membership_cuts SELECT session_id,control_seq,json_array(domain_id) FROM domain_versions", []).unwrap();
+        for horizon in [1, count / 2, count] {
+            let mut statement = connection.prepare(MEMBERSHIP_SQL).unwrap();
+            let names: String = statement
+                .query_row(
+                    params![
+                        "session",
+                        horizon,
+                        i64::try_from(MAXIMUM_MEMBERSHIP_BYTES).unwrap()
+                    ],
+                    |row| row.get(1),
+                )
+                .unwrap();
+            assert_eq!(names, format!("[\"d{horizon:06}\"]"));
+            let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+            assert!(
+                steps < 100,
+                "membership lookup scanned lifetime names: names={count}, horizon={horizon}, vm_steps={steps}"
+            );
+            let horizon = u64::try_from(horizon).unwrap();
+            let heads = historical_heads(&connection, &session, horizon).unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads[0].control_seq, horizon);
+        }
+    }
+}
+
+#[test]
+fn named_domain_lookup_does_not_scan_revision_history() {
+    let connection = Connection::open_in_memory().unwrap();
     connection
         .pragma_update(None, "foreign_keys", false)
         .unwrap();
@@ -130,97 +241,30 @@ fn historical_membership_seeks_names_and_cuts_without_scanning_revisions() {
     {
         connection.execute_batch(sql).unwrap();
     }
-    for (_, sql) in crate::EXPECTED_INDEXES.iter().filter(|(name, _)| {
-        matches!(
-            *name,
-            "domain_versions_by_control" | "domain_removals_by_control"
-        )
-    }) {
-        connection.execute_batch(sql).unwrap();
-    }
     for revisions in [128, 8192] {
         connection
             .execute("DELETE FROM domain_versions", [])
             .unwrap();
         connection
-            .execute("DELETE FROM domain_removals", [])
-            .unwrap();
-        for name in ["a", "b", "c", "d"] {
-            connection.execute("WITH RECURSIVE n(seq) AS (VALUES(1) UNION ALL SELECT seq+1 FROM n WHERE seq<?1)
-                INSERT INTO domain_versions SELECT 'session',?2,seq,0,1,seq,10 FROM n", params![revisions, name]).unwrap();
-        }
-        connection
             .execute(
-                "INSERT INTO domain_removals (session_id, domain_id, control_seq, codec_version) VALUES ('session', 'b', ?1, 1)",
-                [revisions + 1],
+                "WITH RECURSIVE n(seq) AS (VALUES(1) UNION ALL SELECT seq+1 FROM n WHERE seq<?1)
+            INSERT INTO domain_versions SELECT 'session','stable',seq,0,1,seq,10 FROM n",
+                [revisions],
             )
             .unwrap();
-        for horizon in [revisions / 2, revisions + 1] {
-            for name in ["a", "b"] {
-                let mut named = connection.prepare(NAMED_HEAD_SQL).unwrap();
-                let found = named
-                    .query_row(params!["session", name, horizon], |row| {
-                        row.get::<_, i64>(1)
-                    })
-                    .optional()
-                    .unwrap();
-                assert_eq!(
-                    found,
-                    if name == "b" && horizon > revisions {
-                        None
-                    } else {
-                        Some(horizon.min(revisions))
-                    }
-                );
-                assert!(
-                    named.get_status(rusqlite::StatementStatus::VmStep) < 150,
-                    "named lookup scanned revision history"
-                );
-            }
-            let mut statement = connection.prepare(HISTORICAL_HEADS_SQL).unwrap();
-            let rows = statement
-                .query_map(params!["session", horizon], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            let names = if horizon <= revisions {
-                vec!["a", "b", "c", "d"]
-            } else {
-                vec!["a", "c", "d"]
-            };
-            assert_eq!(
-                rows,
-                names
-                    .into_iter()
-                    .map(|name| (name.to_owned(), horizon.min(revisions)))
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                statement.get_status(rusqlite::StatementStatus::VmStep) < 1000,
-                "historical membership work grew with unselected revisions"
-            );
-        }
+        let mut statement = connection.prepare(NAMED_HEAD_SQL).unwrap();
+        let cut: i64 = statement
+            .query_row(params!["session", "stable", revisions / 2], |row| {
+                row.get(1)
+            })
+            .unwrap();
+        assert_eq!(cut, revisions / 2);
+        let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+        assert!(
+            steps < 150,
+            "named lookup scanned revision history: revisions={revisions}, vm_steps={steps}"
+        );
     }
-}
-
-fn historical_heads(
-    connection: &Connection,
-    session: &SessionId,
-    horizon: u64,
-) -> Result<Vec<StoreDomainHead>> {
-    let mut statement = connection
-        .prepare(HISTORICAL_HEADS_SQL)
-        .map_err(sql_error)?;
-    statement
-        .query_map(
-            params![session.as_str(), sqlite_u64("domain horizon", horizon)?],
-            head_row,
-        )
-        .map_err(sql_error)?
-        .map(|row| decode_head(row.map_err(sql_error)?))
-        .collect()
 }
 
 fn request_position(
@@ -349,6 +393,16 @@ pub(super) fn read_request(
         ));
     }
     Ok(Some(record))
+}
+
+pub(super) fn read_admission(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot> {
+    rsi_agent_store_protocol::StoreDomainAdmissionSnapshot::new(
+        read_watermarks(connection, session)?,
+        read_heads(connection, session)?,
+    )
 }
 
 pub(super) fn read_watermarks(
@@ -497,6 +551,12 @@ pub(super) fn insert(
     }
     let heads = read_heads(connection, session)?;
     let next = domain_heads_after(&heads, record.seq(), commit)?;
+    if commit.source().is_initial() || membership_changed(&heads, &next) {
+        let names: Vec<_> = next.iter().map(|head| head.identity.id()).collect();
+        connection.execute("INSERT INTO domain_membership_cuts(session_id,control_seq,names_json) VALUES(?1,?2,?3)",
+            params![session.as_str(), sqlite_u64("domain membership cut", record.seq())?, serde_json::to_string(&names).map_err(|error| StoreError::Invalid(error.to_string()))?]).map_err(sql_error)?;
+    }
+
     if commit.source().is_generation() {
         connection
             .execute(
@@ -548,6 +608,7 @@ pub(super) struct Projection {
     requests: u64,
     generations: u64,
     removals: u64,
+    memberships: u64,
 }
 
 impl Projection {
@@ -612,6 +673,20 @@ impl Projection {
         }
         let next = domain_heads_after(&self.heads, record.seq(), commit)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if commit.source().is_initial() || membership_changed(&self.heads, &next) {
+            let expected = next
+                .iter()
+                .map(|head| head.identity.id().to_owned())
+                .collect();
+            if read_membership(connection, session, record.seq())? != Some((record.seq(), expected))
+            {
+                return Err(StoreError::Corrupt(
+                    "domain membership differs from canonical control".into(),
+                ));
+            }
+            self.memberships += 1;
+        }
+
         if commit.source().is_generation() {
             if generation_position(connection, session, record.seq())? != Some(record.seq()) {
                 return Err(StoreError::Corrupt(
@@ -682,13 +757,14 @@ impl Projection {
         Ok(())
     }
     pub(super) fn finish(self, connection: &Connection, session: &SessionId) -> Result<()> {
-        let (versions, requests, generations, removals) = connection
+        let (versions, requests, generations, removals, memberships) = connection
             .query_row(
                 "SELECT
             (SELECT COUNT(*) FROM domain_versions WHERE session_id = ?1),
             (SELECT COUNT(*) FROM domain_requests WHERE session_id = ?1),
             (SELECT COUNT(*) FROM generation_selections WHERE session_id = ?1),
-            (SELECT COUNT(*) FROM domain_removals WHERE session_id = ?1)",
+            (SELECT COUNT(*) FROM domain_removals WHERE session_id = ?1),
+            (SELECT COUNT(*) FROM domain_membership_cuts WHERE session_id = ?1)",
                 [session.as_str()],
                 |row| {
                     Ok((
@@ -696,6 +772,7 @@ impl Projection {
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
@@ -705,6 +782,7 @@ impl Projection {
             || self.requests != decode_u64("domain request count", requests)?
             || self.generations != decode_u64("generation count", generations)?
             || self.removals != decode_u64("removal count", removals)?
+            || self.memberships != decode_u64("membership count", memberships)?
         {
             return Err(StoreError::Corrupt(
                 "domain index membership differs from canonical controls".into(),

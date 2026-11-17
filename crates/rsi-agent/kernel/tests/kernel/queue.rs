@@ -1007,8 +1007,9 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
             .unwrap()
             .unwrap();
         assert_eq!(child_claim.session_id(), &child);
-        let inherited = kernel
-            .read_fork_facts(&child_claim, child_claim.session_id(), 0, 64)
+        let reader = kernel.open_fork_history(&child_claim).await.unwrap();
+        let inherited = reader
+            .read_facts(child_claim.session_id(), 0, 64)
             .await
             .unwrap()
             .unwrap();
@@ -1025,6 +1026,10 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
         kernel.shutdown(worker).await.unwrap();
         drop(kernel);
         drop(store);
+        assert!(matches!(
+            reader.read_facts(child_claim.session_id(), 0, 64).await,
+            Err(TurnError::ShuttingDown)
+        ));
         if sqlite {
             // Cancellation can leave a dispatched SQLite reader owning the writer lease.
             // Wait only for that documented resource lifetime, never suppress corruption.
@@ -1041,6 +1046,7 @@ async fn queue_edits_preserve_tree_ready_order_and_pinned_fork_prefix() {
             .await
             .expect("cancelled SQLite reader did not release its writer lease");
         }
+        drop(reader);
     }
 }
 
