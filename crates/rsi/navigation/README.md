@@ -4,7 +4,7 @@ Workspace Session accounts have a shared Host order, independent of activity,
 pin/archive partitions and device-local view ordering. New durable members precede
 previously ordered members in descending creation-time/identity order; activity
 never moves them. An explicit move writes the selected Workspace's ordered
-identity references in the existing metadata document. Accounts are resolved
+identity references in its typed order record. Accounts are resolved
 against the current registration. A recreated directory has a new
 registration identity and cannot inherit its predecessor's explicit account.
 When an explicit move records the new account, the same commit removes its
@@ -25,7 +25,8 @@ Status is read-only; cleanup is idempotent and preserves unrelated records. Writ
 capacity refusal leaves the document unchanged and permits explicit retry. A
 pending durable purge cannot authorize navigation removal.
 
-The ordinary `AttentionFactory` owns a separate version-1 Storage domain of
+The ordinary `AttentionFactory` owns a separate version-2 Storage domain with a
+typed `positions` table of
 explicit per-principal reading positions. It combines bounded Session activity
 metadata with eight ACP resident observations, never scans recent history, and
 does not persist runtime status. Two nonqueued request slots shared by reads and
@@ -48,12 +49,18 @@ Unknown commit outcomes close query and mutation admission until Host restart
 reloads durable truth; a known pre-commit failure leaves admission available.
 
 This ordinary Host plugin joins durable Session summaries with navigation
-metadata. One Storage document contains a global revision and at most 8,192
-title/archive records within 8 MiB, including record wrappers. Every read validates
-durable bounds; every mutation validates the projected document before writing.
+metadata. Domain schema 2 stores a global revision, a `metadata` table and an
+`orders` table. It requires atomic batches (SQLite or single JSON); per-record
+JSON is refused before activation. At most 8,192 title/archive records and 8,192
+order references fit within the same logical 8 MiB document bound, including
+record wrappers. Cold loading validates durable bounds once; every mutation
+validates its projected accounting before writing.
 Cold validation seeds exact record-object byte and pin counts. An edit measures
 only the old and new entry and projects the revision envelope before publication.
-The immutable snapshot and atomic single-record durable format remain unchanged.
+Only affected records and the revision are encoded and committed in one batch.
+Publication follows durability. Readers retain immutable snapshots; a concurrent
+reader can require a copy of the in-memory index at publication, but an uncontended
+edit does not clone that index. Failed writes publish no part of the change.
 Navigation reads the authoritative immutable Header directly from the Session Store. It admits metadata writes using the execution location and protection grant of the actual caller.
 Unpublished drafts cannot acquire Host navigation metadata. An archive intent sets the archive flag and clears the pin in one revision. Restoring clears only the archive flag. Both preserve the title and return the caller-visible archives in archive order. Repeated intents leave the revision unchanged. A local operator may clear a stale archive after its Session is gone.
 
@@ -106,7 +113,7 @@ is rejected before I/O when that generation is already unavailable. Ready and
 closed external conversations retain unread observations according to their epoch
 and sequence, including history loaded from a remote peer.
 
-The version-1 metadata document retains the pinned field and bounds owned by the
+The metadata records retain the pinned field and bounds owned by the
 [wire contract](../navigation-api/README.md). Missing activity may remain explicit when the Header still authorizes the read;
 queries never clean up metadata. Missing-Header records may also be explicitly
 cleared by replacing them with default metadata, whether pinned or not, under
@@ -155,3 +162,11 @@ leaves canonical purge complete and is retried through the same operation status
 absence of this owner is reported as unavailable rather than successful cleanup.
 
 Native directory observers may sample the current metadata revision without reading membership. Rows and pin or archive state are always obtained through the authenticated read.
+
+The owner-local persistence gate covers both navigation metadata and account
+attention. It records serialization schemas and exact raw
+Domain mutation bytes from `tests::persistence::capture_current_writer`. Capture
+requires a new `RSI_NAVIGATION_CAPTURE` directory; it never replaces an existing
+corpus. The retained gate requires current-version writer evidence, validates its
+actual codecs, and opens older versions through the real Domain to verify explicit
+refusal without writes. No old schema is inferred from the current structs.

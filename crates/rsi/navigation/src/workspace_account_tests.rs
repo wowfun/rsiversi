@@ -26,10 +26,7 @@ async fn account(owner: &Arc<Navigation>) -> Vec<SessionId> {
 #[tokio::test]
 async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     let mut owner = owner().await;
-    let domain = Arc::new(RecordingDomain(
-        owner.domain.spec().clone(),
-        Mutex::new(None),
-    ));
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
     let row = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
@@ -39,7 +36,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     );
     let workspace = row.id.clone();
     let editable = Arc::get_mut(&mut owner).unwrap();
-    editable.domain = domain.clone();
+    editable.domain = domain.domain.clone();
     editable.workspace = Arc::new(Workspaces {
         records: [(workspace.clone(), row)].into(),
         ..Default::default()
@@ -60,7 +57,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     expected.retain(|entry| entry != &id(1));
     expected.insert(1, id(1));
     assert_eq!(account(&owner).await, expected);
-    let persisted = domain.1.lock().unwrap().take().unwrap();
+    let persisted = domain.take_document().unwrap();
     for (session, before) in [(id(1), Some(id(1))), (id(1), Some(id(299))), (id(2), None)] {
         assert_eq!(
             move_to(session, before).await.unwrap(),
@@ -68,7 +65,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
         );
     }
     assert_eq!(owner.metadata_revision(), 1);
-    assert!(domain.1.lock().unwrap().is_none());
+    assert!(domain.document().is_none());
     append_member(&owner, 999, "/foreign").await;
     for (session, before) in [(id(999), None), (id(1), Some(id(999))), (id(998), None)] {
         assert_eq!(
@@ -164,50 +161,15 @@ async fn append_member(owner: &Navigation, number: u64, path: &str) {
         .unwrap();
 }
 
-#[derive(Debug)]
-struct AccountDomain {
-    recorded: RecordingDomain,
-    fail_next: std::sync::atomic::AtomicBool,
-}
-
-#[async_trait]
-impl Domain for AccountDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        Ok(())
-    }
-    fn spec(&self) -> &DomainSpec {
-        self.recorded.spec()
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
-        self.recorded.snapshot().await
-    }
-    async fn put(
-        &self,
-        key: &str,
-        value: serde_json::Value,
-    ) -> std::result::Result<(), rsi_storage::StorageError> {
-        if self
-            .fail_next
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(rsi_storage::StorageError::Io("injected failure".into()));
-        }
-        self.recorded.put(key, value).await
-    }
-    async fn delete(&self, key: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
-        self.recorded.delete(key).await
-    }
-}
-
 #[tokio::test]
 async fn workspace_account_commit_failure_and_concurrent_moves_preserve_published_state() {
     let mut owner = owner().await;
-    let domain = Arc::new(AccountDomain {
-        recorded: RecordingDomain(owner.domain.spec().clone(), Mutex::new(None)),
-        fail_next: true.into(),
-    });
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let row = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
@@ -217,7 +179,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     );
     let workspace = row.id.clone();
     let editable = Arc::get_mut(&mut owner).unwrap();
-    editable.domain = domain.clone();
+    editable.domain = domain.domain.clone();
     editable.workspace = Arc::new(Workspaces {
         records: [(workspace.clone(), row)].into(),
         ..Default::default()
@@ -232,8 +194,13 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     assert!(move_to(id(1), Some(id(300))).await.is_err());
     assert_eq!(account(&owner).await, original);
     assert_eq!(owner.metadata_revision(), 0);
-    assert!(domain.recorded.1.lock().unwrap().is_none());
+    assert!(domain.document().is_none());
 
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     // Disjoint moves commute; both must survive regardless of writer arrival order.
     let (first, second) =
         tokio::join!(move_to(id(1), Some(id(300))), move_to(id(2), Some(id(299))));
@@ -243,7 +210,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     let mut expected = vec![id(1), id(300), id(2)];
     expected.extend((3..=299).rev().map(id));
     assert_eq!(account(&owner).await, expected);
-    let persisted = domain.recorded.1.lock().unwrap().take().unwrap();
+    let persisted = domain.take_document().unwrap();
     let mut restored: Document = serde_json::from_value(persisted).unwrap();
     restored.validate().unwrap();
     assert_eq!(restored.workspace_orders[&workspace], expected);
@@ -310,8 +277,8 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
 #[tokio::test]
 async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     let mut old = owner().await;
-    let old_domain = Arc::new(RecordingDomain(old.domain.spec().clone(), Mutex::new(None)));
-    Arc::get_mut(&mut old).unwrap().domain = old_domain;
+    let old_domain = TestDomain::new(old.domain.spec().clone()).await;
+    Arc::get_mut(&mut old).unwrap().domain = old_domain.domain.clone();
     let mut record = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
@@ -341,18 +308,16 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     let mut current = owner().await;
     record.id = WorkspaceId::parse("f".repeat(64)).unwrap();
     let current_id = record.id.clone();
-    let current_domain = Arc::new(RecordingDomain(
-        current.domain.spec().clone(),
-        Mutex::new(None),
-    ));
+    let current_domain = TestDomain::new(current.domain.spec().clone()).await;
     let editable = Arc::get_mut(&mut current).unwrap();
-    editable.domain = current_domain;
+    editable.domain = current_domain.domain.clone();
     editable.workspace = Arc::new(Workspaces {
         records: [(current_id.clone(), record)].into(),
         ..Default::default()
     });
     let mut restored: Document = serde_json::from_value(saved).unwrap();
     restored.validate().unwrap();
+    current_domain.seed_document(&restored).await;
     editable.state.lock().unwrap().document = Arc::new(restored);
     assert_eq!(account(&current).await[0], last);
     assert_eq!(

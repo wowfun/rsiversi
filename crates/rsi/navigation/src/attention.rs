@@ -1,7 +1,7 @@
 use super::admission::Admission;
 use super::{
     Arc, BTreeMap, BoxFuture, Config, ConfigValue, Deserialize, Domain, DomainFacilityContract,
-    DomainSpec, Mutex, PluginFactory, PreparedActivation, Result, Semaphore, activation,
+    DomainSpec, Mutex, PluginFactory, PreparedActivation, Result, Schema, Semaphore, activation,
     session_error, storage_error,
 };
 use async_trait::async_trait;
@@ -92,7 +92,7 @@ impl State {
 }
 fn position_bytes(key: &str, position: &Position) -> usize {
     encoded_entry_bytes(
-        key,
+        &format!("positions/{key}"),
         serde_json::to_vec(position)
             .expect("typed reading position")
             .len(),
@@ -103,7 +103,7 @@ struct Attention {
     session: Arc<dyn SessionIngress>,
     external: Arc<dyn ExternalConversations>,
     epoch: HostEpoch,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     state: Mutex<State>,
     writer: Arc<Semaphore>,
     admission: Arc<Admission>,
@@ -325,16 +325,20 @@ impl Attention {
             evicted
         };
         for oldest in &evicted {
-            self.domain.delete(oldest).await.map_err(storage_error)?;
+            self.domain
+                .table::<Position>("positions")
+                .map_err(storage_error)?
+                .delete(oldest)
+                .await
+                .map_err(storage_error)?;
             // Each acknowledged eviction is already durable even if the next write fails.
             let mut state = self.state.lock().expect("attention reading positions");
             state.remove(oldest);
         }
         self.domain
-            .put(
-                &key,
-                serde_json::to_value(&position).expect("typed reading position"),
-            )
+            .table::<Position>("positions")
+            .map_err(storage_error)?
+            .put(&key, position.clone())
             .await
             .map_err(storage_error)?;
         let mut state = self.state.lock().expect("attention reading positions");
@@ -343,6 +347,7 @@ impl Attention {
     }
     async fn close(&self) {
         self.admission.close(&self.writer).await;
+        self.domain.close().await;
     }
 }
 /// Ordinary Host owner of bounded native/external attention and reading positions.
@@ -376,17 +381,28 @@ impl PluginFactory for AttentionFactory {
             serde_json::from_value(plan.config().as_ref().clone()).map_err(activation)?;
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.attention".into(),
-                backend: input.backend,
-                version: 1,
-                maximum_records: 4096,
-                maximum_bytes: 1024 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.attention".into(),
+                    backend: input.backend,
+                    version: STORAGE_VERSION,
+                    maximum_records: 4096,
+                    maximum_bytes: 1024 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .table::<Position>("positions")
+                    .map_err(activation)?,
+            )
             .await
             .map_err(activation)?;
         let mut positions = BTreeMap::new();
-        for (key, value) in domain.snapshot().await.map_err(activation)? {
+        for (key, position) in domain
+            .table::<Position>("positions")
+            .and_then(|table| table.snapshot())
+            .map_err(activation)?
+            .entries()
+        {
             if key.len() != 64
                 || !key
                     .bytes()
@@ -394,9 +410,8 @@ impl PluginFactory for AttentionFactory {
             {
                 return Err(activation("invalid attention reading key"));
             }
-            let position: Position = serde_json::from_value(value).map_err(activation)?;
             position.validate().map_err(activation)?;
-            positions.insert(key, position);
+            positions.insert(key.to_owned(), (*position).clone());
         }
         let owner = Arc::new(Attention {
             session: plan.local::<SessionIngressContract>()?,
@@ -457,3 +472,38 @@ impl PluginFactory for AttentionFactory {
 #[cfg(test)]
 #[path = "attention_tests.rs"]
 mod tests;
+
+const STORAGE_VERSION: u32 = 2;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_attention,
+    Position,
+    STORAGE_VERSION,
+    format!(
+        "tests/fixtures/attention/attention-v{}.json",
+        STORAGE_VERSION
+    ),
+    {
+        let samples: Vec<Position> = vec![
+            Position {
+                conversation: ConversationIdentity::Native(
+                    rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
+                ),
+                epoch: "0".into(),
+                sequence: "123".into(),
+            },
+            Position {
+                conversation: ConversationIdentity::External(
+                    rsi_acp_protocol::observation::ConversationId::new("external").unwrap(),
+                ),
+                epoch: "2".into(),
+                sequence: "9".into(),
+            },
+        ];
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

@@ -9,6 +9,7 @@ use rsi_session_protocol::ActivityRequest;
 /// Exact visible source cut, independent of execution authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Position {
     /// Native or external source owner.
     pub conversation: ConversationIdentity,

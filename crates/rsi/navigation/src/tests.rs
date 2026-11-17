@@ -8,6 +8,8 @@ use rsi_workspace_protocol::{WorkspaceCursor, WorkspacePage, WorkspaceRecord, Wo
 #[path = "workspace_account_tests.rs"]
 mod workspace_account;
 
+mod persistence;
+
 #[tokio::test]
 async fn archive_selection_includes_both_partitions_only_when_requested() {
     let owner = owner().await;
@@ -259,33 +261,9 @@ impl WorkspaceRegistry for Workspaces {
         panic!("navigation cannot delete workspaces")
     }
 }
-#[derive(Debug)]
-struct ReadOnlyDomain(DomainSpec);
-#[async_trait]
-impl Domain for ReadOnlyDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        Ok(())
-    }
-    fn spec(&self) -> &DomainSpec {
-        &self.0
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
-        Ok(BTreeMap::new())
-    }
-    async fn put(
-        &self,
-        _: &str,
-        _: serde_json::Value,
-    ) -> std::result::Result<(), rsi_storage::StorageError> {
-        panic!("query cannot write metadata")
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
-        panic!("query cannot delete metadata")
-    }
-}
-async fn owner() -> Arc<Navigation> {
+mod storage;
+use storage::{FixtureOwner, TestDomain};
+async fn owner() -> FixtureOwner {
     let settings = FrozenAgentSettings::new(
         "default",
         "system",
@@ -328,14 +306,11 @@ async fn owner() -> Arc<Navigation> {
             .await
             .unwrap();
     }
-    Arc::new(Navigation {
-        domain: Arc::new(ReadOnlyDomain(DomainSpec {
-            id: "test".into(),
-            backend: "fixture".into(),
-            version: 1,
-            maximum_records: 1,
-            maximum_bytes: 8 * 1024 * 1024,
-        })),
+    let storage = TestDomain::new(domain_spec("fixture".into())).await;
+    let mut document = Document::default();
+    document.validate().unwrap();
+    let owner = Arc::new(Navigation {
+        domain: storage.domain.clone(),
         resolver: Arc::new(Visibility),
         store,
         protection: None,
@@ -343,14 +318,18 @@ async fn owner() -> Arc<Navigation> {
         workspace: Arc::new(Workspaces::default()),
         epoch: HostEpoch::generate().unwrap(),
         state: Mutex::new(State {
-            document: Arc::new(Document::default()),
+            document: Arc::new(document),
         }),
         writer: Arc::new(Semaphore::new(1)),
         admission: Admission::new(
             8,
             rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         ),
-    })
+    });
+    FixtureOwner {
+        owner,
+        _storage: storage,
+    }
 }
 #[tokio::test]
 async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch() {
@@ -920,42 +899,85 @@ async fn pinned_summaries_preserve_sorted_order_without_attaching_sessions() {
     owner.close().await;
 }
 
-#[derive(Debug)]
-struct RecordingDomain(DomainSpec, Mutex<Option<serde_json::Value>>);
-#[async_trait]
-impl Domain for RecordingDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        Ok(())
+#[tokio::test]
+#[ignore = "report-only measurement; requires a new RSI_NAVIGATION_EVIDENCE file"]
+async fn measure_near_capacity_metadata_writes() {
+    use std::io::Write as _;
+    let mut owner = owner().await;
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
+    let mut document = Document {
+        revision: 1,
+        records: (0..8192)
+            .map(|n| {
+                (
+                    SessionId::new(format!("row-{n:04}")).unwrap(),
+                    SessionMetadata {
+                        title: Some(format!("session {n}")),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    document.validate().unwrap();
+    domain.seed_document(&document).await;
+    owner.state.lock().unwrap().document = Arc::new(document);
+    let session = SessionId::new("row-0001").unwrap();
+    let mut reports = Vec::new();
+    for (operation, metadata) in [
+        (
+            "rename",
+            SessionMetadata {
+                title: Some("renamed".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "pin",
+            SessionMetadata {
+                title: Some("renamed".into()),
+                pinned: true,
+                ..Default::default()
+            },
+        ),
+        ("remove_metadata", SessionMetadata::default()),
+    ] {
+        let records_before = owner.document().records.len();
+        let start = std::time::Instant::now();
+        let published = owner.write_metadata(&session, &metadata).await.unwrap();
+        let elapsed = start.elapsed();
+        let mutations = domain.backend.state.last_write.lock().unwrap();
+        let encoded_bytes: usize = mutations
+            .iter()
+            .filter_map(|change| change.value.as_ref())
+            .map(rsi_storage::EncodedValue::encoded_len)
+            .sum();
+        reports.push(serde_json::json!({
+            "operation": operation, "records_before": records_before,
+            "encoded_value_bytes": encoded_bytes, "domain_batches": 1, "changed_records": mutations.len(),
+            "elapsed_micros": elapsed.as_micros(),
+        }));
+        drop(published);
     }
-    fn spec(&self) -> &DomainSpec {
-        &self.0
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
-        panic!("unexpected snapshot")
-    }
-    async fn put(
-        &self,
-        key: &str,
-        value: serde_json::Value,
-    ) -> std::result::Result<(), rsi_storage::StorageError> {
-        assert_eq!(key, "metadata");
-        *self.1.lock().unwrap() = Some(value);
-        Ok(())
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
-        panic!("unexpected deletion")
-    }
+    let path = std::env::var_os("RSI_NAVIGATION_EVIDENCE").expect("explicit evidence file");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap()
+        .write_all(&serde_json::to_vec_pretty(&reports).unwrap())
+        .unwrap();
+    owner.close().await;
 }
+
 #[tokio::test]
 async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
     let mut owner = owner().await;
-    let domain = Arc::new(RecordingDomain(
-        owner.domain.spec().clone(),
-        Mutex::new(None),
-    ));
-    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let newer = SessionId::new("row-300").unwrap();
     let older = SessionId::new("row-001").unwrap();
     let pin = |id: &SessionId, pinned| {
@@ -978,15 +1000,14 @@ async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
     assert!(
         matches!(&pins.entries[..], [PinnedEntry::Available{entry:a},PinnedEntry::Available{entry:b}] if a.session==older && b.session==newer)
     );
-    let mut saved: Document =
-        serde_json::from_value(domain.1.lock().unwrap().take().unwrap()).unwrap();
+    let mut saved: Document = serde_json::from_value(domain.take_document().unwrap()).unwrap();
     saved.validate().unwrap();
     assert_eq!(saved.records[&older].partition_revision, Some(2));
     let absent = SessionId::new("missing").unwrap();
     assert_eq!(pin(&older, true).await.unwrap(), PinOutcome::Applied);
     assert_eq!(pin(&absent, false).await.unwrap(), PinOutcome::Applied);
     assert_eq!(pin(&absent, true).await.unwrap(), PinOutcome::Unknown);
-    assert!(domain.1.lock().unwrap().is_none());
+    assert!(domain.document().is_none());
     assert_eq!(pin(&newer, false).await.unwrap(), PinOutcome::Applied);
     assert_eq!(pin(&newer, true).await.unwrap(), PinOutcome::Applied);
     owner
@@ -1065,11 +1086,8 @@ async fn unprotected_navigation_reads_retain_no_revocation_leases() {
 #[tokio::test]
 async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_write() {
     let mut owner = owner().await;
-    let domain = Arc::new(RecordingDomain(
-        owner.domain.spec().clone(),
-        Mutex::new(None),
-    ));
-    Arc::get_mut(&mut owner).unwrap().domain = domain;
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let id = SessionId::new("row-001").unwrap();
     let apply = |id: &SessionId, intent| {
         owner
@@ -1123,11 +1141,8 @@ async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_writ
 #[tokio::test]
 async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_metadata() {
     let mut owner = owner().await;
-    let domain = Arc::new(RecordingDomain(
-        owner.domain.spec().clone(),
-        Mutex::new(None),
-    ));
-    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let ids = ["row-300", "row-001", "row-002"].map(|id| SessionId::new(id).unwrap());
     for (index, id) in ids.iter().enumerate() {
         owner
@@ -1145,7 +1160,7 @@ async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_m
             .await
             .unwrap();
     }
-    domain.1.lock().unwrap().take();
+    domain.take_document();
     let undo = |id: &SessionId| {
         owner
             .archive_intent(CallOrigin::Local, id.clone(), ArchiveIntent::Restore)
@@ -1156,7 +1171,7 @@ async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_m
         undo(&SessionId::new("unknown").unwrap()).await.unwrap(),
         applied(false, ids.to_vec())
     );
-    assert!(domain.1.lock().unwrap().is_none());
+    assert!(domain.document().is_none());
     let (one, two) = tokio::join!(undo(&ids[1]), undo(&ids[1]));
     let kept = vec![ids[0].clone(), ids[2].clone()];
     let pair = [one.unwrap(), two.unwrap()];
@@ -1191,11 +1206,8 @@ async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_m
 #[tokio::test]
 async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
     let mut owner = owner().await;
-    let domain = Arc::new(RecordingDomain(
-        owner.domain.spec().clone(),
-        Mutex::new(None),
-    ));
-    Arc::get_mut(&mut owner).unwrap().domain = domain.clone();
+    let domain = TestDomain::new(owner.domain.spec().clone()).await;
+    Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let missing = SessionId::new("gone").unwrap();
     owner.state.lock().unwrap().document = Arc::new(Document {
         workspace_orders: BTreeMap::new(),
@@ -1212,6 +1224,12 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
         )]
         .into(),
     });
+    Arc::make_mut(&mut owner.state.lock().unwrap().document)
+        .validate()
+        .unwrap();
+    let seeded = owner.document();
+    domain.seed_document(&seeded).await;
+    drop(seeded);
     assert!(
         owner
             .replace(
@@ -1224,7 +1242,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
             .await
             .is_err()
     );
-    assert!(domain.1.lock().unwrap().is_none());
+    assert!(domain.document().is_none());
     assert_eq!(owner.metadata_revision(), 7);
     owner
         .replace(
@@ -1238,8 +1256,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
         .unwrap();
     assert!(owner.state.lock().unwrap().document.records.is_empty());
     assert_eq!(owner.metadata_revision(), 8);
-    let saved: Document =
-        serde_json::from_value(domain.1.lock().unwrap().clone().unwrap()).unwrap();
+    let saved: Document = serde_json::from_value(domain.document().unwrap()).unwrap();
     assert!(saved.records.is_empty());
     assert_eq!(saved.revision, 8);
     assert!(
@@ -1860,42 +1877,10 @@ async fn cursor_successors_and_refreshes_preserve_both_caps_at_global_capacity()
     assert!(book.cuts.iter().any(|c| c.issued == foreign));
 }
 
-#[derive(Debug)]
-struct CleanupDomain {
-    spec: DomainSpec,
-    written: Mutex<Vec<serde_json::Value>>,
-}
-#[async_trait]
-impl Domain for CleanupDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        Ok(())
-    }
-    fn spec(&self) -> &DomainSpec {
-        &self.spec
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
-        Ok(BTreeMap::new())
-    }
-    async fn put(
-        &self,
-        key: &str,
-        value: serde_json::Value,
-    ) -> std::result::Result<(), rsi_storage::StorageError> {
-        assert_eq!(key, "metadata");
-        self.written.lock().unwrap().push(value);
-        Ok(())
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
-        panic!("cleanup updates the shared metadata document")
-    }
-}
-
 #[tokio::test]
 async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_capacity() {
     use rsi_agent_store_protocol::StoreMaintenance;
-    use rsi_session_protocol::{NavigationCleanup, SessionPurgeCleanup};
+    use rsi_session_protocol::{CleanupStatus, SessionPurgeCleanup};
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
     let mut navigation = owner().await;
@@ -1904,13 +1889,10 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let header = navigation.store.header(&selected).await.unwrap();
     let workspace = fixture_workspace_id(header.coordinates());
     let request = seed_purge_cleanup(&store, header).await;
-    let domain = Arc::new(CleanupDomain {
-        spec: navigation.domain.spec().clone(),
-        written: Mutex::new(Vec::new()),
-    });
+    let domain = TestDomain::new(navigation.domain.spec().clone()).await;
     let owner = Arc::get_mut(&mut navigation).unwrap();
     owner.store = store.clone();
-    owner.domain = domain.clone();
+    owner.domain = domain.domain.clone();
     let metadata = SessionMetadata {
         title: Some("Keep".into()),
         archived: false,
@@ -1926,17 +1908,23 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
         ]
         .into(),
     });
+    Arc::make_mut(&mut owner.state.lock().unwrap().document)
+        .validate()
+        .unwrap();
+    let seeded = owner.document();
+    domain.seed_document(&seeded).await;
+    drop(seeded);
     let cleanup = PurgeCleanup(Arc::downgrade(&navigation));
     store.begin_purge(request.clone()).await.unwrap().unwrap();
     assert_eq!(
         cleanup.status("cleanup").await.unwrap(),
-        NavigationCleanup::Pending
+        CleanupStatus::Pending
     );
     assert!(matches!(
         cleanup.cleanup("cleanup").await,
         Err(SessionError::Invalid(_))
     ));
-    assert!(domain.written.lock().unwrap().is_empty());
+    assert_eq!(domain.writes(), 0);
     assert!(store.purge_batch("cleanup").await.unwrap().complete);
     let busy = navigation.writer.clone().acquire_owned().await.unwrap();
     assert!(matches!(
@@ -1945,16 +1933,16 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     ));
     assert_eq!(
         cleanup.status("cleanup").await.unwrap(),
-        NavigationCleanup::Pending
+        CleanupStatus::Pending
     );
     drop(busy);
     cleanup.cleanup("cleanup").await.unwrap();
     assert_eq!(
         cleanup.status("cleanup").await.unwrap(),
-        NavigationCleanup::Complete
+        CleanupStatus::Complete
     );
     cleanup.cleanup("cleanup").await.unwrap();
-    assert_eq!(domain.written.lock().unwrap().len(), 1);
+    assert_eq!(domain.writes(), 1);
     let state = navigation.state.lock().unwrap();
     assert_eq!(state.document.records.len(), 1);
     assert_eq!(

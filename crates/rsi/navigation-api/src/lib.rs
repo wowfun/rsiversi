@@ -20,7 +20,7 @@ pub use order::{
 };
 
 /// Exact title and archive state; neither field mutates Session execution.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMetadata {
     /// Optional user title; absent uses the immutable Session identity.

@@ -19,7 +19,7 @@ use rsi_navigation_api::{
 use rsi_session_protocol::SessionError;
 use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
 use rsi_storage_domain::storage_error;
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use rsi_workspace_protocol::{
     WorkspaceError, WorkspaceId, WorkspaceRegistry, WorkspaceRegistryContract,
 };
@@ -34,9 +34,14 @@ mod attention;
 use admission::Admission;
 mod endpoint;
 mod order;
+mod persistence;
 mod workspace_account;
 pub use attention::AttentionFactory;
+use persistence::{DocumentChange, Revision, domain_schema, domain_spec, load_document};
 pub use workspace_account::WorkspaceMoveOutcome;
+
+/// Durable navigation payload version; retained corpora gate encoding changes.
+pub const NAVIGATION_STORAGE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +55,7 @@ struct Document {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct StoredMetadata {
     #[serde(flatten)]
     metadata: SessionMetadata,
@@ -137,10 +143,11 @@ impl Document {
         self.accounting = Some(accounting);
         Ok(())
     }
-    fn edit(&mut self, session: &SessionId, metadata: &SessionMetadata) -> Result<()> {
-        if self.accounting.is_none() {
-            self.validate()?;
-        }
+    fn project_metadata(
+        &self,
+        session: &SessionId,
+        metadata: &SessionMetadata,
+    ) -> Result<DocumentChange> {
         let mut accounting = self.accounting.expect("validated metadata accounting");
         let previous = self.records.get(session);
         let revision = self
@@ -179,14 +186,12 @@ impl Document {
             accounting.pins += usize::from(metadata.pinned);
         }
         accounting.check(revision)?;
-        if remove {
-            self.records.remove(session);
-        } else {
-            self.records.insert(session.clone(), stored);
-        }
-        self.revision = revision;
-        self.accounting = Some(accounting);
-        Ok(())
+        Ok(DocumentChange {
+            revision,
+            accounting,
+            records: vec![(session.clone(), (!remove).then_some(stored))],
+            orders: vec![],
+        })
     }
 }
 #[derive(Debug)]
@@ -231,7 +236,7 @@ pub enum ArchiveOutcome {
 /// One Host's navigation owner; it never owns Session execution.
 #[derive(Debug)]
 pub struct Navigation {
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     resolver: Arc<dyn rsi_execution::ExecutionResolver>,
     store: Arc<dyn SessionStore>,
     protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
@@ -647,7 +652,8 @@ impl Navigation {
                     }
                     None => return Err(ApiError::Invalid("Session is not available".into())),
                 };
-                let updated = owner.write_metadata(&document, &session, &metadata).await?;
+                drop(document);
+                let updated = owner.write_metadata(&session, &metadata).await?;
                 Ok(MetadataReceipt {
                     revision: updated.revision.to_string(),
                     session,
@@ -689,7 +695,8 @@ impl Navigation {
                 if previous.is_some_and(|row| row.pinned) != pinned {
                     let mut metadata = previous.map(|row| row.metadata.clone()).unwrap_or_default();
                     metadata.pinned = pinned;
-                    owner.write_metadata(&document, &session, &metadata).await?;
+                    drop(document);
+                    owner.write_metadata(&session, &metadata).await?;
                 }
                 Ok(PinOutcome::Applied)
             })
@@ -762,10 +769,8 @@ impl Navigation {
                             previous.map(|row| row.metadata.clone()).unwrap_or_default();
                         metadata.archived = desired;
                         metadata.pinned = false;
-                        (
-                            owner.write_metadata(&current, &session, &metadata).await?,
-                            true,
-                        )
+                        drop(current);
+                        (owner.write_metadata(&session, &metadata).await?, true)
                     }
                 };
                 let ids = owner
@@ -803,32 +808,63 @@ impl Navigation {
 
     async fn write_metadata(
         &self,
-        current: &Document,
         session: &SessionId,
         metadata: &SessionMetadata,
     ) -> Result<Arc<Document>> {
-        let mut document = current.clone();
-        document.edit(session, metadata)?;
-        self.publish_document(document).await
-    }
-    async fn publish_document(&self, document: Document) -> Result<Arc<Document>> {
-        self.domain
-            .put(
-                "metadata",
-                serde_json::to_value(&document)
-                    .map_err(|_| ApiError::Invalid("invalid navigation document".into()))?,
-            )
-            .await
-            .map_err(storage_error)?;
-        let document = Arc::new(document);
-        self.state
+        let change = self
+            .state
             .lock()
             .expect("navigation state poisoned")
-            .document = Arc::clone(&document);
-        Ok(document)
+            .document
+            .project_metadata(session, metadata)?;
+        self.publish(change).await
+    }
+    async fn publish(&self, change: DocumentChange) -> Result<Arc<Document>> {
+        let metadata = self
+            .domain
+            .table::<StoredMetadata>("metadata")
+            .map_err(storage_error)?;
+        let orders = self
+            .domain
+            .table::<Vec<SessionId>>("orders")
+            .map_err(storage_error)?;
+        let mut batch = Vec::with_capacity(change.records.len() + change.orders.len() + 1);
+        batch.push(
+            self.domain
+                .global::<Revision>()
+                .map_err(storage_error)?
+                .change(Revision {
+                    revision: change.revision,
+                })
+                .map_err(storage_error)?,
+        );
+        for (id, value) in &change.records {
+            batch.push(
+                match value {
+                    Some(value) => metadata.put_change(id.as_str(), value.clone()),
+                    None => metadata.delete_change(id.as_str()),
+                }
+                .map_err(storage_error)?,
+            );
+        }
+        for (id, members) in &change.orders {
+            batch.push(
+                if members.is_empty() {
+                    orders.delete_change(id.as_str())
+                } else {
+                    orders.put_change(id.as_str(), members.clone())
+                }
+                .map_err(storage_error)?,
+            );
+        }
+        self.domain.batch(batch).await.map_err(storage_error)?;
+        let mut state = self.state.lock().expect("navigation state poisoned");
+        change.apply(Arc::make_mut(&mut state.document));
+        Ok(state.document.clone())
     }
     async fn close(&self) {
         self.admission.close(&self.writer).await;
+        self.domain.close().await;
     }
 }
 fn session_error(error: SessionError) -> ApiError {
@@ -847,7 +883,7 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
     async fn status(
         &self,
         operation: &str,
-    ) -> rsi_session_protocol::Result<rsi_session_protocol::NavigationCleanup> {
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::CleanupStatus> {
         let owner = self.0.upgrade().ok_or(SessionError::ShuttingDown)?;
         let store = owner
             .store
@@ -868,9 +904,9 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
                     .any(|ids| ids.contains(&target.session_id))
         });
         Ok(if absent {
-            rsi_session_protocol::NavigationCleanup::Complete
+            rsi_session_protocol::CleanupStatus::Complete
         } else {
-            rsi_session_protocol::NavigationCleanup::Pending
+            rsi_session_protocol::CleanupStatus::Pending
         })
     }
 
@@ -902,58 +938,12 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
             .run_mutation(move |owner| {
                 Box::pin(async move {
                     let _permit = permit;
-                    let mut document = owner
-                        .state
-                        .lock()
-                        .expect("navigation state poisoned")
-                        .document
-                        .as_ref()
-                        .clone();
-                    let mut changed = false;
-                    let removed = request
-                        .targets
-                        .iter()
-                        .map(|target| &target.session_id)
-                        .collect::<std::collections::HashSet<_>>();
-                    let orders = document
-                        .workspace_orders
-                        .iter()
-                        .filter(|(_, ids)| ids.iter().any(|id| removed.contains(id)))
-                        .map(|(workspace, ids)| {
-                            (
-                                workspace.clone(),
-                                ids.iter()
-                                    .filter(|id| !removed.contains(id))
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    for (workspace, ids) in orders {
-                        document.edit_order(&workspace, ids)?;
-                        changed = true;
-                    }
-                    for target in request.targets {
-                        if document.records.contains_key(&target.session_id) {
-                            document.edit(&target.session_id, &SessionMetadata::default())?;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        owner
-                            .domain
-                            .put(
-                                "metadata",
-                                serde_json::to_value(&document)
-                                    .map_err(|_| ApiError::Unavailable)?,
-                            )
-                            .await
-                            .map_err(storage_error)?;
-                        owner
-                            .state
-                            .lock()
-                            .expect("navigation state poisoned")
-                            .document = Arc::new(document);
+                    let change = {
+                        let state = owner.state.lock().expect("navigation state poisoned");
+                        DocumentChange::purge(&state.document, &request.targets)?
+                    };
+                    if let Some(change) = change {
+                        owner.publish(change).await?;
                     }
                     Ok(())
                 })
@@ -1000,24 +990,13 @@ impl PluginFactory for NavigationFactory {
             serde_json::from_value(plan.config().as_ref().clone()).map_err(activation)?;
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.navigation".into(),
-                backend: input.backend,
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 8 * 1024 * 1024,
-            })
+            .open(
+                domain_spec(input.backend),
+                domain_schema().map_err(activation)?,
+            )
             .await
             .map_err(activation)?;
-        let mut records = domain.snapshot().await.map_err(activation)?;
-        if records.len() > 1 || records.keys().any(|key| key != "metadata") {
-            return Err(MetaError::Activation("invalid navigation records".into()));
-        }
-        let mut document: Document = records
-            .remove("metadata")
-            .map_or_else(|| Ok(Document::default()), serde_json::from_value)
-            .map_err(|_| MetaError::Activation("invalid navigation document".into()))?;
-        document.validate().map_err(activation)?;
+        let document = load_document(&domain).map_err(activation)?;
         let owner = Arc::new(Navigation {
             domain,
             resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,

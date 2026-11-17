@@ -1,0 +1,82 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "conversation": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/0"
+              }
+            ]
+          },
+          "epoch": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "conversation",
+          "epoch",
+          "sequence"
+        ]
+      },
+      "definitions": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "native"
+                },
+                "id": {
+                  "$ref": "#/definitions/1"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "external"
+                },
+                "id": {
+                  "$ref": "#/definitions/2"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"conversation\":{\"kind\":\"native\",\"id\":\"fixture\"},\"epoch\":\"0\",\"sequence\":\"123\"}",
+      "{\"conversation\":{\"kind\":\"external\",\"id\":\"external\"},\"epoch\":\"2\",\"sequence\":\"9\"}"
+    ]
+  },
+  "sha256": "0264d5e119be0cfee6cf336e5624dcd39e535e865d953be73b228423db861822"
+}

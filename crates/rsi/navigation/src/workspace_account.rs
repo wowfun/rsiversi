@@ -1,6 +1,6 @@
 use super::{
-    ApiError, Arc, BoxFuture, CallOrigin, Document, MetadataSize, Navigation, Result, SessionId,
-    WorkspaceError, WorkspaceId, encoded_entry_bytes, storage_error,
+    ApiError, Arc, BoxFuture, CallOrigin, Document, DocumentChange, MetadataSize, Navigation,
+    Result, SessionId, WorkspaceError, WorkspaceId, encoded_entry_bytes, storage_error,
 };
 use rsi_agent_store_protocol::{MAXIMUM_ORDER_MEMBERS, StoreOrderMember, StoreOrderSeed};
 use std::collections::HashSet;
@@ -36,7 +36,7 @@ pub(super) fn account_order<'a>(
         .collect()
 }
 
-fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usize> {
+pub(super) fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usize> {
     encoded_entry_bytes(
         id.as_str(),
         serde_json::to_vec(members)
@@ -67,10 +67,11 @@ impl Document {
         Ok(())
     }
 
-    pub(super) fn edit_order(&mut self, id: &WorkspaceId, members: Vec<SessionId>) -> Result<()> {
-        if self.accounting.is_none() {
-            self.validate()?;
-        }
+    pub(super) fn project_order(
+        &self,
+        id: &WorkspaceId,
+        members: Vec<SessionId>,
+    ) -> Result<DocumentChange> {
         let mut accounting = self.accounting.expect("validated metadata accounting");
         // Store membership is immutable by coordinates. Members of this current
         // registration cannot also belong to a deleted registration's saved account.
@@ -115,16 +116,12 @@ impl Document {
             .checked_add(1)
             .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
         accounting.check(revision)?;
-        for (id, members) in changes {
-            if members.is_empty() {
-                self.workspace_orders.remove(&id);
-            } else {
-                self.workspace_orders.insert(id, members);
-            }
-        }
-        self.accounting = Some(accounting);
-        self.revision = revision;
-        Ok(())
+        Ok(DocumentChange {
+            revision,
+            accounting,
+            records: vec![],
+            orders: changes,
+        })
     }
 }
 
@@ -215,9 +212,9 @@ impl Navigation {
                 if from + 1 != at {
                     let session = order.remove(from);
                     order.insert(if at > from { at - 1 } else { at }, session);
-                    let mut updated = current.as_ref().clone();
-                    updated.edit_order(&workspace, order)?;
-                    owner.publish_document(updated).await?;
+                    let change = current.project_order(&workspace, order)?;
+                    drop(current);
+                    owner.publish(change).await?;
                 }
                 Ok(WorkspaceMoveOutcome::Applied)
             })

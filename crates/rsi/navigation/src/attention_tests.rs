@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn an_accepted_mark_commits_when_retirement_starts_before_dispatch() {
-    let (_, storage, owner) = fixture(0);
+    let (_, storage, owner) = fixture(0).await;
     let position = owner
         .read(&CallOrigin::Local)
         .await
@@ -28,7 +28,7 @@ async fn an_accepted_mark_commits_when_retirement_starts_before_dispatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attention_read_tracking_can_be_polled_without_an_entered_tokio_runtime() {
-    let (_, _, owner) = fixture(0);
+    let (_, _, owner) = fixture(0).await;
     let executor = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
         assert!(tokio::runtime::Handle::try_current().is_err());
@@ -54,7 +54,7 @@ async fn attention_read_tracking_can_be_polled_without_an_entered_tokio_runtime(
 
 #[tokio::test]
 async fn read_waiter_loss_releases_attention_capacity_and_unpolled_reads_do_not_hold_close() {
-    let (_, _, owner) = fixture(0);
+    let (_, _, owner) = fixture(0).await;
     let mut read = owner
         .run_read(|_| Box::pin(std::future::pending::<Result<()>>()))
         .unwrap();
@@ -218,8 +218,7 @@ struct Storage {
     fenced: std::sync::atomic::AtomicBool,
     reject_put: std::sync::atomic::AtomicBool,
 }
-#[async_trait]
-impl Domain for Storage {
+impl Storage {
     fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
         if self.fenced.load(std::sync::atomic::Ordering::Acquire) {
             Err(rsi_storage::StorageError::RecoveryRequired)
@@ -227,48 +226,120 @@ impl Domain for Storage {
             Ok(())
         }
     }
-    fn spec(&self) -> &DomainSpec {
-        &self.spec
-    }
-    async fn snapshot(
+    fn snapshot(
         &self,
     ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
         self.ensure_available()?;
         Ok(self.rows.lock().unwrap().clone())
     }
-    async fn put(
+}
+#[derive(Debug)]
+struct Backend(Arc<Storage>);
+#[derive(Debug)]
+struct Unit(Arc<Storage>, rsi_storage::UnitDescriptor);
+#[async_trait]
+impl rsi_storage::KvBackend for Backend {
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        self.0.ensure_available()
+    }
+    fn capabilities(&self, _: rsi_storage::Layout) -> rsi_storage::Capabilities {
+        rsi_storage::Capabilities {
+            atomic_batch: true,
+            backup_record: false,
+        }
+    }
+    async fn open(
         &self,
-        key: &str,
-        value: serde_json::Value,
+        descriptor: rsi_storage::UnitDescriptor,
+    ) -> std::result::Result<rsi_storage::OpenedUnit, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        descriptor.admit_version(self.0.spec.version)?;
+        let records = self
+            .0
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    rsi_storage::Address::record("positions", key).unwrap(),
+                    rsi_storage::EncodedValue::encode(value).unwrap(),
+                )
+            })
+            .collect();
+        Ok(rsi_storage::OpenedUnit {
+            snapshot: rsi_storage::UnitSnapshot {
+                version: Some(self.0.spec.version),
+                records,
+                recoveries: vec![],
+            },
+            unit: Arc::new(Unit(self.0.clone(), descriptor)),
+        })
+    }
+}
+#[async_trait]
+impl rsi_storage::KvUnit for Unit {
+    fn descriptor(&self) -> &rsi_storage::UnitDescriptor {
+        &self.1
+    }
+    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+        self.0.ensure_available()
+    }
+    async fn write(
+        &self,
+        changes: Vec<rsi_storage::Mutation>,
     ) -> std::result::Result<(), rsi_storage::StorageError> {
         self.ensure_available()?;
-        if self.reject_put.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(rsi_storage::StorageError::Io("rejected before put".into()));
+        for change in changes {
+            assert_eq!(change.address.table(), "positions");
+            if let Some(value) = change.value {
+                if self.0.reject_put.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(rsi_storage::StorageError::Io("rejected before put".into()));
+                }
+                self.0
+                    .rows
+                    .lock()
+                    .unwrap()
+                    .insert(change.address.key().into(), value.decode()?);
+            } else {
+                self.0.rows.lock().unwrap().remove(change.address.key());
+                if self.0.fail.load(std::sync::atomic::Ordering::Acquire) {
+                    self.0
+                        .fenced
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return Err(rsi_storage::StorageError::OutcomeUnknown(
+                        "lost deletion receipt".into(),
+                    ));
+                }
+            }
         }
-        self.rows.lock().unwrap().insert(key.into(), value);
         Ok(())
     }
-    async fn delete(&self, key: &str) -> std::result::Result<bool, rsi_storage::StorageError> {
-        self.ensure_available()?;
-        let removed = self.rows.lock().unwrap().remove(key).is_some();
-        if self.fail.load(std::sync::atomic::Ordering::Acquire) {
-            self.fenced
-                .store(true, std::sync::atomic::Ordering::Release);
-            Err(rsi_storage::StorageError::OutcomeUnknown(
-                "lost deletion receipt".into(),
-            ))
-        } else {
-            Ok(removed)
-        }
+}
+struct FixtureOwner {
+    owner: Arc<Attention>,
+    _runtime: rsi_meta::Runtime,
+}
+impl std::ops::Deref for FixtureOwner {
+    type Target = Arc<Attention>;
+    fn deref(&self) -> &Self::Target {
+        &self.owner
     }
 }
-fn fixture(count: usize) -> (Arc<Sources>, Arc<Storage>, Arc<Attention>) {
-    fixture_with_byte_limit(count, 1024 * 1024)
+fn encoded_rows(rows: &BTreeMap<String, serde_json::Value>) -> usize {
+    let addressed: BTreeMap<_, _> = rows
+        .iter()
+        .map(|(key, value)| (format!("positions/{key}"), value))
+        .collect();
+    serde_json::to_vec(&addressed).unwrap().len()
 }
-fn fixture_with_byte_limit(
+async fn fixture(count: usize) -> (Arc<Sources>, Arc<Storage>, FixtureOwner) {
+    fixture_with_byte_limit(count, 1024 * 1024).await
+}
+async fn fixture_with_byte_limit(
     count: usize,
     maximum_bytes: usize,
-) -> (Arc<Sources>, Arc<Storage>, Arc<Attention>) {
+) -> (Arc<Sources>, Arc<Storage>, FixtureOwner) {
     let sources = Arc::new(Sources(
         Arc::new(Mutex::new(ExternalStatus::Ready)),
         Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -292,9 +363,10 @@ fn fixture_with_byte_limit(
         spec: DomainSpec {
             id: "test".into(),
             backend: "test".into(),
-            version: 1,
+            version: 2,
             maximum_records: 4096,
             maximum_bytes,
+            ..DomainSpec::default()
         },
         rows: Mutex::new(
             positions
@@ -306,11 +378,51 @@ fn fixture_with_byte_limit(
         fenced: std::sync::atomic::AtomicBool::new(false),
         reject_put: std::sync::atomic::AtomicBool::new(false),
     });
+    let runtime = rsi_meta::Runtime::default();
+    for (name, factory) in [
+        (
+            "storage",
+            Arc::new(rsi_storage::StorageFactory) as Arc<dyn PluginFactory>,
+        ),
+        (
+            "backend",
+            Arc::new(rsi_storage_testkit::BackendFactory::new(
+                "test",
+                Arc::new(Backend(storage.clone())),
+            )),
+        ),
+        ("domains", Arc::new(rsi_storage_domain::DomainFactory)),
+    ] {
+        let fiber = runtime
+            .root()
+            .apply(
+                rsi_meta::ResolvedFactory::linked(
+                    name,
+                    "test",
+                    rsi_meta::UpdateMode::Replayable,
+                    factory,
+                ),
+                ConfigValue::Null,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
+    }
+    let domain = runtime
+        .root()
+        .lookup_local::<DomainFacilityContract>()
+        .unwrap()
+        .open(
+            storage.spec.clone(),
+            Schema::default().table::<Position>("positions").unwrap(),
+        )
+        .await
+        .unwrap();
     let owner = Arc::new(Attention {
         session: sources.clone(),
         external: sources.clone(),
         epoch: HostEpoch::generate().unwrap(),
-        domain: storage.clone(),
+        domain,
         state: Mutex::new(State::from_positions(positions)),
         admission: Admission::new(
             2,
@@ -318,11 +430,18 @@ fn fixture_with_byte_limit(
         ),
         writer: Arc::new(Semaphore::new(1)),
     });
-    (sources, storage, owner)
+    (
+        sources,
+        storage,
+        FixtureOwner {
+            owner,
+            _runtime: runtime,
+        },
+    )
 }
 #[tokio::test]
 async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_acknowledgments() {
-    let (sources, storage, owner) = fixture(4096);
+    let (sources, storage, owner) = fixture(4096).await;
     for status in [ExternalStatus::Ready, ExternalStatus::Closed] {
         *sources.0.lock().unwrap() = status;
         let page = owner.read(&CallOrigin::Local).await.unwrap();
@@ -353,10 +472,10 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
             .entries
             .is_empty()
     );
-    let rows = storage.snapshot().await.unwrap();
+    let rows = storage.snapshot().unwrap();
     assert_eq!(rows.len(), 4096);
     assert!(!rows.contains_key(&format!("{:064x}", 0)));
-    assert!(serde_json::to_vec(&rows).unwrap().len() <= 1024 * 1024);
+    assert!(encoded_rows(&rows) <= 1024 * 1024);
     // A durable delete with a lost receipt must never authorize another update.
     let stored_key = key(&CallOrigin::Local, &position.conversation);
     {
@@ -389,7 +508,7 @@ async fn ready_and_closed_history_stays_unread_and_full_positions_admit_new_ackn
 #[tokio::test]
 async fn fenced_attention_rejects_before_observing_either_source() {
     use std::sync::atomic::Ordering;
-    let (sources, storage, owner) = fixture(0);
+    let (sources, storage, owner) = fixture(0).await;
     let position = owner
         .read(&CallOrigin::Local)
         .await
@@ -420,7 +539,7 @@ async fn fenced_attention_rejects_before_observing_either_source() {
 #[tokio::test]
 async fn known_failed_acknowledgment_keeps_confirmed_evictions_and_allows_explicit_retry() {
     use std::sync::atomic::Ordering;
-    let (_, storage, owner) = fixture(4096);
+    let (_, storage, owner) = fixture(4096).await;
     let position = owner
         .read(&CallOrigin::Local)
         .await
@@ -449,10 +568,7 @@ async fn known_failed_acknowledgment_keeps_confirmed_evictions_and_allows_explic
             .map(|(key, record)| (key.clone(), serde_json::to_value(&record.position).unwrap()))
             .collect();
         assert_eq!(actual, cached);
-        assert_eq!(
-            state.size.bytes(),
-            serde_json::to_vec(&actual).unwrap().len()
-        );
+        assert_eq!(state.size.bytes(), encoded_rows(&actual));
         assert_eq!(state.size.records(), actual.len());
         assert_eq!(state.recency.len(), state.positions.len());
         assert!(
@@ -484,11 +600,9 @@ async fn known_failed_acknowledgment_keeps_confirmed_evictions_and_allows_explic
 #[tokio::test]
 async fn byte_limited_eviction_and_repeated_acknowledgments_preserve_exact_cache_sizes() {
     use std::sync::atomic::Ordering;
-    let (_, seed, _) = fixture(3);
-    let limit = serde_json::to_vec(&seed.snapshot().await.unwrap())
-        .unwrap()
-        .len();
-    let (_, storage, owner) = fixture_with_byte_limit(3, limit);
+    let (_, seed, _) = fixture(3).await;
+    let limit = encoded_rows(&seed.snapshot().unwrap());
+    let (_, storage, owner) = fixture_with_byte_limit(3, limit).await;
     let position = owner
         .read(&CallOrigin::Local)
         .await
@@ -503,10 +617,7 @@ async fn byte_limited_eviction_and_repeated_acknowledgments_preserve_exact_cache
     let assert_cache = || {
         let actual = storage.rows.lock().unwrap();
         let state = owner.state.lock().unwrap();
-        assert_eq!(
-            state.size.bytes(),
-            serde_json::to_vec(&*actual).unwrap().len()
-        );
+        assert_eq!(state.size.bytes(), encoded_rows(&actual));
         assert_eq!(state.size.records(), actual.len());
         assert!(state.size.bytes() <= limit);
         assert_eq!(state.recency.len(), actual.len());
@@ -553,7 +664,6 @@ async fn byte_limited_eviction_and_repeated_acknowledgments_preserve_exact_cache
     let state = State::from_positions(
         storage
             .snapshot()
-            .await
             .unwrap()
             .into_iter()
             .map(|(key, value)| (key, serde_json::from_value(value).unwrap()))
@@ -564,7 +674,7 @@ async fn byte_limited_eviction_and_repeated_acknowledgments_preserve_exact_cache
 
 #[tokio::test]
 async fn attention_passes_the_same_principal_to_candidate_reads_and_acknowledgments() {
-    let (sources, _, owner) = fixture(0);
+    let (sources, _, owner) = fixture(0).await;
     let id = rsi_api_protocol::DeviceId::from_bytes([9; 16]);
     let origin = CallOrigin::Device(rsi_api_protocol::AuthenticatedDevice {
         id: id.clone(),
