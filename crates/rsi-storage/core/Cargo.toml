@@ -10,7 +10,7 @@ publish = false
 async-trait.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 

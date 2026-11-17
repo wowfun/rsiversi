@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-spill = { path = "../../rsi-spill/core" }
 rsi-session-tree-ui = { path = "../session-tree-ui" }
 rsi-execution = { path = "../../rsi-execution/core" }
 async-trait.workspace = true
@@ -26,7 +27,6 @@ rsi-client = { path = "../client" }
 rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-conversation = { path = "../conversation" }
-rsi-process = { path = "../../rsi-process/core" }
 rsi-retrieval-protocol = { path = "../../rsi-retrieval/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-spill = { path = "../../rsi-spill/core" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-execution = { path = "../../rsi-execution/core" }
 rsi-process = { path = "../../rsi-process/core" }
@@ -33,6 +34,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-spill-policy = { path = "../../rsi-spill/policy" }
+rsi-spill-local = { path = "../../rsi-spill/local" }
 rsi-agent-prompt-assembly = { path = "../prompt-assembly" }
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }

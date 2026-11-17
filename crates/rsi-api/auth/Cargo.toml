@@ -23,6 +23,9 @@ tokio-util.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
+rsi-storage-testkit = { path = "../../rsi-storage/testkit" }
 futures-util.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 

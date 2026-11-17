@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-spill = { path = "../../crates/rsi-spill/core" }
 rsi-session-api = { path = "../../crates/rsi/session-api" }
 rsi-workspace-api = { path = "../../crates/rsi-workspace/api" }
 rsi-media-api = { path = "../../crates/rsi-media/api" }
@@ -59,7 +60,6 @@ rsi-approval-protocol = { path = "../../crates/rsi-approval/protocol" }
 rsi-media-protocol = { path = "../../crates/rsi-media/protocol" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 rsi-host = { path = "../../crates/rsi-host/core" }
-rsi-process = { path = "../../crates/rsi-process/core" }
 rsi-sandbox = { path = "../../crates/rsi-sandbox/core" }
 rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
 rsi-workspace-protocol = { path = "../../crates/rsi-workspace/protocol" }

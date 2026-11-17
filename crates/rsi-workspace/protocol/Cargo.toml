@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+schemars.workspace = true
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
 rsi-workspace-path = { path = "../path" }
 sha2.workspace = true

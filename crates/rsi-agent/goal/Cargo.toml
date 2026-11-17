@@ -18,6 +18,8 @@ sha2.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
 tokio.workspace = true
 rsi-agent-composition = { path = "../composition" }
 rsi-agent-context = { path = "../context" }

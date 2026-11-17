@@ -22,6 +22,8 @@ rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 libc.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
+sha2.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 rsi-storage-domain = { path = "../domain" }
 tempfile.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "rsi-persistence-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+jsonschema.workspace = true
+hex.workspace = true
+sha2.workspace = true
+serde.workspace = true
+schemars.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 [dependencies]
+schemars.workspace = true
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-conversation = { path = "../conversation" }

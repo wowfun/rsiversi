@@ -30,6 +30,10 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
+schemars.workspace = true
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+rsi-storage-testkit = { path = "../../rsi-storage/testkit" }
 rsi-agent-store-sqlite = { path = "../../rsi-agent/store-sqlite" }
 tempfile.workspace = true
 rsi-agent-testkit = { path = "../../rsi-agent/testkit" }

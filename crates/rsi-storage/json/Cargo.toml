@@ -13,8 +13,13 @@ rsi-meta = { path = "../../rsi-meta/core" }
 rsi-storage = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 same-file.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
+rustix.workspace = true
 
 [dev-dependencies]
 rsi-storage-domain = { path = "../domain" }

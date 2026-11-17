@@ -29,6 +29,8 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
 http.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 

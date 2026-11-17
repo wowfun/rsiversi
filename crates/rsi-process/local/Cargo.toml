@@ -7,10 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-spill = { path = "../../rsi-spill/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 async-trait.workspace = true
-getrandom.workspace = true
-hex.workspace = true
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-process = { path = "../core" }
 tokio-util.workspace = true
@@ -25,6 +24,7 @@ rustix = { workspace = true, features = ["process", "fs", "event"] }
 portable-pty.workspace = true
 
 [dev-dependencies]
+rsi-spill-local = { path = "../../rsi-spill/local" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

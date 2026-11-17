@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+schemars.workspace = true
 rsi-ssh-protocol = { path = "../../rsi-ssh/protocol" }
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
 async-trait.workspace = true

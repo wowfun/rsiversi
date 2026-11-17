@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+schemars.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 base64.workspace = true
 rsi-execution-protocol = { path = "../../rsi-execution/protocol" }
@@ -26,6 +27,9 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
 
 [lints]
 workspace = true

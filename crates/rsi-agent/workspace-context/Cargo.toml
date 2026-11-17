@@ -34,6 +34,8 @@ libc.workspace = true
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-agent-composition = { path = "../composition" }
 rsi-agent-context = { path = "../context" }

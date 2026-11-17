@@ -22,6 +22,9 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
+rsi-storage-testkit = { path = "../../rsi-storage/testkit" }
 rsi-api = { path = "../../rsi-api/core" }
 rsi-api-auth = { path = "../../rsi-api/auth" }
 rsi-storage = { path = "../../rsi-storage/core" }

@@ -18,7 +18,7 @@ host-interface-packages = [
     "rsi-history-api",
     "rsi-media-api",
     "rsi-navigation-api",
-    "rsi-process-output-api",
+    "rsi-spill-api",
     "rsi-session-api",
     "rsi-session-files",
     "rsi-settings-api",

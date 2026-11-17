@@ -11,6 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
+rsi-spill = { path = "../../rsi-spill/core" }
 rsi-settings-api = { path = "../../rsi-settings/api" }
 rsi-session-api = { path = "../session-api" }
 rsi-ai-models-api = { path = "../../rsi-ai/models-api" }

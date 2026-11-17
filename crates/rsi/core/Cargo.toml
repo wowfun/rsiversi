@@ -15,6 +15,9 @@ name = "session-api-eval"
 path = "eval/session.rs"
 
 [dependencies]
+rsi-spill-local = { path = "../../rsi-spill/local" }
+rsi-spill-policy = { path = "../../rsi-spill/policy" }
+rsi-spill = { path = "../../rsi-spill/core" }
 dirs.workspace = true
 rsi-installation = { path = "../installation" }
 rsi-host-control = { path = "../host-control" }
@@ -73,7 +76,7 @@ rsi-ai-models-api = { path = "../../rsi-ai/models-api" }
 rsi-workspace-api = { path = "../../rsi-workspace/api" }
 rsi-settings-api = { path = "../../rsi-settings/api" }
 rsi-media-api = { path = "../../rsi-media/api" }
-rsi-process-output-api = { path = "../../rsi-process/output-api" }
+rsi-spill-api = { path = "../../rsi-spill/api" }
 rsi-session-api = { path = "../session-api" }
 bytes.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
@@ -134,8 +137,6 @@ rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-profile = { path = "../../rsi-meta/profile" }
 rsi-meta-scope = { path = "../../rsi-meta/scope" }
-rsi-permission-presets = { path = "../../rsi-permission-presets/core" }
-rsi-projection = { path = "../../rsi-projection/core" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
@@ -164,6 +165,10 @@ toml.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
+rsi-conversation = { path = "../conversation" }
+rsi-storage-testkit = { path = "../../rsi-storage/testkit" }
 rsi-automation = { path = "../automation", features = ["test-support"] }
 ring.workspace = true
 rsi-meta-native-loader = { path = "../../rsi-meta/native-loader" }

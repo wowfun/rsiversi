@@ -1187,6 +1187,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-media-protocol",
  "rsi-meta",
+ "rsi-spill",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -1224,6 +1225,7 @@ dependencies = [
  "rsi-sandbox",
  "rsi-tools-protocol",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2",
@@ -1261,6 +1263,7 @@ dependencies = [
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-sandbox",
+ "rsi-spill",
  "rsi-tools-protocol",
  "serde",
  "serde_json",
@@ -1280,6 +1283,7 @@ dependencies = [
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-tools-protocol",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2",
@@ -1307,6 +1311,7 @@ dependencies = [
  "rsi-api-contract-build",
  "rsi-credentials-protocol",
  "rsi-meta-contract",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror",
@@ -1339,6 +1344,7 @@ dependencies = [
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror",
@@ -1409,8 +1415,9 @@ dependencies = [
  "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-media-protocol",
- "rsi-process",
+ "rsi-spill",
  "rsi-tools-protocol",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror",
@@ -1422,6 +1429,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
+ "schemars 1.2.2",
  "serde",
  "thiserror",
  "zeroize",
@@ -1449,6 +1457,7 @@ version = "0.0.1"
 dependencies = [
  "rsi-api-protocol",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "thiserror",
 ]
@@ -1504,6 +1513,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "rsi-meta-contract",
+ "rsi-spill",
  "serde",
  "serde_json",
  "thiserror",
@@ -1518,6 +1528,7 @@ dependencies = [
  "bytes",
  "rsi-api-protocol",
  "rsi-meta-contract",
+ "schemars 1.2.2",
  "serde",
  "thiserror",
 ]
@@ -1598,6 +1609,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-meta-contract",
  "rsi-sandbox",
+ "rsi-spill",
  "serde",
  "thiserror",
 ]
@@ -1622,6 +1634,7 @@ dependencies = [
  "async-trait",
  "rsi-meta-contract",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "thiserror",
 ]
@@ -1680,6 +1693,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-spill"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "hex",
+ "rsi-api-protocol",
+ "rsi-meta-contract",
+ "schemars 1.2.2",
+ "serde",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "rsi-tools-protocol"
 version = "0.0.1"
 dependencies = [
@@ -1692,7 +1720,9 @@ dependencies = [
  "rsi-meta-contract",
  "rsi-process",
  "rsi-sandbox",
+ "rsi-spill",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2",
@@ -1758,6 +1788,7 @@ dependencies = [
  "rsi-execution-protocol",
  "rsi-meta",
  "rsi-workspace-path",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "sha2",

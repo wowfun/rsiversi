@@ -29,6 +29,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
+schemars.workspace = true
 rsi-api = { path = "../../rsi-api/core" }
 rsi-api-uds-client = { path = "../../rsi-api/uds-client" }
 rsi-api-auth = { path = "../../rsi-api/auth" }

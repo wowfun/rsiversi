@@ -1,0 +1,24 @@
+[package]
+name = "rsi-spill"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+rsi-api-protocol = { path = "../../rsi-api/protocol" }
+hex.workspace = true
+rsi-meta-contract = { path = "../../rsi-meta/contract" }
+schemars.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
