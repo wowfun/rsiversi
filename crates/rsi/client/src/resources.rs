@@ -19,6 +19,8 @@ pub struct InputCompletion {
     pub group: CompletionGroup,
     /// Resource coordinates for preview, independent of insertion text.
     pub resource: Option<SessionResourceRequest>,
+    /// Explicit command input; absent for resource completions.
+    pub composer_input: Option<rsi_agent_session_protocol::ComposerCommandInput>,
 }
 /// Closed first-party input groups.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -78,13 +80,14 @@ impl SessionController {
         let mut entries: Vec<_> = commands
             .commands()
             .iter()
-            .filter(|entry| entry.name() != "model-selection" && !reserved.contains(&entry.name()))
+            .filter(|entry| entry.composer_input().is_some() && !reserved.contains(&entry.name()))
             .map(|entry| InputCompletion {
                 name: entry.name().into(),
                 description: entry.description().into(),
                 replacement: format!("/{}", entry.name()),
                 group: CompletionGroup::Command,
                 resource: None,
+                composer_input: entry.composer_input().cloned(),
             })
             .collect();
         let names: Vec<_> = reserved
@@ -152,6 +155,7 @@ impl SessionController {
                 description: entry.description.clone(),
                 replacement: format!("@{}", entry.name),
                 group: CompletionGroup::Agent,
+                composer_input: None,
                 resource: Some(SessionResourceRequest::Read {
                     source: source.clone(),
                     id: entry.id.clone(),
@@ -227,6 +231,7 @@ impl SessionController {
                     format!("/{}", entry.name)
                 },
                 group: CompletionGroup::Skill,
+                composer_input: None,
                 resource: Some(SessionResourceRequest::Read {
                     source: source.clone(),
                     id: entry.id.clone(),

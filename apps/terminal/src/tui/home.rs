@@ -287,7 +287,7 @@ pub(super) async fn run(
                             selected = 0; status.clear(); menu = Some(Menu { title: "Actions", hint: "Enter select · Esc back", detail:None,detail_open:false,detail_offset:0,items: vec![("/login".into(), None), ("/model".into(), None), ("Recent sessions".into(), None), ("/external".into(),None), ("/profiles".into(),None), ("/attention".into(),None), ("/automation".into(),None), ("Exit".into(), None), ("/help".into(), None)] });
                         } else if (key.code == KeyCode::Enter && !key.modifiers.contains(Modifiers::SHIFT)) || (control && key.code == KeyCode::Char('s')) {
                             if let Some(command) = setup::command(editor.text()) {
-                                if editor.cursor()!=editor.text().len() || matches!(command,setup::Command::Invalid) {status="Invalid command or cursor not at end. Draft retained; /help lists usage.".into();continue;}
+                                if matches!(command,setup::Command::Invalid) {status="Invalid command. Draft retained; /help lists usage.".into();continue;}
                                 editor.take();
                                 match command {
                                     setup::Command::Automation=>{automation=super::feature_api(context).map(rsi_automation_api::Client::new);if let Some(client)=automation.clone(){status=if super::automation::Pending::start(&mut automation_work,client,super::automation::list()){"Reading deployment owner…"}else{"Deployment operation is still awaiting its result"}.into();}else{status="Automation is unavailable on this connection".into();}},

@@ -48,6 +48,25 @@ impl Scenario {
                     "plan",
                     "Plan arguments",
                     true,
+                    Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        hint: "Arguments".into(),
+                    }),
+                )
+                .unwrap(),
+                SessionCommandDescriptor::new(
+                    ContributionId::new("fixture.structured").unwrap(),
+                    "structured",
+                    "Dedicated structured controls",
+                    true,
+                    None,
+                )
+                .unwrap(),
+                SessionCommandDescriptor::new(
+                    ContributionId::new("fixture.help").unwrap(),
+                    "help",
+                    "No arguments",
+                    true,
+                    Some(rsi_agent_session_protocol::ComposerCommandInput::None),
                 )
                 .unwrap(),
             ],
@@ -208,6 +227,17 @@ async fn owned_commands(execution: Execution) {
     let controller = context.lookup_local::<SessionControllerContract>().unwrap();
     let view = controller.commands().await.unwrap();
     assert_eq!(view.revision(), CommandRevision::Draft { revision: 7 });
+    let (catalog, _) = controller.completion_catalog(&["plan"]).await.unwrap();
+    let commands: Vec<_> = catalog
+        .iter()
+        .filter(|entry| entry.group == rsi_client::CompletionGroup::Command)
+        .collect();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].name, "help");
+    assert_eq!(
+        commands[0].composer_input,
+        Some(rsi_agent_session_protocol::ComposerCommandInput::None)
+    );
     for index in 0..4 {
         drop(controller.execute_command(invocation(&handle, &format!("request{index}"))));
     }

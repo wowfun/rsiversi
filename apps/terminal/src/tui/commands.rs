@@ -90,7 +90,7 @@ impl Client {
                 items: commands
                     .commands()
                     .iter()
-                    .filter(|entry| slash::visible_session_command(entry.name()))
+                    .filter(|entry| entry.composer_input().is_some())
                     .map(|entry| {
                         (
                             format!("/{} · {}", entry.name(), entry.description()),

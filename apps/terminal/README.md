@@ -4,6 +4,11 @@ Conversation rows follow the final Step input order. Source details read the
 exact entered field. A saved viewport reopens at the row's display Fact even
 when its text came from an earlier claim.
 
+Line `:output` admits a typed Spill locator before reading a bounded page. TUI
+source details expose retained text and stdout/stderr through the same reader;
+stream locators have no duplicate generic action. Paging retains the typed
+locator, and closing a detail cancels its read without cancelling the Turn.
+
 
 Input-preparation rejection reports a Blocked outcome without a provider call.
 An initially empty final input list completes normally.
@@ -193,11 +198,13 @@ their error classifications.
 Application commands are `/help`, `/login [deepseek|openai|openai-compatible]`,
 `/model`, `/effort`, `/markdown [on|off]`, `/new`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
 bypass message submission, prompt recall and Session command receipts, and shadow
-same-name Session commands. Recognition requires raw single-line input and a
-cursor at the end; invalid arguments retain the draft. Multi-line input starting
+same-name Session commands. Recognition requires raw single-line input regardless
+of cursor position; invalid arguments retain the draft. Multi-line input starting
 with other reserved names and `//` input are literal Human text in both dispatch layers.
 `/export` rejects multiline arguments and never submits them as Human text.
 Editing and submission keys follow the [interaction design](docs/tui-design.md).
+Incomplete metrics retain their progress until the next inspection or explicit
+refresh; receiving an incomplete result does not immediately issue another read.
 `@name` opens Agent completion. Ctrl+P → “@ Workspace file · browse and insert
 path” opens the separate file picker on all supported key decoders. A decoded
 Alt+@ is an additional shortcut; whether a terminal emits it depends on its
@@ -211,8 +218,12 @@ provider arguments. The unfiltered popup keeps application actions in their
 curated order and hides the exit alias; typing it still completes and executes it. Up/Down select, Tab replaces only the current token, Escape
 hides until another edit or Tab. Enter completes and executes application commands;
 a partial Session command is completed only. Fully typed Session commands retain
-the shared invocation-time predecessor checks. Session descriptors are bounded
-display snapshots: fetch on each popup/help opening, coalesce invalidation during
+the shared invocation-time predecessor checks. Completion, help and the command
+menu use each descriptor's composer input declaration. The structured-only
+`model-selection` command is represented by `/model` and `/effort`.
+Explicit Skill and Agent entries keep
+their resource invocation paths. Session descriptors are bounded display
+snapshots: fetch on each popup/help opening, coalesce invalidation during
 control progress, command completion and publication, and reject obsolete results.
 Read failures clear Session candidates while retaining application commands.
 Help has a filterable list and paged details, bounded to 64 KiB overall, 256-byte

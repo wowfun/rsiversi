@@ -56,7 +56,7 @@ pub(super) struct Services {
     pub ui: Arc<rsi_ui::Ui>,
     pub ui_target: Arc<rsi_ui::UiTarget>,
     pub application: Arc<dyn SessionService>,
-    pub output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    pub output_cache: Arc<dyn rsi_spill::SpillReader>,
     pub model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     pub workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     pub lifetime: rsi_client::ConnectionLifetime,
@@ -243,7 +243,7 @@ enum Update {
     ),
     FilePicker(rsi_session_files_ui::FilePickerPage),
     Message(rsi_agent_session_protocol::AgentMessage),
-    Output(rsi_process::OutputPage),
+    Output(rsi_spill::SpillPage),
     Notice(String),
     Approval(Option<rsi_approval_protocol::ApprovalRequest>),
     ApprovalDecided(
@@ -370,7 +370,7 @@ struct Client {
     prompts: prompts::Prompts,
     ui: ui::Bindings,
     application: Arc<dyn SessionService>,
-    output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    output_cache: Arc<dyn rsi_spill::SpillReader>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     handle: Arc<dyn SessionHandle>,
     controller: Arc<rsi_client::SessionController>,
@@ -649,6 +649,13 @@ impl Client {
         let handle = self.handle.clone();
         self.spawn(async move { Ok(Update::Metrics(Box::new(handle.metrics().await))) });
     }
+    fn metrics_received(
+        &mut self,
+        result: rsi_session_protocol::Result<rsi_session_protocol::MetricsRead>,
+    ) {
+        self.metrics_loading = false;
+        self.state.metrics = result.ok();
+    }
 
     fn history(&mut self, manual: bool) {
         if self.history.loading || self.pending_requests() >= 8 {
@@ -754,10 +761,9 @@ impl Client {
             return;
         }
         if !retry && let Some(command) = setup::command(self.state.editor.text()) {
-            if self.state.editor.cursor() != self.state.editor.text().len()
-                || matches!(command, setup::Command::Invalid)
-            {
-                self.state.notice("Invalid application command or cursor not at end. Draft retained; /help lists usage.");
+            if matches!(command, setup::Command::Invalid) {
+                self.state
+                    .notice("Invalid application command. Draft retained; /help lists usage.");
                 return;
             }
             self.state.editor.take();
@@ -1679,12 +1685,30 @@ impl Client {
                                 ));
                             }
                         }
-                    }
-                    for (stream, output) in ["stdout", "stderr"].into_iter().zip(&block.outputs) {
-                        if let Some(output) = output {
+                        for (stream, output) in ["stdout", "stderr"].into_iter().zip(&tool.outputs)
+                        {
+                            if let Some(output) = output {
+                                items.push((
+                                    format!("Full {stream}"),
+                                    Action::Output(output.locator().clone(), 0),
+                                ));
+                            }
+                        }
+                        for (index, output) in tool
+                            .spills
+                            .iter()
+                            .filter(|output| {
+                                !tool
+                                    .outputs
+                                    .iter()
+                                    .flatten()
+                                    .any(|stream| stream == *output)
+                            })
+                            .enumerate()
+                        {
                             items.push((
-                                format!("Full {stream}"),
-                                Action::Output(output.clone(), 0),
+                                format!("Full output {}", index + 1),
+                                Action::Output(output.locator().clone(), 0),
                             ));
                         }
                     }
@@ -2217,9 +2241,9 @@ async fn run_inner(
                             client.message_detail(&message);
                         },
                         Ok(Update::Output(page)) => {
-                            client.state.open_detail(format!("Completed output {} · bytes {}..{} / {}\n{}", page.id, page.offset, page.next_offset, page.total_bytes, super::terminal_text(&String::from_utf8_lossy(&page.bytes))));
-                            client.state.detail_previous = (page.offset > 0).then(|| Action::Output(page.id.clone(), page.offset.saturating_sub(16*1024)));
-                            client.state.detail_next = (page.next_offset < page.total_bytes).then(|| Action::Output(page.id, page.next_offset));
+                            client.state.open_detail(format!("Completed output {} · bytes {}..{} / {}\n{}", page.locator, page.offset, page.next_offset, page.total_bytes, super::terminal_text(&String::from_utf8_lossy(&page.bytes))));
+                            client.state.detail_previous = (page.offset > 0).then(|| Action::Output(page.locator.clone(), page.offset.saturating_sub(16*1024)));
+                            client.state.detail_next = (page.next_offset < page.total_bytes).then(|| Action::Output(page.locator, page.next_offset));
                             client.state.notice("Output page · ←/→ pages · ↑/↓ scroll · Ctrl+Y copies this displayed page");
                         },
                         Ok(Update::AttentionRead) => {},
@@ -2242,13 +2266,7 @@ async fn run_inner(
                             client.refresh_metrics();
                         },
                         Ok(Update::Metrics(result)) => {
-                            let result = *result;
-                            client.metrics_loading = false;
-                            if let Ok(metrics) = result {
-                                let complete = metrics.complete;
-                                client.state.metrics = Some(metrics);
-                                if !complete { client.refresh_metrics(); }
-                            } else { client.state.metrics = None; }
+                            client.metrics_received(*result);
                         },
                         Ok(Update::History(page)) => client.page(page),
                         Ok(Update::Submitted(receipt)) => {

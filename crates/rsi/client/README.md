@@ -19,7 +19,7 @@ Permission answers bind the displayed generation, request and exact option ID.
 All four standard option kinds remain visible; no answer creates a local grant.
 
 The controller exposes completions through `SessionController::completion_catalog`,
-which assembles Session commands and human
+which assembles composer-enabled Session commands and human
 resource candidates from one Sources discovery and one List per present skill or
 Agent source. GUI filtering caches that catalog per pane generation; the Web
 document requests a refresh on each new popup and on explicit Refresh. Fresh spawn

@@ -461,7 +461,7 @@ impl AnswerDraft {
 /// Runs one line-oriented client over the transport-independent Session seam.
 pub(crate) async fn run_session_application(
     application: Arc<dyn SessionService>,
-    output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    output_cache: Arc<dyn rsi_spill::SpillReader>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     command: SessionCommand,
     work: ApplicationWork,
@@ -528,7 +528,7 @@ pub(crate) async fn run_session_application(
 #[allow(clippy::too_many_lines)] // One command owner preserves attachment, answer draft, and client input authority.
 async fn run(
     application: Arc<dyn SessionService>,
-    output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    output_cache: Arc<dyn rsi_spill::SpillReader>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     command: SessionCommand,
     renderer: &Renderer,
@@ -734,8 +734,9 @@ async fn run(
                             let id = parts.next().ok_or_else(|| session_error("usage: :output ID [OFFSET]"))?;
                             let offset = parts.next().map(str::parse::<u64>).transpose().map_err(session_error)?.unwrap_or(0);
                             if parts.next().is_some() { return Err(session_error("usage: :output ID [OFFSET]")); }
-                            let page = output_cache.read(id, offset, rsi_process::DEFAULT_OUTPUT_READ_BYTES).await.map_err(session_error)?;
-                            notice(renderer, "output", json!({"id":page.id,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":String::from_utf8_lossy(&page.bytes),"bytes_hex":hex::encode(&page.bytes)})).await?;
+                            let id = rsi_spill::SpillLocator::parse(id.to_owned()).map_err(session_error)?;
+                            let page = output_cache.read(&id, offset, rsi_spill::DEFAULT_SPILL_READ_BYTES).await.map_err(session_error)?;
+                            notice(renderer, "output", json!({"id":page.locator,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":String::from_utf8_lossy(&page.bytes),"bytes_hex":hex::encode(&page.bytes)})).await?;
                         }
                         "steer" => { if arguments.is_empty() { return Err(session_error("usage: :steer TEXT")); } delivery = MessageDelivery::Steer; text = arguments.to_owned(); }
                         "help" => notice(renderer, "help", json!({"commands":":sessions :attach SESSION :export [PATH] [-f FORMAT] [-i INCLUDE] :history [BEFORE] :status :agents :queue :commands :command-result /NAME ARGUMENTS :steer TEXT :cancel [ID] :approvals :allow SESSION ID :deny SESSION ID :questions :answer ID :output ID [OFFSET] :exit ::TEXT"})).await?,

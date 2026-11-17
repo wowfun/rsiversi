@@ -25,7 +25,7 @@ impl PluginFactory for BlockedRead {
             plan.context()
                 .provide_local::<WorkspaceRegistryContract>(Arc::new(UnusedWorkspace))?,
             plan.context()
-                .provide_local::<rsi_process::ProcessOutputCacheContract>(Arc::new(
+                .provide_local::<rsi_spill::SpillReaderContract>(Arc::new(
                     UnknownThenAcceptedHandle::default(),
                 ))?,
         ];

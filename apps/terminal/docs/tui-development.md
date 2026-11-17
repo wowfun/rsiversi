@@ -72,7 +72,7 @@ running it; concurrent Cargo commands can replace `target/debug/rsi`.
 tui_dev=$(mktemp -d /var/tmp/rsi-tui-dev.XXXXXX)
 tui_runtime=$(mktemp -d /tmp/rt.XXXXXX)
 tui_rustup_home=${RUSTUP_HOME:-"$HOME/.rustup"}
-mkdir -p "$tui_dev"/{home,config/rsi,state,cache,workspace/.cargo}
+mkdir -p "$tui_dev"/{home,config/rsiversi,data,state,cache,tmp,workspace/.cargo}
 chmod 700 "$tui_runtime"
 cp target/debug/rsi "$tui_dev/rsi"
 chmod 700 "$tui_dev/rsi"
@@ -82,7 +82,9 @@ tui_rsi() {
   env -i PATH="$PATH" TERM="${TERM:-xterm-256color}" LANG="${LANG:-C.UTF-8}" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=$tui_runtime/absent-session-bus" \
     HOME="$tui_dev/home" \
+    TMPDIR="$tui_dev/tmp" \
     XDG_CONFIG_HOME="$tui_dev/config" \
+    XDG_DATA_HOME="$tui_dev/data" \
     XDG_STATE_HOME="$tui_dev/state" \
     XDG_CACHE_HOME="$tui_dev/cache" \
     XDG_RUNTIME_DIR="$tui_runtime" \
@@ -118,8 +120,8 @@ Create an Application Profile for the fullscreen client and another for
 machine-readable inspection. Both use the same Host Profile:
 
 ```bash
-mkdir -p "$tui_dev/config/rsi/application-profiles/"{dev-tui,dev-cli}
-cat > "$tui_dev/config/rsi/application-profiles/dev-tui/application.profile.toml" <<'TOML'
+mkdir -p "$tui_dev/config/rsiversi/application-profiles/"{dev-tui,dev-cli}
+cat > "$tui_dev/config/rsiversi/application-profiles/dev-tui/application.profile.toml" <<'TOML'
 format = 1
 [[steps]]
 kind = "plugin"
@@ -145,7 +147,7 @@ id = "application"
 plugin = "rsi.application.tui"
 config = { presentation = [{ id = "linked", plugin = "rsi.terminal.ui" }] }
 TOML
-cat > "$tui_dev/config/rsi/application-profiles/dev-cli/application.profile.toml" <<'TOML'
+cat > "$tui_dev/config/rsiversi/application-profiles/dev-cli/application.profile.toml" <<'TOML'
 format = 1
 [[steps]]
 kind = "plugin"
@@ -162,8 +164,8 @@ TOML
 For an opt-in DeepSeek session, configure its declared Responses route:
 
 ```bash
-mkdir -p "$tui_dev/config/rsi/host-profiles/dev"
-cat > "$tui_dev/config/rsi/host-profiles/dev/host.profile.toml" <<'TOML'
+mkdir -p "$tui_dev/config/rsiversi/host-profiles/dev"
+cat > "$tui_dev/config/rsiversi/host-profiles/dev/host.profile.toml" <<'TOML'
 format = 1
 [[steps]]
 kind = "plugin"
@@ -179,7 +181,7 @@ context_window_tokens = 1000000
 default_output_reserve_tokens = 256000
 max_output_reserve_tokens = 256000
 TOML
-cat > "$tui_dev/config/rsi/settings.json" <<'JSON'
+cat > "$tui_dev/config/rsiversi/settings.json" <<'JSON'
 {
   "rsi.agent": {
     "default_model": {"deployment": "dev-deepseek", "model": "deepseek-v4-flash"}

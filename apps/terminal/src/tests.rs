@@ -610,6 +610,9 @@ impl SessionHandle for UnknownThenAcceptedHandle {
                     "plan",
                     "Plan on or off",
                     true,
+                    Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        hint: "Arguments".into(),
+                    }),
                 )
                 .unwrap(),
             ],
@@ -1424,13 +1427,13 @@ async fn cancelled_turn_still_delivers_terminal_envelopes_through_backpressure()
 }
 
 #[async_trait::async_trait]
-impl rsi_process::ProcessOutputCache for UnknownThenAcceptedHandle {
+impl rsi_spill::SpillReader for UnknownThenAcceptedHandle {
     async fn read(
         &self,
-        _: &str,
+        _: &rsi_spill::SpillLocator,
         _: u64,
         _: usize,
-    ) -> rsi_process::Result<rsi_process::OutputPage> {
+    ) -> rsi_spill::Result<rsi_spill::SpillPage> {
         self.wait_read().await;
         unreachable!("submission fixture does not finish Process output")
     }

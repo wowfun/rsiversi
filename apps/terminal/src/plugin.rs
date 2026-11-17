@@ -157,13 +157,11 @@ impl Factory {
             Kind::Headless => {
                 session(prepared).requiring_local::<rsi_media_protocol::MediaContract>()
             }
-            Kind::Cli => {
-                session(prepared).requiring_local::<rsi_process::ProcessOutputCacheContract>()
-            }
+            Kind::Cli => session(prepared).requiring_local::<rsi_spill::SpillReaderContract>(),
             Kind::Tui => session(prepared)
                 .requiring_local::<rsi_ui::UiContract>()
                 .requiring_local::<rsi_ui::UiTargetContract>()
-                .requiring_local::<rsi_process::ProcessOutputCacheContract>()
+                .requiring_local::<rsi_spill::SpillReaderContract>()
                 .requiring_local::<rsi_ai_protocol::LanguageModelsContract>()
                 .requiring_local::<ConnectionLifetimeContract>(),
         })
@@ -214,7 +212,7 @@ impl Factory {
             Prepared::Cli(command) => {
                 let session = plan.local::<SessionContract>()?;
                 let workspace = plan.local::<WorkspaceRegistryContract>()?;
-                let output = plan.local::<rsi_process::ProcessOutputCacheContract>()?;
+                let output = plan.local::<rsi_spill::SpillReaderContract>()?;
                 Box::pin(crate::session_cli::run_session_application(
                     session,
                     output,
@@ -227,7 +225,7 @@ impl Factory {
             Prepared::Tui(command, presentation) => {
                 let session = plan.local::<SessionContract>()?;
                 let workspace = plan.local::<WorkspaceRegistryContract>()?;
-                let output = plan.local::<rsi_process::ProcessOutputCacheContract>()?;
+                let output = plan.local::<rsi_spill::SpillReaderContract>()?;
                 let models = plan.local::<rsi_ai_protocol::LanguageModelsContract>()?;
                 let lifetime = *plan.local::<ConnectionLifetimeContract>()?;
                 Box::pin(crate::tui::run(

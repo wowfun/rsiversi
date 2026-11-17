@@ -85,7 +85,7 @@ pub(super) enum Action {
         rsi_approval_protocol::ApprovalRequest,
         rsi_approval_protocol::ApprovalDecision,
     ),
-    Output(String, u64),
+    Output(rsi_spill::SpillLocator, u64),
     Window(super::transcript::Source, usize),
 }
 

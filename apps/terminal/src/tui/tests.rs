@@ -8,6 +8,43 @@ mod ui;
 mod workspace;
 
 #[tokio::test]
+async fn partial_metrics_wait_for_the_next_refresh_without_spawning_a_retry() {
+    let (mut client, _, runtime, surface) = client().await;
+    client.metrics_loading = true;
+    client.metrics_received(Ok(rsi_session_protocol::MetricsRead {
+        current_model: rsi_session_protocol::ModelSelectionRead {
+            selection: rsi_agent_session_protocol::ModelSelection::baseline(
+                client.state.header.settings(),
+            ),
+            availability: rsi_session_protocol::ModelAvailability::Unavailable {
+                reason: "fixture".into(),
+            },
+        },
+        session_id: client.state.header.session_id().clone(),
+        watermark: 10,
+        complete: false,
+        summary: rsi_conversation::SessionMetrics {
+            through_seq: 5,
+            ..Default::default()
+        },
+    }));
+    assert!(!client.metrics_loading);
+    assert_eq!(
+        client.state.metrics.as_ref().unwrap().summary.through_seq,
+        5
+    );
+    assert!(client.tasks.is_empty());
+    client.refresh_metrics();
+    assert!(client.metrics_loading);
+    assert!(matches!(
+        client.tasks.next().await.unwrap().result,
+        Ok(Update::Metrics(_))
+    ));
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn approval_review_reads_authority_and_uncertain_decisions_require_explicit_refresh() {
     let (mut client, handle, runtime, surface) = client().await;
     let request: rsi_approval_protocol::ApprovalRequest =
@@ -829,7 +866,13 @@ async fn closing_source_detail_cancels_its_owned_io_and_fences_the_late_error() 
 #[tokio::test]
 async fn closing_other_details_drops_io_and_fences_errors_without_cancelling_mutations() {
     for action in [
-        Action::Output("fixture-output".into(), 0),
+        Action::Output(
+            rsi_spill::SpillLocator::new(
+                &rsi_spill::SpillScope::new("session", "fixture"),
+                [0; 16],
+            ),
+            0,
+        ),
         Action::ReadQueue(rsi_agent_store_protocol::StorePendingMessage {
             queue_slot: rsi_agent_session_protocol::QueueSlot::initial(
                 &MessageId::new("fixture-message").unwrap(),
@@ -873,6 +916,68 @@ async fn closing_other_details_drops_io_and_fences_errors_without_cancelling_mut
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn output_menu_retains_typed_spills_without_duplicate_stream_actions() {
+    let (mut client, _, runtime, surface) = client().await;
+    let scope = rsi_spill::SpillScope::new("session", "menu");
+    let stdout = rsi_spill::SpillLocator::new(&scope, [1; 16]);
+    let text = rsi_spill::SpillLocator::new(&scope, [2; 16]);
+    let mut result = rsi_tools_protocol::ToolResult::new(
+        serde_json::json!({"stdout":{"full_output":stdout.as_str()}}),
+        vec![],
+        false,
+    )
+    .unwrap();
+    result.spills = [stdout.clone(), text.clone()]
+        .map(|locator| rsi_spill::SpillRef {
+            locator,
+            bytes: 100_000,
+        })
+        .into();
+    client.state.transcript.apply(
+        &SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ToolResult {
+                turn_id: rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
+                effect_id: rsi_agent_session_protocol::EffectId::new("tool").unwrap(),
+                identity: rsi_tools_protocol::ToolResultIdentity::new(
+                    "owner",
+                    "invoke",
+                    "call",
+                    "a".repeat(64),
+                )
+                .unwrap(),
+                result,
+                conclusion: None,
+            },
+        )
+        .unwrap(),
+    );
+    client.action(Action::Detail);
+    let outputs: Vec<_> = client
+        .state
+        .menu
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|(label, action)| {
+            if let Action::Output(locator, offset) = action {
+                Some((label.as_str(), locator, *offset))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        outputs,
+        [("Full stdout", &stdout, 0), ("Full output 1", &text, 0)]
+    );
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -1831,6 +1936,7 @@ async fn setup_commands_bypass_message_history_and_unresolved_session_submission
         "/exit",
     ] {
         client.state.editor.insert(text).unwrap();
+        client.state.editor.key(KeyCode::Left.into()).unwrap();
         client.submit(MessageDelivery::NextTurn, false);
         assert!(client.setup_command.take().is_some());
         assert!(client.state.editor.text().is_empty());

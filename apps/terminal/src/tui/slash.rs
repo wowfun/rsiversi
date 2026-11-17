@@ -76,9 +76,6 @@ fn detail_pages(mut text: &str) -> Vec<&str> {
     }
     pages
 }
-pub(super) fn visible_session_command(name: &str) -> bool {
-    name != "model-selection"
-}
 pub(super) fn reserved(text: &str) -> bool {
     let word = text.split_whitespace().next().unwrap_or_default();
     BUILTINS
@@ -728,6 +725,46 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completion_and_help_preserve_shared_catalog_and_dedicated_model_controls() {
+        let mut ui = Ui {
+            catalog: ["plan"]
+                .into_iter()
+                .map(|name| Entry {
+                    name: name.into(),
+                    description: "Session command".into(),
+                    application: false,
+                    skill: None,
+                })
+                .chain([skill("model-selection", "/skill model-selection")])
+                .collect(),
+            ..Ui::default()
+        };
+        ui.update(&editor::Editor::with_text("/".into(), 1024), None);
+        assert!(
+            ui.entries
+                .iter()
+                .all(|entry| entry.skill.is_some() || entry.name.as_ref() != "model-selection")
+        );
+        assert!(
+            ui.entries
+                .iter()
+                .any(|entry| entry.name.as_ref() == "model")
+        );
+        assert!(
+            ui.entries
+                .iter()
+                .any(|entry| entry.name.as_ref() == "effort")
+        );
+        assert!(ui.entries.iter().any(|entry| entry.name.as_ref() == "plan"));
+        assert!(ui.entries.iter().any(|entry| entry.skill.is_some()));
+        ui.open_help();
+        assert!(
+            ui.help_entries()
+                .iter()
+                .all(|entry| entry.skill.is_some() || entry.name.as_ref() != "model-selection")
+        );
+    }
     fn skill(name: &str, replacement: &str) -> Entry {
         Entry {
             name: name.into(),
@@ -738,6 +775,7 @@ mod tests {
                 description: "Review a change".into(),
                 replacement: replacement.into(),
                 group: rsi_client::CompletionGroup::Skill,
+                composer_input: None,
                 resource: Some(rsi_agent_session_protocol::SessionResourceRequest::Read {
                     source: rsi_agent_session_protocol::ContributionId::new("rsi.workspace-skills")
                         .unwrap(),
@@ -854,6 +892,7 @@ mod tests {
             description: "x".repeat(40 * 1024),
             replacement: "/large".into(),
             group: rsi_client::CompletionGroup::Skill,
+            composer_input: None,
             resource: None,
         };
         assert!(catalog_entry(entry, &mut remaining).is_none());
