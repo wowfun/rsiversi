@@ -1,6 +1,6 @@
 import {DocumentContributions} from "../document-plugins.tsx";
 import { useLayoutEffect, useRef } from "react";
-import type { Model } from "../bridge.ts";
+import {run, type Model} from "../bridge.ts";
 import {ComposerAdd, ComposerAccess, ComposerModel} from "./composer-controls.tsx";
 import { Completions, ResourcePreview } from "./completions.tsx";
 import type { ComposerOwner, ComposerProjection } from "./composer-state.ts";
@@ -77,13 +77,17 @@ export function Composer({
       />
       <DocumentContributions seat="composer"/>
       <DraftReferences owner={owner} state={state} />
+      <div className="composer-command">
+        <span role="status" aria-live="polite" aria-atomic="true">{state?.command && <><strong>/{state.command.name}</strong> {state.command.hint}</>}</span>
+        {state?.command && <button type="button" className="quiet" disabled={state.disabled} aria-label="Leave command input" onClick={()=>void run(async()=>owner.clearCommand())}>×</button>}
+      </div>
       <textarea
         ref={(node) => {
           input.current = node;
           register("input")(node);
         }}
         disabled={state?.disabled ?? true}
-        aria-label={`${label} message`}
+        aria-label={state?.command ? `${label} command arguments` : `${label} message`}
         aria-describedby={hintId}
         aria-expanded={!!owner.completions}
         aria-autocomplete="list"

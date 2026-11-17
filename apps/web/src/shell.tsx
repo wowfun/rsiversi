@@ -9,7 +9,7 @@ import {
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import css from "./shell.module.css";
 import navigationCss from "./navigation.module.css";
-import { DirectoryPickerHost, chooseWorkspace } from "./directory-picker.tsx";
+import { DirectoryPickerHost } from "./directory-picker.tsx";
 import license from "../vendor/dsh/LICENSE?raw";
 import xtermLicense from "@xterm/xterm/LICENSE?raw";
 import fitLicense from "@xterm/addon-fit/LICENSE?raw";

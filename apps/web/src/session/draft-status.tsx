@@ -13,12 +13,16 @@ export function DraftStatus({
       {state?.bindingError && (
         <p className="draft-error">{state.bindingError}</p>
       )}
-      {state?.storageNotice && (
+      <p className="draft-error" role="status" aria-live="polite" aria-atomic="true">
+        {state?.storageNotice}
+      </p>
+      {(state?.storageNotice || state?.discardConfirmed) && (
         <>
           {state.discardConfirmed && (
             <p className="draft-error">
-              This deletes all saved text, images, references and pending
-              request identities for this site. A pending request may already
+              This deletes all saved drafts for this site, including drafts that
+              have not started a conversation, and their text, images, references and pending
+              request identities. A pending request may already
               have run; discarding its identity does not undo it. This cannot be undone.
             </p>
           )}

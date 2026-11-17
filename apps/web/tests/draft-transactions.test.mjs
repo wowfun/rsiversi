@@ -1,9 +1,10 @@
+import {clearDraftRecords} from './clear-draft-records.mjs';
 import 'fake-indexeddb/auto';
 import {test, beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {DraftStore, DraftEditor, captureOf} from '../drafts.js';
 
-beforeEach(() => DraftStore.discardAllSaved());
+beforeEach(() => clearDraftRecords());
 const open = () => DraftStore.open('a'.repeat(32), {kind:'local'});
 const header = 'b'.repeat(64);
 
@@ -94,6 +95,21 @@ test('empty removal is idempotent but cannot delete a replaced incarnation',asyn
   const replacement=await store.ensure('main','session',header);
   await store.edit(replacement,'preserve',[]);
   await assert.rejects(store.removeEmpty(saved),{code:'conflict'});
+  await store.verify();
+});
+test('confirmed nonempty removal refuses new edits and pending or reference obligations',async()=>{
+  const store=await open();let saved=await store.edit(await store.ensure('main','session',header),'delete me',[]);
+  const stale=saved;saved=await store.edit(saved,'newer',[]);
+  await assert.rejects(store.removeSaved(stale),{code:'conflict'});
+  saved=await store.freeze(saved,{kind:'message',id:'pending',opaque:'opaque',text_bytes:5,images:0,captures:[]});
+  await assert.rejects(store.removeSaved(saved),/Resolve pending/);
+  saved=await store.cancelPrepared(saved);
+  saved=await store.edit(saved,'keep until released',[],[reference('owned')]);
+  await assert.rejects(store.removeSaved(saved),/release references/);
+  saved=await store.edit(saved,'delete after cleanup',[],[]);
+  await assert.rejects(store.removeSaved(saved),/release references/);
+  saved=await store.acknowledgeRelease(saved,saved.releases[0]);
+  await store.removeSaved(saved);assert.equal(await store.get('main','session'),undefined);
   await store.verify();
 });
 

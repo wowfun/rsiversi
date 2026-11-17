@@ -18,6 +18,11 @@ rounding integer revisions or changing command argument order. Separate editable
 and pending revisions let typing continue while the original request settles.
 Incarnation and revision comparisons protect every transactional write, including
 atomic movement to an explicitly created replacement Fresh Session.
+Command selection adapts the DSH input facade's captured span and draft revision:
+argument commands retain the trailing prose as visible arguments, while no-argument
+commands consume only their triggering span after confirmed completion. The frozen
+request carries that consumption guard across reloads. A newer edit is never consumed;
+there is no hidden backup draft or replacement request identity.
 Recreation saves and holds the cached editor before it starts the replacement;
 an older persisted value cannot stand in for unsaved local input. Conflict choices
 remain available in the recovery list even when the old Session cannot reopen.
@@ -66,6 +71,9 @@ A volatile cleanup queue cannot recover from tab loss after the removal commits.
 Schema 6 stores only a pending reference count, so its missing identities cannot
 be inferred safely from a later editor or decoded opaque request. Keeping those
 records unchanged and requiring explicit discard follows the pre-release policy.
+Schema 7 has all required identities, so its validated upgrade preserves the exact
+pending request. Rejecting that known format would discard recoverable evidence
+without simplifying the current persistence boundary.
 
 ## Consequences
 

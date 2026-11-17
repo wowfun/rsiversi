@@ -37,16 +37,18 @@ test('frozen references retain independent capture identities at the durable dra
   }
 });
 
-test('explicit discard removes only the composer database and reports blocked deletion', async () => {
+test('explicit discard removes both draft databases and reports blocked deletion', async () => {
   const original = globalThis.indexedDB;
-  let request, name;
-  globalThis.indexedDB = {deleteDatabase(value){ name=value; request={}; return request; }};
+  const requests = new Map();
+  globalThis.indexedDB = {deleteDatabase(name){ const request={}; requests.set(name,request); return request; }};
   try {
-    const discard = DraftStore.discardAllSaved();
-    assert.equal(name, 'rsi.composer');
-    request.onsuccess(); await discard;
-    const blocked = DraftStore.discardAllSaved();
-    request.onblocked();
+    const discard = DraftStore.discardAllDrafts();
+    await Promise.resolve();
+    assert.deepEqual([...requests.keys()], ['rsi.composer','rsi.composer-starts']);
+    for (const request of requests.values()) request.onsuccess(); await discard;
+    const blocked = DraftStore.discardAllDrafts();
+    await Promise.resolve();
+    requests.get('rsi.composer').onsuccess(); requests.get('rsi.composer-starts').onblocked();
     await assert.rejects(blocked, /Close other RSIversi tabs/);
   } finally { globalThis.indexedDB = original; }
 });
@@ -131,4 +133,18 @@ test('retiring an owned or queued capture needs no transaction, while an unseen 
   saved.pending=null;
   assert.deepEqual((await store.retireUnowned(record,[capture])).releases,[capture]);
   assert.equal(writes,2);
+});
+
+test('command trigger consumption survives recovery and never deletes newer text', async()=>{
+  for(const changed of [false,true]) {
+    const store=new DraftStore(undefined,'a'.repeat(32),'local');
+    let saved=store.blank('main','command-span','b'.repeat(64));saved.text='before /help after';
+    store.mutate=async(_key,change)=>saved=change(structuredClone(saved));
+    saved=await store.freeze(saved,{kind:'command',id:'help',opaque:'opaque',text_bytes:0,images:0,captures:[]},true,{start:7,end:12});
+    saved=await store.begin(saved);saved=await store.settle(saved,{status:'unknown'});
+    assert.equal(saved.text,'before /help after');
+    if(changed)saved=await store.edit(saved,'new text',[]);
+    saved=await store.settle(saved,{status:'complete',receipt:'confirmed'});
+    assert.equal(saved.text,changed?'new text':'before  after');
+  }
 });

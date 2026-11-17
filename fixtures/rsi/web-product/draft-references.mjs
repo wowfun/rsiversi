@@ -3,9 +3,9 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
 export async function verifyDraftReferences(browser, root) {
-  const source = await readFile(join(root, 'apps/web/drafts.js'), 'utf8');
+  const files = new Map(await Promise.all(['drafts.js','draft-databases.js'].map(async name => [name,await readFile(join(root,'apps/web',name),'utf8')])));
   const context = await browser.newContext();
-  await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:route.request().url().endsWith('drafts.js') ? source : ''}));
+  await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:files.get(new URL(route.request().url()).pathname.slice(1)) ?? ''}));
   const page = await context.newPage();
   try {
     await page.goto('http://localhost:37918/');

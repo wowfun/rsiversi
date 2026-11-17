@@ -15,9 +15,10 @@ export function mount(pane, context, elements) {
       context.perform(run);
     });
   listen(pane.node, "focusin", () => context.select(index));
+  listen(window, 'rsi:draft-storage-retired', () => pane.renderComposer());
   action(pane.history, () => pane.action("history"));
   action(pane.live, () => pane.action("live"));
-  action(pane.commands, async () => { pane.commandsExpanded = true; pane.invalidate(); await pane.action("commands"); });
+  action(pane.commands, async () => { pane.captureCommandSelection(); pane.commandsExpanded = true; pane.invalidate(); await pane.action("commands"); });
   pane.visibleBlocks = new context.TranscriptVisibility(pane.transcript, () =>
     pane.scheduleVisible(),
   );

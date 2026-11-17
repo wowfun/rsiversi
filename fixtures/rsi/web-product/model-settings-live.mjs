@@ -12,7 +12,7 @@ assert(binary&&assets&&process.env.RSI_LIVE_ENV_FILE,'Explicit live configuratio
 const key=await readDeepseekKey(process.env.RSI_LIVE_ENV_FILE);let service,browser,page;const errors=[];
 try{
  service=await startService({binary,assets,report,networkProxy:process.env.RSI_LIVE_PROXY,developmentHttp:true,configure:async({config})=>{
-  await writeFile(join(config,'settings.json'),'{}');await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format=1\nsteps=[]\n');
+  await writeFile(join(config,'settings.json'),'{}');await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format=1\n');
  }});
  await writeFile(join(service.workspace,'keep.txt'),'workspace data must remain');
  browser=await chromium.launch();page=await browser.newPage({viewport:{width:1440,height:960},colorScheme:'dark'});page.on('pageerror',error=>errors.push(error.message));

@@ -1,3 +1,4 @@
+import {assertDraftStorageActive, openDraftDatabase, discardDraftDatabases, draftDatabaseNames} from './draft-databases.js';
 const MiB = 1024 * 1024;
 const encoder = new TextEncoder();
 const bytes = value => encoder.encode(value).length;
@@ -55,8 +56,12 @@ export function validateEditor(text, images, references = []) {
   return textBytes + referenceBytes(references);
 }
 function validatePending(pending) {
-  require(pending && ["captures,editRevision,id,images,kind,opaque,phase,text_bytes", "captures,editRevision,id,images,kind,opaque,phase,preserve_editor,text_bytes"].includes(Object.keys(pending).sort().join()));
+  require(pending && Object.keys(pending).filter(key => key !== 'preserve_editor' && key !== 'consume').sort().join() === "captures,editRevision,id,images,kind,opaque,phase,text_bytes");
   require(!("preserve_editor" in pending) || pending.preserve_editor === true && pending.kind === "command");
+  if ('consume' in pending) {
+    require(pending.preserve_editor && pending.kind === 'command' && pending.consume && Object.keys(pending.consume).sort().join() === 'end,start');
+    require(integer(pending.consume.start,MiB) && integer(pending.consume.end,MiB) && pending.consume.start < pending.consume.end);
+  }
   require(pending && ["message", "command", "queue"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string" && bytes(pending.opaque) <= (pending.kind !== "command" ? 8 * MiB : 32 * 1024));
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
@@ -112,8 +117,8 @@ function validateCreation(creation, session) {
   require(selection === "all" || selection === "none" || (selection && typeof selection === "object"
     && Object.keys(selection).join() === "last" && integer(selection.last) && selection.last > 0));
 }
-function validateRecord(record) {
-  require(record?.version === 7 && Array.isArray(record.key) && record.key.length === 4 &&
+function validateRecord(record, version = 8) {
+  require(record?.version === version && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(equal(record.scope, record.key.slice(0, 3)) && hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
@@ -152,45 +157,28 @@ function samePending(expected, saved) {
   if (saved.pendingRevision !== expected.pendingRevision || !equal(saved.pending, expected.pending)) throw conflict(saved);
 }
 
-let database;
-async function openDatabase() {
-  if (!database) database = new Promise((resolve, reject) => {
-    let failure;
-    const request = indexedDB.open("rsi.composer", 7);
-    request.onupgradeneeded = event => {
-      const fail = error => { failure = error; request.transaction.abort(); };
-      if (failure) { request.transaction.abort(); return; }
-      if (event.oldVersion === 0) {
-        const records = request.result.createObjectStore("drafts", { keyPath: "key" });
-        records.createIndex("scope", "scope"); request.result.createObjectStore("usage");
-      }
-      else fail(new Error("Unsupported saved draft schema. Your saved drafts remain on this device. Discarding saved drafts permanently deletes them."));
-    };
-    request.onerror = () => reject(failure ?? request.error);
-    request.onblocked = () => { failure = new Error("Draft storage is waiting for another tab to close"); reject(failure); };
-    request.onsuccess = () => {
-      const db = request.result;
-      if (failure) { db.close(); return; }
-      db.onversionchange = () => { db.close(); database = undefined; };
-      resolve(db);
-    };
-  }).catch(error => { database = undefined; throw error; });
-  return database;
+function openDatabase() {
+  return openDraftDatabase(draftDatabaseNames.composer, 8, (db, tx, oldVersion, fail) => {
+    if (oldVersion === 0) {
+      const records = db.createObjectStore("drafts", { keyPath: "key" });
+      records.createIndex("scope", "scope"); db.createObjectStore("usage");
+    } else if (oldVersion === 7) {
+      const request = tx.objectStore('drafts').openCursor();
+      request.onsuccess = () => {
+        try {
+          const cursor = request.result;
+          if (!cursor) return;
+          const record = validateRecord(cursor.value,7);
+          cursor.update({...record,version:8}); cursor.continue();
+        } catch (error) { fail(error); }
+      };
+    } else throw new Error("Unsupported saved draft schema");
+  });
 }
 
 export class DraftStore {
   ephemeral = new WeakSet();
-  static async discardAllSaved() {
-    if (database) { try { (await database).close(); } catch { /* Refused schema has no open connection. */ } }
-    database = undefined;
-    await new Promise((resolve, reject) => {
-      const request = indexedDB.deleteDatabase("rsi.composer");
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error("Close other RSIversi tabs, then reload to finish discarding drafts"));
-    });
-  }
-
+  static discardAllDrafts() { return discardDraftDatabases(); }
   static async open(endpoint, principal) {
     require(hex(endpoint,32) && principal && (principal.kind === "local" ? Object.keys(principal).length === 1 : principal.kind === "device" && Object.keys(principal).length === 2 && hex(principal.device_id,32)), "Authenticated draft namespace is unavailable");
     const key = principal.kind === "local" ? "local" : `device:${principal.device_id}`;
@@ -198,7 +186,7 @@ export class DraftStore {
     await store.verify(); return store;
   }
   constructor(db, endpoint, principal) { this.database = db; this.namespace = [endpoint, principal]; }
-  get db() { require(this.database, "Draft storage is unavailable. Input cannot be saved or sent."); return this.database; }
+  get db() { assertDraftStorageActive(); require(this.database, "Draft storage is unavailable. Input cannot be saved or sent."); return this.database; }
   key(pane, session) { require(surface(pane) && identity(session)); return [...this.namespace, pane, session]; }
   async verify() {
     return new Promise((resolve, reject) => {
@@ -243,7 +231,7 @@ export class DraftStore {
           const before = saved.map(usage), after = next.map(usage);
           const total = counts.map((count, dimension) => saved.reduce((sum, _, index) => sum - before[index][dimension] + after[index][dimension], count));
           const finish = () => {
-            require(total.every((count, index) => integer(count, limits[index])), "Saved drafts exceed the origin storage limit; open Saved drafts and clear an unused draft");
+            require(total.every((count, index) => integer(count, limits[index])), "Saved drafts exceed the origin storage limit; open Restore drafts and delete an unused draft");
             next.forEach((record, index) => { if (record) records.put(record); else records.delete(keys[index]); });
             counters.put(total, "aggregate");
             result = next;
@@ -319,7 +307,7 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     const blank = validateRecord({
-      version: 7, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 8, key, scope: key.slice(0, 3), incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], releases: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
     });
@@ -335,8 +323,9 @@ export class DraftStore {
       return saved;
     });
   }
-  freeze(expected, prepared, preserveEditor = false) {
+  freeze(expected, prepared, preserveEditor = false, consume) {
     require(!preserveEditor || prepared.kind === "command", "Only a command control can retain its editor");
+    require(!consume || preserveEditor && integer(consume.start) && consume.start < consume.end && consume.end <= expected.text.length, 'Invalid command trigger');
     return this.mutateInitial(expected, saved => {
       samePending(expected, saved);
       if (saved.pending) throw conflict(saved);
@@ -344,6 +333,7 @@ export class DraftStore {
       if (prepared.kind !== "queue" && prepared.captures.some(capture => !saved.references.some(reference => sameCapture(captureOf(reference), capture)))) throw conflict(saved);
       saved.pending = { kind: prepared.kind, id: prepared.id, opaque: prepared.opaque,
         ...(preserveEditor ? {preserve_editor: true} : {}),
+        ...(consume ? {consume:clone(consume)} : {}),
         text_bytes: prepared.text_bytes, images: prepared.images, captures: clone(prepared.captures), phase: "prepared", editRevision: expected.editRevision };
       saved.pendingRevision = bump(saved.pendingRevision);
       return saved;
@@ -365,6 +355,11 @@ export class DraftStore {
       if (settlement.status === "complete") {
         require(typeof settlement.receipt === "string", "The completed receipt must remain an opaque Rust string");
         saved.receipt = settlement.receipt;
+        if (saved.pending.consume && saved.editRevision === saved.pending.editRevision) {
+          const {start,end} = saved.pending.consume;
+          saved.text = saved.text.slice(0,start) + saved.text.slice(end);
+          saved.editRevision = bump(saved.editRevision);
+        }
         if (!saved.pending.preserve_editor && saved.pending.kind !== "queue" && saved.editRevision === saved.pending.editRevision) {
           saved.text = ""; saved.images = []; saved.references = []; saved.editRevision = bump(saved.editRevision);
         }
@@ -434,6 +429,16 @@ export class DraftStore {
       return undefined;
     });
   }
+  removeSaved(expected) {
+    return this.mutate(expected.key, saved => {
+      if (!saved) return undefined;
+      samePending(expected, saved);
+      if (saved.editRevision !== expected.editRevision) throw conflict(saved);
+      require(!saved.pending && !saved.references.length && !saved.releases.length,
+        "Resolve pending requests and release references before removing this draft");
+      return undefined;
+    });
+  }
 }
 
 // One bounded local editor coalesces persistence without retaining an event queue.
@@ -498,6 +503,7 @@ export class DraftEditor {
       try {
         this.record = await operation(this.record);
         if (!this.dirty && revision === this.revision) {
+          if (this.text !== this.record.text) this.revision = bump(this.revision);
           this.text = this.record.text; this.images = clone(this.record.images); this.references = clone(this.record.references);
         }
         this.changed(); return this.record;
@@ -522,7 +528,7 @@ export class DraftEditor {
         saved = await this.store.retireUnowned(saved, this.references.map(captureOf));
       }
       this.record = saved;
-      if (useSaved) { this.text = saved.text; this.images = clone(saved.images); this.references = clone(saved.references); this.dirty = false; }
+      if (useSaved) { if (this.text !== saved.text) this.revision = bump(this.revision); this.text = saved.text; this.images = clone(saved.images); this.references = clone(saved.references); this.dirty = false; }
       else { this.dirty = true; }
       this.failure = undefined; this.pump(); this.changed();
       await this.flush();

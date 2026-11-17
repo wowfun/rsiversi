@@ -1,7 +1,7 @@
 // @ts-check
 import { proxyConfiguration } from './development-proxy.mjs';
 import { loopbackAddress } from './development-control.mjs';
-import { defineConfig } from 'vite';
+import { defineConfig, normalizePath } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { relative } from 'node:path';
@@ -11,6 +11,7 @@ import { desktopBridgeDescriptor } from './wire-descriptors.mjs';
 
 /** @param {string} path */
 const local = path => fileURLToPath(new URL(path, import.meta.url));
+const draftDatabaseModule = normalizePath(local('./draft-databases.js'));
 /** @param {Pick<import('vite').ConfigEnv, 'command'>} environment
  * @param {{supervised?: boolean}} options
  * @returns {import('vite').UserConfig} */
@@ -38,7 +39,7 @@ export function documentConfiguration({command}, {supervised = false} = {}) {
     server:{host:'127.0.0.1',strictPort:true,fs:{strict:true,allow:[local('./')],deny:['**/.git/**','**/.env*','**/target/**','**/Cargo.toml','**/Cargo.lock','**/*.rs']},
       headers:{'Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' blob: data:; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"},
       proxy:upstream ? proxyConfiguration(websocket => ({target:upstream,changeOrigin:false,rewriteWsOrigin:false,ws:websocket})) : undefined},
-    build:{target:'es2022',emptyOutDir:false,assetsDir:'',rollupOptions:{external:['/mounts.js','/drafts.js'],output:{inlineDynamicImports:true,entryFileNames:'app.js',assetFileNames:'styles[extname]'}}},
+    build:{target:'es2022',emptyOutDir:false,assetsDir:'',rollupOptions:{external:['/mounts.js','/drafts.js',draftDatabaseModule],output:{paths:{[draftDatabaseModule]:'/draft-databases.js'},inlineDynamicImports:true,entryFileNames:'app.js',assetFileNames:'styles[extname]'}}},
   };
 }
 export default defineConfig(environment => documentConfiguration(environment));

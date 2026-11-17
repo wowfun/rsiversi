@@ -236,7 +236,7 @@ export async function upload(pane, context, files) {
   }
 }
 
-export async function executeDocumentCommand(pane, context, name, input = '') {
+export async function executeDocumentCommand(pane, context, name, input = '', consume, revision) {
   if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(name) || typeof input !== 'string' || new TextEncoder().encode(input).length > 16 * 1024)
     throw new Error('Invalid Session command');
   const editor = pane.editor, generation = pane.generation, current = context.connection;
@@ -246,13 +246,16 @@ export async function executeDocumentCommand(pane, context, name, input = '') {
   pane.renderComposer();
   try {
     await editor.flush();
+    if (revision !== undefined && revision !== editor.revision) throw new Error('The input changed; select the command again');
+    const captured = editor.record;
     const prepared = JSON.parse(await context.call('prepare_submission', JSON.stringify({
       pane: pane.index, generation, text: `/${name} ${input}`, images: [], references: [],
     })));
     if (prepared.kind !== 'command') throw new Error('Session command is unavailable');
     if (pane.editor !== editor || pane.generation !== generation || context.connection !== current || current.closing)
       throw new Error('Conversation changed before command preparation completed');
-    await editor.update(record => editor.store.freeze(record, prepared, true));
+    // Keep the pre-preparation editRevision: typing during preparation must prevent consuming that captured span.
+    await editor.update(() => editor.store.freeze(captured, prepared, true, consume));
     await pane.executePending(editor, generation, current, 'dispatch');
   } finally {
     pane.submitting = false;

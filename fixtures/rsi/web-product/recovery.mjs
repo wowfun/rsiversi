@@ -40,7 +40,7 @@ try {
       postMessage(message, ...rest) { if (message.method === "dispatch_submission") this.submissions.add(message.id); return super.postMessage(message,...rest); }
     };
     window.savedRecord = async session => {
-      const db = await new Promise((resolve,reject) => { const request=indexedDB.open("rsi.composer",6); request.onsuccess=()=>resolve(request.result); request.onerror=()=>reject(request.error); });
+      const db = await new Promise((resolve,reject) => { const request=indexedDB.open("rsi.composer"); request.onsuccess=()=>resolve(request.result); request.onerror=()=>reject(request.error); });
       try { return await new Promise((resolve,reject) => { const tx=db.transaction("drafts","readonly"), request=tx.objectStore("drafts").openCursor(); let result; request.onsuccess=()=> { const cursor=request.result; if (!cursor) return; if(cursor.value.key[3]===session) result=cursor.value; else cursor.continue(); }; tx.oncomplete=()=>resolve(result); tx.onabort=()=>reject(tx.error); }); }
       finally { db.close(); }
     };
@@ -65,7 +65,7 @@ try {
   const restore = async (tab, session) => {
     await openRecovery(tab);
     const row=pane(tab).locator(".saved-draft").filter({hasText:session});
-    await row.getByRole("button",{name:"Open saved conversation",exact:true}).click();
+    await row.getByRole("button",{name:/^Open saved conversation here:/}).click();
     return row;
   };
   const sessionId = async tab => (await pane(tab).getAttribute('data-session-id'));
@@ -171,7 +171,7 @@ try {
   await disconnect(page); await page.locator("#login").waitFor({state:"visible"});
   // Opening corrupt storage must report degradation before any composer is opened.
   await page.evaluate(async () => {
-    const db=await new Promise((resolve,reject)=>{const request=indexedDB.open("rsi.composer",6);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
+    const db=await new Promise((resolve,reject)=>{const request=indexedDB.open("rsi.composer");request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
     try { await new Promise((resolve,reject)=>{const tx=db.transaction("usage","readwrite");tx.objectStore("usage").put([0,0,0,0],0);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);}); }
     finally {db.close();}
   });

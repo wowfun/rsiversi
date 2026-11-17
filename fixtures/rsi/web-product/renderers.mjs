@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright";
 import { startService, waitUntil } from "./service.mjs";
 import { recordTaskFailure } from './task-checks.mjs';
+import {bootstrapFiles} from '../../../apps/web/bundle-contract.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const directory = await mkdtemp(join(tmpdir(), "rsi-renderer-product-"));
@@ -164,7 +165,7 @@ try {
     service = await startService({ binary, assets, report: join(report, mode), configure: async ({ config }) => {
       const profile = join(config, "application-profiles/browser-fixture/application.profile.toml");
       const content = await readFile(profile, "utf8");
-      const files = ["index.html", "preview-local.html", "preview-online.html", "app.js", "worker.js", "admission.js", "download-worker.js", "download-frame.js", "styles.css", "rsi_web.js", "rsi_web_bg.wasm", "mounts.js", "drafts.js"];
+      const files = bootstrapFiles.map(file => file.name);
       if (mode === "broken") files.push("standard.js", "file-preview.js", "ui-renderers.json");
       await writeFile(profile, content.replace(`directory = ${JSON.stringify(assets)}`, `directory = ${JSON.stringify(assets)}, files = ${JSON.stringify(files)}`));
     } });

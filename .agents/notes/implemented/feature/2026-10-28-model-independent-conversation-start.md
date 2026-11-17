@@ -17,6 +17,18 @@ Documents convention. Directory registration and blank conversation surfaces
 do not create Sessions. A separate, revision-checked starting draft persists
 text before a Session Header exists; sending transfers it to the existing bound
 submission journal before clearing the captured starting revision.
+Starting input has its own aggregate budget and paged recovery because endpoint
+changes otherwise leave bounded individual records with unbounded total retention.
+Incarnations prevent an editor that observed stored input from resurrecting a
+removed record or overwriting its replacement. An editor that observed absence
+has no stored input to resurrect; its later first edit is fresh intent and may
+create a record only while that key remains absent. Tracking intervening
+create/delete cycles for these blank editors would require per-key durable
+history without protecting additional stored input. A global deletion epoch
+instead conflicts unrelated blank editors, so neither mechanism is retained.
+Explicit reset retires both
+draft owners and all existing editors until reload; deleting only the Session
+journal leaves pre-Session input behind.
 
 Conversation and Activity tabs adapt RSI's existing turn presentation. Activity
 shows the full existing execution record; it does not import DSH runtime state.
@@ -43,6 +55,11 @@ invariants. Reusing the process CWD as a default workspace would make launcher
 context decide user data placement. Keeping default policy in the generic
 registry would make unrelated consumers inherit a product-specific convention.
 A localStorage draft cannot provide atomic conflict checks across documents.
+Combining both draft formats would couple pre-Session state to the larger frozen
+request journal. Separate bounded stores retain their existing authority and
+ownership; reset therefore reports either deletion failure instead of claiming
+an atomic two-database operation. Legacy input above the new aggregate allowance
+remains recoverable and may shrink until it fits.
 
 ## Consequences
 

@@ -8,11 +8,17 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 7 namespaces composer records by endpoint, real principal
-(`local` or authenticated DeviceId), stable surface key and SessionId. Only this
-schema is accepted; older schemas are refused without rewriting their records,
-ledgers or version. Refusal explains that the saved drafts remain on this device;
-explicit discard permanently deletes them. A blank editor created after a failed
+IndexedDB schema 8 namespaces composer records by endpoint, real principal
+(`local` or authenticated DeviceId), stable surface key and SessionId. Schema 8
+adds a command's optional consumed input span to the pending envelope. Its database
+version fences schema-7 writers, whose validator cannot understand that envelope;
+after version change their old-version reopen fails. Schema 7 receives a
+transactional record-version upgrade; its text, captures and pending identities
+are retained. Other schemas are refused without rewriting
+their records, ledgers or version. Refusal explains that the saved drafts remain on this device;
+validation failures during asynchronous upgrade reads retain their specific reason
+and abort the whole upgrade, including earlier cursor updates. Explicit discard
+permanently deletes them. A blank editor created after a failed
 read has the same first-save ownership as one created after an empty read, and
 still refuses to overwrite a concurrently persisted record. Rust still
 checks every pending operation and immutable Header binding before reconciliation.
@@ -27,6 +33,10 @@ reclaims empty dispatched records in the current endpoint/principal namespace.
 It never removes unsent Fresh intent, pending requests, references or cleanup
 obligations. A stale editor still fails its incarnation check and keeps local
 input. Saved empty records also remain removable from the recovery list.
+Restore drafts also permits confirmed removal of nonempty records without pending
+requests, references or cleanup obligations. Removal checks the saved incarnation
+and edit revision. The same panel exposes the existing confirmed site-wide discard
+for quota recovery across namespaces, without revealing another principal's input.
 The current editor record also retains at most four frozen conversation
 references, charged to editable-text quota by their encoded descriptor size.
 Captured descriptors keep their original target Header binding;
@@ -125,6 +135,9 @@ NotFound. Commands remain query-only after dispatch, including absent receipts.
 A lost bridge response is unknown. Definitive pre-admission rejection returns to
 prepared; settlement clears only the matching pending incarnation and identity,
 and clears editable input only if its captured edit revision still matches.
+A detached no-argument command preserves the editor. A slash-triggered command
+can carry a bounded consume span; successful settlement removes that span only
+when its captured edit revision still matches, including after reload.
 Failed receipt persistence leaves pending input blocked, never allocating a new ID.
 Completed receipts also arrive as opaque Rust JSON strings and are stored verbatim;
 the document never decodes their sequence numbers through JavaScript numbers.
@@ -153,8 +166,8 @@ conversations with a previous write failure. Surface close fences editing while
 saving and restores input admission on failure. Ordinary submission saves only
 its selected editor. Unavailable draft storage reports that diagnosis consistently.
 
-Reference descriptors use the exact envelope-2 source/capture contract. Only
-draft schema 7 is admitted; opening an older journal fails without modifying its
+Reference descriptors use the exact envelope-2 source/capture contract. Draft schema 8 retains schema 7 reference and receipt semantics; only that known
+predecessor can be upgraded. Unsupported older formats fail without changing
 rows or database version. Unsupported reference metadata
 is never translated into a new selection or silently removed from an uncertain
 submission.
@@ -300,11 +313,64 @@ starting draft with its selected workspace and text. This record is independent
 of model configuration and Session Header identities. Typing does not create a
 Session. Model setup and workspace selection preserve the record. Sending first
 creates the Session, durably copies the captured text into its bound draft, then
-clears only the matching starting revision. Failure leaves a recoverable copy;
+clears both text and workspace of the matching starting revision. Opening controls
+with blank input does not materialize an empty saved Session draft. Failure leaves a recoverable copy;
 a late result cannot overwrite newer text or another endpoint's draft. This
 handoff never invents a Session identity or bypasses submission receipts.
+Recovery captures the connection and namespace before storage reads. Closing its
+panel, replacing the connection or resetting the pane retires that recovery;
+each awaited transition rechecks ownership before creating, copying or clearing.
+Session and starting-draft stores are read independently: a failed format cannot
+hide healthy rows in the other format, and both failures remain visible.
+Command insertion admits the editor change before publishing command selection
+or textarea state. Record and pane quota rejection leave the displayed and
+retained input identical.
 
 Starting text uses the separate `rsi.composer-starts` IndexedDB store. Its atomic
 revision checks reject another document's conflicting write, with explicit use
 saved/replace actions. Attachments and captured references require a Session;
 the starting composer therefore exposes text and model configuration only.
+
+Pre-Session text lives in `rsi.composer-starts` schema 3, keyed by endpoint,
+principal and surface, without a fabricated Session Header. Its independent
+origin allowance is 128 records and 4 MiB text, with at most 1 MiB per draft.
+Text, workspace selection, incarnation/revision and aggregate counters commit
+atomically. Editors that observed a stored incarnation cannot recreate it after
+deletion or replace another incarnation. A never-persisted blank editor's first
+edit is fresh intent: it succeeds only if that key is currently absent, regardless
+of intervening deletions. Concurrent first creations still conflict. No deletion
+epoch or per-key tombstones are retained. Empty text without a workspace consumes
+no record. The known schema-1 and schema-2 predecessors upgrade transactionally;
+schema 2 only drops obsolete epoch metadata and preserves every record. Opening
+the new schema retires older document writers through version-change handling.
+Excess retained input remains readable and deletable but cannot grow beyond its
+previous cost.
+Recovery reads at most 32 starting records per page in the authenticated namespace.
+The storage reader validates canonical namespace/surface keys and pagination
+cursors before exposing rows; corrupt keys fail the read without deleting input.
+Loading more appends rows and retains previous row state. A pending starting-draft
+deletion has an explicit Cancel action; only confirmation removes the saved input.
+Recovery distinguishes loading, failed reads and a successfully empty list. It
+omits clean input already attached to the current pane, retains unsaved conflicts,
+and states that opening a row switches this pane. Starting rows explicitly create
+a new conversation here. Read-only input previews mount at most 4,096 UTF-16 code
+units without splitting a surrogate pair; expanding a preview is explicit and
+does not truncate persisted or recovered input. Destructive row actions have
+row-specific accessible names, as do the read-only previews. Storage retirement
+and claimed-command changes are announced through continuously mounted status
+regions; the retirement explanation remains visible beside reset recovery actions.
+Recovery storage errors appear before the rows, so partial recovery remains
+visible without scrolling through the healthy database's records.
+Known conversation titles label saved Session rows; unavailable titles fall back
+to the Session identity so expired input remains distinguishable. Full draft
+coordinates remain available in the row's title attribute. Starting surface names
+use Main and Compare rather than their internal lowercase keys.
+
+Whole-draft reset retires both database owners before requesting both deletions.
+The lifecycle module is one external bootstrap asset shared by the bundled
+document and the separately copied submission journal; both use the same owner.
+Old editors cannot reopen storage; version changes and same-origin reset notices
+retire other documents. Reload follows only successful deletion of both stores.
+A blocked or partial failure reports the unfinished reset and permits explicit
+retry. IndexedDB cannot atomically delete two databases, so reset never claims
+success from one deletion. Presentation preferences are outside this reset.

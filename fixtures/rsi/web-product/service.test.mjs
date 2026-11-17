@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from "node:fs/promises";
+import {readFileSync} from 'node:fs';
 import cp, { spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { createHash } from "node:crypto";
@@ -8,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {pathToFileURL} from 'node:url';
 import { startService } from "./service.mjs";
+import {deepseekProfile} from './live-limits.mjs';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
@@ -17,7 +19,7 @@ function certificateOrPrivateDirectory(program,args,options) {
     assert.deepEqual(args.slice(0,3),['-NoProfile','-NonInteractive','-Command']);
     assert.match(args[3], /DirectorySecurity/);
     assert.match(args[3], /SetAccessControl/);
-    assert.match(options.env.RSI_FIXTURE_DIRECTORY, /config[\\/]rsi$/);
+    assert.match(options.env.RSI_FIXTURE_DIRECTORY, /config[\\/]rsiversi$/);
   }else assert.equal(program,'openssl');
   return {status:0,stdout:'',stderr:''};
 }
@@ -60,34 +62,55 @@ test("deterministic provider keeps user routing and Tool continuation separate f
   }
 });
 
-test("embedded browser owns its Service and invokes device Profiles directly", async t => {
+test("embedded browser registers Windows devices with final private context before owning Service", async t => {
   const report = await mkdtemp(join(tmpdir(), "rsi-embedded-adapter-"));
   let service;
   const calls = [];
+  let configuredHost, configuredSource, configuredContext;
   try {
     t.mock.method(cp, 'spawnSync', (program, args, options) => {
       if (program !== 'embedder') return certificateOrPrivateDirectory(program, args, options);
       calls.push(args);
-      assert.deepEqual(args.slice(0, 2), ['--profile', 'devices']);
+      assert.deepEqual(args.slice(0, 2), ['--profile', process.platform === 'win32' ? 'fixture-devices' : 'devices']);
+      if(process.platform === 'win32') {
+        const configured = readFileSync(configuredHost, 'utf8');
+        const encoded = configured.split('\n').find(line=>line.startsWith('config_json = '));
+        assert.deepEqual(JSON.parse(JSON.parse(encoded.slice('config_json = '.length))), configuredContext);
+        const devices = readFileSync(join(options.env.XDG_CONFIG_HOME,'rsiversi/application-profiles/fixture-devices/application.profile.toml'),'utf8');
+        assert.match(devices,/host_profile = "fixture"/);
+        assert.match(devices,/plugin = "rsi.application.devices"/);
+      }
       return {status:0, stdout:JSON.stringify(args[2] === 'register' ? {id:'device'} : {revision:'1'}), stderr:''};
     });
     t.mock.method(cp, 'spawn', (program, args) => {
       assert.equal(program, 'embedder');
       assert.deepEqual(args.slice(0, 2), ['--profile', 'browser-fixture']);
       assert(!args.includes('--assets'));
+      assert.equal(calls.length, process.platform === 'win32' ? 3 : 0, 'Windows registration completes before embedded ownership starts');
       const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
       child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
       setImmediate(()=>child.stdout.write('{"event":"serving"}\n'));
       return child;
     });
     syncBuiltinESMExports();
-    service = await startService({binary:'embedder', assets:report, report, embedded:true,
+    service = await startService({binary:'embedder', assets:report, report, embedded:true, registrationLabel:'embedded',
       async configure({config}) {
         const profile = await readFile(join(config, 'application-profiles/browser-fixture/application.profile.toml'), 'utf8');
         assert.match(profile, /plugin = "rsi.web.assets"/);
         assert.match(profile, /plugin = "fixture.browser.serve"/);
+        configuredHost=join(config,'host-profiles/fixture/host.profile.toml');
+        configuredSource=deepseekProfile('fixture-model',{context_window_tokens:128000,default_output_reserve_tokens:4096,max_output_reserve_tokens:16384});
+        configuredContext={user_instruction_file:join(config,'AGENTS.md'),user_agent_roots:[join(config,'agents')],user_skill_roots:[join(config,'skills')]};
+        await writeFile(configuredHost,configuredSource);
       }});
-    assert.deepEqual(service.register('embedded'), {id:'device'});
+    const configured=await readFile(configuredHost,'utf8');
+    assert(configured.startsWith(configuredSource),'the complete configured provider profile is retained');
+    if(process.platform==='win32') {
+      assert.match(configured,/target = 'rsi-agent-workspace-context'/);
+      const encoded=configured.split('\n').find(line=>line.startsWith('config_json = '));
+      assert.deepEqual(JSON.parse(JSON.parse(encoded.slice('config_json = '.length))),configuredContext,'whole-profile replacement cannot remove personal-context isolation');
+    }
+    assert.deepEqual(service.registration, {id:'device'});
     await service.close(); service = undefined;
     assert.deepEqual(calls.map(args=>args.slice(2)), [
       ['register','embedded'], ['configuration','list'], ['configuration','grant','device','1'],

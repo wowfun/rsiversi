@@ -69,7 +69,6 @@ for (const mode of ['complete','unknown','missing','replaced']) test(`document c
 
 
 test('typing while preparation is pending survives completed submission in the real draft store',async()=>{
-  await DraftStore.discardAllSaved();
   const store=await DraftStore.open('a'.repeat(32),{kind:'local'});
   const editor=new DraftEditor(store,await store.ensure('main','session','b'.repeat(64)));
   editor.edit('submitted text');await editor.flush();

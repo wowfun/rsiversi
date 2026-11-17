@@ -9,7 +9,7 @@ test('new runtime controllers always replace the document owner', () => {
 });
 
 test('existing connection, persistence and bootstrap owners cannot hot swap', () => {
-  for (const path of ['worker.js','mounts.js','drafts.js','document-connection.js','device-store.js','presentation-store.js','src/main.tsx','src/bridge.ts','src/presentation.tsx','src/resource-owner.mjs','src/session/state.ts','layout-edits.js','src/navigation-device.ts','src/session/composer-state.ts','image-previews.js','code-highlight.js']) {
+  for (const path of ['worker.js','mounts.js','drafts.js','draft-databases.js','starting-draft.js','document-connection.js','device-store.js','presentation-store.js','src/main.tsx','src/bridge.ts','src/presentation.tsx','src/resource-owner.mjs','src/session/state.ts','layout-edits.js','src/navigation-device.ts','src/session/composer-state.ts','image-previews.js','code-highlight.js']) {
     assert.equal(documentReloadRequired(path), true, path);
   }
 });

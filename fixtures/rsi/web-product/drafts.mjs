@@ -5,8 +5,8 @@ import { join } from "node:path";
 // Real IndexedDB transactions in two documents; no Session/provider claims.
 export async function verifyDrafts(browser, root) {
   const context = await browser.newContext();
-  const source = await readFile(join(root, "apps/web/drafts.js"), "utf8");
-  await context.route("http://localhost:37919/**", route => route.fulfill({ contentType: "text/javascript", body: route.request().url().endsWith("drafts.js") ? source : "" }));
+  const files = new Map(await Promise.all(['drafts.js','draft-databases.js'].map(async name => [name,await readFile(join(root,'apps/web',name),'utf8')])));
+  await context.route("http://localhost:37919/**", route => route.fulfill({ contentType: "text/javascript", body: files.get(new URL(route.request().url()).pathname.slice(1)) ?? "" }));
   const page = await context.newPage(), other = await context.newPage();
   try {
     for (const tab of [page, other]) {

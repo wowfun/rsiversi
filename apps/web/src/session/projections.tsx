@@ -105,22 +105,25 @@ export function SessionCommands({
   owner: ProjectionActions;
 }) {
   const receipt = data?.command_receipt,
-    result = receipt?.outcome;
+    result = receipt?.outcome,
+    commands = owner.commandsExpanded
+      ? data?.commands?.commands.filter((item) => item.composer_input)
+      : undefined;
   return (
     <div
       className="session-commands"
-      hidden={(!owner.commandsExpanded || !data?.commands?.commands.length) && !receipt}
+      hidden={!commands?.length && !receipt}
     >
-      {owner.commandsExpanded && data?.commands?.commands.map((item) => (
+      {commands?.map((item) => (
         <Fragment key={item.name}>
           <button
             type="button"
             className="quiet"
             title={item.description}
             disabled={
-              data.commands?.revision.kind === "draft" && !item.draft_safe
+              data?.commands?.revision.kind === "draft" && !item.draft_safe
             }
-            onClick={() => void run(() => owner.selectCommand(item.name))}
+            onClick={() => void run(() => owner.selectCommand(item))}
           >
             /{item.name}
           </button>

@@ -1,8 +1,10 @@
+import {clearDraftRecords} from './clear-draft-records.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPaneClass} from '../src/runtime/session-controller.js';
 import 'fake-indexeddb/auto';
 import {DraftStore, DraftEditor} from '../drafts.js';
+import {StartingDraft} from '../starting-draft.js';
 globalThis.requestAnimationFrame = callback => queueMicrotask(callback);
 
 const record={key:['endpoint','local','main','saved'],header:'header',text:'',images:[],references:[],releases:[],pending:null,creation:{},everDispatched:false};
@@ -12,6 +14,85 @@ function fixture(records=[record]) {
   pane.flush=async()=>{};pane.renderComposer=()=>{};pane.focusInput=()=>{};
   return {pane,scope,calls};
 }
+test('healthy starting drafts remain recoverable when Session storage fails',async t=>{
+  const {pane,scope}=fixture([]);
+  scope.connection.drafts.list=async()=>{throw Error('Session storage refused');};
+  t.mock.method(StartingDraft,'list',async()=>({rows:[{key:JSON.stringify(['endpoint','local','main']),text:'healthy input'}]}));
+  await pane.restoreDrafts();
+  assert.deepEqual(pane.recoveryView.rows.map(row=>row.text),['healthy input']);
+  assert.match(pane.recoveryView.notice,/Session storage refused/);
+});
+test('recovery reports failures of both independent stores',async t=>{
+  const {pane,scope}=fixture([]);
+  scope.connection.drafts.list=async()=>{throw Error('Session failure');};
+  t.mock.method(StartingDraft,'list',async()=>{throw Error('Starting failure');});
+  await pane.restoreDrafts();
+  assert.match(pane.recoveryView.notice,/Session failure/);
+  assert.match(pane.recoveryView.notice,/Starting failure/);
+});
+test('recovery exposes global discard and confirms deletion of nonempty input without remote obligations',async(t)=>{
+  t.mock.method(StartingDraft,'list',async()=>({rows:[]}));
+  const saved={...record,text:'unused input'}, {pane,scope}=fixture([saved]);
+  const removed=[];scope.connection.drafts.removeSaved=async value=>removed.push(value);
+  await pane.restoreDrafts();const panel=pane.recoveryView,row=panel.rows[0];
+  assert.equal(typeof panel.discard,'function');assert.equal(row.removable,true);
+  await row.remove();assert.equal(row.deleteConfirmed,true);assert.deepEqual(removed,[]);
+  row.cancelDelete();assert.equal(row.deleteConfirmed,false);
+  await row.remove();await row.remove();assert.deepEqual(removed,[saved]);assert.equal(panel.rows.length,0);
+  let discards=0;pane.discardSavedDrafts=async()=>discards++;
+  await panel.discard();assert.equal(discards,1);assert.equal(pane.recoveryView,undefined);
+});
+
+test('recovery reports loading and read failure rather than an empty successful list',async()=>{
+  const {pane,scope}=fixture([]);const read=Promise.withResolvers();
+  scope.connection.drafts.list=()=>read.promise;
+  const opening=pane.restoreDrafts();
+  assert.equal(pane.recoveryView?.loading,true);
+  read.reject(Error('storage refused'));await opening;
+  assert.equal(pane.recoveryView.loading,false);assert.equal(pane.recoveryView.busy,false);
+  assert.match(pane.recoveryView.notice,/storage refused/);
+});
+
+test('loading more starting drafts retains earlier rows and cancellable deletion state',async(t)=>{
+  const {pane}=fixture([]),first={key:JSON.stringify(['endpoint','local','main']),text:'first'},second={key:JSON.stringify(['endpoint','local','compare']),text:'second'};
+  const cursors=[],removed=[];
+  t.mock.method(StartingDraft,'list',async(_namespace,after)=>{cursors.push(after);return after?{rows:[second]}:{rows:[first],next:first.key};});
+  t.mock.method(StartingDraft,'remove',async row=>removed.push(row));
+  await pane.restoreDrafts();const panel=pane.recoveryView,row=panel.rows[0];
+  await row.remove();assert.equal(row.deleteConfirmed,true);
+  await panel.more();
+  assert.deepEqual(panel.rows.map(row=>row.text),['first','second']);
+  assert.equal(panel.rows[0],row);assert.equal(row.deleteConfirmed,true);assert.equal(panel.more,undefined);
+  row.cancelDelete();assert.equal(row.deleteConfirmed,false);assert.deepEqual(removed,[]);
+  await row.remove();assert.deepEqual(removed,[]);
+  await row.remove();assert.deepEqual(removed,[first]);assert.deepEqual(panel.rows.map(row=>row.text),['second']);
+  assert.deepEqual(cursors,[undefined,first.key]);
+});
+
+test('recovery uses known conversation titles while retaining unavailable identities and full coordinates',async(t)=>{
+  const {pane,scope}=fixture([record,{...record,key:['endpoint','local','main','expired-id']}]);
+  scope.view={surfaces:{main:{kind:'native',session:'saved',path:'/workspace',workspace:null}},catalog:{workspaces:[]},navigation:{entries:[{session:'saved',metadata:{title:'Research notes'}}]}};
+  t.mock.method(StartingDraft,'list',async()=>({rows:[{key:JSON.stringify(['endpoint','local','compare']),text:'starting'}]}));
+  await pane.restoreDrafts();
+  assert.equal(pane.recoveryView.rows[0].summary,'Research notes');
+  assert.equal(pane.recoveryView.rows[0].coordinates,JSON.stringify(record.key));
+  assert.equal(pane.recoveryView.rows[1].summary,'expired-id');
+  assert.equal(pane.recoveryView.rows[2].summary,'Starting draft · Compare · starting');
+});
+
+test('recovery omits clean attached input while retaining other surfaces and current unsaved conflicts',async(t)=>{
+  const current={...record,text:'already attached'};
+  const other={...record,key:['endpoint','local','main','other'],text:'recover this'};
+  const {pane}=fixture([current,other]);pane.editor={record:current,text:current.text};
+  pane.editors.set(JSON.stringify(current.key),pane.editor);
+  t.mock.method(StartingDraft,'list',async()=>({rows:[{key:JSON.stringify(['endpoint','local','main']),text:'active start'},{key:JSON.stringify(['endpoint','local','compare']),text:'other start'}]}));
+  pane.starting={key:JSON.stringify(['endpoint','local','main'])};
+  await pane.restoreDrafts();
+  assert.deepEqual(pane.recoveryView.rows.map(row=>row.text),['recover this','other start']);
+  pane.editor.failure=Error('unsaved');pane.starting.failure=Error('unsaved');
+  await pane.restoreDrafts();
+  assert.deepEqual(pane.recoveryView.rows.map(row=>row.text),['already attached','recover this','active start','other start']);
+});
 
 test('a failed first save remains discoverable only in its current namespace',async(t)=>{
   const store=await DraftStore.open('c'.repeat(32),{kind:'local'});
@@ -27,7 +108,7 @@ test('a failed first save remains discoverable only in its current namespace',as
     await pane.restoreDrafts();
     assert.equal(pane.recoveryView.rows.length,1);
     assert.equal(pane.recoveryView.rows[0].unsaved.text,'valuable unsaved text');
-  } finally {await DraftStore.discardAllSaved()}
+  } finally {await clearDraftRecords()}
 });
 
 test('removing an empty draft admits only one concurrent action',async()=>{
@@ -44,10 +125,14 @@ test('saved-input summaries preserve Unicode characters and fit one line',async(
   const {pane}=fixture([
     {...record,text:'x'.repeat(79)+'🚀'+'tail'},
     {...record,key:['endpoint','local','main','second'],text:'first\r\nsecond\t third'},
+    {...record,key:['endpoint','local','main','third'],text:'🚀'.repeat(79)+'x🚀'},
+    {...record,key:['endpoint','local','main','fourth'],text:'🚀'.repeat(80)+'tail'},
   ]);
   await pane.restoreDrafts();
   assert.equal(pane.recoveryView.rows[0].summary,'saved · '+'x'.repeat(79)+'🚀');
   assert.equal(pane.recoveryView.rows[1].summary,'second · first second third');
+  assert.equal(pane.recoveryView.rows[2].summary,'third · '+'🚀'.repeat(79)+'x');
+  assert.equal(pane.recoveryView.rows[3].summary,'fourth · '+'🚀'.repeat(80));
 });
 
 test('expired Fresh recreation requires undispatched input without references',async()=>{
@@ -134,5 +219,5 @@ test('expired Fresh references retire durably before full text can move to a rep
     const replacement=await store.ensure('main','replacement',header,{workspace_id:workspace,session_id:'replacement',agent_preset_id:null});
     const moved=await store.moveFresh(saved,replacement);
     assert.equal(moved.text,text);assert.equal(moved.references.length,0);
-  } finally {await DraftStore.discardAllSaved()}
+  } finally {await clearDraftRecords()}
 });

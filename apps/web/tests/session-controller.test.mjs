@@ -16,11 +16,15 @@ test('failed visible delivery can retry unchanged membership with a fresh sequen
 test('transcript End navigation respects nested editing, selection and handled events',t=>{
   class Node{listeners={};addEventListener(name,handler){this.listeners[name]=handler;}}
   const original=globalThis.ResizeObserver;
+  const originalWindow=globalThis.window;globalThis.window=new Node();
   globalThis.ResizeObserver=class{observe(){}disconnect(){}};
   t.after(()=>{if(original===undefined)delete globalThis.ResizeObserver;else globalThis.ResizeObserver=original;});
+  t.after(()=>{if(originalWindow===undefined)delete globalThis.window;else globalThis.window=originalWindow;});
   const elements=Object.fromEntries(['node','history','live','commands','transcript','bottom','input','composer','modelReceipt','imageInput','attach','addReference','exportButton','searchHistory','addFile','cancel','steer','send','protectedExport'].map(key=>[key,new Node()]));
-  const pane={index:'main',scheduleVisible(){},setReadingSummary(value){this.readingSummary=value;}};
+  let rendered=0;
+  const pane={index:'main',renderComposer(){rendered++;},scheduleVisible(){},setReadingSummary(value){this.readingSummary=value;}};
   mount(pane,{TranscriptVisibility:class{dispose(){}}},elements);
+  window.listeners['rsi:draft-storage-retired']();assert.equal(rendered,1);
   const transcript=pane.transcript;transcript.scrollHeight=1000;
   for(const extra of [{target:new Node()},{defaultPrevented:true},{shiftKey:true},{isComposing:true}]){
     pane.readingSummary=true;transcript.scrollTop=20;

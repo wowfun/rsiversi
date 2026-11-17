@@ -20,7 +20,7 @@ export async function verifyLocalLaunch(binary, assets, engines = [['chromium', 
     const root = await mkdtemp(join(tmpdir(), 'rlw-'));
     const executable = binary;
     const env = { PATH: process.env.PATH };
-    for (const [key, leaf] of [['HOME','home'],['XDG_CONFIG_HOME','config'],['XDG_STATE_HOME','state'],['XDG_CACHE_HOME','cache'],['XDG_RUNTIME_DIR','run']]) {
+    for (const [key, leaf] of [['HOME','home'],['XDG_CONFIG_HOME','config'], ['XDG_DATA_HOME','data'],['XDG_STATE_HOME','state'],['XDG_CACHE_HOME','cache'],['XDG_RUNTIME_DIR','run']]) {
       env[key] = join(root, leaf); await mkdir(env[key], {mode:0o700});
     }
     let child, browser, connectingPage, primary;

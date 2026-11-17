@@ -8,7 +8,7 @@ import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -136,7 +136,7 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false }) {
+export async function startService({ binary, assets, report, configure, registrationLabel, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false }) {
   assert(!(embedded && watchAssets), "embedded fixture uses an explicit application Profile");
   const networkEnvironment = liveProxyEnvironment(networkProxy);
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
@@ -145,7 +145,7 @@ export async function startService({ binary, assets, report, configure, onReques
   let stderr = "";
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
-  const env = { ...inherited, ...networkEnvironment, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
+  const env = { ...inherited, ...networkEnvironment, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_DATA_HOME: join(temporary, "data"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
   const run = (args, {input, timeout = 30_000} = {}) => {
     assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 600_000, 'bounded fixture command deadline');
     if (embedded) {
@@ -154,6 +154,15 @@ export async function startService({ binary, assets, report, configure, onReques
     }
     return boundedRun(binary, args, { cwd: workspace, env, encoding: "utf8", timeout, input });
   };
+  const registerBeforeStart = embedded && process.platform === 'win32';
+  const deviceProfile = registerBeforeStart ? 'fixture-devices' : 'devices';
+  const register = label => {
+    const receipt = JSON.parse(run(["run", deviceProfile, "register", label]).stdout);
+    const grants = JSON.parse(run(["run", deviceProfile, "configuration", "list"]).stdout);
+    run(["run", deviceProfile, "configuration", "grant", receipt.id, grants.revision]);
+    return receipt;
+  };
+  let registration;
   // Only the explicitly invoked live fixture supplies this value. Default tests
   // remain keyless even when the developer's process has a real provider key.
   if (deepseekKey !== undefined) {
@@ -193,7 +202,7 @@ export async function startService({ binary, assets, report, configure, onReques
       () => { if (failed) throw failed; },
       () => writeFile(join(report, "service.stderr.log"), stderr),
       async () => {
-        const log = join(env.XDG_STATE_HOME, 'rsi/session-host/owner.log');
+        const log = join(env.XDG_STATE_HOME, 'rsiversi/session-host/owner.log');
         const info = await stat(log).catch(error => { if (error.code !== 'ENOENT') throw error; });
         if (info && info.size <= 1024 * 1024) await writeFile(join(report, 'host.stderr.log'), await readFile(log));
       },
@@ -205,7 +214,7 @@ export async function startService({ binary, assets, report, configure, onReques
   }
   try {
     await mkdir(workspace); await mkdir(env.HOME);
-    const config = join(env.XDG_CONFIG_HOME, "rsi");
+    const config = join(env.XDG_CONFIG_HOME, "rsiversi");
     await mkdir(config,{recursive:true});
     if(process.platform==='win32') boundedRun('powershell.exe',['-NoProfile','-NonInteractive','-Command',`
       $ErrorActionPreference='Stop'
@@ -225,6 +234,16 @@ export async function startService({ binary, assets, report, configure, onReques
     const servePlugin = embedded ? "fixture.browser.serve" : "rsi.application.serve";
     await writeFile(join(application, "application.profile.toml"), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "fixture" }\n${assetStep}[[steps]]\nkind = "plugin"\nid = "http"\nplugin = "${servePlugin}"\n`);
     await configure?.({ config, workspace, run, provider });
+    if(process.platform==='win32') {
+      const context={user_instruction_file:join(config,'AGENTS.md'),user_agent_roots:[join(config,'agents')],user_skill_roots:[join(config,'skills')]};
+      await appendFile(join(host,'host.profile.toml'),`\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-agent-workspace-context'\nconfig_json = ${JSON.stringify(JSON.stringify(context))}\n`);
+    }
+    if(registerBeforeStart) {
+      const devices = join(config, 'application-profiles', deviceProfile);
+      await mkdir(devices, {recursive:true});
+      await writeFile(join(devices, 'application.profile.toml'), `format = 1\n[[steps]]\nkind = "plugin"\nid = "connection"\nplugin = "rsi.application.connection"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "application"\nplugin = "rsi.application.devices"\n`);
+      if(registrationLabel !== undefined) registration = register(registrationLabel);
+    }
     const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
     if (!developmentHttp) boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
     const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
@@ -253,12 +272,13 @@ export async function startService({ binary, assets, report, configure, onReques
     } else assert.equal(JSON.parse(ready).event, "serving");
     };
     await startProcess();
-    return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, get pid() { return child.pid; },
+    if(!registerBeforeStart && registrationLabel !== undefined) registration = register(registrationLabel);
+    return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, register, registration, get pid() { return child.pid; },
       waitForExit: () => deadline(stopped, 'foreground service exit', 20_000),
       async readSessionFacts(session) {
         assert(typeof session==='string'&&session.length>0&&session.length<=128);
         const {DatabaseSync}=await import('node:sqlite');
-        const database=new DatabaseSync(join(env.XDG_STATE_HOME,'rsi/agent/sessions.sqlite3'),{readOnly:true});
+        const database=new DatabaseSync(join(env.XDG_STATE_HOME,'rsiversi/agent/sessions.sqlite3'),{readOnly:true});
         try {
           const {facts,selection}=readFactEvidence(database,session);
           await writeFile(join(report,'fact-evidence-source.json'),JSON.stringify(selection));
@@ -267,12 +287,6 @@ export async function startService({ binary, assets, report, configure, onReques
       },
       probe(program, input, args = []) { return boundedRun(program, args, {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
       async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
-      register(label) {
-        const receipt = JSON.parse(run(["run", "devices", "register", label]).stdout);
-        const grants = JSON.parse(run(["run", "devices", "configuration", "list"]).stdout);
-        run(["run", "devices", "configuration", "grant", receipt.id, grants.revision]);
-        return receipt;
-      },
     };
   } catch (error) {
     try { await close(); }

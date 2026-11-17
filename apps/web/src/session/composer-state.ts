@@ -21,6 +21,7 @@ export interface ComposerView {
   accessDisabled?: boolean;
   workspace?: string;
   text: string;
+  command?: {name:string;hint:string;end:number};
   disabled: boolean;
   sendDisabled: boolean;
   sendLabel: string;
@@ -46,7 +47,7 @@ export interface ComposerView {
 export interface ComposerOwner extends ProjectionActions {
   prepareComposer(): Promise<boolean>;
   setAccess(mode: string): void;
-  selectCommand(name: string): void;
+  clearCommand(): void;
   index: string;
   selectWorkspace(id: string): Promise<unknown> | void;
   stopBinding?: unknown;

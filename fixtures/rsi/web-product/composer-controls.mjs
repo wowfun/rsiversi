@@ -12,7 +12,7 @@ fixture.view.catalog.models.push({deployment:'fixture',model:'other'});
 fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='create'){
-  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true}]}};
+  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true,composer_input:{kind:'text',hint:'on | off | toggle'}}]}};
  }
  const data=fixture.view.surfaces.main;
  if(command.action==='model'){data.model=command.model;data.reasoning_effort=command.reasoning_effort;}
@@ -27,13 +27,23 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
  page.on('pageerror',error=>errors.push(error.message));
  try{
   await page.goto(scene.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
-  const input=page.getByRole('textbox',{name:'Main message',exact:true});await input.fill('Draft survives opening controls');
+  const input=page.locator('.composer textarea');await input.fill('Draft survives opening controls');await input.press('End');
   await page.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'File',exact:true}).waitFor();
   await page.waitForFunction(()=>fixture.creates===1&&document.querySelector('[role=menu] button:not(:disabled)'));
   assert.equal(await input.getAttribute('placeholder'),'Send a message · / commands · @ agents');
   assert.equal(await input.inputValue(),'Draft survives opening controls');assert.equal(await page.evaluate(()=>fixture.prepared.length),0);
   await page.screenshot({path:join(report,name+'-plus.png')});
-  await page.getByRole('menuitem',{name:'Commands',exact:true}).click();await page.getByRole('menuitem',{name:'/plan',exact:true}).click();assert.equal(await input.inputValue(),'/plan ');
+  await page.getByRole('menuitem',{name:'Commands',exact:true}).click();await page.getByRole('menuitem',{name:'/plan',exact:true}).click();assert.equal(await input.inputValue(),'/plan Draft survives opening controls');
+  await page.screenshot({path:join(report,name+'-command.png')});
+  await page.getByRole('button',{name:'Leave command input'}).click();assert.equal(await input.inputValue(),'Draft survives opening controls');
+  for(const theme of ['light','dark']){
+   await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await input.focus();await input.press('Home');
+   assert.equal(await page.locator('.composer').evaluate(node=>getComputedStyle(node).outlineWidth),'2px');
+   assert.equal(await input.evaluate(node=>getComputedStyle(node).outlineStyle),'none');
+   await page.screenshot({path:join(report,name+'-focus-'+theme+'.png')});
+  }
+  await page.emulateMedia({forcedColors:'active'});await input.focus();assert.equal(await page.locator('.composer').evaluate(node=>getComputedStyle(node).outlineWidth),'2px');
+  await page.screenshot({path:join(report,name+'-focus-forced.png')});await page.emulateMedia({forcedColors:'none'});
   await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();
   await page.getByRole('button',{name:/reasoning effort Max/}).waitFor();
   await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.screenshot({path:join(report,name+'-effort.png')});
@@ -47,10 +57,14 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   // A pending request disables changes without hiding the selected model or access.
   await page.screenshot({path:join(report,name+'-pending.png')});
   await page.getByRole('button',{name:/^Select model/}).click();await page.screenshot({path:join(report,name+'-model.png')});await page.keyboard.press('Escape');
-  for(const width of [390,1440]){await page.setViewportSize({width,height:900});await page.getByRole('button',{name:/^Select model/}).click();
+  for(const width of [390,1440]){await page.setViewportSize({width,height:900});
+   const pendingButton=await page.getByTestId('composer-send').evaluate(node=>({width:node.clientWidth,scroll:node.scrollWidth,height:node.clientHeight}));
+   assert(pendingButton.width>80&&pendingButton.scroll<=pendingButton.width&&pendingButton.height===34,'Pending action fits one readable line');
+   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+   await page.getByRole('button',{name:/^Select model/}).click();
    const bounds=await page.getByRole('menu',{name:/^Select model/}).boundingBox();assert(bounds.x>=0&&bounds.x+bounds.width<=width);
    await page.screenshot({path:join(report,name+'-'+width+'.png')});await page.keyboard.press('Escape');}
   assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','sandbox frozen into request','pending access lock','Escape focus','narrow menu bounds']});
- }catch(error){await page.screenshot({path:join(report,name+'-failure.png')});throw error;}finally{await browser.close();}
+ }catch(error){await page.screenshot({path:join(report,name+'-failure.png')}).catch(()=>{});await writeFile(join(report,name+'-failure.txt'),String(error.stack));throw error;}finally{await browser.close();}
 }}finally{await scene.close();}
 await writeFile(join(report,'document-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));

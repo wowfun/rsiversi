@@ -73,6 +73,11 @@ supersedes the separate Chat/Trajectory choice. The [navigation decision](../fea
 adds independent complete pins and workspace group queries. Existing UI contracts retain action
 identity and independently contributed views. The former Session DOM renderer
 remains an explicitly initialized island with its own awaited mount lifetime.
+Session command descriptors explicitly declare whether a composer can invoke
+them with no arguments or accept text, independently from structured execution
+arguments. Shared completion discovery and Web menus consume that declaration;
+command names do not imply an input grammar. A structured-only contribution keeps
+its execution and dedicated controls without advertising a misleading slash entry.
 
 Vite refreshes feature components in development; bootstrap changes reload the
 document. Independently published renderer graphs use candidate admission,

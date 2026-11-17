@@ -90,6 +90,13 @@ export function pickCompletion(pane, context, item) {
     state.generation !== pane.generation
   )
     return;
+  if (item.group === 'command') {
+    const selection = {editor:pane.editor,generation:pane.generation,
+      revision:pane.editor?.revision,start:token.start,end:token.end,trigger:true};
+    pane.closeCompletions();
+    context.perform(() => pane.selectCommand(item,selection));
+    return;
+  }
   pane.input.setRangeText(item.replacement, token.start, token.end, "end");
   pane.edit(pane.input.value);
   pane.completionRequestKey = JSON.stringify([

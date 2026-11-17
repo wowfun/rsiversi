@@ -69,7 +69,7 @@ export function ComposerAdd({owner,data,register}:{owner:ComposerOwner;data?:Com
   const [commands,setCommands]=useState(false),state=owner.composerView;
   const back=useRef<HTMLButtonElement>(null);
   useLayoutEffect(()=>{if(commands)back.current?.focus();},[commands]);
-  return <ComposerMenu name="Add files or run commands" className={css.plus} label={<Plus/>} onOpen={async()=>{setCommands(false);await run(async()=>{if(await owner.prepareComposer())await owner.action('commands');});}}>
+  return <ComposerMenu name="Add files or run commands" className={css.plus} label={<Plus/>} onOpen={async()=>{setCommands(false);await run(async()=>{if(await owner.prepareComposer()){owner.captureCommandSelection();await owner.action('commands');}});}}>
     {close=><>
       <div hidden={commands}>
         <div className={css.heading}>Add</div>
@@ -78,7 +78,7 @@ export function ComposerAdd({owner,data,register}:{owner:ComposerOwner;data?:Com
       </div>
       <div hidden={!commands} onKeyDown={event=>{if(event.key==='ArrowLeft'){event.preventDefault();setCommands(false);}}}>
         <button ref={back} type="button" role="menuitem" onClick={()=>setCommands(false)}><Back/>Commands</button>
-        {data?.commands?.commands.map(command=><button type="button" role="menuitem" key={command.name} disabled={data.commands?.revision.kind==='draft'&&!command.draft_safe} title={command.description} onClick={()=>{close();owner.selectCommand(command.name);}}>/{command.name}</button>)}
+        {data?.commands?.commands.filter(command=>command.composer_input).map(command=><button type="button" role="menuitem" key={command.name} disabled={data.commands?.revision.kind==='draft'&&!command.draft_safe} title={command.description} onClick={()=>{close();void run(()=>owner.selectCommand(command));}}>/{command.name}</button>)}
       </div>
     </>}
   </ComposerMenu>;

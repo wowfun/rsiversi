@@ -211,7 +211,7 @@ test('cleanup retry uses a fresh connection only for the original endpoint and p
 test('discard confirmation survives composer frames and resets with the pane', async () => {
   let discarded=0,reloaded=0;
   const scope={connection:{storageNotice:'storage failed'},view:undefined,
-    DraftStore:{async discardAllSaved(){discarded++;}},location:{reload(){reloaded++;}}};
+    DraftStore:{async discardAllDrafts(){discarded++;}},location:{reload(){reloaded++;}}};
   const Pane=createPaneClass(scope);
   const pane=Object.assign(new Pane('main'),{generation:'1',input:{value:''},commands:{},recovery:{replaceChildren(){}},render(){}});
   pane.renderComposer();

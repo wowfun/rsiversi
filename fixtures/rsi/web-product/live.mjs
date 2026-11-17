@@ -25,7 +25,7 @@ const errors=[],networkFailures=[];let omittedNetworkFailures=0;const started=Da
 try {
   service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report,deepseekKey:key,configure:async({config})=>{
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{output_budgets:[{model:{deployment:'live-deepseek',model:process.env.RSI_LIVE_MODEL},max_output_tokens:4096}]}}));
-    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\nsteps = []\n');
+    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\n');
   }});
   const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));

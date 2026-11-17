@@ -533,6 +533,8 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await page.waitForFunction(
         () => !document.querySelector(".reference-row"),
       );
+      await page.waitForFunction(() => fixture.calls.some(call =>
+        call.method === "reference_input" && JSON.parse(call.payload).operation.kind === "release"));
       assert.equal(
         await page.evaluate(
           () =>
@@ -599,7 +601,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
           ],
           commands: {
             revision: { kind: "draft" },
-            commands: [{ name: "help", description: "Help", draft_safe: true }],
+            commands: [{ name: "help", description: "Help", draft_safe: true, composer_input: { kind: "text", hint: "Arguments" } }],
           },
         });
         fixture.hold();
@@ -704,11 +706,13 @@ export async function verifyFrameCommit(browser, url, report, name) {
           sequence: state.sequence,
           query: state.query,
           entries: [
-            { replacement: "/help", description: "Help", group: "command" },
+            { name: "help", replacement: "/help", description: "Help", group: "command", composer_input: { kind: "text", hint: "Arguments" } },
             {
+              name: "history",
               replacement: "/history",
               description: "History",
               group: "command",
+              composer_input: { kind: "text", hint: "Arguments" },
             },
           ],
           notice: "",
@@ -758,8 +762,8 @@ export async function verifyFrameCommit(browser, url, report, name) {
       );
       await page.locator('textarea[aria-label="Main message"]').press("Enter");
       assert.equal(
-        await page.locator('textarea[aria-label="Main message"]').inputValue(),
-        "/history",
+        await page.locator('textarea[aria-label="Main command arguments"]').inputValue(),
+        "/history ",
       );
       assert.equal(await page.locator(".input-completions").isVisible(), false);
       await page.screenshot({ path: join(report, `${name}-projections.png`) });

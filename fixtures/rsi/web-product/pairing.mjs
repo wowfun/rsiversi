@@ -17,7 +17,7 @@ export async function verifyPairing(binary, source) {
     await new Promise(resolve => probe.close(resolve));
     const env = {PATH: process.env.PATH};
     try {
-      for (const [name, leaf] of [['HOME','home'], ['XDG_CONFIG_HOME','config'], ['XDG_STATE_HOME','state'], ['XDG_CACHE_HOME','cache'], ['XDG_RUNTIME_DIR','run']]) {
+      for (const [name, leaf] of [['HOME','home'], ['XDG_CONFIG_HOME','config'], ['XDG_DATA_HOME','data'], ['XDG_STATE_HOME','state'], ['XDG_CACHE_HOME','cache'], ['XDG_RUNTIME_DIR','run']]) {
         env[name] = join(root, leaf); await mkdir(env[name], {mode:0o700});
       }
       await cp(source, assets, {recursive:true});
@@ -35,7 +35,7 @@ export async function verifyPairing(binary, source) {
       }
       let args = ['web', '--no-open', '--port', String(port), '--assets', assets];
       if (variant === 'custom-profile') {
-        const profile = join(env.XDG_CONFIG_HOME, 'rsi/application-profiles/custom');
+        const profile = join(env.XDG_CONFIG_HOME, 'rsiversi/application-profiles/custom');
         await mkdir(profile, {recursive:true});
         await writeFile(join(profile, 'application.profile.toml'), `format = 1\n[[steps]]\nkind = "plugin"\nid = "service"\nplugin = "rsi.application.service"\nconfig = { host_profile = "standard" }\n[[steps]]\nkind = "plugin"\nid = "web"\nplugin = "rsi.application.web"\n`);
         args = ["run", 'custom', '--no-open', '--port', String(port), '--assets', assets];

@@ -1,17 +1,21 @@
+import {StartingDraft} from '../../starting-draft.js';
+import {restoreStartingDraft} from './starting-conversation.js';
+import {conversationTitle, navigationTitle} from '../../conversation-title.js';
+const preview = text => Array.from(text.slice(0,160)).slice(0,80).join('').replace(/\s+/g,' ').trim();
+
 export async function restoreDrafts(pane, context) {
   const current = context.connection,
     store = current?.drafts;
   if (!store) throw new Error("Connect to your service first");
-  const records = new Map((await store.list(pane.index)).map(record => [JSON.stringify(record.key), record]));
-  if (context.connection !== current || current.closing) return;
-  for (const [key, local] of pane.editors) {
-    if (local.record.key[2] === pane.index &&
-        JSON.stringify(local.record.key.slice(0, 2)) === JSON.stringify(store.namespace) &&
-        (local.dirty || local.failure) && !records.has(key)) records.set(key, local.record);
-  }
   const panel = {
     rows: [],
-    busy: false,
+    busy: true,
+    loading: true,
+    discard: async () => {
+      if (!active() || panel.busy) return;
+      panel.close();
+      await pane.discardSavedDrafts();
+    },
     close: () => {
       if (pane.recoveryView !== panel) return;
       pane.recoveryView = undefined;
@@ -29,13 +33,32 @@ export async function restoreDrafts(pane, context) {
     panel.rows = panel.rows.filter((value) => value !== row);
     pane.invalidate();
   };
+  pane.recoveryView = panel;
+  pane.invalidate();
+  let records = new Map(), sessionFailure;
+  try { records = new Map((await store.list(pane.index)).map(record => [JSON.stringify(record.key), record])); }
+  catch (error) {
+    sessionFailure = `Saved drafts could not be read: ${error.message}`;
+    if (active()) { panel.notice = sessionFailure; pane.invalidate(); }
+  }
+  if (!active()) return;
+  for (const [key, local] of pane.editors) {
+    if (local.record.key[2] === pane.index &&
+        JSON.stringify(local.record.key.slice(0, 2)) === JSON.stringify(store.namespace) &&
+        (local.dirty || local.failure) && !records.has(key)) records.set(key, local.record);
+  }
   for (const record of records.values()) {
     const local = pane.editors.get(JSON.stringify(record.key));
+    if (local && local === pane.editor && !local.dirty && !local.failure) continue;
+    const surface = Object.keys(context.view?.surfaces ?? {}).find(key=>context.view.surfaces[key]?.kind==='native' && context.view.surfaces[key].session===record.key[3]);
     const row = {
       id: JSON.stringify(record.key),
+      coordinates: JSON.stringify(record.key),
       text: local?.text ?? record.text,
-      summary: [record.key[3], record.pending ? "awaiting confirmation" :
-        Array.from(record.text.slice(0, 160)).slice(0, 80).join("").replace(/\s+/g, " ").trim(),
+      removable: !record.pending && !record.references.length && !record.releases.length && !local?.dirty && !local?.failure,
+      cancelDelete: () => { if (active() && !panel.busy) { row.deleteConfirmed=false; pane.invalidate(); } },
+      summary: [surface ? conversationTitle(context.view,surface) : navigationTitle(context.view,record.key[3]) || record.key[3], record.pending ? "awaiting confirmation" :
+        preview(record.text),
         record.images.length ? `${record.images.length} images` : "",
         record.releases.length ? "pending reference cleanup" : ""].filter(Boolean).join(" · "),
       empty:
@@ -136,10 +159,15 @@ export async function restoreDrafts(pane, context) {
       },
       remove: async () => {
         if (!active() || panel.busy) return;
+        if (local?.dirty || local?.failure || (local && local === pane.editor)) throw new Error("Save or resolve this editor before deleting its draft");
+        if (!row.empty && !row.removable) return;
+        if (!row.empty && !row.deleteConfirmed) { row.deleteConfirmed=true; pane.invalidate(); return; }
         panel.busy = true;
         pane.invalidate();
         try {
-          await store.removeEmpty(record);
+          if (row.empty) await store.removeEmpty(record);
+          else await store.removeSaved(record);
+          pane.editors.delete(JSON.stringify(record.key));
           if (active()) remove(row);
         } finally {
           panel.busy = false;
@@ -149,8 +177,50 @@ export async function restoreDrafts(pane, context) {
     };
     panel.rows.push(row);
   }
-  pane.recoveryView = panel;
-  pane.invalidate();
+  let next;
+  const loadStarting = async () => {
+    panel.loading = true; panel.notice = sessionFailure; pane.invalidate();
+    try {
+      const page = await StartingDraft.list(store.namespace,next);
+      if (!active()) return;
+      next = page.next;
+      for (const saved of page.rows) {
+        if (!pane.generation && pane.starting?.key === saved.key && !pane.starting.dirty && !pane.starting.failure) continue;
+        const surface = JSON.parse(saved.key)[2];
+        const row = {
+          id: saved.key, coordinates:saved.key, starting:true, text:saved.text, empty:false,
+          summary:`Starting draft · ${surface==='main'?'Main':surface==='compare'?'Compare':surface} · ${preview(saved.text) || 'Workspace selection'}`,
+          cancelDelete: () => { if (active() && !panel.busy) { row.deleteConfirmed=false; pane.invalidate(); } },
+          open: async () => {
+            if (!active() || panel.busy) return;
+            panel.busy=true; pane.invalidate();
+            try { if (await restoreStartingDraft(pane,context,saved)) panel.close(); }
+            finally { panel.busy=false; pane.invalidate(); }
+          },
+          remove: async () => {
+            if (!active() || panel.busy) return;
+            if (!row.deleteConfirmed) { row.deleteConfirmed=true; pane.invalidate(); return; }
+            panel.busy=true; pane.invalidate();
+            try { await StartingDraft.remove(saved); if (active()) remove(row); }
+            finally { panel.busy=false; pane.invalidate(); }
+          },
+        };
+        panel.rows.push(row);
+      }
+      panel.more = next ? async () => {
+        if (!active() || panel.busy) return;
+        panel.busy=true; pane.invalidate();
+        await loadStarting();
+      } : undefined;
+    } catch (error) {
+      if (active()) {
+        pane.startingStorageError = `Starting drafts could not be read: ${error.message}`;
+        panel.notice = [sessionFailure, pane.startingStorageError].filter(Boolean).join(' ');
+        pane.renderComposer();
+      }
+    } finally { panel.loading = panel.busy = false; pane.invalidate(); }
+  };
+  await loadStarting();
 }
 
 export async function recreateDraft(pane, context, record, current) {

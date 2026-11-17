@@ -22,7 +22,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
   const service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report:directory,configure:async({config,provider})=>{
     endpoint=provider.origin;
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':staleDefault?{default_model:{deployment:'removed-provider',model:'unavailable-model'}}:{}}));
-    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\nsteps = []\n');
+    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\n');
   }});
   const browser=await engine.launch();
   const errors=[]; let page;

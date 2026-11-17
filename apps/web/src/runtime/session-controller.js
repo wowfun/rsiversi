@@ -1,4 +1,6 @@
 import {bindStarting, startingWorkspace, startConversation, prepareComposer} from './starting-conversation.js';
+import {assertDraftStorageActive, draftStorageRetired} from '../../draft-databases.js';
+import {commandSelection, claimedCommand, commandToken} from '../../command-input.js';
 import {accessKey, readAccess, saveAccess} from '../../composer-access.js';
 import {captureOf, captureKey, canCaptureReference} from '../../drafts.js';
 import {
@@ -64,10 +66,34 @@ export function createPaneClass(context) {
     focusInput() {
       this.input.focus();
     }
-    selectCommand(name) {
-      this.input.value = `/${name} `;
-      this.edit(this.input.value);
+    captureCommandSelection() {
+      this.commandSelection = {editor:this.editor,generation:this.generation,revision:this.editor?.revision,
+        start:this.input.selectionStart ?? 0,end:this.input.selectionEnd ?? 0};
+    }
+    async selectCommand(command, selection = this.commandSelection) {
+      if (!this.editor) throw new Error('The draft is not ready; wait for it to load');
+      if (!selection) { this.captureCommandSelection(); selection=this.commandSelection; }
+      this.commandSelection = undefined;
+      if (this.composing || selection.editor !== this.editor || selection.generation !== this.generation || selection.revision !== this.editor.revision)
+        throw new Error('The input changed; select the command again');
+      const selected = commandSelection(this.input.value,selection.start,selection.end,command,selection.trigger);
+      if (selected.kind === 'execute') {
+        await executeDocumentCommand(this,context,command.name,'',selected.consume,selection.revision);
+      } else {
+        this.edit(selected.text);
+        this.selectedCommand = command;
+        this.input.value = selected.text;
+        this.input.setSelectionRange?.(`/${command.name} `.length,`/${command.name} `.length);
+      }
+      this.closeCompletions();
       this.input.focus();
+    }
+    clearCommand() {
+      if (this.composerView?.disabled || this.composing) return;
+      const command = this.composerView.command;
+      if (!command) return;
+      this.edit(this.editor.text.slice(command.end));
+      this.focusInput();
     }
     mount(elements) {
       return mount(this, context, elements);
@@ -233,6 +259,7 @@ export function createPaneClass(context) {
       images = this.editor?.images ?? [],
       references = this.editor?.references ?? [],
     ) {
+      assertDraftStorageActive();
       if (!this.generation && this.starting) { this.starting.edit(text); return; }
       if (!this.editor) throw new Error("The saved draft is still loading");
       this.editor.edit(text, images, references, textBytes => {
@@ -242,6 +269,19 @@ export function createPaneClass(context) {
         );
         if (total > 2 * 1024 * 1024)
           throw new Error("Local drafts exceed this pane's 2 MiB limit");
+      });
+      this.prefetchCommands(text);
+    }
+    prefetchCommands(text) {
+      const generation=this.generation, current=context.connection;
+      if (!generation || !commandToken(text) || this.staged?.data?.commands ||
+        (this.commandCatalog?.generation === generation && this.commandCatalog.connection === current)) return;
+      const read={generation,connection:current};
+      this.commandCatalog=read;
+      void this.action('commands').catch(error=>{
+        if (this.generation === generation && context.connection === current) context.notify(error.message);
+      }).finally(()=>{
+        if (this.commandCatalog === read) this.commandCatalog=undefined;
       });
     }
     async bindDraft(data) {
@@ -297,6 +337,7 @@ export function createPaneClass(context) {
       };
       void this.drainReferenceReleases(editor, generation, true).catch(() => {});
       this.renderComposer();
+      if (!data.commands) this.prefetchCommands(editor.text);
       if (
         editor.record.pending &&
         editor.record.pending.phase !== "prepared" &&
@@ -484,6 +525,7 @@ export function createPaneClass(context) {
       return state.releasing;
     }
     renderComposer() {
+      const storageRetired = draftStorageRetired();
       const starting = !this.generation ? this.starting : undefined;
       const session = this.staged?.data?.session;
       const namespace = context.connection?.drafts?.namespace;
@@ -497,6 +539,7 @@ export function createPaneClass(context) {
       const editor = this.editor,
         pending = editor?.record.pending;
       const sendDisabled =
+        storageRetired ||
         !editor ||
         !!editor.failure ||
         editor.transferring ||
@@ -514,10 +557,11 @@ export function createPaneClass(context) {
         access: session ? this.accessPreference?.mode ?? this.staged?.data?.sandbox : context.view?.setup?.agent?.sandbox,
         accessDisabled: !!this.submitting || !!editor?.record.pending || !!this.switching,
         text: starting?.text ?? editor?.text ?? "",
+        command: claimedCommand(editor?.text ?? '', [...(this.staged?.data?.commands?.commands ?? []),...(this.selectedCommand ? [this.selectedCommand] : [])]),
         workspace: startingWorkspace(this, context)?.id,
         disabled:
-          !!(this.switching || (!this.generation ? !starting || this.submitting : !editor || editor.transferring || editor.resolving)),
-        sendDisabled: starting ? !!starting.failure || this.submitting || this.switching || !starting.text.trim() : !!sendDisabled,
+          !!(storageRetired || this.switching || (!this.generation ? !starting || this.submitting : !editor || editor.transferring || editor.resolving)),
+        sendDisabled: storageRetired || (starting ? !!starting.failure || this.submitting || this.switching || !starting.text.trim() : !!sendDisabled),
         alternativeDisabled:
           !!sendDisabled || !!pending || !this.composerActions?.alternative,
         alternative: this.composerActions?.alternative,
@@ -530,7 +574,7 @@ export function createPaneClass(context) {
           : (this.composerActions?.primary.label ?? "Send"),
         exporting: !!this.exportAbort,
         bindingError: this.bindingError,
-        storageNotice: context.connection?.storageNotice,
+        storageNotice: storageRetired ? 'Draft storage is retired. Finish the reset or reload before editing.' : context.connection?.storageNotice ?? this.startingStorageError,
         discardConfirmed: !!this.discardDraftsConfirmed,
         discarding: this.discarding,
         failure: starting?.failure ? {message:starting.failure.message, resolve:useSaved=>starting.resolve(useSaved)} : editor?.failure
@@ -593,7 +637,7 @@ export function createPaneClass(context) {
       this.discarding = true;
       this.renderComposer();
       try {
-        await context.DraftStore.discardAllSaved();
+        await context.DraftStore.discardAllDrafts();
         context.location.reload();
       } catch (error) {
         context.notify(`Draft reset failed: ${error.message}`);
@@ -754,6 +798,7 @@ export function createPaneClass(context) {
       this.startBindingOwner = undefined;
       this.startBinding = undefined;
       this.starting = undefined;
+      this.startingStorageError = undefined;
       this.staged = undefined;
       this.discardDraftsConfirmed = false;
       this.switching = false;
@@ -797,6 +842,8 @@ export function createPaneClass(context) {
         this.startBinding = bindStarting(this, context, binding).catch(error => {
           if (this.startBindingOwner !== binding) return;
           this.startBindingOwner = undefined;
+          this.startingStorageError = error.message;
+          this.renderComposer();
           context.notify(error.message);
         }).finally(() => {
           if (this.startBindingOwner === binding) this.startBinding = undefined;
@@ -811,6 +858,8 @@ export function createPaneClass(context) {
         this.switching = false;
       }
       if (changed) {
+        this.commandSelection = undefined;
+        this.selectedCommand = undefined;
         this.commandsExpanded = false;
         this.queueDialog?.close();
         this.queueBinding = undefined;
