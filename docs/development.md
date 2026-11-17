@@ -14,12 +14,12 @@ The installer is only needed when you want `rsi` on PATH.
 
 ## Choose homes
 
-All three options select final directories relative to the caller's cwd. Omitted
+All five options select final directories relative to the caller's cwd. Omitted
 options retain the normal platform defaults. For an isolated development instance:
 
 ```bash
-target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache config init
-target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache tui
+target/debug/rsi --config-home .local/dev/config --data-home .local/dev/data --state-home .local/dev/state --cache-home .local/dev/cache --tmp-home .local/dev/tmp config init
+target/debug/rsi --config-home .local/dev/config --data-home .local/dev/data --state-home .local/dev/state --cache-home .local/dev/cache --tmp-home .local/dev/tmp tui
 ```
 
 Configure providers normally, or supply an environment credential to the caller
@@ -40,7 +40,7 @@ keeps its immutable generation. See the [generation contract](../crates/rsi-agen
 ## Observe configuration and source
 
 ```bash
-target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache --watch tui
+target/debug/rsi --config-home .local/dev/config --data-home .local/dev/data --state-home .local/dev/state --cache-home .local/dev/cache --tmp-home .local/dev/tmp --watch tui
 ```
 
 `--watch` holds configuration and source-build leases while the application is
@@ -76,7 +76,7 @@ commands use Process/Sandbox providers. They publish through ordinary package
 admission; a failed build preserves the installed good generation.
 
 ```bash
-target/debug/rsi --config-home .local/dev/config --state-home .local/dev/state --cache-home .local/dev/cache --watch web --no-open
+target/debug/rsi --config-home .local/dev/config --data-home .local/dev/data --state-home .local/dev/state --cache-home .local/dev/cache --tmp-home .local/dev/tmp --watch web --no-open
 ```
 
 Web watch runs in the foreground. The owned Vite process reports its actual

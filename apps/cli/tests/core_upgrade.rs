@@ -40,8 +40,10 @@ impl Fixture {
             .unwrap();
         let paths = rsi_host::HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap();
         Self {
@@ -73,6 +75,10 @@ impl Fixture {
             .env("HOME", self.root.path().join("home"))
             .arg("--config-home")
             .arg(self.paths.config())
+            .arg("--data-home")
+            .arg(self.paths.data())
+            .arg("--tmp-home")
+            .arg(self.paths.tmp())
             .arg("--state-home")
             .arg(self.paths.state())
             .arg("--cache-home")
@@ -313,6 +319,10 @@ impl Fixture {
             .arg(prefix)
             .arg("--config-home")
             .arg(self.paths.config())
+            .arg("--data-home")
+            .arg(self.paths.data())
+            .arg("--tmp-home")
+            .arg(self.paths.tmp())
             .arg("--state-home")
             .arg(self.paths.state())
             .arg("--cache-home")

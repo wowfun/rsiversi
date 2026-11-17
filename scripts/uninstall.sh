@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 usage() {
-    printf '%s\n' 'Usage: bash uninstall.sh [--prefix DIR] [--uninstaller FILE] [--config-home DIR] [--state-home DIR] [--cache-home DIR] [--purge] [--dry-run] [--no-path] [--force] [--yes]' \
+    printf '%s\n' 'Usage: bash uninstall.sh [--prefix DIR] [--uninstaller FILE] [--config-home DIR] [--data-home DIR] [--tmp-home DIR] [--state-home DIR] [--cache-home DIR] [--purge] [--dry-run] [--no-path] [--force] [--yes]' \
         'Remove an installation without running rsi or Cargo. Homes are preserved by default.' \
         '--purge clears shared runtime data and saved credentials, preserving user-authored configuration.' \
         '--force permits confirmed fixed-file removal without a valid record; it never force-kills a Host.' \
@@ -12,9 +12,9 @@ prefix=''; uninstaller=''; purge=false
 arguments=(); windows=()
 while (($#)); do
     case "$1" in
-        --prefix|--uninstaller|--config-home|--state-home|--cache-home)
+        --prefix|--uninstaller|--config-home|--data-home|--tmp-home|--state-home|--cache-home)
             (($# >= 2)) && [[ -n "$2" ]] || { usage >&2; exit 2; }
-            case "$1" in --prefix) prefix=$2; flag=-Prefix;; --uninstaller) uninstaller=$2; flag=-Uninstaller;; --config-home) flag=-ConfigHome;; --state-home) flag=-StateHome;; --cache-home) flag=-CacheHome;; esac
+            case "$1" in --prefix) prefix=$2; flag=-Prefix;; --uninstaller) uninstaller=$2; flag=-Uninstaller;; --config-home) flag=-ConfigHome;; --data-home) flag=-DataHome;; --tmp-home) flag=-TmpHome;; --state-home) flag=-StateHome;; --cache-home) flag=-CacheHome;; esac
             windows+=("$flag" "$2"); if [[ "$1" != --uninstaller ]]; then arguments+=("$1" "$2"); fi; shift 2;;
         --purge|--dry-run|--no-path|--force|--yes)
             case "$1" in --purge) purge=true; flag=-Purge;; --dry-run) flag=-DryRun;; --no-path) flag=-NoPath;; --force) flag=-Force;; --yes) flag=-Yes;; esac
@@ -28,7 +28,7 @@ case "$(uname -s)" in
         converted=()
         for ((index=0; index<${#windows[@]}; index++)); do
             value=${windows[index]}; converted+=("$value")
-            case "$value" in -Prefix|-Uninstaller|-ConfigHome|-StateHome|-CacheHome) ((index+=1)); converted+=("$(cygpath -aw -- "${windows[index]}")");; esac
+            case "$value" in -Prefix|-Uninstaller|-ConfigHome|-DataHome|-TmpHome|-StateHome|-CacheHome) ((index+=1)); converted+=("$(cygpath -aw -- "${windows[index]}")");; esac
         done
         script=$(cygpath -aw -- "$(dirname -- "${BASH_SOURCE[0]}")/uninstall.ps1")
         MSYS2_ARG_CONV_EXCL='*' exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$script" "${converted[@]}";;

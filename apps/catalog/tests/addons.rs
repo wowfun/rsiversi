@@ -109,7 +109,14 @@ fn addon(factory: Arc<CounterFactory>, scope: AddonScope, enabled: bool) -> Stan
 
 fn composition(root: &std::path::Path) -> StandardComposition {
     StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         rsi_app_catalog::metadata(),
@@ -640,7 +647,7 @@ fn descriptor_limits_reject_depth_width_and_platform_overflow_without_prepare() 
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn missing_export_rolls_back_the_embedded_connection_and_releases_its_owner() {
+async fn missing_export_degrades_the_connection_and_releases_its_owner() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("config")).unwrap();
     std::fs::write(
@@ -657,15 +664,19 @@ async fn missing_export_rolls_back_the_embedded_connection_and_releases_its_owne
         vec![],
     )
     .unwrap();
-    assert!(
-        host.start(Profile::new([ProfileEntry::new(
+    let running = host
+        .start(Profile::new([ProfileEntry::new(
             "connection",
             "rsi.application.connection",
-            json!({"host_profile":"standard"})
+            json!({"host_profile":"standard"}),
         )]))
         .await
-        .is_err()
+        .unwrap();
+    assert_eq!(
+        running.profile_status().health(),
+        rsi_host::ProfileHealth::Degraded
     );
+    assert!(running.lookup_local::<Counter>().is_none());
     assert!(
         diagnostics
             .take()
@@ -673,6 +684,7 @@ async fn missing_export_rolls_back_the_embedded_connection_and_releases_its_owne
             .to_string()
             .contains(Counter::KEY)
     );
+    assert!(running.shutdown().await.is_clean());
     rsi_service_host::HostOwnerLease::try_acquire(
         rsi_service_host::ServiceHostPaths::from_host_paths(composition.paths()).unwrap(),
     )

@@ -27,12 +27,16 @@ argument-reading helpers here; domain-specific grammars remain with their
 applications. These helpers perform no I/O or application selection.
 
 ScopedProfile mounts a frozen Host catalog and ordinary Profile below a supplied
-Context. It prepares every initial leaf before creating its real meta-scope child
-Fiber, isolates the catalog's Local markers and Profile control, and inherits
+Context. Its real meta-scope child Fiber isolates the catalog's Local markers and
+Profile control, and inherits
 uncatalogued domain capabilities and Portable identities. Reload and shutdown
 affect only that subtree. Profile status subscriptions report convergence and
-retirement without granting parent shutdown authority. Preparation, activation failure and cleanup are reported
-through their owning Meta/Profile errors. The caller owns the parent lifetime,
+retirement without granting parent shutdown authority. Ordinary startup and reload
+retain healthy leaves and report leaf preparation or activation failures as
+degraded Profile status. A degraded surface still owns its Shell slot until
+closed. Callers require their necessary entry and security capabilities before
+use; successful Profile startup alone does not establish product readiness.
+Cleanup errors retain their owning Meta/Profile reports. The caller owns the parent lifetime,
 including cancellation during bootstrap; ScopedProfile never creates or shuts down
 a Runtime. Native embedded service compositions and UI surfaces use this same seam.
 Its read-only `inspect` observes only that scope's owning generation and descendants,

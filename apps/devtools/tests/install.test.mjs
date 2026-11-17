@@ -350,7 +350,7 @@ test('publication refuses a directory created during the version probe and clean
     const binary = join(directory, windows ? 'probe.exe' : 'probe'), prefix = join(directory, 'prefix');
     const destination = join(prefix, 'bin', windows ? 'rsi.exe' : 'rsi');
     if (windows) {
-      const source = 'public class Probe { public static void Main() { if (System.Environment.GetEnvironmentVariable("RSI_PROBE_SECRET") != null) System.Environment.Exit(29); System.IO.Directory.CreateDirectory('+JSON.stringify(destination)+'); System.Console.WriteLine("{\\\"interface\\\":1,\\\"record\\\":1,\\\"transaction\\\":2}"); } }';
+      const source = 'public class Probe { public static void Main() { if (System.Environment.GetEnvironmentVariable("RSI_PROBE_SECRET") != null) System.Environment.Exit(29); System.IO.Directory.CreateDirectory('+JSON.stringify(destination)+'); System.Console.WriteLine("{\\\"interface\\\":1,\\\"record\\\":1,\\\"transaction\\\":4}"); } }';
       const build = spawnSync('powershell.exe', ['-NoProfile', '-Command',
         'Add-Type -TypeDefinition $env:RSI_INSTALL_PROBE_SOURCE -OutputType ConsoleApplication -OutputAssembly $env:RSI_INSTALL_PROBE'],
         {env:{...process.env, RSI_INSTALL_PROBE:binary, RSI_INSTALL_PROBE_SOURCE:source}, encoding:'utf8', timeout:30_000});
@@ -358,7 +358,7 @@ test('publication refuses a directory created during the version probe and clean
     } else await writeFile(binary, `#!/bin/sh
 [ -z "\${RSI_PROBE_SECRET+x}" ] || exit 29
 mkdir -p -- '${destination.replaceAll("'", "'\\''")}'
-echo '{"interface":1,"record":1,"transaction":2}'
+echo '{"interface":1,"record":1,"transaction":4}'
 `, {mode:0o700});
     const result = installer(windows ? ['-Prefix', prefix, '-Binary', binary, '-NoPath']
       : ['--prefix', prefix, '--binary', binary, '--no-path'], directory,

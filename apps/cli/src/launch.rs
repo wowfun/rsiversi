@@ -28,6 +28,8 @@ impl Startup {
     pub fn append_child_options(&self, command: &mut std::process::Command) {
         // Preserve default-document semantics while freezing explicit roots.
         for (flag, selected, resolved) in [
+            ("--data-home", &self.options.homes.data, self.paths.data()),
+            ("--tmp-home", &self.options.homes.tmp, self.paths.tmp()),
             (
                 "--config-home",
                 &self.options.homes.config,
@@ -107,7 +109,10 @@ pub(super) fn validate_command(options: &Options, command: &super::Parse) -> rsi
 
 pub(super) fn initialize(options: Options) -> rsi::Result<()> {
     let cwd = std::env::current_dir().map_err(|error| RsiError::Boot(error.to_string()))?;
-    let paths = options.homes.resolve(&rsi::standard_paths()?, &cwd)?;
+    let paths = options
+        .homes
+        .resolve(&cwd)
+        .map_err(|error| RsiError::Boot(error.to_string()))?;
     STARTUP
         .set(Startup { paths, options })
         .map_err(|_| RsiError::Boot("launch inputs were already resolved".into()))
@@ -121,8 +126,10 @@ pub(super) fn parse(
     while let Some(argument) = arguments.peek().and_then(|value| value.to_str()) {
         let path = match argument {
             "--config-home" => Some(&mut options.homes.config),
+            "--data-home" => Some(&mut options.homes.data),
             "--state-home" => Some(&mut options.homes.state),
             "--cache-home" => Some(&mut options.homes.cache),
+            "--tmp-home" => Some(&mut options.homes.tmp),
             _ => None,
         };
         if let Some(path) = path {
@@ -173,14 +180,38 @@ pub(super) fn run_config(arguments: &[OsString]) -> u8 {
             .first()
             .and_then(|argument| argument.to_str())
             .unwrap_or("show");
+        if command == "paths" {
+            if !(arguments.len() == 1 || (arguments.len() == 2 && arguments[1] == "--legacy")) {
+                return Err(super::cli::usage("config paths accepts only --legacy"));
+            }
+            if startup.options.reset_config || startup.options.reset_state {
+                return Err(super::cli::usage(
+                    "config paths is read-only and cannot reset homes",
+                ));
+            }
+            let mut value = serde_json::json!({
+                "config": startup.paths.config(), "data": startup.paths.data(),
+                "state": startup.paths.state(), "cache": startup.paths.cache(),
+                "tmp": startup.paths.tmp(),
+            });
+            if arguments.len() == 2 {
+                value["legacy_credentials"] =
+                    serde_json::json!(rsi_installation::legacy_credentials());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|e| RsiError::Boot(e.to_string()))?
+            );
+            return Ok(());
+        }
         if arguments.len() > 1 {
             return Err(super::cli::usage(
-                "config accepts one operation: init, show or validate",
+                "config accepts one operation: init, show, validate or paths [--legacy]",
             ));
         }
         if !matches!(command, "init" | "show" | "validate") {
             return Err(super::cli::usage(
-                "unknown config operation; use init, show or validate",
+                "unknown config operation; use init, show, validate or paths [--legacy]",
             ));
         }
         maintain()?;
@@ -197,8 +228,10 @@ pub(super) fn run_config(arguments: &[OsString]) -> u8 {
                 let document = startup.configuration()?;
                 let value = serde_json::json!({
                     "config_home": startup.paths.config(),
+                    "data_home": startup.paths.data(),
                     "state_home": startup.paths.state(),
                     "cache_home": startup.paths.cache(),
+                    "tmp_home": startup.paths.tmp(),
                     "configuration": document,
                 });
                 println!(

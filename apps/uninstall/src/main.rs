@@ -6,7 +6,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
 };
-const HELP: &str = "Usage: rsi-uninstall uninstall --interface-version 1 [OPTIONS]\nBootstrap: rsi-uninstall install --interface-version 1 --prefix DIR --binary FILE --uninstaller FILE --launcher FILE [--no-path]\n  --prefix DIR --config-home DIR --state-home DIR --cache-home DIR\n  --purge --dry-run --no-path --force --yes\nOrdinary uninstall preserves homes. Purge preserves user-authored configuration.\nForce permits confirmed fixed-file removal without a record; it never force-kills.\nUse the installed uninstall.ps1 launcher on Windows to remove the running tool.\n";
+const HELP: &str = "Usage: rsi-uninstall uninstall --interface-version 1 [OPTIONS]\nBootstrap: rsi-uninstall install --interface-version 1 --prefix DIR --binary FILE --uninstaller FILE --launcher FILE [--no-path]\n  --prefix DIR --config-home DIR --data-home DIR --state-home DIR --cache-home DIR --tmp-home DIR\n  --purge --dry-run --no-path --force --yes\nOrdinary uninstall preserves homes. Purge preserves user-authored configuration.\nForce permits confirmed fixed-file removal without a record; it never force-kills.\nUse the installed uninstall.ps1 launcher on Windows to remove the running tool.\n";
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {
@@ -51,6 +51,8 @@ async fn run() -> Result<()> {
         } else if [
             "--prefix",
             "--config-home",
+            "--data-home",
+            "--tmp-home",
             "--state-home",
             "--cache-home",
             "--binary",
@@ -85,7 +87,7 @@ async fn run() -> Result<()> {
         if values.keys().any(|name| {
             matches!(
                 name.as_str(),
-                "--config-home" | "--state-home" | "--cache-home"
+                "--config-home" | "--data-home" | "--state-home" | "--cache-home" | "--tmp-home"
             )
         }) {
             return Err(error("install does not accept home overrides"));
@@ -119,20 +121,15 @@ fn uninstall_options(
     values: &BTreeMap<String, OsString>,
     flags: &BTreeSet<String>,
 ) -> Result<rsi_installation::uninstall::Options> {
-    let defaults = rsi_installation::standard_paths()?;
-    let path = |name, default: &std::path::Path| -> Result<PathBuf> {
-        rsi_installation::filesystem::absolute(
-            &values
-                .get(name)
-                .map_or_else(|| default.to_owned(), PathBuf::from),
-        )
-    };
-    let homes = rsi_host::HostPaths::new(
-        path("--config-home", defaults.config())?,
-        path("--state-home", defaults.state())?,
-        path("--cache-home", defaults.cache())?,
-    )
-    .map_err(error)?;
+    let selected = |name| values.get(name).map(PathBuf::from);
+    let homes = rsi_installation::HomeOverrides {
+        config: selected("--config-home"),
+        data: selected("--data-home"),
+        state: selected("--state-home"),
+        cache: selected("--cache-home"),
+        tmp: selected("--tmp-home"),
+    }
+    .resolve(&std::env::current_dir()?)?;
     Ok(rsi_installation::uninstall::Options {
         prefix,
         homes,
@@ -142,4 +139,38 @@ fn uninstall_options(
         force: flags.contains("--force"),
         yes: flags.contains("--yes"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purge_uses_all_explicit_home_roots_without_creating_them() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!("uninstall-options-{}", std::process::id()));
+        let names = ["config", "data", "state", "cache", "tmp"];
+        let values = names
+            .map(|name| (format!("--{name}-home"), root.join(name).into_os_string()))
+            .into();
+        let options = uninstall_options(
+            root.join("prefix"),
+            &values,
+            &["--purge".into(), "--dry-run".into()].into(),
+        )
+        .unwrap();
+        assert!(options.purge && options.dry_run);
+        assert_eq!(options.prefix, root.join("prefix"));
+        for (name, path) in names.into_iter().zip([
+            options.homes.config(),
+            options.homes.data(),
+            options.homes.state(),
+            options.homes.cache(),
+            options.homes.tmp(),
+        ]) {
+            assert_eq!(path, root.join(name));
+        }
+        assert!(!root.exists());
+    }
 }

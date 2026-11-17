@@ -722,7 +722,7 @@ def self_test():
         assert selected.model == "fixture.model-1"
         settings = configure(root, selected.model)
         profile = tomllib.loads(
-            (root / "config/rsi/host-profiles/live/host.profile.toml").read_text()
+            (root / "config/rsiversi/host-profiles/live/host.profile.toml").read_text()
         )
         assert list(profile["steps"][0]["config"]["language_models"]) == [
             selected.model
@@ -828,7 +828,7 @@ def self_test():
             checks += 1
     with tempfile.TemporaryDirectory(prefix="rsi-eval-trace-") as temporary:
         root = Path(temporary)
-        database = root / "state/rsi/agent/sessions.sqlite3"
+        database = root / "state/rsiversi/agent/sessions.sqlite3"
         database.parent.mkdir(parents=True)
         with sqlite3.connect(database) as connection:
             connection.execute("CREATE TABLE unrelated (id INTEGER)")
@@ -1048,7 +1048,7 @@ def self_test_budgets():
                 if "--profile" not in command:
                     return popen(["/usr/bin/true"], **kwargs)
                 settings_path = (
-                    Path(kwargs["env"]["XDG_CONFIG_HOME"]) / "rsi/settings.json"
+                    Path(kwargs["env"]["XDG_CONFIG_HOME"]) / "rsiversi/settings.json"
                 )
                 launches.append(
                     ("--resume" in command, json.loads(settings_path.read_text()))
@@ -1435,7 +1435,7 @@ def read_key(path):
 
 
 def configure(root, model):
-    config = root / "config/rsi"
+    config = root / "config/rsiversi"
     config.mkdir(parents=True)
     settings = {
         "rsi.agent": {
@@ -1470,7 +1470,7 @@ max_output_reserve_tokens = 256000
 
 
 def durable_trace(root):
-    database = root / "state/rsi/agent/sessions.sqlite3"
+    database = root / "state/rsiversi/agent/sessions.sqlite3"
     if not database.exists():
         return {"facts": [], "controls": []}
     trace = {"facts": [], "controls": []}
@@ -1612,6 +1612,7 @@ def live(args):
                 env.update(
                     {
                         "XDG_CONFIG_HOME": str(root / "config"),
+                        "XDG_DATA_HOME": str(root / "data"),
                         "XDG_STATE_HOME": str(root / "state"),
                         "XDG_CACHE_HOME": str(root / "cache"),
                         "XDG_RUNTIME_DIR": str(root / "runtime"),

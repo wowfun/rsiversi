@@ -17,7 +17,14 @@ fn environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
 }
 async fn manager(root: &Path) -> NativeAddonBuildManager {
     NativeAddonBuildManager::open(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
     )
     .await
     .unwrap()

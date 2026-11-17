@@ -39,7 +39,7 @@ impl PluginFactory for Factory {
         // The Service plugin has already attached to the selected shared Host.
         let _owner = plan.local::<RemoteServiceContract>()?;
         let config = plan.take_state::<Config>()?;
-        let packages = self.paths.state().join("packages");
+        let packages = self.paths.data().join("packages");
         let package = config.package.clone();
         let lease = tokio::task::spawn_blocking(move || {
             rsi_packages::PackageStore::open(&packages)?.acquire(&package)
@@ -208,11 +208,13 @@ impl Runner {
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .env_clear()
-            .envs(self.environment.clone())
+            .envs(self.environment.iter().map(|(name, value)| (name, value)))
             .stdin(std::process::Stdio::piped())
             .kill_on_drop(true);
         for (flag, path) in [
             ("--config-home", self.paths.config()),
+            ("--data-home", self.paths.data()),
+            ("--tmp-home", self.paths.tmp()),
             ("--state-home", self.paths.state()),
             ("--cache-home", self.paths.cache()),
         ] {
@@ -267,8 +269,6 @@ impl Runner {
                 }
             },
         }.map_err(|e| e.to_string())?;
-        // The executable and exact dependency closure stay leased through reaping.
-        let _ = &self.lease;
         if frontend_failed {
             return Err("Desktop frontend or Host listener stopped".into());
         }

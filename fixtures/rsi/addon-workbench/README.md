@@ -38,6 +38,7 @@ With a successful current paired publication from the
 [product browser fixture](../web-product/README.md), run
 `cargo run --locked -p rsi-app-tools -- fixture-dist addon-workbench /absolute/new-report`.
 The browser CI job runs this probe against its current paired publication.
+The fixture runs on Linux and Windows using the captured target's executable suffix.
 It builds the example from that exact frozen source under the shared build lock,
 checks the capture before and after compilation, and retains the publication pin
 while its browser clients run. Its separate receipt records the example hash and
@@ -53,8 +54,13 @@ configuration policy; the browser fixture checks that rejection and retained
 editor input. Trusted Local Settings mutation remains covered by the public
 composition and TUI/headless acceptance targets. Its fixture
 configuration hook only writes isolated test inputs before the service starts.
-CI retains the paired receipt, executable hashes, build log and browser evidence;
-the produced example and its frozen browser copy are execution inputs and are
+The adapter provisions the browser device before Windows embedded Service
+ownership begins; its ordinary private devices Profile uses the same isolated
+Host configuration. Unix provisions through its operator after Service startup.
+CI retains the paired receipt, executable hashes, build log and browser evidence.
+`fixture-scripts.json` separately records the browser entrypoint and shared Service
+adapter hashes, including verification-only changes after the product capture.
+The produced example and its frozen browser copy are execution inputs and are
 excluded from the acceptance archive.
 
 The echo Tool also declares a typed output contract. Browser acceptance opens its

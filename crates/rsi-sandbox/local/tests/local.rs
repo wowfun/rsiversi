@@ -930,6 +930,45 @@ async fn zero_exit_executable_is_not_accepted_as_a_working_bubblewrap() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires native bubblewrap and user namespace support"]
+async fn native_bubblewrap_rejects_workspace_scratch_before_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    let runtime = Runtime::default();
+    let fiber = runtime.root().apply(ResolvedFactory::linked(
+        "sandbox", "overlap", UpdateMode::Replayable, Arc::new(SandboxLocalFactory::default())),
+        json!({"bubblewrap":["/usr/bin/bwrap"], "landlock":[], "temporary_root":workspace.join(".tmp")})).await.unwrap();
+    let sandbox = runtime.root().lookup_local::<SandboxContract>().unwrap();
+    let request = |mode| ProcessRequest {
+        stdio: rsi_sandbox::ProcessStdio::Pipes,
+        mode,
+        program: PathBuf::from("/bin/sh"),
+        arguments: vec!["-c".into(), "touch must-not-run".into()],
+        cwd: workspace.clone(),
+        workspace: workspace.clone(),
+    };
+    let read_only = sandbox
+        .confine(request(SandboxMode::ReadOnly))
+        .await
+        .unwrap();
+    assert!(matches!(
+        read_only.stamp.backend,
+        SandboxBackend::Bubblewrap { .. }
+    ));
+    assert!(read_only.program.starts_with(workspace.join(".tmp")));
+    for _ in 0..2 {
+        assert!(
+            matches!(sandbox.confine(request(SandboxMode::WorkspaceWrite)).await,
+            Err(SandboxError::InvalidInput(message)) if message.contains("launcher overlaps"))
+        );
+    }
+    assert!(!workspace.join("must-not-run").exists());
+    assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires native bubblewrap and user namespace support"]
 async fn native_bubblewrap_enforces_read_only_and_workspace_write_plans() {
     let bubblewrap = PathBuf::from("/usr/bin/bwrap");
     assert!(bubblewrap.is_file(), "native bubblewrap is unavailable");

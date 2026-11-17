@@ -53,9 +53,10 @@ fn parse(arguments: &[OsString]) -> rsi::Result<Invocation> {
 pub(super) async fn install(
     store: Arc<PackageStore>,
     arguments: &[OsString],
+    temporary_root: &std::path::Path,
 ) -> rsi::Result<Resolution> {
     let stop = CancellationToken::new();
-    let work = install_inner(store, arguments, stop.clone());
+    let work = install_inner(store, arguments, stop.clone(), temporary_root);
     tokio::pin!(work);
     tokio::select! {
         result = &mut work => result,
@@ -71,6 +72,7 @@ async fn install_inner(
     store: Arc<PackageStore>,
     arguments: &[OsString],
     stop: CancellationToken,
+    temporary_root: &std::path::Path,
 ) -> rsi::Result<Resolution> {
     let invocation = parse(arguments)?;
     rsi::import_packages(
@@ -82,6 +84,7 @@ async fn install_inner(
             program: invocation.program,
             options: None,
             workspace: std::env::current_dir().map_err(error)?,
+            temporary_root: temporary_root.into(),
             specifications: invocation.specifications,
         },
         rsi_serve::supported_protocols(),
@@ -137,14 +140,16 @@ mod tests {
             std::env::var_os("RSI_EXTENSION_NODE").unwrap(),
             "fixture".into(),
         ];
-        let accepted = install(store.clone(), &args).await.unwrap();
+        let scratch = root.path().join("scratch");
+        let accepted = install(store.clone(), &args, &scratch).await.unwrap();
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
         let digest = accepted.packages["imported"].digest.clone();
         assert_eq!(
             store.acquire("imported").unwrap().manifest().files[0].digest,
             hash(b"verified native importer publication")
         );
         args[3] = "escape".into();
-        assert!(install(store.clone(), &args).await.is_err());
+        assert!(install(store.clone(), &args, &scratch).await.is_err());
         assert_eq!(
             store.resolution().unwrap().packages["imported"].digest,
             digest
@@ -153,8 +158,9 @@ mod tests {
         args[3] = "wait".into();
         args.push(marker.clone().into_os_string());
         let stop = CancellationToken::new();
-        let (cancelled, ()) =
-            tokio::join!(install_inner(store.clone(), &args, stop.clone()), async {
+        let (cancelled, ()) = tokio::join!(
+            install_inner(store.clone(), &args, stop.clone(), &scratch),
+            async {
                 tokio::time::timeout(Duration::from_secs(10), async {
                     while !marker.exists() {
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -163,8 +169,10 @@ mod tests {
                 .await
                 .unwrap();
                 stop.cancel();
-            });
+            }
+        );
         assert!(cancelled.is_err());
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
         assert_eq!(
             store.resolution().unwrap().packages["imported"].digest,
             digest

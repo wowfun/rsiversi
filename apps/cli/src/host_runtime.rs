@@ -153,6 +153,7 @@ fn publish_source_before(
     let mut input = source_file()?;
     let mut buffer = vec![0; 64 * 1024];
     let mut copied = 0_u64;
+    let mut copied_digest = Sha256::new();
     loop {
         check_deadline(deadline)?;
         let count = input.read(&mut buffer).map_err(failure)?;
@@ -164,13 +165,13 @@ fn publish_source_before(
             return Err(failure("runtime grew beyond 4 GiB"));
         }
         output.write_all(&buffer[..count]).map_err(failure)?;
+        copied_digest.update(&buffer[..count]);
     }
     output.flush().map_err(failure)?;
     output.sync_all().map_err(failure)?;
     drop(output);
-    let staged = rsi_files_native_fs::open_relative_file_no_follow(&directory, Path::new(&staging))
-        .map_err(failure)?;
-    if digest(staged, deadline)? != expected {
+    check_deadline(deadline)?;
+    if hex::encode(copied_digest.finalize()) != expected {
         return Err(failure("runtime source changed during publication"));
     }
     #[cfg(windows)]
@@ -361,8 +362,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let source = temporary.path().join("source.exe");
@@ -380,8 +383,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
         )
         .unwrap();
         let bundle = temp.path().join("generations/00000000000000000001/bundle");
@@ -423,8 +428,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap();
         let source = root.path().join("source.exe");
@@ -450,8 +457,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap();
         let source = root.path().join("source");
@@ -469,8 +478,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
         )
         .unwrap();
         let source = temp.path().join("source");
@@ -485,12 +496,39 @@ mod tests {
     }
 
     #[test]
+    fn reused_runtime_rejects_modified_cached_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = rsi_host::HostPaths::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("state"),
+            temp.path().join("cache"),
+            temp.path().join("tmp"),
+        )
+        .unwrap();
+        let source = temp.path().join("source");
+        let bytes = vec![7; 128 * 1024 + 1];
+        std::fs::write(&source, &bytes).unwrap();
+        let published = publish_source(&paths, &source).unwrap();
+        assert_eq!(std::fs::read(&published).unwrap(), bytes);
+        std::fs::write(&published, b"changed cache").unwrap();
+        assert!(
+            publish_source(&paths, &source)
+                .unwrap_err()
+                .to_string()
+                .contains("cached runtime digest differs")
+        );
+    }
+
+    #[test]
     fn concurrent_publication_and_collection_keep_the_running_generation() {
         let temp = tempfile::tempdir().unwrap();
         let paths = rsi_host::HostPaths::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
         )
         .unwrap();
         let source = temp.path().join("source");

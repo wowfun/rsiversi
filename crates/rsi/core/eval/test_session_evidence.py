@@ -13,7 +13,7 @@ class CanonicalTrace(unittest.TestCase):
     def test_reads_logical_observations_in_canonical_field_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            state = root / "state/rsi"
+            state = root / "state/rsiversi"
             state.mkdir(parents=True)
             fact = dict(seq=1, timestamp_ms=1, type="input_message_claimed", content="界🦀")
             control = dict(seq=1, type="message_accepted")
@@ -29,7 +29,7 @@ class CanonicalTrace(unittest.TestCase):
     def test_missing_or_invalid_capture_never_falls_back_to_physical_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            state = root / "state/rsi"
+            state = root / "state/rsiversi"
             (state / "agent").mkdir(parents=True)
             (state / "agent/sessions.sqlite3").write_bytes(b"physical projection")
             with self.assertRaises(FileNotFoundError):

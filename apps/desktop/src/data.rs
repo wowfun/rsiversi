@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn first_launch_creates_private_state_before_webview_and_preserves_it() {
         let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state/rsi");
+        let state = root.path().join("state/rsiversi");
         let data = prepare(&state).unwrap();
         for path in [&state, &data] {
             rsi_files_native_fs::open_absolute_directory_no_follow(path)

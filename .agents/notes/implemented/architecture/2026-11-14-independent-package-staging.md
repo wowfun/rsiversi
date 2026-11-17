@@ -18,7 +18,7 @@ The Store admits objects and pins candidate closures within one writer critical
 section. Process leases, rather than persistent staging profiles, own candidates.
 The package contract belongs to [Packages](../../../../crates/rsi/packages/README.md).
 
-Application protocol 13 exposes disposable stage handles. The existing roots CAS
+Application exposes disposable stage handles. The existing roots CAS
 retains old and new closures during publication; the existing journal remains the
 sole recovery authority. [Serve](../../../../apps/serve/README.md) owns this wire
 contract. Candidate resolver maps are detached until commit. Managed replacement

@@ -4,6 +4,8 @@ param(
     [string]$Prefix,
     [string]$Uninstaller,
     [string]$ConfigHome,
+    [string]$DataHome,
+    [string]$TmpHome,
     [string]$StateHome,
     [string]$CacheHome,
     [switch]$Purge,
@@ -18,14 +20,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 trap { [Console]::Error.WriteLine("rsi uninstall: " + $_.Exception.Message); exit 1 }
 if ($Help) {
-    Write-Output 'Usage: powershell -File uninstall.ps1 [-Prefix DIR] [-Uninstaller FILE] [-ConfigHome DIR] [-StateHome DIR] [-CacheHome DIR] [-Purge] [-DryRun] [-NoPath] [-Force] [-Yes]'
+    Write-Output 'Usage: powershell -File uninstall.ps1 [-Prefix DIR] [-Uninstaller FILE] [-ConfigHome DIR] [-DataHome DIR] [-TmpHome DIR] [-StateHome DIR] [-CacheHome DIR] [-Purge] [-DryRun] [-NoPath] [-Force] [-Yes]'
     Write-Output 'Remove an installation without running rsi or Cargo. Homes are preserved by default.'
     Write-Output '-Purge clears shared runtime data and saved credentials, preserving user-authored configuration.'
     Write-Output '-Force permits confirmed fixed-file removal without a valid record; it never force-kills a Host.'
     Write-Output 'After uninstall, later -Purge requires an external prebuilt -Uninstaller FILE.'
     exit 0
 }
-foreach ($name in @('Prefix', 'Uninstaller', 'ConfigHome', 'StateHome', 'CacheHome')) {
+foreach ($name in @('Prefix', 'Uninstaller', 'ConfigHome', 'DataHome', 'TmpHome', 'StateHome', 'CacheHome')) {
     if ($PSBoundParameters.ContainsKey($name) -and [string]::IsNullOrEmpty($PSBoundParameters[$name])) { throw "$name must not be empty." }
 }
 if (!$Prefix) {
@@ -77,16 +79,18 @@ if (!$external) {
     }
 }
 $arguments = @('uninstall', '--interface-version', '1', '--prefix', $prefixPath)
-foreach ($entry in @(@('ConfigHome','--config-home'), @('StateHome','--state-home'), @('CacheHome','--cache-home'))) {
+foreach ($entry in @(@('ConfigHome','--config-home'), @('DataHome','--data-home'), @('TmpHome','--tmp-home'), @('StateHome','--state-home'), @('CacheHome','--cache-home'))) {
     if ($PSBoundParameters.ContainsKey($entry[0])) { $arguments += @($entry[1], [IO.Path]::GetFullPath($PSBoundParameters[$entry[0]])) }
 }
 foreach ($entry in @(@($Purge,'--purge'), @($DryRun,'--dry-run'), @($NoPath,'--no-path'), @($Force,'--force'), @($Yes,'--yes'))) {
     if ($entry[0]) { $arguments += $entry[1] }
 }
 if ($DryRun) { & $Uninstaller @arguments; exit $LASTEXITCODE }
-$temporary = Join-Path ([IO.Path]::GetTempPath()) ('rsi-uninstall-' + [guid]::NewGuid().ToString('N'))
+$scratchParent = if ($TmpHome) { [IO.Path]::GetFullPath($TmpHome) } else { [IO.Path]::GetTempPath() }
+$temporary = Join-Path $scratchParent ('rsi-uninstall-' + [guid]::NewGuid().ToString('N'))
 $temporary = [IO.Path]::GetFullPath($temporary)
 if ($temporary.StartsWith($prefixPath.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Temporary execution directory must be outside the installation prefix.' }
+if (!(Test-Path -LiteralPath $scratchParent)) { New-Item -ItemType Directory -Path $scratchParent -Force | Out-Null }
 New-Item -ItemType Directory -Path $temporary | Out-Null
 $exitCode = 1
 try {

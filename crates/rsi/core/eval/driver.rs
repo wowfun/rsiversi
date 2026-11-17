@@ -404,6 +404,11 @@ async fn exercise(
     })
     .await??;
     let goal = state(&handle).await?;
+    infrastructure(
+        "canonical trace capture",
+        capture_trace(&handle, trace_path),
+    )
+    .await??;
     let current = goal.goal.as_ref().ok_or("Goal disappeared")?;
     if live.armed
         || current
@@ -411,16 +416,14 @@ async fn exercise(
             .as_ref()
             .is_none_or(|reservation| reservation.settlement.is_none())
     {
-        return Err("driver stopped without canonical round settlement".into());
+        return Err(format!(
+            "driver stopped without canonical round settlement: live={live:?}, goal={current:?}"
+        )
+        .into());
     }
     if current.phase == GoalPhase::Completed && current.report.is_none() {
         return Err("completion lacks an authenticated report".into());
     }
-    infrastructure(
-        "canonical trace capture",
-        capture_trace(&handle, trace_path),
-    )
-    .await??;
     Ok(
         serde_json::json!({"transport":"local_session_api", "before_live":before_live, "after_reads_live":after_reads_live, "before":before, "receipt":receipt, "live":live, "goal":goal}),
     )

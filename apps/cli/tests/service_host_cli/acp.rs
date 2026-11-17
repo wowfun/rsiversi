@@ -9,7 +9,7 @@ fn profile(fixture: &CliFixture) {
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/application-profiles/test-acp/application.profile.toml");
+        .join("config/rsiversi/application-profiles/test-acp/application.profile.toml");
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(profile, "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"service\"\nplugin = \"rsi.application.acp-service\"\nconfig = { host_profile = \"fixture\" }\n[[steps]]\nkind = \"plugin\"\nid = \"application\"\nplugin = \"rsi.application.acp\"\n").unwrap();
 }
@@ -299,7 +299,10 @@ async fn output_limit_reports_max_tokens_without_continuation_over_stdio() {
     });
     let fixture = CliFixture::new(&endpoint);
     profile(&fixture);
-    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let settings_path = fixture
+        .temporary
+        .path()
+        .join("config/rsiversi/settings.json");
     let mut settings: Value =
         serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
     settings["rsi.agent"]["output_budgets"] = json!([{
@@ -557,7 +560,10 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
         axum::serve(listener, app).await.unwrap();
     });
     let fixture = CliFixture::new(&endpoint);
-    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let settings_path = fixture
+        .temporary
+        .path()
+        .join("config/rsiversi/settings.json");
     let mut settings: Value =
         serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
     settings["rsi.agent"]["default_reasoning_effort"] = json!("high");
@@ -565,7 +571,7 @@ async fn stdio_application_closes_drafts_and_replays_owned_native_sessions() {
     let host = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let mut contents: toml::Value =
         toml::from_str(&std::fs::read_to_string(&host).unwrap()).unwrap();
     let config = &mut contents["steps"]
@@ -864,7 +870,7 @@ async fn concurrent_acp_clients_share_one_host_and_disconnect_independently() {
     let owner_path = fixture
         .temporary
         .path()
-        .join("state/rsi/session-host/owner.json");
+        .join("state/rsiversi/session-host/owner.json");
     let before: Value = serde_json::from_slice(&std::fs::read(&owner_path).unwrap()).unwrap();
     let (second, second_peer) = start(&fixture).await;
     let setup = json!({"cwd":fixture.workspace,"mcpServers":[]});

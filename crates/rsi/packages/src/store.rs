@@ -145,6 +145,9 @@ impl PartialEq for PackageLease {
 impl Eq for PackageLease {}
 impl PackageLease {
     /// Borrows a named payload of an exact direct dependency already pinned by this lease.
+    ///
+    /// # Panics
+    /// Panics if an admitted dependency payload does not belong to the retained closure.
     pub fn dependency_payload(
         self: &Arc<Self>,
         package: &str,

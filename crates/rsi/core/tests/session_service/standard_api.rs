@@ -231,12 +231,9 @@ async fn owner_precedes_storage_and_runtime_identity_does_not_change_launch_prev
     let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
     assert!(!paths.owner_lock().exists());
     let lease = Arc::new(rsi_service_host::HostOwnerLease::try_acquire(paths.clone()).unwrap());
-    let blocked = candidate
-        .clone()
-        .build()
-        .unwrap()
-        .start_file(&fixture.profile)
-        .await;
+    // Product bootstrap owns the prerequisite lease before starting its child
+    // Profile. A raw Host starts independent healthy leaves when degraded.
+    let blocked = rsi::RunningRsi::boot_host_profile(candidate.clone(), &profile).await;
     assert!(blocked.is_err());
     assert!(!fixture.paths.state().join("base.sqlite3").exists());
     assert!(!fixture.paths.state().join("agent").exists());
@@ -414,7 +411,7 @@ async fn standard_api_plugins_share_durable_identity_and_serve_independent_domai
     let models = rsi_ai_models_api::ModelsClient::new(api.clone());
     assert_eq!(models.list_models(None, 256).await.unwrap().models.len(), 1);
     rsi_media_api::MediaClient::new(api.clone());
-    rsi_process_output_api::OutputClient::new(api.clone());
+    rsi_spill_api::OutputClient::new(api.clone());
     let sessions = rsi_session_api::SessionClient::new(api.clone());
     assert!(
         sessions

@@ -6,20 +6,24 @@ is needed for Host creation/publication, not for ordinary command parsing or que
 When launching an upgraded or recovered executable, admission uses that selected
 source artifact rather than the parent process's old image.
 It remains distinct from home authority and executable digest: two installations
-can share both homes and a build. Lifecycle consumers preserve older metadata
+can share all three homes and a build. Lifecycle consumers preserve older metadata
 without provenance and require explicit consent before assuming its origin.
 Reusable graceful-stop coordination fences the process start token, never silently
 escalates to force, and reports PID and operating-system recovery guidance.
 
 This package owns native process ownership and local API publication for the
-standard product. One HostOwnerLease exclusively protects both configuration and
+standard product. One HostOwnerLease exclusively protects configuration, data and
 state homes for embedded and daemon execution. Each home retains its own
 `session-host/owner.lock`; changing only one home cannot open another writer for
 the shared home. Acquisition orders canonical directory identities and releases
 every partial acquisition on failure. Startup coordination uses distinct
-`startup.lock` files under the same two authorities. The child acquires its own
+`startup.lock` files under the same three authorities. The child acquires its own
 owner leases before provider activation; no inherited standard stream acts as
 an ownership capability. Linux and Windows provide resident daemon endpoints.
+
+The identity codec's schema-2 corpus is bound by `persistence-contract.json` and
+checked by the `persistence` library tests for structural shape and exact bytes.
+It contains a synthetic endpoint identity; no device credential belongs here.
 Native identity checks fence process generations; foreground embedded ownership
 remains available to library embedders.
 Home lease retirement explicitly unlocks before closing its file, so an unrelated
@@ -36,7 +40,7 @@ through Native Files, opens its owner lock without following reparse points, and
 retains a namespace pin and exclusive file lease through provider cleanup.
 Contention refuses another owner; compatible clients attach to its endpoint.
 Deleting its lock is never a recovery action. Published metadata records the
-canonical config/state authority pair. A reader selecting a different pair
+canonical config/data/state authority set. A reader selecting a different set
 cannot attach to or stop the owner merely by reusing its state home.
 Embedded metadata publication flushes its staged file before replacement and
 synchronizes the pinned private directory through Native Files on Windows.
@@ -56,8 +60,10 @@ Construction and Profile preview perform neither acquisition nor identity
 generation. The owning Scope retains the lease through cleanup.
 
 `ServiceIdentityFactory` depends on that owner and Storage. It publishes
-EndpointIdentity from schema-1 Storage domain `rsi.service.identity`, with one
-record and at most 128 encoded bytes. A new identity is durable before publication.
+EndpointIdentity from the typed global in schema-2 Storage domain
+`rsi.service.identity`, with one slot and at most 128 encoded bytes. A new identity is durable before publication.
+Initialization closes its temporary Domain before returning either an endpoint or
+an error, so publication does not retain its storage slot.
 Malformed or conflicting records are rejected without replacement. The lease
 serializes initialization and pins its first backend and endpoint for this
 process. Initialization has an independent task owner and plugin cleanup drains

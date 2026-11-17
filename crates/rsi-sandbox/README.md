@@ -13,6 +13,9 @@ restricted backend passes its behavior probe. The standard product selects the
 required policy on Linux whenever it links effect-bearing coding Tools, so those Tools
 cannot become ready with enforcement deferred until their first call.
 Windows uses its native ACL backend when no external wrapper is selected.
+Restricted workspace-write plans reject a staged launcher inside the writable
+workspace, including aliases. The launcher and its parents must remain outside
+the child's write authority for the lifetime of cached verification evidence.
 Restricted pipe plans carry a primary token; explicit full-access plans remain
 unconfined. Windows ACL evidence describes its native partial write boundary
 separately from Linux mount evidence, as defined in the [core contract](core/README.md).

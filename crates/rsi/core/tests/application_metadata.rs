@@ -40,8 +40,10 @@ fn application_profiles_and_reserved_ids_do_not_change_service_launch_identity()
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let key = |metadata: ApplicationCatalogMetadata| {
@@ -85,8 +87,10 @@ fn service_catalog_lists_and_protects_explicit_builtins() {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let catalog = ProfileCatalog::new(paths, metadata("fixture.a", b"format = 1\n"));
@@ -107,8 +111,10 @@ async fn standard_preset_manager_preserves_the_service_launch_identity() {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let metadata = metadata("fixture.a", b"format = 1\n");
@@ -146,8 +152,10 @@ fn base_metadata_matches_registered_application_factories() {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let catalog = rsi::base_application_catalog(StandardComposition::new(
@@ -190,8 +198,10 @@ fn application_build_must_match_all_reserved_factory_ids_before_activation() {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     for extra in [false, true] {

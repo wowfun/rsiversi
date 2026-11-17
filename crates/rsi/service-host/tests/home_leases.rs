@@ -6,7 +6,14 @@ use std::path::Path;
 
 fn paths(root: &Path, config: &str, state: &str) -> ServiceHostPaths {
     ServiceHostPaths::from_host_paths(
-        &HostPaths::new(root.join(config), root.join(state), root.join("cache")).unwrap(),
+        &HostPaths::new(
+            root.join(config),
+            root.join(config),
+            root.join(state),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -25,12 +32,40 @@ fn ownership_fences_either_shared_home_and_releases_partial_acquisitions() {
             ServiceHostError::OwnerActive,
         );
     }
-    // The earlier lock in a failed two-home acquisition must have been released.
+    // The earlier lock in a failed acquisition must have been released.
     let independent =
         HostOwnerLease::try_acquire(paths(root.path(), "a-config", "d-state")).unwrap();
     drop(independent);
     drop(first);
     HostOwnerLease::try_acquire(paths(root.path(), "b-config", "c-state")).unwrap();
+}
+
+#[test]
+fn data_authority_is_exclusive_even_with_distinct_config_and_state() {
+    let root = tempfile::tempdir().unwrap();
+    let homes = |config: &str, data: &str, state: &str| {
+        ServiceHostPaths::from_host_paths(
+            &HostPaths::new(
+                root.path().join(config),
+                root.path().join(data),
+                root.path().join(state),
+                root.path().join("cache"),
+                root.path().join("tmp"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let owner = HostOwnerLease::try_acquire(homes("b-config", "shared-data", "c-state")).unwrap();
+    assert_eq!(
+        HostOwnerLease::try_acquire(homes("a-config", "shared-data", "d-state")).unwrap_err(),
+        ServiceHostError::OwnerActive,
+    );
+    let independent =
+        HostOwnerLease::try_acquire(homes("a-config", "other-data", "d-state")).unwrap();
+    drop(independent);
+    drop(owner);
+    HostOwnerLease::try_acquire(homes("a-config", "shared-data", "d-state")).unwrap();
 }
 
 #[test]

@@ -5,6 +5,9 @@ use rsi_web_assets::{AssetError, WebAssetControlContract};
 use sha2::{Digest as _, Sha256};
 use std::sync::Arc;
 
+mod support;
+use support::assert_assets_unavailable;
+
 fn host() -> rsi_host::Host {
     let mut builder = HostBuilder::without_paths("native");
     builder
@@ -191,34 +194,34 @@ async fn complete_bundle_is_immutable_and_retirement_fences_escaped_capability()
 async fn rejects_missing_nonregular_and_oversized_bundles_without_publication() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("index.html"), b"page").unwrap();
-    assert!(
+    assert_assets_unavailable(
         host()
             .start(profile(root.path(), &["index.html", "missing.js"]))
-            .await
-            .is_err()
-    );
+            .await,
+    )
+    .await;
     std::fs::create_dir(root.path().join("directory.js")).unwrap();
-    assert!(
+    assert_assets_unavailable(
         host()
             .start(profile(root.path(), &["index.html", "directory.js"]))
-            .await
-            .is_err()
-    );
+            .await,
+    )
+    .await;
     let file = std::fs::File::create(root.path().join("large.wasm")).unwrap();
     file.set_len(64 * 1024 * 1024).unwrap();
-    assert!(
+    assert_assets_unavailable(
         host()
             .start(profile(root.path(), &["index.html", "large.wasm"]))
-            .await
-            .is_err()
-    );
+            .await,
+    )
+    .await;
     for files in [
         vec!["index.html", "../escape.js"],
         vec!["index.html", "index.html"],
         vec!["index.html", ".hidden.js"],
         vec!["index.html", "secret.pem"],
     ] {
-        assert!(host().start(profile(root.path(), &files)).await.is_err());
+        assert_assets_unavailable(host().start(profile(root.path(), &files)).await).await;
     }
 }
 
@@ -231,19 +234,19 @@ async fn rejects_symlink_directory_symlink_file_and_fifo_without_opening_their_c
     std::fs::create_dir(&bundle).unwrap();
     std::fs::write(bundle.join("index.html"), b"page").unwrap();
     symlink(&bundle, root.path().join("alias")).unwrap();
-    assert!(
+    assert_assets_unavailable(
         host()
             .start(profile(&root.path().join("alias"), &["index.html"]))
-            .await
-            .is_err()
-    );
+            .await,
+    )
+    .await;
     symlink(bundle.join("index.html"), bundle.join("alias.html")).unwrap();
-    assert!(
+    assert_assets_unavailable(
         host()
             .start(profile(&bundle, &["index.html", "alias.html"]))
-            .await
-            .is_err()
-    );
+            .await,
+    )
+    .await;
     assert!(
         std::process::Command::new("/usr/bin/mkfifo")
             .env_clear()
@@ -254,12 +257,12 @@ async fn rejects_symlink_directory_symlink_file_and_fifo_without_opening_their_c
             .success()
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        assert!(
+        assert_assets_unavailable(
             host()
                 .start(profile(&bundle, &["index.html", "pipe.js"]))
-                .await
-                .is_err()
-        );
+                .await,
+        )
+        .await;
     })
     .await
     .unwrap();

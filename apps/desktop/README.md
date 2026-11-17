@@ -12,10 +12,10 @@ Desktop package validates this handoff before creating the main window and
 uses the same exact-Origin native bridge checks. Ordinary installed Desktop
 continues to own its own Host listener connection.
 
-The executable receives resolved `--config-home`, `--state-home` and
-`--cache-home` directories from its launcher. `--assets` optionally selects an
+The executable receives resolved `--config-home`, `--data-home`, `--state-home`,
+`--cache-home` and `--tmp-home` directories from its launcher. `--assets` optionally selects an
 explicit local Web bundle; otherwise the Host resolves the installed `web`
-export. Direct invocation requires all three absolute homes and an existing
+export. Direct invocation requires all five absolute roots and an existing
 Host. The Host validates its native peer and Web control descriptor, then owns a
 loopback listener for the lifetime of this Desktop connection. Closing the
 window releases that listener and leaves the shared Host running.

@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub trait LocalStream: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug> LocalStream for T {}
 
-/// Native listener retaining the two-home authority for its entire publication.
+/// Native listener retaining the three-home authority for its entire publication.
 #[derive(Debug)]
 pub struct LocalServiceListener {
     #[cfg(unix)]

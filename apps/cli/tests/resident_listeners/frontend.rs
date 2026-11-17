@@ -50,7 +50,7 @@ lines.on('line',line=>{
 const timer=setInterval(()=>{if(fs.existsSync('exit-frontend')){server.close();lines.close();process.stdin.destroy();clearInterval(timer);}},25);
 lines.on('close',()=>{server.close();clearInterval(timer);});
 ").unwrap();
-    let config = root.join("config/rsi/rsi.toml");
+    let config = root.join("config/rsiversi/rsi.toml");
     let mut launch = rsi::LaunchConfiguration::parse(&std::fs::read(&config).unwrap()).unwrap();
     launch.sources.insert(
         "web".into(),

@@ -30,6 +30,8 @@ Global options:\n\
   -h, --help        Show help without initializing homes\n\
   -V, --version     Show the version\n\
   --config-home DIR Select the final configuration directory\n\
+  --data-home DIR   Select the final user data directory\n\
+  --tmp-home DIR    Select the scratch parent directory\n\
   --state-home DIR  Select the final state directory\n\
   --cache-home DIR  Select the final cache directory\n\
   --watch           Observe declared configuration and source inputs\n\
@@ -660,9 +662,9 @@ fn set_host_flag(flag: &mut bool, name: &str) -> rsi::Result<()> {
 }
 
 pub(super) const CORE_HELP: &str = "Usage: rsi core upgrade [--local PACKAGE_DIRECTORY]\n       rsi core recover\nUpgrade verifies the core package, stops the selected Host and starts the new core.\nRecorded installations update core, uninstaller, launcher and installation record together.\nUnrecorded executables retain single-file upgrades. Recovery restores previous artifacts and Host state.\n--local requires a core package directory with package.json, not a bare executable.\n";
-pub(super) const IMPORT_HELP: &str = "Usage: rsi [GLOBAL HOMES] import --config-home OLD_CONFIG --state-home OLD_STATE [--dry-run]\n       rsi [GLOBAL HOMES] import recover\nStop both Hosts first. Preflight, stage and back up owned data; preserve unrelated files.\n";
+pub(super) const IMPORT_HELP: &str = "Usage: rsi [GLOBAL HOMES] import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE [--dry-run]\n       rsi [GLOBAL HOMES] import recover\nStop both Hosts first. Preflight, stage and back up owned data; preserve unrelated files.\n";
 pub(super) const PLUGIN_HELP: &str = "Usage: rsi plugin list\n       rsi plugin install NAME [NAME ...]\n       rsi plugin install --local DIR [DIR ...]\n       rsi plugin install --importer PACKAGE/EXPORT --program ABSOLUTE_EXE SPEC...\n       rsi plugin uninstall NAME [NAME ...]\n       rsi plugin gc\nEach local directory contains package.json and its declared files.\n";
-const CONFIG_HELP: &str = "Usage: rsi config init|show|validate\nUse global home options to select the configuration and state directories.\n";
+const CONFIG_HELP: &str = "Usage: rsi config init|show|validate|paths [--legacy]\nUse global home options to select the configuration and state directories.\n";
 pub(super) const RUN_HELP: &str = "Usage: rsi [GLOBAL OPTIONS] run PROFILE [-- APPLICATION ARGUMENTS]\nUse rsi APPLICATION --help for a built-in application's options.\nCustom Profile help does not load or execute the Profile.\n";
 
 fn wants_help(arguments: &[OsString]) -> bool {
@@ -754,11 +756,11 @@ fn parse_maintenance(first: &str, rest: Vec<OsString>) -> rsi::Result<Parse> {
         .is_some_and(|operation| {
             matches!(operation, "--help" | "-h")
                 || match first {
-                    "config" => matches!(operation, "init" | "show" | "validate"),
+                    "config" => matches!(operation, "init" | "show" | "validate" | "paths"),
                     "core" => matches!(operation, "upgrade" | "recover"),
                     "import" => matches!(
                         operation,
-                        "recover" | "--config-home" | "--state-home" | "--dry-run"
+                        "recover" | "--config-home" | "--data-home" | "--state-home" | "--dry-run"
                     ),
                     "plugin" => matches!(operation, "list" | "install" | "uninstall" | "gc"),
                     _ => false,

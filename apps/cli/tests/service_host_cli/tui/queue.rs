@@ -51,9 +51,10 @@ async fn fullscreen_queue_editor_preserves_draft_and_withdraws_the_successor() {
         "withdrawn successor never reaches a provider"
     );
     fixture.assert_success(&["host", "stop"]);
-    let store =
-        rsi_agent_store_sqlite::SqliteStore::open(fixture.temporary.path().join("state/rsi/agent"))
-            .unwrap();
+    let store = rsi_agent_store_sqlite::SqliteStore::open(
+        fixture.temporary.path().join("state/rsiversi/agent"),
+    )
+    .unwrap();
     let session = rsi_agent_session_protocol::SessionId::new("tui-queue-edit").unwrap();
     let controls = store
         .read_controls(&session, 0, 64, MAXIMUM_STORE_CONTROL_PAGE_BYTES)

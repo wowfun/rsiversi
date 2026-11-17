@@ -10,8 +10,10 @@ async fn windows_application_bounds_discovery_of_an_owner_without_an_endpoint() 
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let owner_paths = rsi_service_host::ServiceHostPaths::from_host_paths(&paths).unwrap();
@@ -72,8 +74,10 @@ async fn embedded_application_connection_starts_without_optional_process_capabil
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let (host, diagnostics) = standard_application_host(
@@ -118,8 +122,10 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let (host, diagnostics) = standard_application_host(
@@ -196,7 +202,13 @@ async fn invalid_remote_policy_and_device_arguments_prepare_before_any_backend()
         );
         assert!(diagnostics.take().is_some());
     }
-    for path in [paths.config(), paths.state(), paths.cache()] {
+    for path in [
+        paths.config(),
+        paths.data(),
+        paths.state(),
+        paths.cache(),
+        paths.tmp(),
+    ] {
         assert!(!path.exists(), "preflight created {}", path.display());
     }
 }
@@ -231,8 +243,10 @@ async fn invalid_serve_transport_policy_is_rejected_before_service_activation() 
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
@@ -256,7 +270,13 @@ async fn invalid_serve_transport_policy_is_rejected_before_service_activation() 
                 .is_err()
         );
         assert!(diagnostics.take().is_some());
-        for path in [paths.config(), paths.state(), paths.cache()] {
+        for path in [
+            paths.config(),
+            paths.data(),
+            paths.state(),
+            paths.cache(),
+            paths.tmp(),
+        ] {
             assert!(
                 !path.exists(),
                 "invalid Serve input activated a backend: {}",
@@ -275,8 +295,10 @@ async fn serve_profile_owns_one_runtime_authenticates_http_and_releases_its_list
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let (host, program) = support::embedded_serve(
@@ -401,8 +423,10 @@ async fn invalid_application_arguments_fail_before_any_standard_backend_or_asset
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let profile = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata())
@@ -423,7 +447,13 @@ async fn invalid_application_arguments_fail_before_any_standard_backend_or_asset
     .await
     .unwrap_err();
     assert!(error.to_string().contains("unknown option"), "{error}");
-    for path in [paths.config(), paths.state(), paths.cache()] {
+    for path in [
+        paths.config(),
+        paths.data(),
+        paths.state(),
+        paths.cache(),
+        paths.tmp(),
+    ] {
         assert!(
             !path.exists(),
             "application preflight created {}",
@@ -438,8 +468,10 @@ async fn ordinary_application_source_errors_are_rejected_by_the_shared_compiler_
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let catalog = ProfileCatalog::new(paths.clone(), rsi_app_catalog::metadata());
@@ -476,8 +508,10 @@ async fn product_start_requires_a_published_application_entry_point() {
     let temporary = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let composition = rsi_app_catalog::compose(rsi::StandardComposition::new(
@@ -499,8 +533,10 @@ async fn retained_service_observation_does_not_keep_native_ownership_after_shutd
     let temporary = tempfile::tempdir().unwrap();
     let paths = rsi_host::HostPaths::new(
         temporary.path().join("config"),
+        temporary.path().join("data"),
         temporary.path().join("state"),
         temporary.path().join("cache"),
+        temporary.path().join("tmp"),
     )
     .unwrap();
     let (host, _) = rsi::standard_application_host(
@@ -599,8 +635,10 @@ async fn catalog_admits_independent_web_bundle_and_rejects_bootstrap_tampering()
         }
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let (host, _) = standard_application_host(

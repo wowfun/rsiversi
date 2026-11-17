@@ -1,11 +1,15 @@
 const input = document.querySelector('textarea[aria-label="Main message"]');
 const style = getComputedStyle(input);
+const outer = getComputedStyle(input.closest('.composer'));
 return {
   focused: document.activeElement === input,
   focusVisible: input.matches(':focus-visible'),
   outlineWidth: parseFloat(style.outlineWidth),
   outlineStyle: style.outlineStyle,
   outlineColor: style.outlineColor,
+  outerOutlineWidth: parseFloat(outer.outlineWidth),
+  outerOutlineStyle: outer.outlineStyle,
+  outerOutlineColor: outer.outlineColor,
   forcedColors: matchMedia('(forced-colors:active)').matches,
   inputEventsBefore: arguments[0],
   inputEventsAfter: window.fixtureInputEvents.length,

@@ -9,7 +9,14 @@ fn edit_is_pure_consumes_one_root_and_rejects_stale_sources() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let catalog = ProfileCatalog::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         rsi_app_catalog::metadata(),
     );
     let id = HostProfileId::new("edit").unwrap();
@@ -54,7 +61,14 @@ fn fixture() -> (
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let catalog = ProfileCatalog::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         rsi_app_catalog::metadata(),
     );
     let id = HostProfileId::new("edit").unwrap();
@@ -243,8 +257,20 @@ async fn publication_is_independent_of_later_activation_failure_and_catalog_revi
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), first.start_file(&path))
         .await
         .unwrap();
-    assert!(result.is_err());
+    let running = result.unwrap();
+    assert_eq!(
+        running.profile_status().health(),
+        rsi_host::ProfileHealth::Degraded
+    );
+    assert!(
+        running
+            .profile_status()
+            .diagnostic()
+            .unwrap()
+            .contains("expected activation refusal")
+    );
     assert!(factory.prepared.load(Ordering::SeqCst) > 0);
     assert_eq!(factory.activated.load(Ordering::SeqCst), 1);
     assert_eq!(fs::read(&path).unwrap(), proposed);
+    assert!(running.shutdown().await.is_clean());
 }

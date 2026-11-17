@@ -76,7 +76,8 @@ final limits before creating the Runtime.
 
 ## Frozen inputs
 
-Construction requires explicit absolute config, state, and cache paths; Host
+Construction requires explicit absolute config, data, state, cache and scratch
+parent paths; Host
 never discovers them from the process environment. The builder also receives
 bounded Host and Meta limits. `register_factory(ResolvedFactory)` accepts explicit
 trusted embedder provenance, update policy and implementation. Linked identity

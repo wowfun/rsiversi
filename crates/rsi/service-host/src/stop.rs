@@ -76,8 +76,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let homes = rsi_host::HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap();
         let paths = crate::ServiceHostPaths::from_host_paths_with_runtime(

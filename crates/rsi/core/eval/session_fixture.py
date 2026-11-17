@@ -90,7 +90,7 @@ class Provider:
             self.goal = f"eval-goal-{stage + 1}"
 
     def configure(self, root):
-        targets = [str(root / "config/rsi/settings.json"), str(root / "state/rsi/agent/sessions.sqlite3")]
+        targets = [str(root / "config/rsiversi/settings.json"), str(root / "state/rsiversi/agent/sessions.sqlite3")]
         probe = f'''import os
 from pathlib import Path
 assert not any(name in os.environ for name in ("DEEPSEEK_API_KEY", "RSI_OPENAI_COMPATIBLE_API_KEY"))
@@ -107,7 +107,7 @@ local.unlink()
 print({BOUNDARY_MARKER!r})
 '''
         self.boundary_command = "python3 -c " + shlex.quote(probe)
-        profile = root / "config/rsi/host-profiles/live/host.profile.toml"
+        profile = root / "config/rsiversi/host-profiles/live/host.profile.toml"
         profile.write_text(f'''format = 1
 [[steps]]
 kind = "plugin"

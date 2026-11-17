@@ -409,8 +409,10 @@ impl HostBuilder {
         let environment = match &self.paths {
             Some(paths) => ProfileEnvironment::new(
                 paths.config(),
+                paths.data(),
                 paths.state(),
                 paths.cache(),
+                paths.tmp(),
                 self.platform,
                 self.defines,
             )?,

@@ -23,22 +23,7 @@ pub struct Options {
     pub force: bool,
     pub yes: bool,
 }
-const EXTRA_STATE: &[&str] = &[
-    "desktop-webview",
-    "trust",
-    "session-host/artifacts",
-    "session-host/owner.log",
-    "session-host/owner.json",
-    "session-host/runtime",
-];
-const CACHE: &[&str] = &[
-    "history",
-    "process-output",
-    "workspace-review",
-    "native-applications",
-    "native-addons",
-    "agent-presets/system",
-];
+use crate::receipts::{CACHE, EXTRA_STATE};
 const PREVIEW_ENTRIES: usize = 1024;
 const ANCHORS: &[&str] = &[".rsi-namespace-pin", fs::LOCK, "owner.lock", "startup.lock"];
 
@@ -71,7 +56,7 @@ fn record(layout: &Layout, force: bool) -> Result<Option<Record>> {
     }
 }
 fn pending(homes: &HostPaths) -> Result<()> {
-    for root in [homes.config(), homes.state()] {
+    for root in [homes.config(), homes.data(), homes.state()] {
         for name in [
             "reset.pending.json",
             "import.pending.json",
@@ -92,7 +77,8 @@ fn pending(homes: &HostPaths) -> Result<()> {
 }
 fn data_plan(homes: &HostPaths) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
     let mut targets = BTreeSet::new();
-    targets.insert(homes.config().join("credentials"));
+    targets.insert(homes.data().join("credentials"));
+    targets.insert(homes.data().join("media"));
     for name in crate::receipts::STATE.iter().chain(EXTRA_STATE) {
         targets.insert(homes.state().join(name));
     }
@@ -279,6 +265,7 @@ fn installation_present(layout: &Layout) -> Result<bool> {
 }
 #[allow(clippy::too_many_lines)] // Keep all retained leases live across revalidation, stop, ordered deletion and retry settlement.
 pub async fn uninstall(options: Options) -> Result<()> {
+    crate::receipts::validate_home_layout(&options.homes)?;
     let layout = Layout::new(&options.prefix)?;
     let present = installation_present(&layout)?;
     layout.reject_pending()?;
@@ -290,14 +277,16 @@ pub async fn uninstall(options: Options) -> Result<()> {
         ));
     }
     println!(
-        "Installation: {}\nConfig: {}\nState: {}\nCache: {}\nHomes are shared by installations and development builds.",
+        "Installation: {}\nConfig: {}\nData: {}\nState: {}\nCache: {}\nHomes are shared by installations and development builds.",
         layout.prefix.display(),
         options.homes.config().display(),
+        options.homes.data().display(),
         options.homes.state().display(),
         options.homes.cache().display()
     );
     for root in [
         options.homes.config(),
+        options.homes.data(),
         options.homes.state(),
         options.homes.cache(),
     ] {
@@ -315,10 +304,11 @@ pub async fn uninstall(options: Options) -> Result<()> {
     };
     for target in targets
         .iter()
-        .chain(std::iter::once(&options.homes.state().join("packages")))
+        .chain(std::iter::once(&options.homes.data().join("packages")))
     {
         if [
             options.homes.config(),
+            options.homes.data(),
             options.homes.state(),
             options.homes.cache(),
             &layout.bin,
@@ -388,7 +378,7 @@ pub async fn uninstall(options: Options) -> Result<()> {
         println!("Purge: {} ({})", path.display(), preview_size(path));
     }
     for path in [
-        options.homes.state().join("packages"),
+        options.homes.data().join("packages"),
         options.homes.state().join("session-host/artifacts"),
     ] {
         if targets.contains(&path) {
@@ -403,6 +393,7 @@ pub async fn uninstall(options: Options) -> Result<()> {
     }
     for root in [
         options.homes.config(),
+        options.homes.data(),
         options.homes.state(),
         options.homes.cache(),
     ] {
@@ -412,7 +403,7 @@ pub async fn uninstall(options: Options) -> Result<()> {
             &targets.union(&cleanup_receipts).cloned().collect(),
             options
                 .purge
-                .then(|| options.homes.state().join("packages"))
+                .then(|| options.homes.data().join("packages"))
                 .as_deref(),
             &mut budget,
         )?;
@@ -456,8 +447,10 @@ pub async fn uninstall(options: Options) -> Result<()> {
             options.yes,
         )?;
     }
-    let needs_homes =
-        options.purge || options.homes.config().exists() || options.homes.state().exists();
+    let needs_homes = options.purge
+        || options.homes.config().exists()
+        || options.homes.data().exists()
+        || options.homes.state().exists();
     let _startup = if needs_homes {
         Some(HostStartupLease::try_acquire(&host).map_err(error)?)
     } else {
@@ -539,7 +532,7 @@ pub async fn uninstall(options: Options) -> Result<()> {
     if locked_targets != targets || locked_receipts != cleanup_receipts {
         return Err(error("cleanup plan changed; preview and retry"));
     }
-    let package_root = options.homes.state().join("packages");
+    let package_root = options.homes.data().join("packages");
     let packages = if options.purge && package_root.exists() {
         Some(
             rsi_packages::PackageStore::open(&package_root)

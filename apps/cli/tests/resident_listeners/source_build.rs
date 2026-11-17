@@ -62,7 +62,7 @@ async fn ordinary_watch_deduplicates_sources_preserves_good_package_and_releases
         std::fs::rename(source.join(filename), source.join("build-implementation")).unwrap();
         std::os::unix::fs::symlink("build-implementation", source.join(filename)).unwrap();
     }
-    let config = fixture.temporary.path().join("config/rsi/rsi.toml");
+    let config = fixture.temporary.path().join("config/rsiversi/rsi.toml");
     let mut value = rsi::LaunchConfiguration::parse(&std::fs::read(&config).unwrap()).unwrap();
     value.sources.insert(
         "fixture-build".into(),
@@ -113,15 +113,17 @@ async fn ordinary_watch_deduplicates_sources_preserves_good_package_and_releases
     };
     let mut first = start();
     let store =
-        rsi_packages::PackageStore::open(&fixture.temporary.path().join("state/rsi/packages"))
+        rsi_packages::PackageStore::open(&fixture.temporary.path().join("data/rsiversi/packages"))
             .unwrap();
     until(|| store.acquire("fixture-build").is_ok()).await;
     assert!(first.try_wait().unwrap().is_none());
     let initial = store.acquire("fixture-build").unwrap().digest().to_owned();
     let paths = rsi_host::HostPaths::new(
-        fixture.temporary.path().join("config/rsi"),
-        fixture.temporary.path().join("state/rsi"),
-        fixture.temporary.path().join("cache/rsi"),
+        fixture.temporary.path().join("config/rsiversi"),
+        fixture.temporary.path().join("data/rsiversi"),
+        fixture.temporary.path().join("state/rsiversi"),
+        fixture.temporary.path().join("cache/rsiversi"),
+        fixture.temporary.path().join("tmp"),
     )
     .unwrap();
     let conflicting = rsi::BuildRecipe {
@@ -168,7 +170,7 @@ async fn ordinary_watch_deduplicates_sources_preserves_good_package_and_releases
         fixture
             .temporary
             .path()
-            .join("state/rsi/packages/writer.lock"),
+            .join("data/rsiversi/packages/writer.lock"),
     )
     .unwrap();
     reader.lock_shared().unwrap();

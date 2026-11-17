@@ -121,8 +121,14 @@ fn unchanged_service_capture_reuses_its_compiler_and_catalog_snapshot() {
     use rsi_agent_composition::AgentCompositionSource as _;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
-    let paths =
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+    let paths = HostPaths::new(
+        root.join("config"),
+        root.join("data"),
+        root.join("state"),
+        root.join("cache"),
+        root.join("tmp"),
+    )
+    .unwrap();
     let composition = crate::StandardComposition::new(
         paths,
         std::collections::BTreeMap::new(),

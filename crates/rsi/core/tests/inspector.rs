@@ -85,7 +85,14 @@ async fn actual_host_inspection_is_redacted_paginated_local_and_withdrawn() {
         .unwrap();
     write_inspected_preset(&root, "source-a");
     let composition = StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         rsi::ApplicationCatalogMetadata::default(),

@@ -15,14 +15,14 @@ const PENDING: &str = "reset.pending.json";
 const MAX_JOURNAL: usize = 64 * 1024;
 pub use rsi_installation::receipts::ResetSelection;
 use rsi_installation::receipts::{
-    RESET_CONFIG as CONFIG_ENTRIES, ResetEntry as Entry, ResetJournal as Journal,
-    STATE as STATE_ENTRIES,
+    HomeKind, RESET_CONFIG as CONFIG_ENTRIES, RESET_DATA as DATA_ENTRIES, ResetEntry as Entry,
+    ResetJournal as Journal, STATE as STATE_ENTRIES,
 };
 
 /// Durable completed reset evidence; backup paths contain the original bytes.
 #[derive(Clone, Debug, Serialize)]
 pub struct ResetReceipt {
-    /// Transaction identity retained in both authority directories.
+    /// Transaction identity retained in every durable home authority.
     pub transaction: String,
     /// Operations completed, including when resuming after interruption.
     pub selection: ResetSelection,
@@ -160,31 +160,47 @@ impl Home {
 ///
 /// Passing no selection performs no I/O mutation when no pending journal exists.
 /// Any live Host or startup coordinator prevents maintenance; callers must stop it explicitly.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One lease scope covers recovery and the three reset intents before owned entries move."
+)]
 pub fn maintain_product_homes(
     paths: &HostPaths,
     selected: Option<ResetSelection>,
 ) -> Result<Vec<ResetReceipt>> {
     crate::reject_pending_import(paths)?;
-    let pending = [paths.config(), paths.state()].into_iter().any(|home| {
-        !matches!(std::fs::symlink_metadata(home.join("session-host").join(PENDING)),
+    let pending = [paths.config(), paths.data(), paths.state()]
+        .into_iter()
+        .any(|home| {
+            !matches!(std::fs::symlink_metadata(home.join("session-host").join(PENDING)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-    });
+        });
     let selected = selected.filter(|selection| selection.config || selection.state);
     if !pending && selected.is_none() {
         return Ok(Vec::new());
     }
+    rsi_installation::receipts::validate_home_layout(paths).map_err(error)?;
     let host_paths = ServiceHostPaths::from_host_paths(paths).map_err(error)?;
     let _startup = HostStartupLease::try_acquire(&host_paths).map_err(error)?;
     let _owner = HostOwnerLease::try_acquire(host_paths).map_err(error)?;
     crate::reject_pending_import(paths)?;
     let config = Home::open(paths.config())?;
+    let data = Home::open(paths.data())?;
     let state = Home::open(paths.state())?;
-    let mut authorities = vec![Home::open(&paths.config().join("session-host"))?];
-    if std::fs::canonicalize(paths.config()).map_err(error)?
-        != std::fs::canonicalize(paths.state()).map_err(error)?
-    {
-        authorities.push(Home::open(&paths.state().join("session-host"))?);
-    }
+    let mut roots = [paths.config(), paths.data(), paths.state()]
+        .into_iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(rsi_workspace_protocol::canonical_native_path)
+                .map_err(error)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    roots.sort();
+    roots.dedup();
+    let authorities = roots
+        .iter()
+        .map(|root| Home::open(&root.join("session-host")))
+        .collect::<Result<Vec<_>>>()?;
     let mut existing = None;
     for home in &authorities {
         if let Some(bytes) = home.read(PENDING)? {
@@ -204,6 +220,7 @@ pub fn maintain_product_homes(
             &journal,
             &bytes,
             &config,
+            &data,
             &state,
             &authorities,
             |_| Ok(()),
@@ -213,32 +230,30 @@ pub fn maintain_product_homes(
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(error)?;
         let mut journal = Journal {
-            format: 1,
+            format: 2,
             id: hex::encode(random),
             config: paths.config().to_owned(),
+            data: paths.data().to_owned(),
             state: paths.state().to_owned(),
             selection,
             entries: Vec::new(),
         };
-        for (is_config, names, home) in [
-            (true, CONFIG_ENTRIES, &config),
-            (false, STATE_ENTRIES, &state),
+        for (kind, names, home) in [
+            (HomeKind::Config, CONFIG_ENTRIES, &config),
+            (HomeKind::Data, DATA_ENTRIES, &data),
+            (HomeKind::State, STATE_ENTRIES, &state),
         ] {
-            if !(if is_config {
-                selection.config
-            } else {
-                selection.state
-            }) {
+            if !kind.selected(selection) {
                 continue;
             }
             for name in names {
                 match home.kind(name)? {
                     None => {}
-                    Some(kind @ (EntryKind::File | EntryKind::Directory)) => {
+                    Some(entry_kind @ (EntryKind::File | EntryKind::Directory)) => {
                         journal.entries.push(Entry {
-                            config: is_config,
+                            home: kind,
                             name: (*name).into(),
-                            directory: kind == EntryKind::Directory,
+                            directory: entry_kind == EntryKind::Directory,
                         });
                     }
                     _ => return Err(error(format!("refusing reset of non-regular entry {name}"))),
@@ -250,6 +265,7 @@ pub fn maintain_product_homes(
             &journal,
             &bytes,
             &config,
+            &data,
             &state,
             &authorities,
             |_| Ok(()),
@@ -259,8 +275,9 @@ pub fn maintain_product_homes(
 }
 
 fn validate(journal: &Journal, paths: &HostPaths) -> Result<()> {
-    if journal.format != 1
+    if journal.format != 2
         || journal.config != paths.config()
+        || journal.data != paths.data()
         || journal.state != paths.state()
         || journal.id.len() != 32
         || !journal
@@ -268,20 +285,19 @@ fn validate(journal: &Journal, paths: &HostPaths) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !(journal.selection.config || journal.selection.state)
-        || journal.entries.len() > CONFIG_ENTRIES.len() + STATE_ENTRIES.len()
+        || journal.entries.len() > CONFIG_ENTRIES.len() + DATA_ENTRIES.len() + STATE_ENTRIES.len()
     {
-        return Err(error("pending reset does not describe this home pair"));
+        return Err(error("pending reset does not describe these homes"));
     }
     let mut seen = BTreeSet::new();
     for entry in &journal.entries {
-        let (enabled, names) = if entry.config {
-            (journal.selection.config, CONFIG_ENTRIES)
-        } else {
-            (journal.selection.state, STATE_ENTRIES)
-        };
+        let (enabled, names) = (
+            entry.home.selected(journal.selection),
+            entry.home.reset_entries(),
+        );
         if !enabled
             || !names.contains(&entry.name.as_str())
-            || !seen.insert((entry.config, &entry.name))
+            || !seen.insert((entry.home, &entry.name))
         {
             return Err(error(
                 "pending reset contains an unauthorized or repeated entry",
@@ -295,6 +311,7 @@ fn complete(
     journal: &Journal,
     bytes: &[u8],
     config: &Home,
+    data: &Home,
     state: &Home,
     authorities: &[Home],
     progress: impl Fn(usize) -> Result<()>,
@@ -320,7 +337,11 @@ fn complete(
     let mut backups = Vec::new();
     let mut renames = Vec::new();
     for entry in &journal.entries {
-        let home = if entry.config { config } else { state };
+        let home = match entry.home {
+            HomeKind::Config => config,
+            HomeKind::Data => data,
+            HomeKind::State => state,
+        };
         let backup = format!(".reset-{}-{}", journal.id, entry.name);
         let expected = if entry.directory {
             EntryKind::Directory
@@ -365,6 +386,12 @@ fn complete(
             home.rename(PENDING, &archive, EntryKind::File)?;
         }
     }
+    for home in authorities {
+        home.directory
+            .remove_child(Path::new(&committed))
+            .map_err(error)?;
+        home.directory.sync_all().map_err(error)?;
+    }
     Ok(ResetReceipt {
         transaction: journal.id.clone(),
         selection: journal.selection,
@@ -397,7 +424,14 @@ mod tests {
     }
 
     fn paths(root: &Path) -> HostPaths {
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap()
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -409,23 +443,16 @@ mod tests {
         let paths = paths(root.path());
         for (home, files) in [
             (
+                paths.data(),
+                vec!["credentials/key", "packages/lock", "media/object"],
+            ),
+            (
                 paths.config(),
-                vec![
-                    "rsi.toml",
-                    "settings.json",
-                    "credentials/key",
-                    "AGENTS.md",
-                    "skills/one",
-                ],
+                vec!["rsi.toml", "settings.json", "AGENTS.md", "skills/one"],
             ),
             (
                 paths.state(),
-                vec![
-                    "agent/corrupt.sqlite",
-                    "base.sqlite3",
-                    "packages/lock",
-                    "trust/highwater",
-                ],
+                vec!["agent/corrupt.sqlite", "base.sqlite3", "trust/highwater"],
             ),
         ] {
             rsi_files_native_fs::create_absolute_directory_no_follow(home).unwrap();
@@ -452,9 +479,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].backups.len(), 4);
+        for home in [paths.config(), paths.data(), paths.state()] {
+            let authority = home.join("session-host");
+            assert!(
+                authority
+                    .join(format!("reset-{}.json", receipts[0].transaction))
+                    .is_file()
+            );
+            assert!(
+                !authority
+                    .join(format!("reset-{}.complete", receipts[0].transaction))
+                    .exists()
+            );
+        }
+        assert_eq!(receipts[0].backups.len(), 5);
+        assert!(!paths.data().join("media").exists());
+        assert!(
+            receipts[0]
+                .backups
+                .iter()
+                .any(|p| p.parent() == Some(paths.data()) && p.join("object").is_file())
+        );
         assert_eq!(
-            std::fs::read_to_string(paths.config().join("credentials/key")).unwrap(),
+            std::fs::read_to_string(paths.data().join("credentials/key")).unwrap(),
             "credentials/key"
         );
         assert_eq!(
@@ -462,7 +509,7 @@ mod tests {
             "AGENTS.md"
         );
         assert!(paths.config().join("skills/one").exists());
-        assert!(paths.state().join("packages/lock").exists());
+        assert!(paths.data().join("packages/lock").exists());
         assert!(paths.state().join("trust/highwater").exists());
         assert!(!paths.state().join("agent").exists());
         assert!(!paths.state().join("base.sqlite3").exists());
@@ -499,70 +546,121 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One interrupted reset verifies recovery across all three home authorities."
+    )]
     fn interrupted_reset_recovers_each_home_without_rearchiving() {
-        let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
-            std::env::temp_dir().canonicalize().unwrap(),
-        ))
-        .unwrap();
-        let paths = paths(root.path());
-        let config = Home::open(paths.config()).unwrap();
-        let state = Home::open(paths.state()).unwrap();
-        config.create("settings.json", b"old-settings").unwrap();
-        state.create("base.sqlite3", b"old-state").unwrap();
-        let authorities = [
-            Home::open(&paths.config().join("session-host")).unwrap(),
-            Home::open(&paths.state().join("session-host")).unwrap(),
-        ];
-        let journal = Journal {
-            format: 1,
-            id: "a".repeat(32),
-            config: paths.config().into(),
-            state: paths.state().into(),
-            selection: ResetSelection {
-                config: true,
-                state: true,
-            },
-            entries: vec![
-                Entry {
-                    config: true,
-                    name: "settings.json".into(),
-                    directory: false,
-                },
-                Entry {
-                    config: false,
-                    name: "base.sqlite3".into(),
-                    directory: false,
-                },
-            ],
-        };
-        let bytes = serde_json::to_vec(&journal).unwrap();
-        let collision = format!(".reset-{}-base.sqlite3", journal.id);
-        state.create(&collision, b"unexpected").unwrap();
-        assert!(complete(&journal, &bytes, &config, &state, &authorities, |_| Ok(())).is_err());
-        assert!(
-            config.path.join("settings.json").exists(),
-            "all participants must be admitted before the first rename"
-        );
-        state.directory.remove_child(Path::new(&collision)).unwrap();
-        assert!(
-            complete(&journal, &bytes, &config, &state, &authorities, |_| Err(
-                error("injected interruption")
+        for stop in 1..=3 {
+            let root = tempfile::tempdir_in(rsi_workspace_protocol::canonical_native_path(
+                std::env::temp_dir().canonicalize().unwrap(),
             ))
-            .is_err()
-        );
-        assert!(!config.path.join("settings.json").exists());
-        assert!(state.path.join("base.sqlite3").exists());
-        drop(authorities);
-        drop(config);
-        drop(state);
-        let receipt = maintain_product_homes(&paths, Some(journal.selection)).unwrap();
-        assert_eq!(receipt.len(), 1);
-        assert_eq!(receipt[0].transaction, journal.id);
-        assert_eq!(
-            std::fs::read(&receipt[0].backups[0]).unwrap(),
-            b"old-settings"
-        );
-        assert_eq!(std::fs::read(&receipt[0].backups[1]).unwrap(), b"old-state");
+            .unwrap();
+            let paths = paths(root.path());
+            let config = Home::open(paths.config()).unwrap();
+            let data = Home::open(paths.data()).unwrap();
+            let state = Home::open(paths.state()).unwrap();
+            config.create("settings.json", b"old-settings").unwrap();
+            state.create("base.sqlite3", b"old-state").unwrap();
+            let media = Home::open(&data.path.join("media")).unwrap();
+            media.create("fixture", b"old-media").unwrap();
+            drop(media);
+            let authorities = [
+                Home::open(&paths.config().join("session-host")).unwrap(),
+                Home::open(&paths.state().join("session-host")).unwrap(),
+                Home::open(&paths.data().join("session-host")).unwrap(),
+            ];
+            let journal = Journal {
+                format: 2,
+                id: "a".repeat(32),
+                config: paths.config().into(),
+                data: paths.data().into(),
+                state: paths.state().into(),
+                selection: ResetSelection {
+                    config: true,
+                    state: true,
+                },
+                entries: vec![
+                    Entry {
+                        home: HomeKind::Config,
+                        name: "settings.json".into(),
+                        directory: false,
+                    },
+                    Entry {
+                        home: HomeKind::Data,
+                        name: "media".into(),
+                        directory: true,
+                    },
+                    Entry {
+                        home: HomeKind::State,
+                        name: "base.sqlite3".into(),
+                        directory: false,
+                    },
+                ],
+            };
+            let bytes = serde_json::to_vec(&journal).unwrap();
+            let collision = format!(".reset-{}-base.sqlite3", journal.id);
+            state.create(&collision, b"unexpected").unwrap();
+            assert!(
+                complete(
+                    &journal,
+                    &bytes,
+                    &config,
+                    &data,
+                    &state,
+                    &authorities,
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+            assert!(
+                config.path.join("settings.json").exists(),
+                "all participants must be admitted before the first rename"
+            );
+            state.directory.remove_child(Path::new(&collision)).unwrap();
+            assert!(
+                complete(
+                    &journal,
+                    &bytes,
+                    &config,
+                    &data,
+                    &state,
+                    &authorities,
+                    |step| {
+                        for home in &authorities {
+                            assert_eq!(
+                                home.read(PENDING).unwrap().as_deref(),
+                                Some(bytes.as_slice())
+                            );
+                        }
+                        if step == stop {
+                            Err(error("injected interruption"))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                )
+                .is_err()
+            );
+            assert!(!config.path.join("settings.json").exists());
+            assert_eq!(state.path.join("base.sqlite3").exists(), stop < 3);
+            drop(authorities);
+            drop(config);
+            drop(data);
+            drop(state);
+            let receipt = maintain_product_homes(&paths, Some(journal.selection)).unwrap();
+            assert_eq!(receipt.len(), 1);
+            assert_eq!(receipt[0].transaction, journal.id);
+            assert_eq!(
+                std::fs::read(&receipt[0].backups[0]).unwrap(),
+                b"old-settings"
+            );
+            assert_eq!(
+                std::fs::read(receipt[0].backups[1].join("fixture")).unwrap(),
+                b"old-media"
+            );
+            assert_eq!(std::fs::read(&receipt[0].backups[2]).unwrap(), b"old-state");
+        }
     }
 
     #[test]
@@ -573,9 +671,10 @@ mod tests {
         .unwrap();
         let paths = paths(root.path());
         let mut journal = Journal {
-            format: 1,
+            format: 2,
             id: "b".repeat(32),
             config: paths.config().into(),
+            data: paths.data().into(),
             state: paths.state().into(),
             selection: ResetSelection {
                 config: true,
@@ -585,7 +684,7 @@ mod tests {
         };
         for name in ["../outside", "credentials", "packages", "session-host"] {
             journal.entries = vec![Entry {
-                config: true,
+                home: HomeKind::Config,
                 name: name.into(),
                 directory: true,
             }];

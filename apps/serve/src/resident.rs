@@ -239,7 +239,7 @@ impl Manager {
         &self,
         name: &str,
     ) -> rsi_meta::Result<Arc<rsi_packages::PackageLease>> {
-        let path = self.paths.state().join("packages");
+        let path = self.paths.data().join("packages");
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
             rsi_packages::PackageStore::open(&path)?

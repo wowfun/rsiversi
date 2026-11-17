@@ -48,6 +48,14 @@ mod tests {
     }
 }
 impl Dir {
+    #[cfg_attr(
+        windows,
+        allow(
+            clippy::unused_self,
+            clippy::unnecessary_wraps,
+            reason = "Windows pins the namespace at admission; Unix verifies the retained directory here"
+        )
+    )]
     pub fn verify_namespace(&self) -> Result<()> {
         #[cfg(unix)]
         {

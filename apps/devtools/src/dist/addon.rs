@@ -10,8 +10,8 @@ pub(super) fn run(
     options: &Options,
     build_lock: fs::File,
 ) -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        return Err("paired addon browser fixture requires Linux".into());
+    if !cfg!(any(target_os = "linux", windows)) {
+        return Err("paired addon browser fixture requires Linux or Windows".into());
     }
     let report = options.output.as_ref().ok_or("missing report directory")?;
     require_new_report(report)?;
@@ -30,6 +30,12 @@ pub(super) fn run(
             .env_clear();
         for key in [
             "PATH",
+            "SystemRoot",
+            "WINDIR",
+            "PATHEXT",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
             "LD_LIBRARY_PATH",
             "PLAYWRIGHT_BROWSERS_PATH",
             "HOME",
@@ -129,7 +135,10 @@ impl Capture {
             .ok_or("missing captured profile")?;
         if !matches!(
             target,
-            "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu"
+            "x86_64-unknown-linux-gnu"
+                | "aarch64-unknown-linux-gnu"
+                | "x86_64-pc-windows-msvc"
+                | "aarch64-pc-windows-msvc"
         ) || !matches!(profile, "release" | "debug")
         {
             return Err("invalid fixture target/profile".into());
@@ -171,14 +180,14 @@ impl Capture {
         }
         runner.run("Compile paired fixture", "cargo", &command)?;
         source::verify(&self.source, &manifest["files"])?;
-        let binary = report.join(name);
+        let binary = report.join(super::executable(name));
         fs::copy(
             cache
                 .join("build/web/target")
                 .join(target)
                 .join(profile)
                 .join("examples")
-                .join(example),
+                .join(super::executable(example)),
             &binary,
         )?;
         Ok(binary)

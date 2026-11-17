@@ -39,7 +39,7 @@ async fn session_browser_tui_uses_production_local_grant_and_renders_the_shared_
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let mut document: toml::Value =
         toml::from_str(&std::fs::read_to_string(&profile).unwrap()).unwrap();
     for step in [

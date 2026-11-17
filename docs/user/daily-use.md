@@ -42,14 +42,19 @@ a token.
 
 ## Find your data
 
-Windows uses the standard per-user application config/state/cache locations with
-an `rsi` directory. Linux uses the corresponding XDG locations. Explicit
-`XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` overrides must be absolute;
-RSIversi appends `rsi` beneath each of them on both platforms.
-`--config-home`, `--state-home` and `--cache-home` select final directories without
-appending `rsi`; relative paths resolve from the calling directory. Use the same
-locations when reopening history. Stop the Host before backing up config and
-state; keep credentials private. Do not delete these directories
-to fix a build failure: build outputs live under the checkout's `target` directory.
+Run `rsi config paths` to see the selected configuration, data, state, cache and
+scratch directories without creating them. Add `--legacy` to report known old
+credential paths; it never reads or imports their contents.
 
-The [Host path contract](../../crates/rsi/core/README.md) owns exact path resolution.
+Every platform uses the `rsiversi` directory below the corresponding XDG root,
+with defaults below the user home. Absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_STATE_HOME` and `XDG_CACHE_HOME` override those parents. Empty variables use
+the defaults; relative values are ignored with a diagnostic.
+`--config-home`, `--data-home`, `--state-home`, `--cache-home` and `--tmp-home`
+select final paths without adding a suffix. Relative CLI paths resolve from the
+calling directory. Stop the Host before backing up config, data and state;
+keep credentials private. Old `rsi` directories are not imported or deleted
+implicitly. Do not delete these directories to fix a build failure: build
+outputs live under the checkout's `target` directory.
+
+The [Host path contract](../../crates/rsi/core/docs/launch.md) owns exact path resolution.

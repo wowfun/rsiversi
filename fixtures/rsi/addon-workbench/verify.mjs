@@ -3,6 +3,7 @@ import {closeDetails,detailMode,resourceSelector,resources} from '../web-product
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, writeFile, copyFile, chmod } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { startService, boundedRun } from "../web-product/service.mjs";
@@ -14,15 +15,20 @@ const original = process.env.RSI_WORKBENCH_BINARY;
 const assets = process.env.RSI_WEB_ASSETS;
 assert.ok(original && assets, "RSI_WORKBENCH_BINARY and RSI_WEB_ASSETS are required");
 await mkdir(report, { recursive: true });
-const binary = join(report, "workbench-addon");
+await writeFile(join(report,'fixture-scripts.json'),JSON.stringify(await Promise.all(
+  ['./verify.mjs','../web-product/service.mjs'].map(async path=>({path,
+    sha256:createHash('sha256').update(await readFile(new URL(path,import.meta.url))).digest('hex')}))),null,2));
+const binary = join(report, process.platform === 'win32' ? "workbench-addon.exe" : "workbench-addon");
 await copyFile(original, binary); await chmod(binary, 0o700);
-const binarySha256 = createHash("sha256").update(await readFile(binary)).digest("hex");
+const binaryHash = createHash("sha256");
+for await (const bytes of createReadStream(binary)) binaryHash.update(bytes);
+const binarySha256 = binaryHash.digest("hex");
 const profile = boundedRun(binary, ["fixture-profile"]).stdout.toString();
 const results = [];
 for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
   const destination = join(report, name); await mkdir(destination, { recursive: true });
   const requests = [];
-  const service = await startService({ binary, assets, report: destination, embedded: true,
+  const service = await startService({ binary, assets, report: destination, embedded: true, registrationLabel: `${name} addon acceptance`,
     async configure({ config }) {
       const preset = join(config, "agent-presets/workbench"); await mkdir(preset, { recursive: true });
       await writeFile(join(preset, "agent.profile.toml"), profile);
@@ -42,7 +48,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     const page = await context.newPage(); page.setDefaultTimeout(30_000);
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(service.origin);
-    await page.locator("#receipt").fill(JSON.stringify(service.register(`${name} addon acceptance`)));
+    await page.locator("#receipt").fill(JSON.stringify(service.registration));
     await page.getByRole("button", { name: "Connect", exact: true }).click();
     await page.locator("#workbench").waitFor({ state: "visible" });
     await addWorkspace(page,service.workspace);
@@ -54,7 +60,10 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(requests.length, 0);
     await pane.getByRole("textbox", { name: "Main message" }).fill("/plan on");
     await pane.getByTestId("composer-send").click();
-    await pane.locator('.command-receipt').filter({hasText:'Draft changed · revision 1'}).waitFor();
+    const draftReceipt = pane.locator('.command-receipt').filter({hasText:'Draft changed'});
+    await draftReceipt.waitFor();
+    if(!await draftReceipt.evaluate(node=>node.open))await draftReceipt.locator('summary').click();
+    assert.match(await draftReceipt.innerText(), /Revision\s+1/);
     await plan.filter({ hasText: '"enabled": true' }).waitFor({state:'attached'});
     assert.equal(await extensions.locator(".hint").first().textContent(), 'Draft state');
     assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()), {kind:'draft',revision:1});
@@ -66,15 +75,19 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.deepEqual(requests, [{ planEnabled: true, independentTool: true }]);
     await pane.getByRole("textbox", { name: "Main message" }).fill("/plan off");
     await pane.getByTestId("composer-send").click();
-    await pane.locator('.command-receipt').filter({hasText:'Committed · control'}).waitFor();
+    const durableReceipt = pane.locator('.command-receipt').filter({hasText:'Committed'});
+    await durableReceipt.waitFor();
+    if(!await durableReceipt.evaluate(node=>node.open))await durableReceipt.locator('summary').click();
+    assert.match(await durableReceipt.innerText(), /Control\s+[1-9][0-9]*/);
     await sessionTools(page);
-    await extensions.locator(':scope > summary').click();
+    if(!await extensions.evaluate(node=>node.open))await extensions.locator(':scope > summary').click();
     await plan.filter({ hasText: '"enabled": false' }).waitFor();
     assert.equal(await extensions.locator(".hint").first().innerText(), 'Recorded session state');
     const cursor = JSON.parse(await extensions.locator('.projection-coordinates pre').textContent());
     assert.equal(cursor.kind, 'durable');
     assert(cursor.fact_seq > 0 && Number.isSafeInteger(cursor.control_seq));
     assert.equal(requests.length, 1);
+    await plan.scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(destination, "durable.png") });
     await pane.getByLabel('Session tools',{exact:true}).click();
     await detailMode(page,'verbose');

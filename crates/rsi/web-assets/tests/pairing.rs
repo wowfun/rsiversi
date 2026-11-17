@@ -7,6 +7,9 @@ use rsi_web_assets::{
 };
 use std::{path::Path, sync::Arc};
 
+mod support;
+use support::assert_assets_unavailable;
+
 const FAMILY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[tokio::test]
@@ -225,7 +228,7 @@ async fn missing_malformed_oversized_and_foreign_receipts_are_rejected() {
             }
         }
         let (result, diagnostic) = start(root.path()).await;
-        assert!(result.is_err(), "accepted {variant}");
+        assert_assets_unavailable(result).await;
         assert!(
             diagnostic
                 .take_diagnostic()
@@ -242,7 +245,7 @@ async fn each_bootstrap_file_is_pinned_including_wasm() {
         let root = bundle();
         std::fs::write(root.path().join(file), "foreign artifact").unwrap();
         let (result, diagnostic) = start(root.path()).await;
-        assert!(result.is_err(), "accepted modified {file}");
+        assert_assets_unavailable(result).await;
         assert!(
             diagnostic
                 .take_diagnostic()
@@ -339,7 +342,7 @@ async fn independent_bundles_keep_internal_integrity_without_core_family_equalit
             )]))
             .await;
         if corrupt {
-            assert!(result.is_err());
+            assert_assets_unavailable(result).await;
         } else {
             assert!(result.unwrap().shutdown().await.is_clean());
         }
@@ -400,7 +403,7 @@ async fn default_verified_admission_and_staging_load_declared_renderer_extension
             )]))
             .await;
         if explicit {
-            assert!(result.is_err(), "explicit file admission remains closed");
+            assert_assets_unavailable(result).await;
             continue;
         }
         let running = result.unwrap();
@@ -496,7 +499,7 @@ async fn paired_renderer_updates_retire_and_restart_without_changing_receipt() {
     assert!(restarted.shutdown().await.is_clean());
     std::fs::write(root.path().join("worker.js"), "changed bootstrap").unwrap();
     let (rejected, diagnostic) = start(root.path()).await;
-    assert!(rejected.is_err());
+    assert_assets_unavailable(rejected).await;
     assert!(
         diagnostic
             .take_diagnostic()

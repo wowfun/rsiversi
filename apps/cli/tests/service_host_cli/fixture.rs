@@ -8,9 +8,13 @@ struct CliFixture {
 
 impl CliFixture {
     fn new(endpoint: &str) -> Self {
-        let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(std::env::temp_dir().canonicalize().unwrap())).unwrap();
-        let config = temporary.path().join("config/rsi");
+        let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
+            std::env::temp_dir().canonicalize().unwrap(),
+        ))
+        .unwrap();
+        let config = temporary.path().join("config/rsiversi");
         let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(temporary.path().join("tmp")).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(
             config.join("rsi.toml"),
@@ -105,6 +109,10 @@ max_output_reserve_tokens = 16384
             .env_remove("RSI_OPENAI_API_KEY")
             .env("HOME", self.temporary.path().join("home"))
             .env("XDG_CONFIG_HOME", self.temporary.path().join("config"))
+            .env("XDG_DATA_HOME", self.temporary.path().join("data"))
+            .env("TMPDIR", self.temporary.path().join("tmp"))
+            .env("TMP", self.temporary.path().join("tmp"))
+            .env("TEMP", self.temporary.path().join("tmp"))
             .env("XDG_STATE_HOME", self.temporary.path().join("state"))
             .env("XDG_CACHE_HOME", self.temporary.path().join("cache"))
             .env("XDG_RUNTIME_DIR", self.temporary.path().join("runtime"))
@@ -122,6 +130,10 @@ max_output_reserve_tokens = 16384
             .env_remove("RSI_OPENAI_API_KEY")
             .env("HOME", self.temporary.path().join("home"))
             .env("XDG_CONFIG_HOME", self.temporary.path().join("config"))
+            .env("XDG_DATA_HOME", self.temporary.path().join("data"))
+            .env("TMPDIR", self.temporary.path().join("tmp"))
+            .env("TMP", self.temporary.path().join("tmp"))
+            .env("TEMP", self.temporary.path().join("tmp"))
             .env("XDG_STATE_HOME", self.temporary.path().join("state"))
             .env("XDG_CACHE_HOME", self.temporary.path().join("cache"))
             .env("XDG_RUNTIME_DIR", self.temporary.path().join("runtime"))
@@ -131,7 +143,7 @@ max_output_reserve_tokens = 16384
 
     fn require_approval(&self) {
         std::fs::write(
-            self.temporary.path().join("config/rsi/settings.json"),
+            self.temporary.path().join("config/rsiversi/settings.json"),
             serde_json::to_vec(&serde_json::json!({
                 "rsi.agent": {
                     "default_model": {"deployment": "fixture", "model": "fixture-model"},
@@ -147,7 +159,7 @@ max_output_reserve_tokens = 16384
         let root = self.temporary.path().join("configured-agent-presets");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
-            self.temporary.path().join("config/rsi/settings.json"),
+            self.temporary.path().join("config/rsiversi/settings.json"),
             serde_json::to_vec(&serde_json::json!({
                 "rsi.agent": {
                     "default_model": {"deployment": "fixture", "model": "fixture-model"}
@@ -193,7 +205,7 @@ max_output_reserve_tokens = 16384
         let path = self
             .temporary
             .path()
-            .join("state/rsi/session-host/owner.log");
+            .join("state/rsiversi/session-host/owner.log");
         let result = std::fs::File::open(path)
             .and_then(|file| file.take(64 * 1024).read_to_string(&mut log));
         result.map_or_else(|error| format!("unavailable: {error}"), |_| log)

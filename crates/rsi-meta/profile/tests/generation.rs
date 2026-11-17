@@ -250,8 +250,10 @@ impl PluginFactory for PrepareFailureFactory {
 fn compiler(root: &std::path::Path) -> ProfileCompiler {
     let environment = ProfileEnvironment::new(
         root.join("config"),
+        root.join("data"),
         root.join("state"),
         root.join("cache"),
+        root.join("tmp"),
         "test",
         BTreeMap::new(),
     )

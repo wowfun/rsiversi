@@ -16,6 +16,20 @@ while explicit section reads and dismissal continue to fence old frames.
 External navigation checks configured endpoint visibility, reopening and paging,
 and reuse of the same conversation identity after an uncertain start.
 Draft recovery opens a local conversation before entering Conversation options.
+`draft-recovery-review.mjs` checks the production saved-input panel's loading and
+failure announcements, bounded Unicode-safe previews, explicit full-input access,
+row-specific deletion names and pane-switching labels at desktop and narrow widths.
+It also runs real IndexedDB refusal/reset checks in Chromium and Firefox.
+`recovery-followup.mjs` checks append-only starting-draft pagination, cancellation
+of deletion, readable recovery titles and command announcements in the real
+document. A separate React Profiler scene mounts the production Conversation
+component to verify nonempty tab/option labels and no container commit on an
+unrelated view publication. Real IndexedDB also verifies schema-7 pending identity
+preservation and refusal of the older writer's reopen after upgrade. Set
+`RSI_REPORT_DIR` for its screenshots and results.
+CI runs these recovery fixtures and `command-visibility.mjs` directly, including
+their migration, reset and older-writer helpers. Their paths resolve from the
+module location so the fixture-directory CI entry point matches local execution.
 Goal lifecycle probes read
 the current Session status and assert the visible driver and control state;
 the status mirror itself is not a visible workbench label.
@@ -100,7 +114,19 @@ isolated home and loopback development HTTP, and closes its Service and browser.
 Windows fixtures create the native filesystem's exact protected private ACL
 (TokenUser owner; explicit full control for SYSTEM, Administrators and TokenUser)
 on their newly created configuration directory before writing settings. They
-never repair user paths.
+never repair user paths. After each fixture's configuration hook, Windows patches
+personal instruction, Agent and Skill discovery to the fixture's private
+configuration directory, including hooks that replace the complete Host Profile.
+`HOME` alone does not redirect Windows Known Folders. Fixtures may populate these
+private roots; empty Host Profiles omit the optional `steps` field so the final
+isolation patch can be appended without rewriting TOML.
+
+An embedded fixture may request a device through `registrationLabel` and consume
+the returned `registration`. On Windows, the adapter provisions it after final
+private context setup and before starting the embedded Service, because another
+process cannot attach to an embedded owner. Its private devices Application
+Profile selects the same fixture Host Profile. Other modes provision after
+startup through the ordinary devices Profile.
 
 The Settings draft fixture checks Plugins-to-Advanced namespace routing through
 Web retrieval on native Windows. MCP management requires native Unix Profile

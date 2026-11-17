@@ -18,6 +18,10 @@ fn plugin_download_uses_the_cli_runtime_and_reports_http_failure_without_panicki
         command
             .args(["--config-home"])
             .arg(&config)
+            .arg("--data-home")
+            .arg(fixture.path().join("data"))
+            .arg("--tmp-home")
+            .arg(fixture.path().join("tmp"))
             .arg("--state-home")
             .arg(&state)
             .arg("--cache-home")

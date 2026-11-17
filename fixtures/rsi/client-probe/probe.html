@@ -4,16 +4,22 @@
 <script type="module">
 window.runProbe = () => new Promise((resolve, reject) => {
   const worker = new Worker("/worker.mjs", { type: "module" });
-  const timer = setTimeout(() => finish(new Error("Controller Worker timed out")), 30_000);
+  let active = "initialization", panic;
+  const timer = setTimeout(() => finish(new Error(`Controller Worker timed out in ${active}`)), 30_000);
   function finish(error, result) {
     clearTimeout(timer);
     worker.terminate();
     if (error) reject(error); else resolve(result);
   }
-  worker.onmessage = ({ data }) => finish(null, data);
+  worker.onmessage = ({ data }) => {
+    if (data.kind !== "progress") { finish(null, data); return; }
+    if (data.state === "started") active = data.detail;
+    if (data.state === "panic") panic = data.detail;
+    console.info(`Controller Worker ${data.state}: ${data.detail}`);
+  };
   worker.onerror = (event) => {
     event.preventDefault();
-    finish(new Error(event.message));
+    finish(new Error(`Controller Worker failed in ${active}: ${panic ?? event.message}`));
   };
   worker.postMessage("run");
 });

@@ -12,7 +12,7 @@ Linux has no copied executable: it uses the tool admitted at installation/packag
 publication, or an explicitly trusted external tool, without adding a shell JSON
 parser or another runtime dependency to re-validate the record before execution.
 
-The scripts accept prefix, uninstaller and final config/state/cache homes plus
+The scripts accept prefix, uninstaller and final config/data/state/cache/tmp homes plus
 purge, dry-run, no-path, force, yes and help options. Force permits confirmed
 fixed-file removal without a reliable record; it never means force-killing a Host.
 An absent installation is an ordinary-removal no-op. Purging after the installed

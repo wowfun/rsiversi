@@ -245,7 +245,7 @@ async fn footer_selection_shows_declared_default_and_explicit_effort_without_not
         let path = fixture
             .temporary
             .path()
-            .join("config/rsi/host-profiles/fixture/host.profile.toml");
+            .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
         let mut profile = std::fs::read_to_string(&path).unwrap();
         profile.push_str("\n[steps.config.language_models.effort-model]\ncontext_window_tokens=128000\ndefault_output_reserve_tokens=4096\nmax_output_reserve_tokens=16384\n[steps.config.reasoning_efforts.effort-model]\nsupported=[\"low\",\"high\"]\ndefault=\"high\"\n");
         std::fs::write(path, profile).unwrap();

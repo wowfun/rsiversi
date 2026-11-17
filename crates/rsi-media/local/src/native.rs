@@ -189,3 +189,73 @@ fn object_read_error(error: &io::Error, id: &MediaId) -> MediaError {
         read_error(error, id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest as _, Sha256};
+
+    #[test]
+    #[ignore = "opt-in process-exit probe of private staging residue"]
+    fn interrupted_staging_survives_restart() {
+        const CHILD_ROOT: &str = "RSI_MEDIA_STAGING_CRASH_ROOT";
+        let bytes = bytes::Bytes::from_static(b"isolated interrupted media publication");
+        let id = MediaId::new(hex::encode(Sha256::digest(&bytes))).unwrap();
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let store = Store::open(Path::new(&root)).unwrap();
+            let shard = directory(&store.objects, &id.as_str()[..2]).unwrap();
+            // Stop at the actual staging primitive, before put can publish or clean up.
+            let (_, mut file) = staging(&shard, &id).unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            std::process::exit(87);
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("media");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native::tests::interrupted_staging_survives_restart",
+                "--ignored",
+            ])
+            .env(CHILD_ROOT, &root)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(87));
+        let shard = root.join("objects").join(&id.as_str()[..2]);
+        let entries = std::fs::read_dir(&shard)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        let residue = &entries[0];
+        assert_eq!(residue.extension().unwrap(), "tmp");
+        assert_eq!(std::fs::read(residue).unwrap(), bytes);
+        let media = StoredMedia {
+            reference: super::super::MediaRef {
+                id: id.clone(),
+                mime: "image/png".into(),
+                bytes: bytes.len() as u64,
+                width: 1,
+                height: 1,
+            },
+            bytes,
+        };
+        let store = Store::open(&root).unwrap();
+        let budget = ByteBudget::default();
+        assert!(matches!(
+            store.get(&id, &budget),
+            Err(MediaError::NotFound(_))
+        ));
+        store.put(&media, &budget).unwrap();
+        assert_eq!(store.get(&id, &budget).unwrap().bytes, media.bytes);
+        assert!(
+            residue.is_file(),
+            "restart must not delete a possibly live writer's file"
+        );
+        eprintln!(
+            "staging_residue files=1 bytes={} retry=readable",
+            media.bytes.len()
+        );
+    }
+}

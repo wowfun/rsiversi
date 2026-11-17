@@ -76,3 +76,7 @@ length changes. Its 64 MiB read pool remains charged with the returned allocatio
 last clone or slice, including the header retained by a canonical-body view.
 Cancellation of an async waiter cannot release a running blocking read's charge.
 Garbage collection and reference counting are intentionally absent.
+An abrupt process exit before immutable publication can leave a private staging
+file. Reopening does not identify or delete another writer's staging files; a
+retry publishes independently. The opt-in `interrupted_staging_survives_restart`
+probe exits a child at this boundary and checks both residue and retry behavior.

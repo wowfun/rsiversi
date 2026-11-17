@@ -95,6 +95,9 @@ impl SandboxProbe for SystemSandboxProbe {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxLocalConfig {
+    /// Absolute parent for private scratch and wrapper staging.
+    #[serde(default)]
+    pub temporary_root: Option<PathBuf>,
     /// bubblewrap candidates in preference order.
     #[serde(default)]
     pub bubblewrap: Vec<PathBuf>,
@@ -105,6 +108,15 @@ pub struct SandboxLocalConfig {
 
 impl SandboxLocalConfig {
     fn validate(&self) -> Result<()> {
+        if self
+            .temporary_root
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(SandboxError::InvalidInput(
+                "temporary_root must be absolute".into(),
+            ));
+        }
         let count = self
             .bubblewrap
             .len()
@@ -128,6 +140,8 @@ impl SandboxLocalConfig {
 
 #[derive(Clone, Debug)]
 struct Service {
+    #[cfg(windows)]
+    temporary_root: Arc<PathBuf>,
     generation: rsi_sandbox::SandboxGeneration,
     backend: Option<SelectedBackend>,
     _staged: Option<Arc<tempfile::TempDir>>,
@@ -360,7 +374,7 @@ impl Service {
         }
         #[cfg(windows)]
         if self.backend.is_none() && !source_reader {
-            return windows::confine(request, program, cwd, workspace);
+            return windows::confine(request, program, cwd, workspace, &self.temporary_root);
         }
         let backend = self
             .backend
@@ -368,6 +382,18 @@ impl Service {
             .ok_or(SandboxError::Unsupported(request.mode))?;
         if source_reader && backend.kind != BackendKind::Bubblewrap {
             return Err(SandboxError::Unsupported(request.mode));
+        }
+        if request.mode == SandboxMode::WorkspaceWrite
+            && backend
+                .path
+                .canonicalize()
+                .map_err(|_| SandboxError::Preparation)?
+                .starts_with(&workspace)
+        {
+            return Err(SandboxError::InvalidInput(
+                "sandbox launcher overlaps the writable workspace; select another scratch home"
+                    .into(),
+            ));
         }
         let target_program = program.into_os_string();
         let target_cwd = cwd.clone().into_os_string();
@@ -519,13 +545,16 @@ impl SandboxLocalFactory {
         path: PathBuf,
         arguments: &'static [&'static str],
         probe_budget: &mut ProbeBudget,
+        temporary_root: &Path,
     ) -> rsi_meta::Result<Option<(SelectedBackend, tempfile::TempDir)>> {
         if probe_budget.exhausted() {
             return Ok(None);
         }
-        let staged = tokio::task::spawn_blocking(move || stage_backend(kind, &path))
-            .await
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let temporary_root = temporary_root.to_owned();
+        let staged =
+            tokio::task::spawn_blocking(move || stage_backend(kind, &path, &temporary_root))
+                .await
+                .map_err(|error| MetaError::Activation(error.to_string()))?;
         let Ok((backend, directory)) = staged else {
             return Ok(None);
         };
@@ -552,6 +581,7 @@ impl PluginFactory for SandboxLocalFactory {
             .bubblewrap
             .iter()
             .chain(&config.landlock)
+            .chain(config.temporary_root.iter())
             .map(|path| path.as_os_str().len())
             .sum();
         Ok(PreparedActivation::with_state(
@@ -563,6 +593,10 @@ impl PluginFactory for SandboxLocalFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<SandboxLocalConfig>()?;
+        let temporary_root = config
+            .temporary_root
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
         let configured_candidates = config.bubblewrap.len() + config.landlock.len();
         let mut considered_candidates = 0_usize;
         let mut probe_budget = ProbeBudget::new();
@@ -578,6 +612,7 @@ impl PluginFactory for SandboxLocalFactory {
                     path,
                     BUBBLEWRAP_PROBE_ARGUMENTS,
                     &mut probe_budget,
+                    &temporary_root,
                 )
                 .await?
             {
@@ -597,6 +632,7 @@ impl PluginFactory for SandboxLocalFactory {
                         path,
                         LANDLOCK_PROBE_ARGUMENTS,
                         &mut probe_budget,
+                        &temporary_root,
                     )
                     .await?
                 {
@@ -629,6 +665,8 @@ impl PluginFactory for SandboxLocalFactory {
             None => (None, None),
         };
         let sandbox: Arc<dyn Sandbox> = Arc::new(Service {
+            #[cfg(windows)]
+            temporary_root: Arc::new(temporary_root),
             generation: rsi_sandbox::SandboxGeneration::default(),
             backend,
             _staged: staged.map(Arc::new),
@@ -850,10 +888,16 @@ fn validate_plan<T: AsRef<OsStr>>(
     Ok(())
 }
 
-fn stage_backend(kind: BackendKind, source: &Path) -> Result<(SelectedBackend, tempfile::TempDir)> {
+fn stage_backend(
+    kind: BackendKind,
+    source: &Path,
+    temporary_root: &Path,
+) -> Result<(SelectedBackend, tempfile::TempDir)> {
+    std::fs::create_dir_all(temporary_root)
+        .map_err(|error| SandboxError::Probe(error.to_string()))?;
     let directory = tempfile::Builder::new()
         .prefix("rsi-sandbox-wrapper-")
-        .tempdir()
+        .tempdir_in(temporary_root)
         .map_err(|error| SandboxError::Probe(error.to_string()))?;
     let staged = directory.path().join("wrapper");
     let mut source = open_candidate(source)?;
@@ -1013,11 +1057,71 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn wrapper_staging_uses_selected_scratch_parent_and_cleans_up() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("selected");
+        let source = root.path().join("candidate");
+        std::fs::write(&source, b"staging fixture").unwrap();
+        let (backend, lease) = stage_backend(BackendKind::Landlock, &source, &scratch).unwrap();
+        assert_eq!(lease.path().parent(), Some(scratch.as_path()));
+        assert_eq!(
+            std::fs::read(&backend.path).unwrap(),
+            std::fs::read(source).unwrap()
+        );
+        let staged = lease.path().to_owned();
+        drop(lease);
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn scratch_configuration_rejects_relative_paths_before_activation() {
+        let config: SandboxLocalConfig = serde_json::from_value(serde_json::json!({
+            "temporary_root": "relative"
+        }))
+        .unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(SandboxError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn writable_workspace_cannot_replace_the_staged_launcher() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let source = workspace.join("source");
+        std::fs::write(&source, b"launcher").unwrap();
+        let (backend, staged) =
+            stage_backend(BackendKind::Landlock, &source, &workspace.join(".tmp")).unwrap();
+        let service = Service {
+            #[cfg(windows)]
+            temporary_root: Arc::new(workspace.join(".tmp")),
+            generation: rsi_sandbox::SandboxGeneration::default(),
+            backend: Some(backend),
+            _staged: Some(Arc::new(staged)),
+            workers: Arc::new(tokio::sync::Semaphore::new(4)),
+        };
+        let request = ProcessRequest {
+            stdio: rsi_sandbox::ProcessStdio::Pipes,
+            mode: SandboxMode::WorkspaceWrite,
+            program: std::env::current_exe().unwrap(),
+            arguments: vec![],
+            cwd: workspace.clone(),
+            workspace,
+        };
+        assert!(
+            matches!(service.confine_view(request, false), Err(SandboxError::InvalidInput(message)) if message.contains("launcher overlaps"))
+        );
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_pty_preserves_explicit_full_access_and_refuses_restricted_requests() {
         let directory = tempfile::tempdir().unwrap();
         let service = Service {
+            #[cfg(windows)]
+            temporary_root: Arc::new(std::env::temp_dir()),
             generation: rsi_sandbox::SandboxGeneration::default(),
             backend: None,
             _staged: None,
@@ -1132,6 +1236,8 @@ mod worker_tests {
         let staged = Arc::new(tempfile::tempdir().unwrap());
         let path = staged.path().to_owned();
         let service = Service {
+            #[cfg(windows)]
+            temporary_root: Arc::new(std::env::temp_dir()),
             generation: rsi_sandbox::SandboxGeneration::default(),
             backend: None,
             _staged: Some(staged),

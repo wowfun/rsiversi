@@ -12,12 +12,14 @@ pub(super) fn run(arguments: &[OsString]) -> u8 {
         }
         let mut config = None;
         let mut state = None;
+        let mut data = None;
         let mut dry_run = false;
         let mut args = arguments.iter();
         while let Some(arg) = args.next() {
             let slot = match arg.to_str() {
                 Some("--config-home") => &mut config,
                 Some("--state-home") => &mut state,
+                Some("--data-home") => &mut data,
                 Some("--dry-run") if !dry_run => {
                     dry_run = true;
                     continue;
@@ -38,10 +40,15 @@ pub(super) fn run(arguments: &[OsString]) -> u8 {
         }
         let config = config.ok_or_else(|| error(HELP))?;
         let state = state.ok_or_else(|| error(HELP))?;
-        let source =
-            rsi_host::HostPaths::new(config, state.clone(), state.join("unused-import-cache"))
-                .map_err(error)?;
-        super::launch::maintain()?;
+        let data = data.ok_or_else(|| error(HELP))?;
+        let source = rsi_host::HostPaths::new(
+            config,
+            data,
+            state.clone(),
+            state.join("unused-import-cache"),
+            state.join("unused-import-tmp"),
+        )
+        .map_err(error)?;
         rsi::import_product_homes(&startup.paths, &source, dry_run)
     })();
     match result {

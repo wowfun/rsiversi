@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 fn environment(root: &std::path::Path) -> ProfileEnvironment {
     ProfileEnvironment::new(
         root.join("config"),
+        root.join("data"),
         root.join("state"),
         root.join("cache"),
+        root.join("tmp"),
         "linux-x86_64",
         BTreeMap::from([
             ("enabled".to_owned(), json!(true)),
@@ -20,11 +22,60 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn frozen_data_and_scratch_paths_are_visible_and_change_source_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("paths.toml");
+    std::fs::write(
+        &source,
+        r##"format = 1
+[[steps]]
+kind = "plugin"
+id = "paths"
+plugin = "test.paths"
+config_rhai = "#{ data: paths.data, tmp: paths.tmp }"
+"##,
+    )
+    .unwrap();
+    let compile = |data: &str, tmp: &str| {
+        let environment = ProfileEnvironment::new(
+            root.path().join("config"),
+            root.path().join(data),
+            root.path().join("state"),
+            root.path().join("cache"),
+            root.path().join(tmp),
+            "test",
+            BTreeMap::new(),
+        )
+        .unwrap();
+        ProfileCompiler::new(environment, ProfileLimits::default())
+            .compile(&ProfileProgram::from_file(&source))
+            .unwrap()
+    };
+    let original = compile("data", "tmp");
+    assert_eq!(
+        original.leaves()[0].config(),
+        &json!({
+            "data": root.path().join("data"), "tmp": root.path().join("tmp"),
+        })
+    );
+    assert_ne!(
+        original.source_digest(),
+        compile("other-data", "tmp").source_digest()
+    );
+    assert_ne!(
+        original.source_digest(),
+        compile("data", "other-tmp").source_digest()
+    );
+}
+
+#[test]
 fn live_configuration_admission_bounds_expansion_and_returns_replaced_charges() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile.toml");
     let compiler = ProfileCompiler::new(
         ProfileEnvironment::new(
+            temp.path(),
+            temp.path(),
             temp.path(),
             temp.path(),
             temp.path(),
@@ -202,8 +253,10 @@ fn rhai_defines_accept_exact_i64_and_reject_every_inexact_json_number() {
     ] {
         let environment = ProfileEnvironment::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
             "test",
             BTreeMap::from([("value".to_owned(), value.clone())]),
         )
@@ -221,8 +274,10 @@ fn rhai_defines_accept_exact_i64_and_reject_every_inexact_json_number() {
     ] {
         let environment = ProfileEnvironment::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
             "test",
             BTreeMap::from([("value".to_owned(), value.clone())]),
         )
@@ -663,8 +718,10 @@ fn source_digest_includes_fragment_identity_and_frozen_environment_paths() {
 
     let moved_environment = ProfileEnvironment::new(
         temp.path().join("different-config"),
+        temp.path().join("different-data"),
         temp.path().join("state"),
         temp.path().join("cache"),
+        temp.path().join("different-tmp"),
         "linux-x86_64",
         BTreeMap::from([
             ("enabled".to_owned(), json!(true)),
@@ -686,8 +743,10 @@ fn source_digest_changes_when_a_frozen_define_value_changes_at_the_same_paths() 
     let compile = |value| {
         let environment = ProfileEnvironment::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
             "linux-x86_64",
             BTreeMap::from([
                 ("enabled".to_owned(), json!(true)),

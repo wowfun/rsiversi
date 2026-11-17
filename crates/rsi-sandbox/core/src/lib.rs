@@ -23,7 +23,7 @@ pub const MAXIMUM_SANDBOX_PLAN_BYTES: usize = 1024 * 1024;
 pub const MAXIMUM_SANDBOX_WRAPPER_BYTES: usize = 16 * 1024 * 1024;
 
 /// Requested file-effect policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
     /// Requests read-only file effects; the stamp identifies the native boundary.
@@ -76,7 +76,7 @@ impl<P> ProcessRequest<P> {
 }
 
 /// Actually selected enforcement backend.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SandboxBackend {
     /// bubblewrap wrapper.
@@ -96,7 +96,7 @@ pub enum SandboxBackend {
 }
 
 /// Durable filesystem-write enforcement evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxFileSystem {
     /// No filesystem-write confinement.
@@ -112,7 +112,7 @@ pub enum SandboxFileSystem {
 }
 
 /// Durable scratch-directory evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxScratch {
     /// The child sees the host scratch namespace.
@@ -124,7 +124,7 @@ pub enum SandboxScratch {
 }
 
 /// Durable network enforcement evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxNetwork {
     /// The child retains host network access.
@@ -134,7 +134,7 @@ pub enum SandboxNetwork {
 }
 
 /// Durable-safe truth about one selected process plan.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcementStamp {
     /// Requested mode.

@@ -29,6 +29,10 @@
       "stage": "copy"
     },
     {
+      "name": "draft-databases.js",
+      "stage": "copy"
+    },
+    {
       "name": "admission.js",
       "stage": "copy"
     },

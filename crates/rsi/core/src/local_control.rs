@@ -27,7 +27,7 @@ impl Factory {
         Self {
             policy,
             environment: EnvironmentFingerprint::capture(credentials),
-            packages: paths.state().join("packages"),
+            packages: paths.data().join("packages"),
             interfaces,
         }
     }

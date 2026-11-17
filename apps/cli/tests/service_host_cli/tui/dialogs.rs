@@ -26,7 +26,7 @@ async fn fullscreen_dialogs_keep_context_and_filter_geometry_without_background_
         let path = fixture
             .temporary
             .path()
-            .join("config/rsi/host-profiles/fixture/host.profile.toml");
+            .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
         let mut profile = std::fs::read_to_string(&path).unwrap();
         profile.push_str("\n[steps.config.reasoning_efforts.fixture-model]\nsupported=[\"low\",\"high\"]\ndefault=\"high\"\n");
         std::fs::write(path, profile).unwrap();

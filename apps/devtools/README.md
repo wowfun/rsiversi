@@ -129,6 +129,8 @@ publications are not product installation or launch entrypoints. Their leases,
 atomic publication records and bounded child diagnostics remain owned here.
 Fixture development selects its service through its private `rsi.toml` and
 stops its resident Host before retiring the fixture homes.
+The paired workbench-addon browser fixture supports Linux and Windows; it builds
+the example for the captured native target and retains the publication lease.
 
 Run Node producer and installer behavior tests with `node --test
 apps/devtools/tests/*.test.mjs`, and Rust fixture tests with `cargo test --locked

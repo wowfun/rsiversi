@@ -2,7 +2,7 @@ use super::*;
 use rsi_credentials_local::SecretStore as _;
 
 pub(super) fn backups(fixture: &CliFixture) -> Vec<std::path::PathBuf> {
-    let mut entries = std::fs::read_dir(fixture.temporary.path().join("state/rsi"))
+    let mut entries = std::fs::read_dir(fixture.temporary.path().join("state/rsiversi"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
@@ -14,7 +14,7 @@ pub(super) fn backups(fixture: &CliFixture) -> Vec<std::path::PathBuf> {
     entries
 }
 fn seed(fixture: &CliFixture) -> Vec<u8> {
-    let root = fixture.temporary.path().join("state/rsi/agent");
+    let root = fixture.temporary.path().join("state/rsiversi/agent");
     drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
     let db = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
     db.pragma_update(
@@ -31,12 +31,15 @@ fn seed(fixture: &CliFixture) -> Vec<u8> {
 fn reset_state_cli_archives_owned_state_and_preserves_credentials_and_settings() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let before = seed(&fixture);
-    let config = fixture.temporary.path().join("config/rsi/settings.json");
+    let config = fixture
+        .temporary
+        .path()
+        .join("config/rsiversi/settings.json");
     let settings = std::fs::read(&config).unwrap();
     let credentials = fixture
         .temporary
         .path()
-        .join("config/rsi/credentials/credentials.json");
+        .join("data/rsiversi/credentials/credentials.json");
     rsi_credentials_local::FileSecretStore::new(&credentials)
         .set(
             &rsi_credentials_protocol::CredentialRef::new("fixture", "retained").unwrap(),
@@ -62,7 +65,7 @@ fn reset_state_cli_archives_owned_state_and_preserves_credentials_and_settings()
 fn reset_help_preserves_broken_configuration_and_store() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let before = seed(&fixture);
-    let launch = fixture.temporary.path().join("config/rsi/rsi.toml");
+    let launch = fixture.temporary.path().join("config/rsiversi/rsi.toml");
     std::fs::write(&launch, b"invalid [").unwrap();
     fixture.assert_success(&["--reset-config", "--reset-state", "tui", "--help"]);
     assert_eq!(std::fs::read(&launch).unwrap(), b"invalid [");
@@ -71,7 +74,7 @@ fn reset_help_preserves_broken_configuration_and_store() {
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/agent/sessions.sqlite3")
+                .join("state/rsiversi/agent/sessions.sqlite3")
         )
         .unwrap(),
         before
@@ -94,7 +97,7 @@ fn reset_does_not_follow_a_profile_to_an_external_store() {
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     writeln!(
         std::fs::OpenOptions::new()
             .append(true)

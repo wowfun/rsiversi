@@ -4,9 +4,25 @@ use rsi_host::HostPaths;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
 
+pub(crate) const EXTRA_STATE: &[&str] = &[
+    "desktop-webview",
+    "trust",
+    "session-host/artifacts",
+    "session-host/owner.log",
+    "session-host/owner.json",
+    "session-host/runtime",
+];
+pub(crate) const CACHE: &[&str] = &[
+    "history",
+    "spill",
+    "workspace-review",
+    "native-applications",
+    "native-addons",
+    "agent-presets/system",
+];
+
 pub const STATE: &[&str] = &[
     "agent",
-    "media",
     "acp",
     "automation",
     "base.sqlite3",
@@ -25,11 +41,111 @@ pub const IMPORT_CONFIG: &[&str] = &[
     "application-profiles",
     "host-profiles",
     "agent-presets",
-    "credentials",
     "AGENTS.md",
     "agents",
     "skills",
 ];
+pub const RESET_DATA: &[&str] = &["media"];
+pub const IMPORT_DATA: &[&str] = &["credentials", "media"];
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeKind {
+    Config,
+    Data,
+    State,
+}
+impl HomeKind {
+    pub fn path(self, paths: &HostPaths) -> &std::path::Path {
+        match self {
+            Self::Config => paths.config(),
+            Self::Data => paths.data(),
+            Self::State => paths.state(),
+        }
+    }
+    pub fn reset_entries(self) -> &'static [&'static str] {
+        match self {
+            Self::Config => RESET_CONFIG,
+            Self::Data => RESET_DATA,
+            Self::State => STATE,
+        }
+    }
+    pub fn import_entries(self) -> &'static [&'static str] {
+        match self {
+            Self::Config => IMPORT_CONFIG,
+            Self::Data => IMPORT_DATA,
+            Self::State => STATE,
+        }
+    }
+    pub fn selected(self, selection: ResetSelection) -> bool {
+        match self {
+            Self::Config => selection.config,
+            Self::Data | Self::State => selection.state,
+        }
+    }
+}
+
+/// Rejects layouts where a managed entry contains another product home.
+/// Independent children under a common parent are valid; disposable subtrees cannot overlap authored state.
+pub fn validate_home_layout(paths: &HostPaths) -> Result<()> {
+    let roots = [
+        paths.config(),
+        paths.data(),
+        paths.state(),
+        paths.cache(),
+        paths.tmp(),
+    ]
+    .map(|path| rsi_files_native_fs::resolve_absolute_root_alias(path, true));
+    let [config, data, state, cache, tmp] = roots;
+    let roots = [config?, data?, state?, cache?, tmp?];
+    #[cfg(windows)]
+    let roots = roots.map(|path| PathBuf::from(path.to_string_lossy().to_lowercase()));
+    for (root, names) in [
+        (&roots[0], IMPORT_CONFIG),
+        (&roots[1], &["credentials", "media", "packages"][..]),
+        (&roots[2], STATE),
+        (&roots[2], EXTRA_STATE),
+        (&roots[3], CACHE),
+    ] {
+        for name in names.iter().copied().chain(std::iter::once("session-host")) {
+            let target = root.join(name);
+            #[cfg(windows)]
+            let target = PathBuf::from(target.to_string_lossy().to_lowercase());
+            if roots.iter().any(|other| other.starts_with(&target)) {
+                return Err(error(format!(
+                    "managed entry contains a product home: {}",
+                    target.display()
+                )));
+            }
+        }
+    }
+    for (root, names) in [
+        (&roots[1], &["credentials", "media", "packages"][..]),
+        (&roots[2], STATE),
+        (&roots[2], EXTRA_STATE),
+        (&roots[3], CACHE),
+    ] {
+        for name in names {
+            let disposable = root.join(name);
+            for authored in IMPORT_CONFIG
+                .iter()
+                .copied()
+                .chain(std::iter::once("native-addons"))
+            {
+                let protected = roots[0].join(authored);
+                #[cfg(windows)]
+                let protected = PathBuf::from(protected.to_string_lossy().to_lowercase());
+                if disposable.starts_with(&protected) || protected.starts_with(&disposable) {
+                    return Err(error(format!(
+                        "disposable entry overlaps authored configuration: {}",
+                        disposable.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 /// Independent reset selections; neither includes credentials or packages.
@@ -45,6 +161,7 @@ pub struct ResetJournal {
     pub format: u8,
     pub id: String,
     pub config: PathBuf,
+    pub data: PathBuf,
     pub state: PathBuf,
     pub selection: ResetSelection,
     pub entries: Vec<ResetEntry>,
@@ -52,7 +169,7 @@ pub struct ResetJournal {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResetEntry {
-    pub config: bool,
+    pub home: HomeKind,
     pub name: String,
     pub directory: bool,
 }
@@ -63,6 +180,7 @@ pub struct ImportJournal {
     pub format: u32,
     pub id: String,
     pub config: PathBuf,
+    pub data: PathBuf,
     pub state: PathBuf,
     pub entries: Vec<ImportEntry>,
 }
@@ -70,7 +188,7 @@ pub struct ImportJournal {
 #[serde(deny_unknown_fields)]
 #[derive(Debug)]
 pub struct ImportEntry {
-    pub config: bool,
+    pub home: HomeKind,
     pub name: String,
     pub old: Option<String>,
     pub new: String,
@@ -85,7 +203,7 @@ pub fn backups(
     let mut remove = BTreeSet::new();
     let mut known = BTreeSet::new();
     let mut receipts = BTreeSet::new();
-    for root in [paths.config(), paths.state()] {
+    for root in [paths.config(), paths.data(), paths.state()] {
         let directory = match rsi_files_native_fs::open_absolute_directory_no_follow(
             &root.join("session-host"),
         ) {
@@ -101,20 +219,20 @@ pub fn backups(
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let reset = name.starts_with("reset-");
-            if !(reset || name.starts_with("import-")) || !name.ends_with(".json") {
+            let completion = reset && name.ends_with(".complete");
+            if !(reset || name.starts_with("import-")) || !(name.ends_with(".json") || completion) {
                 continue;
             }
             let bytes = fs::read(&directory, name, fs::DOCUMENT_LIMIT)?
                 .ok_or_else(|| error("receipt disappeared"))?;
-            let (id, config, state, entries) = if reset {
+            let (id, config, data, state, entries) = if reset {
                 let j: ResetJournal = serde_json::from_slice(&bytes).map_err(error)?;
-                if j.format != 1 || !(j.selection.config || j.selection.state) {
+                if j.format != 2 || !(j.selection.config || j.selection.state) {
                     return Err(error("invalid reset receipt"));
                 }
                 for e in &j.entries {
-                    if (e.config
-                        && (!j.selection.config || !RESET_CONFIG.contains(&e.name.as_str())))
-                        || (!e.config && !j.selection.state)
+                    if !e.home.selected(j.selection)
+                        || !e.home.reset_entries().contains(&e.name.as_str())
                     {
                         return Err(error("invalid reset selection"));
                     }
@@ -122,15 +240,16 @@ pub fn backups(
                 (
                     j.id,
                     j.config,
+                    j.data,
                     j.state,
                     j.entries
                         .into_iter()
-                        .map(|e| (e.config, e.name, true))
+                        .map(|e| (e.home, e.name, true))
                         .collect::<Vec<_>>(),
                 )
             } else {
                 let j: ImportJournal = serde_json::from_slice(&bytes).map_err(error)?;
-                if j.format != 1
+                if j.format != 2
                     || j.entries
                         .iter()
                         .any(|e| !hex(&e.new, 64) || e.old.as_ref().is_some_and(|v| !hex(v, 64)))
@@ -140,16 +259,23 @@ pub fn backups(
                 (
                     j.id,
                     j.config,
+                    j.data,
                     j.state,
                     j.entries
                         .into_iter()
-                        .map(|e| (e.config, e.name, e.old.is_some()))
+                        .map(|e| (e.home, e.name, e.old.is_some()))
                         .collect(),
                 )
             };
             if !hex(&id, 32)
-                || name != format!("{}-{id}.json", if reset { "reset" } else { "import" })
+                || name
+                    != format!(
+                        "{}-{id}.{}",
+                        if reset { "reset" } else { "import" },
+                        if completion { "complete" } else { "json" }
+                    )
                 || std::fs::canonicalize(&config)? != std::fs::canonicalize(paths.config())?
+                || std::fs::canonicalize(&data)? != std::fs::canonicalize(paths.data())?
                 || std::fs::canonicalize(&state)? != std::fs::canonicalize(paths.state())?
                 || entries.len() > 16
             {
@@ -157,31 +283,30 @@ pub fn backups(
             }
             let mut seen = BTreeSet::new();
             let mut preserve_receipt = false;
-            let config_entries = if reset { RESET_CONFIG } else { IMPORT_CONFIG };
-            for (is_config, entry, has_backup) in entries {
-                if !seen.insert((is_config, entry.clone()))
-                    || !(if is_config { config_entries } else { STATE }).contains(&entry.as_str())
+            for (home, entry, has_backup) in entries {
+                if !seen.insert((home, entry.clone()))
+                    || !(if reset {
+                        home.reset_entries()
+                    } else {
+                        home.import_entries()
+                    })
+                    .contains(&entry.as_str())
                 {
                     return Err(error("unauthorized backup entry"));
                 }
                 if !has_backup {
                     continue;
                 }
-                let backup = (if is_config {
-                    paths.config()
-                } else {
-                    paths.state()
-                })
-                .join(if reset {
+                let backup = home.path(paths).join(if reset {
                     format!(".reset-{id}-{entry}")
                 } else {
                     format!(".import-{id}-backup-{entry}")
                 });
                 known.insert(backup.clone());
-                if !is_config || entry == "credentials" {
-                    remove.insert(backup);
-                } else {
+                if home == HomeKind::Config {
                     preserve_receipt = true;
+                } else {
+                    remove.insert(backup);
                 }
             }
             if !preserve_receipt {
@@ -190,7 +315,7 @@ pub fn backups(
         }
     }
     // Unknown backup-looking files may contain secrets; never report a complete purge.
-    for root in [paths.config(), paths.state()] {
+    for root in [paths.config(), paths.data(), paths.state()] {
         let directory = match rsi_files_native_fs::open_absolute_directory_no_follow(root) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

@@ -105,10 +105,10 @@ impl Upgrade {
         .ok_or_else(|| error("no upgrade is pending"))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(error)?;
         match value["format"].as_u64() {
-            Some(1) => crate::legacy::CoreUpgrade::recover(bin, paths)
+            Some(3) => crate::legacy::CoreUpgrade::recover(bin, paths)
                 .map(|value| Self(UpgradeKind::Legacy(value)))
                 .map_err(error),
-            Some(2) => Transaction::recover(layout, paths)
+            Some(4) => Transaction::recover(layout, paths)
                 .map(|value| Self(UpgradeKind::Managed(value)))
                 .map_err(error),
             _ => Err(error("unknown or absent core upgrade journal; retained")),

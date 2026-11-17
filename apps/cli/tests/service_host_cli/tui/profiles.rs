@@ -4,7 +4,7 @@ use super::*;
 async fn host_profile_tui_grants_prepares_saves_and_reconciles_with_or_without_native_session() {
     for configured in [true, false] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
-        let root = fixture.temporary.path().join("config/rsi");
+        let root = fixture.temporary.path().join("config/rsiversi");
         let original = std::fs::read(root.join("host-profiles/fixture/host.profile.toml")).unwrap();
         let directory = root.join("host-profiles/editable");
         std::fs::create_dir(&directory).unwrap();
@@ -44,13 +44,13 @@ async fn host_profile_tui_grants_prepares_saves_and_reconciles_with_or_without_n
         terminal.send(b"\r");
         terminal.select_menu("Save reviewed change").await;
         terminal.until("Source: saved").await;
-        terminal.until("Current runtime: NotSelected").await;
+        terminal.until("Runtime at completion: NotSelected").await;
         terminal.capture();
         let saved = std::fs::read(&path).unwrap();
         assert_ne!(saved, original);
         terminal.send(b"\r");
-        terminal.select_menu("Query original receipt").await;
-        terminal.until("Current runtime: NotSelected").await;
+        terminal.select_menu("Refresh current source").await;
+        terminal.until("fixture-provider · disabled").await;
         assert_eq!(std::fs::read(&path).unwrap(), saved);
         terminal.send(b"\x1b");
         terminal.until("PROFILE_DRAFT_KEEP").await;
@@ -62,11 +62,9 @@ async fn host_profile_tui_grants_prepares_saves_and_reconciles_with_or_without_n
                 "/profiles"
             })
             .await;
-        terminal
-            .select_menu("Recover original source receipts")
-            .await;
-        terminal.until("Read receipt ").await;
-        terminal.send(b"\r");
+        terminal.select_menu("Open Profile editable").await;
+        terminal.until("fixture-provider · disabled").await;
+        terminal.select_menu("Last change result").await;
         terminal.until("Source: saved").await;
         terminal.resize(PtySize {
             rows: 28,
@@ -75,13 +73,14 @@ async fn host_profile_tui_grants_prepares_saves_and_reconciles_with_or_without_n
             pixel_height: 0,
         });
         terminal
-            .until_screen("narrow Profile receipt", |screen| {
-                screen.contains("Source: saved") && screen.contains("Current runtime: NotSelected")
+            .until_screen("narrow Profile result", |screen| {
+                screen.contains("Source: saved")
+                    && screen.contains("Runtime at completion: NotSelected")
             })
             .await;
         terminal.capture();
         terminal.send(b"\r");
-        terminal.until("Query original receipt").await;
+        terminal.until("Refresh current source").await;
         terminal.send(b"\x1b");
         terminal.until("Enter actions").await;
         terminal.send(b"\x1b");

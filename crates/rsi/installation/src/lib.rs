@@ -18,12 +18,14 @@ pub mod upgrade;
 #[allow(unsafe_code)] // Single documented Win32 environment-notification boundary.
 mod windows_environment;
 pub use install::{InstallOptions, install, probe};
-pub use paths::{default_prefix, standard_paths};
+pub use paths::{
+    HomeOverrides, default_prefix, legacy_credentials, normalize_path, standard_paths,
+};
 pub use record::{Layout, Record};
 pub type Result<T> = std::io::Result<T>;
 pub fn error(message: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(message.to_string())
 }
-pub const PROTOCOL: &str = "{\"interface\":1,\"record\":1,\"transaction\":2}";
+pub const PROTOCOL: &str = "{\"interface\":1,\"record\":1,\"transaction\":4}";
 #[cfg(test)]
 mod tests;

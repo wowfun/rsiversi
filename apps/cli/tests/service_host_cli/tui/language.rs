@@ -91,7 +91,7 @@ fn configure_language(fixture: &CliFixture) -> serde_json::Value {
             fixture
                 .temporary
                 .path()
-                .join("config/rsi/host-profiles/fixture/host.profile.toml"),
+                .join("config/rsiversi/host-profiles/fixture/host.profile.toml"),
         )
         .arg(analyzer)
         .output()
@@ -116,7 +116,10 @@ fn configure_language(fixture: &CliFixture) -> serde_json::Value {
         ),
     )
     .unwrap();
-    let settings = fixture.temporary.path().join("config/rsi/settings.json");
+    let settings = fixture
+        .temporary
+        .path()
+        .join("config/rsiversi/settings.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
     value["rsi.agent-presets"]["default"] = "language".into();

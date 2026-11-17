@@ -526,7 +526,7 @@ async fn plan_application(binary: Option<std::path::PathBuf>) {
 
 fn configure_independent(fixture: &mut CliFixture, binary: std::path::PathBuf) {
     fixture.binary = binary;
-    let config = fixture.temporary.path().join("config/rsi");
+    let config = fixture.temporary.path().join("config/rsiversi");
     let preset = config.join("agent-presets/workbench");
     std::fs::create_dir_all(&preset).unwrap();
     let profile = fixture.assert_success(&["fixture-profile"]);
@@ -613,7 +613,7 @@ impl TerminalClient {
         let directory = fixture
             .temporary
             .path()
-            .join("config/rsi/application-profiles/test-tui");
+            .join("config/rsiversi/application-profiles/test-tui");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
             directory.join("application.profile.toml"),
@@ -711,6 +711,7 @@ plugin = "rsi.application.tui"
         for (name, path) in [
             ("HOME", "home"),
             ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
             ("XDG_STATE_HOME", "state"),
             ("XDG_CACHE_HOME", "cache"),
             ("XDG_RUNTIME_DIR", "runtime"),
@@ -1319,6 +1320,10 @@ async fn daemon_detach_resume_reads_foreign_pending_body_and_ctrl_c_preserves_dr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One running TUI must retain its draft and pending turn across presentation reload."
+)]
 async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_pending_turn() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -1361,12 +1366,19 @@ async fn native_presentation_reloads_in_the_running_tui_without_losing_draft_or_
     let manifest = source.join("native.toml");
     std::fs::write(&manifest,format!("format=2\nscope='application'\nid='dev.terminal'\nplugin='rsi.terminal.native'\ntarget='{}'\nartifact='artifact.bin'\n",rsi::native_addon_target())).unwrap();
     std::fs::copy(&artifacts[0], source.join("artifact.bin")).unwrap();
-    let store =
-        rsi::NativeAddonStore::open(fixture.temporary.path().join("config/rsi/native-addons"))
-            .unwrap();
+    let store = rsi::NativeAddonStore::open(
+        fixture
+            .temporary
+            .path()
+            .join("config/rsiversi/native-addons"),
+    )
+    .unwrap();
     let old = store.install(&manifest).unwrap().record.unwrap();
     store.enable_exact(&old, None).unwrap();
-    let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+    let settings_path = fixture
+        .temporary
+        .path()
+        .join("config/rsiversi/settings.json");
     let saved_settings = std::fs::read(&settings_path).unwrap();
     std::fs::remove_file(&settings_path).unwrap();
     let mut home = TerminalClient::start_presentation(&fixture, &[], true);

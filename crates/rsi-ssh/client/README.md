@@ -10,8 +10,10 @@ option or alias is accepted from target data.
 Identity paths must be absolute UTF-8 paths without OpenSSH percent or environment
 expansion syntax. Quoting preserves literal spaces, quotes and backslashes. The
 configuration directory remains owned until the prepared invocation is dropped;
-callers retain it through the actual SSH child lifetime. Child environment is
-explicitly empty; it does not inherit SSH_AUTH_SOCK, proxy, askpass or agent state.
+callers retain it through the actual SSH child lifetime.
+The caller supplies the frozen absolute scratch parent for generated configuration
+and any copied identity; creation uses private permissions and owned cleanup.
+Child environment is explicitly empty; it does not inherit SSH_AUTH_SOCK, proxy, askpass or agent state.
 The remote command is supplied only by the trusted transport owner, not target
 configuration or model arguments. This library does not grant permission to run it.
 

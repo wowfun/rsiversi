@@ -141,11 +141,11 @@ for key in ('HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_
     path = args.report / key.lower(); path.mkdir(mode=0o700); env[key] = str(path.resolve())
 runtime_directory = tempfile.TemporaryDirectory(prefix='rsi-desktop-', dir='/tmp')
 env['XDG_RUNTIME_DIR'] = runtime_directory.name
-config = Path(env['XDG_CONFIG_HOME']) / 'rsi'
+config = Path(env['XDG_CONFIG_HOME']) / 'rsiversi'
 host = config / 'host-profiles/fixture'; host.mkdir(parents=True)
 (host / 'host.profile.toml').write_text('format = 1\nsteps = []\n')
 (config / 'rsi.toml').write_text('format=1\n[service]\nkind="catalog"\nid="fixture"\n')
-homes = ['--config-home', str(config.resolve()), '--state-home', str((Path(env['XDG_STATE_HOME'])/'rsi').resolve()), '--cache-home', str((Path(env['XDG_CACHE_HOME'])/'rsi').resolve())]
+homes = ['--data-home', str((Path(env['XDG_DATA_HOME'])/'rsiversi').resolve()), '--tmp-home', runtime_directory.name, '--config-home', str(config.resolve()), '--state-home', str((Path(env['XDG_STATE_HOME'])/'rsiversi').resolve()), '--cache-home', str((Path(env['XDG_CACHE_HOME'])/'rsiversi').resolve())]
 desktop_arguments = homes + ['--assets', str(args.assets.resolve())]
 if args.automation_fixture: configure_automation(host / 'host.profile.toml', args.automation_fixture)
 if args.profiles:
@@ -162,7 +162,7 @@ if args.workspace_review:
     git('init', '--quiet'); (workspace / 'card.txt').write_text('committed\n'); git('add', '.')
     git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
     (workspace / 'card.txt').write_text('before\n')
-if args.external: configure_external(host / 'host.profile.toml', workspace.resolve(), Path(env['XDG_STATE_HOME']) / 'rsi')
+if args.external: configure_external(host / 'host.profile.toml', workspace.resolve(), Path(env['XDG_STATE_HOME']) / 'rsiversi')
 daemon = None
 daemon_log = None
 daemon_metadata = None
@@ -311,7 +311,7 @@ try:
         script(r'''window.fixtureSubmissions=[];window.fixtureInputEvents=[];fixtureTransport.observers.push((kind,data,request)=>{if(kind==='call'&&['prepare_submission','dispatch_submission','query_submission'].includes(data.method))window.fixtureSubmissions.push({method:data.method,bytes:typeof data.payload==='string'?data.payload.length:null});});document.addEventListener('input',event=>{if(event.target.matches('textarea[aria-label="Main message"]'))window.fixtureInputEvents.push({length:event.target.value.length,trusted:event.isTrusted})});return true''')
     observe_document()
     if args.profiles:
-        verify_profiles(script, button, lambda item: call('POST', root + f'/element/{eid(item)}/click', {}), until, screenshot, editable_source, args.report, args.profile_probe, env)
+        verify_profiles(script, button, until, screenshot, editable_source, args.report, args.profile_probe, env)
     if args.external: verify_external(script, button, fill, until, screenshot, workspace, args.report)
     button('Choose workspace')
     until(lambda: script('return document.querySelector(".directory-columns[aria-busy=false] .directory-column, .directory-path input")'))
@@ -374,10 +374,8 @@ try:
     fill('textarea[aria-label="Main message"]', prompt)
     focus = script(COMPOSER_FOCUS, [input_events_before])
     assert focus['focused'] and focus['focusVisible'] and focus['trustedInput'], focus
-    if focus['forcedColors']:
-        assert focus['outlineWidth'] >= 2 and focus['outlineStyle'] != 'none', focus
-    else:
-        assert focus['outlineStyle'] == 'none', focus
+    assert focus['outlineStyle'] == 'none', focus
+    assert focus['outerOutlineWidth'] >= 2 and focus['outerOutlineStyle'] != 'none', focus
     (args.report / 'composer-focus.json').write_text(json.dumps(focus, indent=2))
     screenshot('composer-focus.png')
     if args.refresh_during_click:

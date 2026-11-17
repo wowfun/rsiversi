@@ -9,6 +9,10 @@ also check explicit reconciliation cancellation preserves the unknown Message
 identity and drains its controller without dispatching a replacement request.
 Both engines must finish with zero browser timers and alarms.
 
+Each Worker reports the scenario it starts and completes. A bounded panic
+diagnostic and the last started scenario accompany a trap or timeout, so a
+failed shared scenario can be reproduced through its native test target.
+
 The same fixture also runs native `rsi-application` Shell scenarios: ordinary
 Profile compilation without a Session consumer, inherited domain capabilities,
 independent surface Local identities, dropped open/Surface cleanup, cancellation

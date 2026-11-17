@@ -46,8 +46,10 @@ async fn fixture() -> (tempfile::TempDir, Runtime, ServiceHostPaths) {
     let directory = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         directory.path().join("config"),
+        directory.path().join("data"),
         directory.path().join("state"),
         directory.path().join("cache"),
+        directory.path().join("tmp"),
     )
     .unwrap();
     let paths =

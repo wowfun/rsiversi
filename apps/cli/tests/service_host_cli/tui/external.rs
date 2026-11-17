@@ -5,8 +5,13 @@ async fn external_tui_permissions_detach_cancel_and_reap_with_or_without_native_
     for configured in [true, false] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
         if !configured {
-            std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json"))
-                .unwrap();
+            std::fs::remove_file(
+                fixture
+                    .temporary
+                    .path()
+                    .join("config/rsiversi/settings.json"),
+            )
+            .unwrap();
         }
         configure(&fixture);
         let mut terminal = TerminalClient::start(&fixture, &[]);
@@ -83,13 +88,13 @@ fn configure(fixture: &CliFixture) {
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/rsi/acp/agent.py")
         .canonicalize()
         .unwrap();
     let secret = serde_json::json!({"kind":"literal","value":"private-fixture-secret"});
-    let config = serde_json::json!({"directory":fixture.temporary.path().join("state/rsi/acp"),"endpoints":[{"id":"fixture-external","enabled":true,"cwd":fixture.workspace,"sandbox":"danger-full-access","launch":{"program":"/usr/bin/python3","arguments":["-u",script,fixture.workspace,"normal"],"environment":{"FIXTURE_SECRET":secret}},"mcp_servers":[{"name":"private","launch":{"program":"/usr/bin/python3","environment":{"MCP_SECRET":secret}}}]}]});
+    let config = serde_json::json!({"directory":fixture.temporary.path().join("state/rsiversi/acp"),"endpoints":[{"id":"fixture-external","enabled":true,"cwd":fixture.workspace,"sandbox":"danger-full-access","launch":{"program":"/usr/bin/python3","arguments":["-u",script,fixture.workspace,"normal"],"environment":{"FIXTURE_SECRET":secret}},"mcp_servers":[{"name":"private","launch":{"program":"/usr/bin/python3","environment":{"MCP_SECRET":secret}}}]}]});
     let mut document: toml::Value =
         toml::from_str(&std::fs::read_to_string(&profile).unwrap()).unwrap();
     document["steps"].as_array_mut().unwrap().push(

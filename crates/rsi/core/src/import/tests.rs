@@ -1,5 +1,50 @@
 use super::*;
 
+#[test]
+fn nested_homes_are_allowed_when_managed_entries_do_not_overlap() {
+    let fixture = Fixture::new();
+    let nested = |parent: &Path| {
+        HostPaths::new(
+            parent.join("config"),
+            parent.join("data"),
+            parent.join("state"),
+            parent.join("cache"),
+            parent.join("tmp"),
+        )
+        .unwrap()
+    };
+    let destination = nested(&fixture.source.config().join("independent"));
+    import_product_homes(&destination, &fixture.source, true).unwrap();
+    assert!(!destination.config().exists());
+    import_product_homes(&destination, &fixture.source, false).unwrap();
+    assert_eq!(
+        std::fs::read(destination.config().join("skills/tool")).unwrap(),
+        b"new"
+    );
+    let overlapping = nested(&fixture.source.config().join("skills"));
+    assert!(
+        import_product_homes(&overlapping, &fixture.source, true)
+            .unwrap_err()
+            .to_string()
+            .contains("managed entries overlap")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn import_targets_fold_the_complete_managed_path() {
+    let fixture = Fixture::new();
+    let nested = fixture.source.config().join("aGeNtS.Md/data");
+    let nested = fs::resolve_absolute_root_alias(&nested, true).unwrap();
+    let nested = PathBuf::from(nested.to_string_lossy().to_lowercase());
+    assert!(
+        import_targets(&fixture.source)
+            .unwrap()
+            .iter()
+            .any(|target| nested.starts_with(target))
+    );
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     source: HostPaths,
@@ -15,9 +60,18 @@ impl Fixture {
             let directory = root.path().join(name);
             let config = directory.join("config");
             let state = directory.join("state");
+            rsi_files_native_fs::create_absolute_directory_no_follow(&directory.join("data"))
+                .unwrap();
             rsi_files_native_fs::create_absolute_directory_no_follow(&config).unwrap();
             rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
-            HostPaths::new(config, state, directory.join("cache")).unwrap()
+            HostPaths::new(
+                &config,
+                directory.join("data"),
+                &state,
+                directory.join("cache"),
+                directory.join("tmp"),
+            )
+            .unwrap()
         };
         let source = paths("source");
         let destination = paths("destination");
@@ -29,6 +83,7 @@ impl Fixture {
                 ),
                 (paths.config().join("skills/tool"), value.to_owned()),
                 (paths.state().join("automation/fixture"), value.to_owned()),
+                (paths.data().join("media/fixture"), value.to_owned()),
                 (paths.state().join("unrelated"), value.to_owned()),
             ] {
                 let parent = rsi_files_native_fs::create_absolute_directory_no_follow(
@@ -68,6 +123,10 @@ impl Fixture {
             std::fs::read(self.destination.state().join("automation/fixture")).unwrap(),
             b"new"
         );
+        assert_eq!(
+            std::fs::read(self.destination.data().join("media/fixture")).unwrap(),
+            b"new"
+        );
         LaunchConfiguration::load(self.destination.config(), true).unwrap();
         reject_pending_import(&self.destination).unwrap();
         self.preserved();
@@ -79,21 +138,21 @@ fn explicit_import_dry_run_then_publishes_and_keeps_backups() {
     let fixture = Fixture::new();
     let dry_run = import_product_homes(&fixture.destination, &fixture.source, true).unwrap();
     assert!(dry_run.transaction.is_none());
-    assert_eq!(dry_run.entries.len(), 3);
+    assert_eq!(dry_run.entries.len(), 4);
     assert_eq!(
         std::fs::read(fixture.destination.config().join("skills/tool")).unwrap(),
         b"old"
     );
     assert!(!fixture.destination.config().join("rsi.toml").exists());
     let receipt = import_product_homes(&fixture.destination, &fixture.source, false).unwrap();
-    assert_eq!(receipt.backups.len(), 3);
+    assert_eq!(receipt.backups.len(), 4);
     assert!(receipt.backups.iter().all(|path| path.exists()));
     fixture.published();
 }
 
 #[test]
 fn recovery_settles_each_cross_home_rename_without_source_availability() {
-    for stop in 1..=6 {
+    for stop in 1..=8 {
         let fixture = Fixture::new();
         let result = import_with_checkpoint(&fixture.destination, &fixture.source, false, |step| {
             if step == stop {
@@ -107,7 +166,7 @@ fn recovery_settles_each_cross_home_rename_without_source_availability() {
         let source_parent = fixture.source.config().parent().unwrap();
         std::fs::rename(source_parent, source_parent.with_file_name("unavailable")).unwrap();
         let receipt = recover_product_import(&fixture.destination).unwrap();
-        assert_eq!(receipt.backups.len(), 3);
+        assert_eq!(receipt.backups.len(), 4);
         assert_eq!(
             std::fs::read(fixture.destination.config().join("skills/tool")).unwrap(),
             b"new"
@@ -191,12 +250,13 @@ fn recovery_discards_partial_preparation_without_touching_payloads() {
     let fixture = Fixture::new();
     let homes = Homes::open(&fixture.destination).unwrap();
     let journal = Journal {
-        format: 1,
+        format: 2,
         id: "a".repeat(32),
         config: canonical(fixture.destination.config()).unwrap(),
+        data: canonical(fixture.destination.data()).unwrap(),
         state: canonical(fixture.destination.state()).unwrap(),
         entries: vec![Entry {
-            config: true,
+            home: HomeKind::Config,
             name: "skills".into(),
             old: Some("b".repeat(64)),
             new: "c".repeat(64),
@@ -245,8 +305,10 @@ fn dry_run_creates_no_authorities_or_missing_destination_homes() {
     let fixture = Fixture::new();
     let destination = HostPaths::new(
         fixture.root.path().join("absent/config"),
+        fixture.root.path().join("absent/data"),
         fixture.root.path().join("absent/state"),
         fixture.root.path().join("absent/cache"),
+        fixture.root.path().join("absent/tmp"),
     )
     .unwrap();
     #[cfg(windows)]
@@ -255,9 +317,21 @@ fn dry_run_creates_no_authorities_or_missing_destination_homes() {
         .verify_private()
         .is_ok();
     let receipt = import_product_homes(&destination, &fixture.source, true).unwrap();
-    assert_eq!(receipt.entries.len(), 3);
+    assert_eq!(
+        receipt.entries.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            destination.config().join("settings.json"),
+            destination.config().join("skills"),
+            destination.data().join("media"),
+            destination.state().join("automation"),
+        ])
+    );
     assert!(!fixture.root.path().join("absent").exists());
-    for path in [fixture.source.config(), fixture.source.state()] {
+    for path in [
+        fixture.source.config(),
+        fixture.source.data(),
+        fixture.source.state(),
+    ] {
         assert!(!path.join("session-host").exists());
         assert!(!path.join(".rsi-namespace-pin").exists());
     }

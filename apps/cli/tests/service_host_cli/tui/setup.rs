@@ -34,7 +34,7 @@ async fn plugins_exa_credential_is_masked_independent_and_preserves_the_composer
     let path = fixture
         .temporary
         .path()
-        .join("config/rsi/credentials/credentials.json");
+        .join("data/rsiversi/credentials/credentials.json");
     let store = rsi_credentials_local::FileSecretStore::new(path);
     let reference = rsi_credentials_protocol::CredentialRef::new("rsi.retrieval", "exa").unwrap();
     assert_eq!(store.get(&reference).unwrap().unwrap().expose_secret(), key);
@@ -59,7 +59,7 @@ async fn plugins_exa_credential_is_masked_independent_and_preserves_the_composer
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
-    let root = fixture.temporary.path().join("state/rsi/agent");
+    let root = fixture.temporary.path().join("state/rsiversi/agent");
     drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
     let path = root.join("sessions.sqlite3");
     let version = rsi_agent_store_protocol::AGENT_STORE_SCHEMA_VERSION;
@@ -88,7 +88,7 @@ async fn incompatible_agent_store_reports_schema_and_preserves_existing_bytes() 
 async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
     for launcher in [&["tui"][..], &["run", "tui"][..]] {
         let fixture = CliFixture::new("http://127.0.0.1:1");
-        let root = fixture.temporary.path().join("state/rsi/agent");
+        let root = fixture.temporary.path().join("state/rsiversi/agent");
         drop(rsi_agent_store_sqlite::SqliteStore::open(&root).unwrap());
         let db = rusqlite::Connection::open(root.join("sessions.sqlite3")).unwrap();
         db.pragma_update(None, "user_version", 42).unwrap();
@@ -121,7 +121,13 @@ async fn reset_state_tui_archives_old_schema_for_both_launcher_forms() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unavailable_credential_store_retry_does_not_add_a_navigation_step() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
-    std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
+    std::fs::remove_file(
+        fixture
+            .temporary
+            .path()
+            .join("config/rsiversi/settings.json"),
+    )
+    .unwrap();
     let bus = format!(
         "unix:path={}",
         fixture.temporary.path().join("absent-bus").display()
@@ -136,7 +142,7 @@ async fn unavailable_credential_store_retry_does_not_add_a_navigation_step() {
     let credential_path = fixture
         .temporary
         .path()
-        .join("config/rsi/credentials/credentials.json");
+        .join("data/rsiversi/credentials/credentials.json");
     rsi_credentials_local::FileSecretStore::new(&credential_path)
         .set(
             &rsi_credentials_protocol::CredentialRef::new("fixture", "unused").unwrap(),
@@ -177,7 +183,10 @@ async fn empty_configuration_is_interactive_through_both_tui_entries() {
         let fixture = CliFixture::new("http://127.0.0.1:1");
         if missing_route {
             std::fs::write(
-                fixture.temporary.path().join("config/rsi/settings.json"),
+                fixture
+                    .temporary
+                    .path()
+                    .join("config/rsiversi/settings.json"),
                 serde_json::to_vec(&serde_json::json!({
                     "rsi.agent": {
                         "default_model": {"deployment": "fixture", "model": "missing-model"}
@@ -187,8 +196,13 @@ async fn empty_configuration_is_interactive_through_both_tui_entries() {
             )
             .unwrap();
         } else {
-            std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json"))
-                .unwrap();
+            std::fs::remove_file(
+                fixture
+                    .temporary
+                    .path()
+                    .join("config/rsiversi/settings.json"),
+            )
+            .unwrap();
         }
         let mut terminal = TerminalClient::launch(&fixture, &[], entry);
         terminal.until("No session attached").await;
@@ -258,7 +272,13 @@ async fn login_discovery_default_first_message_and_restart_local_and_daemon() {
             axum::serve(listener, router).await.unwrap();
         });
         let fixture = CliFixture::new(&endpoint);
-        std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
+        std::fs::remove_file(
+            fixture
+                .temporary
+                .path()
+                .join("config/rsiversi/settings.json"),
+        )
+        .unwrap();
         if remote {
             fixture.assert_success(&["host", "start"]);
         }
@@ -293,12 +313,18 @@ async fn login_discovery_default_first_message_and_restart_local_and_daemon() {
             fixture
                 .temporary
                 .path()
-                .join("config/rsi/credentials/credentials.json")
+                .join("data/rsiversi/credentials/credentials.json")
                 .is_file()
         );
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
         let settings: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(fixture.temporary.path().join("config/rsi/settings.json")).unwrap(),
+            &std::fs::read(
+                fixture
+                    .temporary
+                    .path()
+                    .join("config/rsiversi/settings.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -337,7 +363,13 @@ async fn login_discovery_default_first_message_and_restart_local_and_daemon() {
         if remote {
             fixture.assert_success(&["host", "stop"]);
         }
-        std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
+        std::fs::remove_file(
+            fixture
+                .temporary
+                .path()
+                .join("config/rsiversi/settings.json"),
+        )
+        .unwrap();
         let mut resumed =
             TerminalClient::launch(&fixture, &["--resume", "setup-session"], &["tui"]);
         resumed.until("first setup message").await;
@@ -389,9 +421,11 @@ async fn injected_credentials_tui_child() {
         return;
     };
     let paths = rsi_host::HostPaths::new(
-        std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap()).join("rsi"),
-        std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap()).join("rsi"),
-        std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap()).join("rsi"),
+        std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap()).join("rsiversi"),
+        std::path::PathBuf::from(std::env::var_os("XDG_DATA_HOME").unwrap()).join("rsiversi"),
+        std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap()).join("rsiversi"),
+        std::path::PathBuf::from(std::env::var_os("XDG_CACHE_HOME").unwrap()).join("rsiversi"),
+        std::env::temp_dir(),
     )
     .unwrap();
     let store = Arc::new(TestSecrets::default());
@@ -479,7 +513,13 @@ async fn masked_key_and_manual_limits_complete_setup_with_injected_store() {
             axum::serve(listener, router).await.unwrap();
         });
         let mut fixture = CliFixture::new(&endpoint);
-        std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
+        std::fs::remove_file(
+            fixture
+                .temporary
+                .path()
+                .join("config/rsiversi/settings.json"),
+        )
+        .unwrap();
         fixture.binary = std::env::current_exe().unwrap();
         let mut terminal = TerminalClient::launch_environment(
             &fixture,
@@ -567,7 +607,13 @@ async fn home_clipboard_helper_timeout_keeps_help_and_exit_usable() {
         "--session-id",
         "clipboard-history",
     ]);
-    std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
+    std::fs::remove_file(
+        fixture
+            .temporary
+            .path()
+            .join("config/rsiversi/settings.json"),
+    )
+    .unwrap();
     fixture.assert_success(&["host", "stop"]);
     let helpers = fixture.temporary.path().join("clipboard-helpers");
     std::fs::create_dir(&helpers).unwrap();

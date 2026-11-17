@@ -17,6 +17,9 @@ temporary file and atomic rename. Supporting platforms also sync the parent
 directory. The persistent lock must be a real regular file and preplaced
 symlinks are rejected before permissions are changed. Unloaded namespaces are
 preserved.
+Pretty encoding admits bytes incrementally before buffer growth and stops at the
+configured document ceiling. Rejection leaves the existing document unchanged;
+compact input size does not imply that its indented output fits.
 Unix document acquisition is nonblocking and admits only an opened regular file
 before reading. FIFOs and other special files are rejected without waiting for
 a writer or stream EOF; existing directory and alias policy is unchanged.

@@ -170,7 +170,7 @@ fn generated_configuration_ignores_hostile_home_and_agent_and_rejects_a_changed_
         .unwrap();
     assert!(fingerprint.status.success());
     assert!(String::from_utf8_lossy(&fingerprint.stdout).contains(&host_key.fingerprint()));
-    let prepared = PreparedSsh::new(&endpoint, &host_key, &identity).unwrap();
+    let prepared = PreparedSsh::new(&endpoint, &host_key, &identity, root).unwrap();
     assert_eq!(
         fs::metadata(prepared.directory())
             .unwrap()
@@ -220,6 +220,7 @@ fn generated_configuration_ignores_hostile_home_and_agent_and_rejects_a_changed_
         &endpoint,
         &SshHostKey::parse(&public(&other)).unwrap(),
         &identity,
+        root,
     )
     .unwrap();
     let forbidden = wrong

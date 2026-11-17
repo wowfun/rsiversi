@@ -25,6 +25,8 @@ pub struct PackageImport {
     pub program: PathBuf,
     /// Invoking workspace used to resolve explicit relative sources.
     pub workspace: PathBuf,
+    /// Explicit absolute parent for a private per-operation scratch directory.
+    pub temporary_root: PathBuf,
     /// Ordered package specifications.
     pub specifications: Vec<String>,
     /// Optional configuration interpreted by the selected importer.
@@ -41,6 +43,7 @@ impl PackageImport {
         rsi_packages::validate_identifier(&self.package).map_err(error)?;
         rsi_packages::validate_identifier(&self.export).map_err(error)?;
         if !self.workspace.is_absolute()
+            || !self.temporary_root.is_absolute()
             || !self.program.is_absolute()
             || self.specifications.is_empty()
             || self.specifications.len() > 128
@@ -217,10 +220,7 @@ async fn prepare_import(
                 .digest
         }
     };
-    let scratch = tempfile::Builder::new()
-        .prefix("rsi-import-")
-        .tempdir()
-        .map_err(error)?;
+    let scratch = import_scratch(&invocation.temporary_root)?;
     let root =
         crate::normalize_launch_path(scratch.path(), &std::env::current_dir().map_err(error)?)?;
     let generation = format!(
@@ -297,6 +297,20 @@ async fn prepare_import(
     }))
 }
 
+fn import_scratch(parent: &Path) -> crate::Result<tempfile::TempDir> {
+    std::fs::create_dir_all(parent).map_err(error)?;
+    let parent =
+        rsi_workspace_protocol::canonical_native_path(parent.canonicalize().map_err(error)?);
+    let scratch = tempfile::Builder::new()
+        .prefix("rsi-import-")
+        .tempdir_in(parent)
+        .map_err(error)?;
+    #[cfg(windows)]
+    let _private = rsi_files_native_fs::set_private_directory_permissions_no_follow(scratch.path())
+        .map_err(error)?;
+    Ok(scratch)
+}
+
 fn imported_sources(
     imported: &Imported,
     stage: &Path,
@@ -324,6 +338,7 @@ fn private_environment(root: &Path) -> crate::Result<BTreeMap<String, String>> {
         ("TEMP", "temporary"),
         ("TMPDIR", "temporary"),
         ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
         ("XDG_CACHE_HOME", "cache"),
         ("XDG_STATE_HOME", "state"),
     ] {
@@ -369,8 +384,14 @@ async fn start_importer(
     resolved: Arc<rsi_packages::ResolvedProcessExtension>,
 ) -> crate::Result<rsi_host::RunningHost> {
     let mut builder = HostBuilder::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
-            .map_err(error)?,
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .map_err(error)?,
     );
     builder
         .register_local_contract::<rsi_process::ProcessContract>()
@@ -424,6 +445,26 @@ async fn start_importer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_scratch_uses_the_selected_parent_and_removes_only_its_children() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("导入 scratch");
+        std::fs::create_dir(&parent).unwrap();
+        let unknown = parent.join("user-owned.txt");
+        std::fs::write(&unknown, b"retain").unwrap();
+        let first = import_scratch(&parent).unwrap();
+        let second = import_scratch(&parent).unwrap();
+        let canonical =
+            rsi_workspace_protocol::canonical_native_path(parent.canonicalize().unwrap());
+        assert_eq!(first.path().parent(), Some(canonical.as_path()));
+        assert_eq!(second.path().parent(), Some(canonical.as_path()));
+        assert_ne!(first.path(), second.path());
+        std::fs::write(first.path().join("partial"), b"scratch").unwrap();
+        drop((first, second));
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 1);
+        assert_eq!(std::fs::read(unknown).unwrap(), b"retain");
+    }
+
     #[tokio::test]
     async fn cancellation_preserves_concurrent_admission_failures() {
         for failure in [

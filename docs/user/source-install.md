@@ -90,7 +90,7 @@ Git Bash delegates to PowerShell. Neither launcher runs the installed `rsi`,
 requires Cargo nor downloads tools. Windows actual removal runs a verified temporary copy of the
 uninstaller; dry-run runs the installed tool in place. Linux runs it directly.
 
-Ordinary uninstall preserves the configuration, state and cache homes, including
+Ordinary uninstall preserves the configuration, data, state and cache homes, including
 shared package and Host runtime copies. `--purge` / `-Purge` removes saved
 credentials, Sessions, generated state, WebView data and caches after displaying
 the affected homes and asking for confirmation. Those homes may also serve other
@@ -99,8 +99,9 @@ installations and development builds. Noninteractive confirmation uses `--yes` /
 Profiles, custom presets and addon sources remain, as do external references and
 unknown files. See the [removal contract](../../crates/rsi/installation/README.md).
 
-Use `--config-home`, `--state-home` and `--cache-home` (PowerShell `-ConfigHome`,
-`-StateHome`, `-CacheHome`) to select final homes without loading configuration.
+Use `--config-home`, `--data-home`, `--state-home`, `--cache-home` and
+`--tmp-home` (PowerShell `-ConfigHome`, `-DataHome`, `-StateHome`, `-CacheHome`,
+`-TmpHome`) to select final homes without loading configuration.
 The eligible Host stops gracefully; embedded Hosts, busy packages and locked
 clients must be closed before retrying. A partial failure retains the uninstall
 tool and reports what remains. Empty coordination anchors intentionally remain.
@@ -228,14 +229,14 @@ For an explicit data transfer, stop both Hosts, then use global options for the
 destination and import options for the old homes:
 
 ```text
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE --dry-run
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import recover
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE --dry-run
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import recover
 ```
 
 The dry run creates no directories or locks and leaves permissions unchanged.
 It previews the import; the actual operation repeats checks under exclusive leases.
-Import stages owned configuration and state, retains destination backups and
+Import stages owned configuration, credentials, media and state, retains destination backups and
 does not rewrite external paths or translate database schemas. Reinstall optional
 packages separately. An unfinished import blocks ordinary startup until recovery.
 The [launch contract](../../crates/rsi/core/docs/launch.md) defines the admitted

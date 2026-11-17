@@ -9,11 +9,13 @@ const assets = await readFile(new URL('./asset-pressure.js', import.meta.url), '
 const buttonTarget = await readFile(new URL('./button-target.js', import.meta.url), 'utf8');
 const savedInput = await readFile(new URL('./saved-input.js', import.meta.url), 'utf8');
 const drafts = await readFile(new URL('../../../apps/web/drafts.js', import.meta.url), 'utf8');
+const databases = await readFile(new URL('../../../apps/web/draft-databases.js', import.meta.url), 'utf8');
 for (const [name, engine] of Object.entries({chromium, firefox})) {
   test(`${name}: reload waits for the exact committed Session draft`, async () => {
     const server = createServer((request, response) => {
-      response.setHeader('Content-Type', request.url === '/drafts.js' ? 'text/javascript' : 'text/html');
-      response.end(request.url === '/drafts.js' ? drafts : '<textarea aria-label="Main message">saved across document reload</textarea>');
+      const source = {'/drafts.js':drafts,'/draft-databases.js':databases}[request.url];
+      response.setHeader('Content-Type', source === undefined ? 'text/html' : 'text/javascript');
+      response.end(source ?? '<textarea aria-label="Main message">saved across document reload</textarea>');
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     let browser;
@@ -87,7 +89,7 @@ for (const [name, engine] of Object.entries({chromium, firefox})) {
     const browser=await engine.launch({headless:true});
     try {
       const page=await browser.newPage();
-      await page.setContent('<textarea aria-label="Main message" style="outline:2px solid blue"></textarea>');
+      await page.setContent('<div class="composer" style="outline:2px solid blue"><textarea aria-label="Main message" style="outline:none"></textarea></div>');
       await page.evaluate(()=>{
         window.fixtureInputEvents=[];
         document.addEventListener('input',event=>window.fixtureInputEvents.push({length:event.target.value.length,trusted:event.isTrusted}));
@@ -103,7 +105,8 @@ for (const [name, engine] of Object.entries({chromium, firefox})) {
       await page.keyboard.press('ControlOrMeta+A');await page.keyboard.press('Backspace');await page.keyboard.type('next');
       const current=await check(before);
       assert.equal(current.trustedInput,true);assert.equal(current.focused,true);
-      assert.equal(current.focusVisible,true);assert.equal(current.outlineWidth,2);
+      assert.equal(current.focusVisible,true);assert.equal(current.outlineStyle,'none');
+      assert.equal(current.outerOutlineWidth,2);assert.equal(current.outerOutlineStyle,'solid');
     } finally {await browser.close();}
   });
   test(`${name}: only the focused current input admits native typing`, async () => {

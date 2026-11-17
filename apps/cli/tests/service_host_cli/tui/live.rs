@@ -58,11 +58,11 @@ default="off"
         fixture
             .temporary
             .path()
-            .join("config/rsi/host-profiles/fixture/host.profile.toml"),
+            .join("config/rsiversi/host-profiles/fixture/host.profile.toml"),
         profile,
     )
     .unwrap();
-    std::fs::write(fixture.temporary.path().join("config/rsi/settings.json"),serde_json::to_vec(&serde_json::json!({"rsi.agent":{"default_model":model_ref,"default_reasoning_effort":"off"}})).unwrap()).unwrap();
+    std::fs::write(fixture.temporary.path().join("config/rsiversi/settings.json"),serde_json::to_vec(&serde_json::json!({"rsi.agent":{"default_model":model_ref,"default_reasoning_effort":"off"}})).unwrap()).unwrap();
     TerminalClient::write_profile(&fixture, false);
     let mut terminal = TerminalClient::launch_environment(
         &fixture,

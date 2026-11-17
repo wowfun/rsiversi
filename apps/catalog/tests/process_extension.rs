@@ -85,7 +85,7 @@ fn write_preset(
         .collect();
     let mut installed = None;
     let (process_factory, process_config) = if let Some(packages) = packages {
-        let store = rsi_packages::PackageStore::open(&paths.state().join("packages")).unwrap();
+        let store = rsi_packages::PackageStore::open(&paths.data().join("packages")).unwrap();
         let names = ["rsi-dsh-cordis", "rsi-dsh-plugin-bridge"];
         let sources: Vec<_> = names
             .iter()
@@ -149,8 +149,10 @@ async fn activate(packages: Option<PathBuf>, scenario: Scenario) {
     let root = tempfile::tempdir().unwrap();
     let paths = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let installed = write_preset(&paths, packages);

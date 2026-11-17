@@ -10,8 +10,14 @@ async fn model_free_home_reads_automation_and_current_readiness() {
     assert!(seed.is_absolute());
     let runtime: serde_json::Value =
         serde_json::from_slice(&std::fs::read(seed.join("runtime-config.json")).unwrap()).unwrap();
-    std::fs::remove_file(fixture.temporary.path().join("config/rsi/settings.json")).unwrap();
-    std::fs::write(fixture.temporary.path().join("config/rsi/host-profiles/fixture/host.profile.toml"),
+    std::fs::remove_file(
+        fixture
+            .temporary
+            .path()
+            .join("config/rsiversi/settings.json"),
+    )
+    .unwrap();
+    std::fs::write(fixture.temporary.path().join("config/rsiversi/host-profiles/fixture/host.profile.toml"),
         format!("format=1\n[[steps]]\nkind=\"patch\"\ntarget=\"automation\"\nconfig_json={}\n[[steps]]\nkind=\"patch\"\ntarget=\"automation\"\nenabled=true\n",
             serde_json::to_string(&serde_json::json!({"directory":seed,"runtime":runtime}).to_string()).unwrap())).unwrap();
     fixture.assert_success(&["host", "start", "--profile", "fixture"]);

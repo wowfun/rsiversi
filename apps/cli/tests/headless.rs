@@ -90,10 +90,11 @@ fn fixture(endpoint: &str) -> Fixture {
         std::env::temp_dir().canonicalize().unwrap(),
     ))
     .unwrap();
-    let config = temporary.path().join("xdg-config/rsi");
-    let state = temporary.path().join("xdg-state/rsi");
-    let cache = temporary.path().join("xdg-cache/rsi");
+    let config = temporary.path().join("xdg-config/rsiversi");
+    let state = temporary.path().join("xdg-state/rsiversi");
+    let cache = temporary.path().join("xdg-cache/rsiversi");
     let workspace = temporary.path().join("workspace");
+    std::fs::create_dir_all(temporary.path().join("tmp")).unwrap();
     std::fs::create_dir_all(&config).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(
@@ -149,7 +150,14 @@ max_output_reserve_tokens = 16384
     )
     .unwrap();
     Fixture {
-        paths: HostPaths::new(config, state, cache).unwrap(),
+        paths: HostPaths::new(
+            &config,
+            temporary.path().join("xdg-data/rsiversi"),
+            &state,
+            &cache,
+            temporary.path().join("tmp"),
+        )
+        .unwrap(),
         profile,
         workspace,
         temporary,
@@ -220,6 +228,10 @@ fn binary_command(binary: &str, fixture: &Fixture) -> tokio::process::Command {
     command
         .env("HOME", fixture.temporary.path())
         .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+        .env("XDG_DATA_HOME", fixture.paths.data().parent().unwrap())
+        .env("TMPDIR", fixture.paths.tmp())
+        .env("TMP", fixture.paths.tmp())
+        .env("TEMP", fixture.paths.tmp())
         .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
         .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
         .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret");
@@ -1518,6 +1530,13 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
             missing_route.paths.config().parent().unwrap(),
         )
         .env(
+            "XDG_DATA_HOME",
+            missing_route.paths.data().parent().unwrap(),
+        )
+        .env("TMP", missing_route.paths.tmp())
+        .env("TEMP", missing_route.paths.tmp())
+        .env("TMPDIR", missing_route.paths.tmp())
+        .env(
             "XDG_STATE_HOME",
             missing_route.paths.state().parent().unwrap(),
         )
@@ -1546,6 +1565,10 @@ async fn built_binary_uses_fixed_failure_exit_classes() {
         ])
         .env("HOME", fixture.temporary.path())
         .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+        .env("XDG_DATA_HOME", fixture.paths.data().parent().unwrap())
+        .env("TMPDIR", fixture.paths.tmp())
+        .env("TMP", fixture.paths.tmp())
+        .env("TEMP", fixture.paths.tmp())
         .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
         .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
         .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
@@ -1581,6 +1604,10 @@ async fn built_binary_sigint_cancels_flushes_and_exits_130() {
             ])
             .env("HOME", fixture.temporary.path())
             .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+            .env("XDG_DATA_HOME", fixture.paths.data().parent().unwrap())
+            .env("TMPDIR", fixture.paths.tmp())
+            .env("TMP", fixture.paths.tmp())
+            .env("TEMP", fixture.paths.tmp())
             .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
             .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
             .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret"),
@@ -2363,6 +2390,10 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", fixture.temporary.path())
         .env("XDG_CONFIG_HOME", fixture.paths.config().parent().unwrap())
+        .env("XDG_DATA_HOME", fixture.paths.data().parent().unwrap())
+        .env("TMPDIR", fixture.paths.tmp())
+        .env("TMP", fixture.paths.tmp())
+        .env("TEMP", fixture.paths.tmp())
         .env("XDG_STATE_HOME", fixture.paths.state().parent().unwrap())
         .env("XDG_CACHE_HOME", fixture.paths.cache().parent().unwrap())
         .env("XDG_RUNTIME_DIR", fixture.temporary.path().join("runtime"))
@@ -2389,12 +2420,12 @@ async fn verify_undrained_stdout(deltas: Option<usize>, output: &str) {
         let mut chunk = [0; 4096];
         loop {
             let count = stdout.read(&mut chunk).await.unwrap();
-            if count == 0 {
-                panic!(
-                    "stdout closed before streamed model bytes: {}",
-                    child.diagnostic("model output")
-                );
-            }
+            assert_ne!(
+                count,
+                0,
+                "stdout closed before streamed model bytes: {}",
+                child.diagnostic("model output")
+            );
             prefix.extend_from_slice(&chunk[..count]);
             if prefix.windows(marker.len()).any(|bytes| bytes == marker) {
                 break;

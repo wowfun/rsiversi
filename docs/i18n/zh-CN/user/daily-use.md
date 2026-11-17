@@ -40,13 +40,17 @@ rsi run devices -- list
 
 ## 查找数据
 
-Windows 使用标准的用户应用配置、状态和缓存位置下的 `rsi` 目录，
-Linux 使用对应的 XDG 位置。
-显式设置的 `XDG_CONFIG_HOME`、`XDG_STATE_HOME` 和 `XDG_CACHE_HOME` 必须是绝对路径。
-两个平台都会在这些位置下追加 `rsi` 子目录。
-`--config-home`、`--state-home` 和 `--cache-home` 直接选择最终目录，
-不追加 `rsi`；相对路径按调用者工作目录解析。
-恢复历史时要使用同一组位置。备份配置和状态前先停止 Host，并妥善保管凭据。
-不要为修复构建失败而删除这些目录，构建产物位于仓库的 `target` 下。
+运行 `rsi config paths` 可查看最终选中的配置、数据、状态、缓存和临时目录，
+不会创建这些目录。加上 `--legacy` 可报告已知旧凭据路径是否存在，
+不会读取或导入其内容。
 
-精确的路径解析规则由 [Host 路径契约](../../../../crates/rsi/core/README.md)定义。
+所有平台都在对应 XDG 根目录下使用 `rsiversi`，默认位置位于用户主目录内。
+绝对路径形式的 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`
+和 `XDG_CACHE_HOME` 覆盖各自的父目录；空值使用默认位置，相对值被忽略并报告。
+`--config-home`、`--data-home`、`--state-home`、`--cache-home` 和 `--tmp-home`
+直接选择最终路径，不追加目录名；相对命令行路径按调用者工作目录解析。
+备份配置、数据和状态前先停止 Host，并妥善保管凭据。
+旧 `rsi` 目录不会被自动导入或删除。不要为修复构建失败而删除这些目录，
+构建产物位于仓库的 `target` 下。
+
+精确的路径解析规则由 [Host 路径契约](../../../../crates/rsi/core/docs/launch.md)定义。

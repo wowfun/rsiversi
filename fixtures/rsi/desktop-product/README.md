@@ -46,8 +46,9 @@ The ordinary conversation run also records the composer's native focus state,
 trusted input receipt and computed outline before sending, with a focused
 screenshot. Only trusted input events recorded after that fill began can satisfy
 its receipt; an earlier input with the same length cannot. Its forced-colors media
-state is reported without changing system settings. The ordinary composer has no
-inner outline; forced colors requires the visible keyboard outline.
+state is reported without changing system settings. The composer has no inner
+outline; the outer composer carries a visible 2px keyboard outline in ordinary
+and forced colors modes.
 WebKit may retain a computed outline width while its style is `none`; the ordinary
 focus check uses the rendered outline style.
 Replacing input uses native select-all/backspace keystrokes and waits for the
@@ -71,9 +72,8 @@ retain the same field nodes across reads.
 Viewport alignment waits for the requested inner width and the shared paint
 barrier before issuing a native click. Settings closure is observed before
 composer geometry is read; a missing command palette fails without replay.
-Profile receipt recovery waits for the requested root catalog before opening its
-disclosure, then confirms it is open before selecting a receipt; the old leaf
-catalog can remain visible while the asynchronous read changes the layout.
+Profile reopening waits for the requested root catalog before selecting a Profile;
+the old leaf catalog can remain visible while the asynchronous read changes layout.
 The transport probe observes the actual shared Worker with a WebDriver-installed
 postMessage observer. Requests use a disjoint negative-ID namespace; replies and
 frame acknowledgements are real. Deliberately withholding an ACK verifies Worker
@@ -201,7 +201,9 @@ Install `fixtures/rsi/acp` dependencies first; this scenario requires Node.
 
 `--profiles --profile-probe /absolute/profile-leaf-probe` exercises the managed
 Desktop Device principal, single-leaf preparation, reviewed source publication,
-and original receipt recovery through the shared Worker. It requires denied
+and current-source refresh through the shared Worker. It verifies the last change
+result within the live document and rereads the disabled leaf after reopening
+Settings, without treating that observation as a recovered completion receipt. It requires denied
 source changes and no Local grant editor before the fixture's Local API probe
 grants that exact Device, leaf and operation. Build the probe from the same source
 checkout with `cargo build --locked -p rsi-cli --example profile-leaf-probe`, then

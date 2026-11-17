@@ -12,8 +12,10 @@ use tempfile::TempDir;
 fn paths(root: &TempDir) -> ServiceHostPaths {
     let host = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     ServiceHostPaths::from_host_paths_with_runtime(&host, Some(&root.path().join("runtime")))
@@ -221,8 +223,10 @@ fn runtime_identity_is_derived_from_the_standard_state_root() {
     let first = paths(&root);
     let other_host = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("other-state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let second = ServiceHostPaths::from_host_paths_with_runtime(
@@ -239,8 +243,10 @@ fn metadata_discovery_does_not_require_a_bindable_client_runtime_path() {
     let root = TempDir::new().unwrap();
     let host = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let owner_paths =

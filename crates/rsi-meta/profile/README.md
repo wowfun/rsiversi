@@ -58,6 +58,8 @@ patch rules and rebuild budgets as native files. The complete retained bundle
 also obeys document, source-count and aggregate-byte limits, including unused
 documents. Native file opening and watching are excluded from browser builds.
 
+Filesystem environments freeze absolute config, data, state, cache and tmp roots.
+Rhai exposes all five under `paths`; each participates in the source digest.
 Frozen environments may omit filesystem paths. In that case Rhai receives an
 empty `paths` map, and the absence participates in the source digest. Browser
 callers do not supply invented native directories. Immutable bundles install no

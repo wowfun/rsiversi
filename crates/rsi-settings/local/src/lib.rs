@@ -187,18 +187,13 @@ fn read_document(config: &LocalSettingsConfig) -> Result<SettingsDocument> {
         }
         Err(error) => return Err(SettingsError::Io(error.to_string())),
     };
-    let value: Value = serde_json::from_slice(&bytes)
+    let document: SettingsDocument = serde_json::from_slice(&bytes)
         .map_err(|error| SettingsError::Corrupt(error.to_string()))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| SettingsError::Corrupt("document root must be an object".into()))?;
-    let mut document = SettingsDocument::new();
-    for (namespace, section) in object {
+    for (namespace, section) in &document {
         validate_namespace(namespace)
             .map_err(|_| SettingsError::Corrupt("invalid namespace".into()))?;
         validate_section(section)
             .map_err(|_| SettingsError::Corrupt("invalid namespace section".into()))?;
-        document.insert(namespace.clone(), section.clone());
     }
     Ok(document)
 }
@@ -255,15 +250,43 @@ fn read_file_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u
 
 fn write_document(config: &LocalSettingsConfig, document: &SettingsDocument) -> Result<()> {
     config.validate()?;
-    let bytes = serde_json::to_vec_pretty(document)
-        .map_err(|error| SettingsError::Io(error.to_string()))?;
-    if bytes.len() > config.maximum_document_bytes {
-        return Err(SettingsError::InvalidInput(format!(
+    let mut output = DocumentBuffer {
+        bytes: Vec::new(),
+        maximum: config.maximum_document_bytes,
+    };
+    serde_json::to_writer_pretty(&mut output, document).map_err(|_| {
+        SettingsError::InvalidInput(format!(
             "document exceeds {} bytes",
             config.maximum_document_bytes
-        )));
+        ))
+    })?;
+    atomic_write(&config.path, &output.bytes)
+}
+
+struct DocumentBuffer {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+impl Write for DocumentBuffer {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        if input.len() > self.maximum - self.bytes.len() {
+            return Err(std::io::Error::other(
+                "Settings document exceeds its byte ceiling",
+            ));
+        }
+        let needed = self.bytes.len() + input.len();
+        if needed > self.bytes.capacity() {
+            let capacity = needed
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(self.maximum);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
     }
-    atomic_write(&config.path, &bytes)
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -271,6 +294,43 @@ struct FileLock {
     file: File,
     #[cfg(windows)]
     _namespace: rsi_files_native_fs::NamespaceLease,
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    #[test]
+    fn pretty_expansion_stops_before_allocation_and_preserves_the_previous_document() {
+        let mut nested = serde_json::json!("value");
+        for _ in 0..32 {
+            nested = serde_json::json!([nested]);
+        }
+        let document =
+            SettingsDocument::from([("test".into(), serde_json::json!({"items":vec![nested;64]}))]);
+        let maximum = 8192;
+        assert!(serde_json::to_vec(&document).unwrap().len() < maximum);
+        let mut output = DocumentBuffer {
+            bytes: Vec::new(),
+            maximum,
+        };
+        assert!(serde_json::to_writer_pretty(&mut output, &document).is_err());
+        assert!(output.bytes.len() <= maximum);
+        assert!(output.bytes.capacity() <= maximum);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        std::fs::write(&path, b"previous").unwrap();
+        assert!(matches!(
+            write_document(
+                &LocalSettingsConfig {
+                    path: path.clone(),
+                    maximum_document_bytes: maximum
+                },
+                &document
+            ),
+            Err(SettingsError::InvalidInput(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"previous");
+    }
 }
 
 impl Drop for FileLock {

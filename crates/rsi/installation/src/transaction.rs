@@ -23,6 +23,7 @@ struct Journal {
     id: String,
     installation: String,
     config: PathBuf,
+    data: PathBuf,
     state: PathBuf,
     was_running: bool,
     participants: Vec<Participant>,
@@ -72,10 +73,11 @@ impl Transaction {
             return Err(error("finish pending installation/removal first"));
         }
         let journal = Journal {
-            format: 2,
+            format: 4,
             id: fs::id()?,
             installation: record.id.clone(),
             config: std::fs::canonicalize(paths.config())?,
+            data: std::fs::canonicalize(paths.data())?,
             state: std::fs::canonicalize(paths.state())?,
             was_running,
             participants: vec![],
@@ -177,9 +179,10 @@ impl Transaction {
         let journal: Journal = serde_json::from_slice(&bytes).map_err(error)?;
         validate(&journal)?;
         if journal.config != std::fs::canonicalize(paths.config())?
+            || journal.data != std::fs::canonicalize(paths.data())?
             || journal.state != std::fs::canonicalize(paths.state())?
         {
-            return Err(error("recovery requires original config/state homes"));
+            return Err(error("recovery requires original config/data/state homes"));
         }
         let transaction = Self {
             layout,
@@ -313,11 +316,12 @@ impl Transaction {
     }
 }
 fn validate(journal: &Journal) -> Result<()> {
-    if journal.format != 2
+    if journal.format != 4
         || !hex(&journal.id, 32)
         || !hex(&journal.installation, 32)
         || journal.participants.len() != 4
         || !journal.config.is_absolute()
+        || !journal.data.is_absolute()
         || !journal.state.is_absolute()
     {
         return Err(error("invalid v2 upgrade journal"));
@@ -351,7 +355,7 @@ fn collection_plan(
         let bytes =
             fs::read(bin, name, fs::DOCUMENT_LIMIT)?.ok_or_else(|| error("receipt disappeared"))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(error)?;
-        if value["format"] == 1 {
+        if value["format"] == 3 {
             plan.extend(
                 crate::legacy::receipt_files(bin, name, &bytes)?
                     .into_iter()

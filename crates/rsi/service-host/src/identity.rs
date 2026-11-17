@@ -2,9 +2,11 @@ use crate::{HostOwnerLease, ServiceOwnerContract};
 use async_trait::async_trait;
 use rsi_api_protocol::{EndpointId, EndpointIdentityContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_storage_domain::{DomainFacility, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{DomainFacility, DomainFacilityContract, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+const STORAGE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +16,7 @@ struct Config {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Durable {
     endpoint: EndpointId,
 }
@@ -84,53 +87,67 @@ async fn load_endpoint(
         ));
     }
     let domain = facility
-        .open(DomainSpec {
-            id: "rsi.service.identity".into(),
-            backend: backend.into(),
-            version: 1,
-            maximum_records: 1,
-            maximum_bytes: 128,
-        })
+        .open(
+            DomainSpec {
+                id: "rsi.service.identity".into(),
+                backend: backend.into(),
+                version: STORAGE_VERSION,
+                maximum_records: 1,
+                maximum_bytes: 128,
+                ..DomainSpec::default()
+            },
+            Schema::default()
+                .global::<Durable>()
+                .map_err(|e| MetaError::Activation(e.to_string()))?,
+        )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
-    let mut snapshot = domain
-        .snapshot()
-        .await
-        .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
-    if snapshot.len() > 1 || snapshot.keys().any(|key| key != "deployment") {
-        return Err(MetaError::Activation(
-            "service identity contains unexpected records".into(),
-        ));
-    }
-    let endpoint = if let Some(value) = snapshot.remove("deployment") {
-        let stored: Durable = serde_json::from_value(value)
-            .map_err(|_| MetaError::Activation("service identity is malformed".into()))?;
-        if pinned
-            .as_ref()
-            .is_some_and(|(_, expected)| expected != &stored.endpoint)
+    let result = async {
+        let global = domain
+            .global::<Durable>()
+            .map_err(|e| MetaError::Activation(e.to_string()))?;
+        let endpoint = if let Some(stored) = global
+            .get()
+            .map_err(|e| MetaError::Activation(e.to_string()))?
         {
-            return Err(MetaError::Activation(
-                "persisted service identity changed under its active owner".into(),
-            ));
-        }
-        stored.endpoint
-    } else {
-        let endpoint = match pinned.as_ref() {
-            Some((_, endpoint)) => endpoint.clone(),
-            None => {
-                EndpointId::generate().map_err(|error| MetaError::Activation(error.to_string()))?
+            if pinned
+                .as_ref()
+                .is_some_and(|(_, expected)| expected != &stored.endpoint)
+            {
+                return Err(MetaError::Activation(
+                    "persisted service identity changed under its active owner".into(),
+                ));
             }
+            stored.endpoint.clone()
+        } else {
+            let endpoint = match pinned.as_ref() {
+                Some((_, endpoint)) => endpoint.clone(),
+                None => EndpointId::generate()
+                    .map_err(|error| MetaError::Activation(error.to_string()))?,
+            };
+            global
+                .set(Durable {
+                    endpoint: endpoint.clone(),
+                })
+                .await
+                .map_err(|e| MetaError::Activation(e.to_string()))?;
+            endpoint
         };
-        let value = serde_json::to_value(Durable {
-            endpoint: endpoint.clone(),
-        })
-        .map_err(|error| MetaError::Activation(error.to_string()))?;
-        domain
-            .put("deployment", value)
-            .await
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
-        endpoint
-    };
-    *pinned = Some((backend.into(), endpoint.clone()));
-    Ok(endpoint)
+        *pinned = Some((backend.into(), endpoint.clone()));
+        Ok(endpoint)
+    }
+    .await;
+    domain.close().await;
+    result
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence,
+    Durable,
+    STORAGE_VERSION,
+    format!("tests/fixtures/persistence/global-v{STORAGE_VERSION}.json"),
+    vec![Durable {
+        endpoint: EndpointId::from_bytes([7; 16]),
+    }]
+);

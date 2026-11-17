@@ -44,7 +44,10 @@ An immutable managed publication starts its resident Host from the original
 executable and holds its generation lease through readiness; the child then
 retains its own lease through shutdown. Ordinary build outputs are first copied
 to the private content-addressed Host runtime so the resident process does not
-lock Cargo output. Managed executables must never be copied away from their
+lock Cargo output. Publication hashes the source, then hashes bytes as they are
+copied into its private staging file and rejects a changed source before
+publication. Existing cached executables are verified when reused.
+Managed executables must never be copied away from their
 publication marker and lease for daemon startup. After readiness, both startup
 paths collect recognized obsolete private Host artifacts while retaining the
 startup coordinator. Managed generation pinning is independent of that private

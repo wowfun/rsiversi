@@ -55,19 +55,30 @@ impl PreparedSsh {
         endpoint: &SshEndpoint,
         host_key: &SshHostKey,
         identity: &[u8],
+        temporary_root: &Path,
     ) -> Result<Self> {
         if identity.is_empty() || identity.len() > 64 * 1024 {
             return Err(SshClientError::Invalid);
         }
-        let directory = private_directory()?;
+        let directory = private_directory(temporary_root)?;
         let path = directory.path().join("identity");
         write_private(&path, identity)?;
         Self::in_directory(directory, endpoint, host_key, &path)
     }
     /// Creates private generated inputs from a trusted endpoint, pinned public key and identity.
     /// Authorization and trust confirmation must precede this call in the product owner.
-    pub fn new(endpoint: &SshEndpoint, host_key: &SshHostKey, identity: &Path) -> Result<Self> {
-        Self::in_directory(private_directory()?, endpoint, host_key, identity)
+    pub fn new(
+        endpoint: &SshEndpoint,
+        host_key: &SshHostKey,
+        identity: &Path,
+        temporary_root: &Path,
+    ) -> Result<Self> {
+        Self::in_directory(
+            private_directory(temporary_root)?,
+            endpoint,
+            host_key,
+            identity,
+        )
     }
     fn in_directory(
         directory: tempfile::TempDir,
@@ -131,10 +142,14 @@ impl PreparedSsh {
     }
 }
 
-fn private_directory() -> Result<tempfile::TempDir> {
+fn private_directory(temporary_root: &Path) -> Result<tempfile::TempDir> {
     if !cfg!(target_os = "linux") {
         return Err(SshClientError::Unsupported);
     }
+    if !temporary_root.is_absolute() {
+        return Err(SshClientError::Invalid);
+    }
+    std::fs::create_dir_all(temporary_root).map_err(|_| SshClientError::Io)?;
     let mut builder = tempfile::Builder::new();
     builder.prefix("rsi-ssh-");
     #[cfg(unix)]
@@ -142,7 +157,9 @@ fn private_directory() -> Result<tempfile::TempDir> {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
-    builder.tempdir().map_err(|_| SshClientError::Io)
+    builder
+        .tempdir_in(temporary_root)
+        .map_err(|_| SshClientError::Io)
 }
 
 const FIXED_POLICY: &str = "    BatchMode yes\n    StrictHostKeyChecking yes\n    CheckHostIP no\n    UpdateHostKeys no\n    VerifyHostKeyDNS no\n    IdentityAgent none\n    CertificateFile none\n    PKCS11Provider none\n    IdentitiesOnly yes\n    ForwardAgent no\n    ForwardX11 no\n    ClearAllForwardings yes\n    ExitOnForwardFailure yes\n    ControlMaster no\n    ControlPath none\n    ControlPersist no\n    ProxyCommand none\n    ProxyJump none\n    PermitLocalCommand no\n    LocalCommand none\n    CanonicalizeHostname no\n    RequestTTY no\n    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n    GSSAPIAuthentication no\n    HostbasedAuthentication no\n    PreferredAuthentications publickey\n    PubkeyAuthentication yes\n    NumberOfPasswordPrompts 0\n    ConnectionAttempts 1\n    ConnectTimeout 10\n    ServerAliveInterval 5\n    ServerAliveCountMax 2\n    LogLevel ERROR\n";
@@ -184,7 +201,10 @@ mod tests {
         .unwrap();
         let endpoint = SshEndpoint::new("127.0.0.1", 22, "fixture").unwrap();
         let mut bytes = b"fixture-private-key".to_vec();
-        let prepared = PreparedSsh::with_identity(&endpoint, &key, &bytes).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("selected-scratch");
+        let prepared = PreparedSsh::with_identity(&endpoint, &key, &bytes, &scratch).unwrap();
+        assert_eq!(prepared.directory().parent(), Some(scratch.as_path()));
         let path = prepared.directory().join("identity");
         bytes.fill(0);
         assert_eq!(std::fs::read(&path).unwrap(), b"fixture-private-key");
@@ -197,7 +217,9 @@ mod tests {
         assert!(!format!("{prepared:?}").contains("fixture-private-key"));
         drop(prepared);
         assert!(!path.exists());
-        assert!(PreparedSsh::with_identity(&endpoint, &key, &vec![0; 64 * 1024 + 1]).is_err());
+        assert!(
+            PreparedSsh::with_identity(&endpoint, &key, &vec![0; 64 * 1024 + 1], &scratch).is_err()
+        );
     }
     #[test]
     fn path_quoting_is_literal_and_rejects_ssh_expansions() {

@@ -6,7 +6,7 @@ async fn desktop_origin_survives_window_and_host_restart_and_rejects_invalid_ide
     let fixture = CliFixture::new("http://127.0.0.1:9");
     install_web(&fixture);
     fixture.assert_success(&["host", "start"]);
-    let state = fixture.temporary.path().join("state/rsi");
+    let state = fixture.temporary.path().join("state/rsiversi");
     let owner = || -> rsi_service_host::HostOwnerMetadata {
         serde_json::from_slice(&std::fs::read(state.join("session-host/owner.json")).unwrap())
             .unwrap()

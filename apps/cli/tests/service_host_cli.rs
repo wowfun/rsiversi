@@ -232,7 +232,7 @@ async fn host_profile_preview_of_the_running_artifact_matches_the_daemon_launch_
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/session-host/owner.json"),
+                .join("state/rsiversi/session-host/owner.json"),
         )
         .unwrap(),
     )
@@ -288,7 +288,7 @@ fn host_start_rejects_a_symlinked_owner_directory_without_chmod_of_its_target() 
     let target = fixture.temporary.path().join("unrelated");
     std::fs::create_dir(&target).unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let state = fixture.temporary.path().join("state/rsi");
+    let state = fixture.temporary.path().join("state/rsiversi");
     std::fs::create_dir_all(&state).unwrap();
     symlink(&target, state.join("session-host")).unwrap();
     let output = fixture.run(&["host", "start", "--profile", "fixture"]);
@@ -880,7 +880,7 @@ async fn profile_edit_cli_reviews_exact_source_and_commits_without_starting_host
     let root = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let before = std::fs::read(&root).unwrap();
     std::fs::write(&source, "format = 1\n# reviewed\n").unwrap();
     let preview = fixture.assert_success(&[
@@ -948,7 +948,7 @@ async fn profile_edit_cli_repairs_application_and_rejects_changed_proposals() {
     let root = fixture
         .temporary
         .path()
-        .join("config/rsi/application-profiles/test-headless/application.profile.toml");
+        .join("config/rsiversi/application-profiles/test-headless/application.profile.toml");
     std::fs::write(&root, "config = 'unfinished-secret").unwrap();
     std::fs::write(&source, "format = 1\n").unwrap();
     let preview = fixture.assert_success(&[
@@ -993,7 +993,7 @@ async fn profile_edit_cli_repairs_application_and_rejects_changed_proposals() {
         !fixture
             .temporary
             .path()
-            .join("cache/rsi/agent-presets")
+            .join("cache/rsiversi/agent-presets")
             .exists()
     );
 }

@@ -39,8 +39,11 @@ Manual Web terminals use native PowerShell through ConPTY with the current user'
 OS permissions. The terminal footer shows this access; Agent permissions are
 unchanged. Interactive input, resize and process-tree cleanup are supported.
 
-Linux SSH targets, Browser/Automation,
-completed process output cache and MCP Profile management are
+Completed local command output uses the same best-effort Spill cache on Windows
+and Linux. Retained output can expire; use the output card or `output_read` while
+the locator is available.
+
+Linux SSH targets, Browser/Automation and MCP Profile management are
 also outside this Windows release scope. A visible action may return a specific
 unavailable diagnostic. Use Linux/WSL for those supported Linux workflows; do not
 interpret the Windows build as full platform parity.

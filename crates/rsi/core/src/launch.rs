@@ -1,11 +1,12 @@
 //! Bounded product launch inputs, separate from provider-owned Settings.
 
 use crate::{ApplicationProfileId, HostProfileId, RsiError};
+#[cfg(test)]
 use rsi_host::HostPaths;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Authoritative document name inside the selected configuration home.
 pub const LAUNCH_FILE: &str = "rsi.toml";
@@ -22,7 +23,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
         },
         rsi_api_protocol::ProtocolDescriptor {
             name: "rsi.extension.agent".into(),
-            version: 9,
+            version: 10,
         },
         rsi_api_protocol::connection_protocol(),
         rsi_api_device_api::protocol_descriptor(),
@@ -37,7 +38,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
         rsi_media_api::protocol_descriptor(),
         rsi_native_addons_api::protocol_descriptor(),
         rsi_navigation_api::protocol_descriptor(),
-        rsi_process_output_api::protocol_descriptor(),
+        rsi_spill_api::protocol_descriptor(),
         rsi_session_api::protocol_descriptor(),
         rsi_session_files::protocol_descriptor(),
         rsi_settings_api::protocol_descriptor(),
@@ -49,34 +50,7 @@ pub fn product_protocols() -> Vec<rsi_api_protocol::ProtocolDescriptor> {
     ]
 }
 
-/// Explicit final roots; absent entries retain ordinary platform defaults.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HomeOverrides {
-    /// User configuration and credentials home.
-    pub config: Option<PathBuf>,
-    /// Durable product state home.
-    pub state: Option<PathBuf>,
-    /// Rebuildable cache home.
-    pub cache: Option<PathBuf>,
-}
-
-impl HomeOverrides {
-    /// Resolves lexical relative roots without creating directories or loading configuration.
-    pub fn resolve(&self, defaults: &HostPaths, cwd: &Path) -> crate::Result<HostPaths> {
-        if !cwd.is_absolute() {
-            return Err(invalid("invoking directory must be absolute"));
-        }
-        let resolve = |selected: &Option<PathBuf>, fallback: &Path| {
-            normalize_path(selected.as_deref().unwrap_or(fallback), cwd)
-        };
-        HostPaths::new(
-            resolve(&self.config, defaults.config())?,
-            resolve(&self.state, defaults.state())?,
-            resolve(&self.cache, defaults.cache())?,
-        )
-        .map_err(invalid)
-    }
-}
+pub use rsi_installation::HomeOverrides;
 
 /// A reference to the existing Profile language, never an inline plugin tree.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -384,7 +358,7 @@ fn package_profile(
     export: &str,
     kind: rsi_packages::ExportKind,
 ) -> crate::Result<(std::sync::Arc<rsi_packages::PackageLease>, PathBuf, Vec<u8>)> {
-    let store = rsi_packages::PackageStore::open(&catalog.paths().state().join("packages"))
+    let store = rsi_packages::PackageStore::open(&catalog.paths().data().join("packages"))
         .map_err(invalid)?;
     let lease = std::sync::Arc::new(store.acquire(package).map_err(invalid)?);
     lease
@@ -425,30 +399,7 @@ pub fn normalize_launch_path(path: &Path, cwd: &Path) -> crate::Result<PathBuf> 
 }
 
 fn normalize_path(path: &Path, cwd: &Path) -> crate::Result<PathBuf> {
-    if path.as_os_str().is_empty() {
-        return Err(invalid("home path is empty"));
-    }
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    return Err(invalid("path escapes its filesystem root"));
-                }
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    if !normalized.is_absolute() {
-        return Err(invalid("home path is not absolute"));
-    }
-    Ok(normalized)
+    rsi_installation::normalize_path(path, cwd).map_err(invalid)
 }
 
 fn invalid(error: impl std::fmt::Display) -> RsiError {
@@ -490,8 +441,10 @@ mod tests {
         .unwrap();
         let paths = HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap();
         let input = root.path().join("input");
@@ -524,7 +477,7 @@ mod tests {
                 },
             )]),
         };
-        PackageStore::open(&paths.state().join("packages"))
+        PackageStore::open(&paths.data().join("packages"))
             .unwrap()
             .install(
                 &[InstallSource {
@@ -577,19 +530,31 @@ mod tests {
 
     #[test]
     fn home_overrides_are_final_and_independent() {
-        let root = std::env::temp_dir();
-        let defaults =
-            HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let defaults = HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap();
         let resolved = HomeOverrides {
             config: Some("dev/../configuration".into()),
-            ..Default::default()
+            data: Some(defaults.data().to_owned()),
+            state: Some(defaults.state().to_owned()),
+            cache: Some(defaults.cache().to_owned()),
+            tmp: Some(defaults.tmp().to_owned()),
         }
-        .resolve(&defaults, &root)
+        .resolve(root)
         .unwrap();
         assert_eq!(resolved.config(), root.join("configuration"));
+        assert_eq!(resolved.data(), defaults.data());
         assert_eq!(resolved.state(), defaults.state());
         assert_eq!(resolved.cache(), defaults.cache());
-        assert!(!resolved.config().ends_with("rsi"));
+        assert_eq!(resolved.tmp(), defaults.tmp());
+        assert!(!resolved.config().ends_with("rsiversi"));
     }
 
     #[test]

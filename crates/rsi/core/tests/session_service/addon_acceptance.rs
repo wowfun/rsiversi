@@ -189,8 +189,10 @@ async fn independent_addon_owns_draft_state_policy_generations_and_cold_recovery
     .unwrap();
     std::fs::write(&path, workbench::profile("B")).unwrap();
     let new = create(&running, &fixture, "workbench-new").await;
-    echo(&provider, &new, "new-b", "B").await;
+    // Capture the fresh draft generation before Turn settlement makes this
+    // Session eligible for cold restoration from the separate restoring slot.
     let generation_b = generation(&new).await;
+    echo(&provider, &new, "new-b", "B").await;
     assert_ne!(generation_a, generation_b);
     assert_eq!(generation(&old).await, generation_a);
     assert_eq!(

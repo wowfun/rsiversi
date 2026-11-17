@@ -19,9 +19,11 @@ their source-chain digests; derived coordinates retain the Fact sequence, event
 index and elapsed time.
 The Session API driver captures an inspected dual-watermark cut through its
 durable observation stream before disconnecting. It writes typed logical Facts
-and controls as NDJSON to `state/rsi/session-api-eval-trace.jsonl` in the isolated
+and controls as NDJSON to `state/rsiversi/session-api-eval-trace.jsonl` in the isolated
 home. Python reads that capture, preserving canonical field order; SQLite's
 physical projections and payload references are not canonical Fact evidence.
+Stopped Goal validation captures that trace before checking settlement and reports
+the live driver state and durable Goal state when settlement is incomplete.
 Compaction message positions count final prepared messages, not input claims.
 
 Build its driver with `CARGO_BUILD_JOBS=2 cargo build -p rsi --example

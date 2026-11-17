@@ -2,6 +2,11 @@
 
 The repository is a family of independently usable products. Each product owns its public contract, trust boundary, and verification policy; the root owns only one-way dependency direction and workspace governance.
 
+Repository tooling owns deterministic format-test mechanics in
+[`rsi-persistence-testkit`](../crates/tools/rsi-persistence-testkit/README.md).
+It is a development dependency; format versions, codecs, writer evidence and
+compatibility decisions stay with each persistence owner.
+
 [`rsi-meta`](../crates/rsi-meta/README.md) is the lowest runtime layer. It owns
 one `Runtime -> Context -> Fiber` lifetime graph, direct typed Local contracts,
 and generation-fenced Portable contracts. Native ABI, Profile loading, and
@@ -21,11 +26,15 @@ target narrowing. Domain operations and durable semantics remain
 with their owning product; the API foundation does not import those products.
 
 Base capability families own Storage, Settings, Credentials, Media, Tools,
-Commands, Approval, User Questions, Sandbox, Process, PTY, Shell, Jobs, Apply-Patch, Workspace, Files, Permission Presets, and derived
-projections. Their protocols and deterministic test support are libraries;
+Commands, Approval, User Questions, Sandbox, Process, PTY, Shell, Jobs, Apply-Patch,
+Workspace, and Files. Their protocols and deterministic test support are libraries;
 stateful providers, registries, schedulers, and policy implementations are
 ordinary `rsi-meta` plugins. `rsi-meta` and `rsi-host` do not know those
 products, and `rsi-host` does not select a default implementation.
+The [Spill family](../crates/rsi-spill/README.md) owns best-effort output storage
+and opaque retrieval locators. Process consumes its generic capture sink; Tools
+and Agent own result presentation and Session association. Spill files do not
+enter the durable Media reference graph.
 The [Execution family](../crates/rsi-execution/README.md) owns location coordinates
 and grouping of execution providers; it does not own target grants, SSH transport
 or Session scheduling. The [SSH family](../crates/rsi-ssh/README.md) owns bounded

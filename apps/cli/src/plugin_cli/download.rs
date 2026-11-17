@@ -109,6 +109,7 @@ fn core_repository(
 #[allow(clippy::too_many_lines)] // Resolve and verify the bounded signed closure before its single publication.
 pub(super) async fn install(
     store: &PackageStore,
+    temporary_root: &std::path::Path,
     repository: rsi::LaunchRepository,
     mut names: Vec<String>,
     interfaces: &[rsi_packages::Interface],
@@ -157,10 +158,14 @@ pub(super) async fn install(
     let mut pending: Vec<_> = names.into_iter().map(|name| (name, None)).collect();
     let mut seen = BTreeMap::new();
     let mut sources = Vec::new();
+    std::fs::create_dir_all(temporary_root).map_err(error)?;
     let staging = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
-        std::env::temp_dir().canonicalize().map_err(error)?,
+        temporary_root.canonicalize().map_err(error)?,
     ))
     .map_err(error)?;
+    #[cfg(windows)]
+    let _private = rsi_files_native_fs::set_private_directory_permissions_no_follow(staging.path())
+        .map_err(error)?;
     let mut total = 0_u64;
     while let Some((name, required)) = pending.pop() {
         let selection = index
@@ -326,6 +331,7 @@ mod tests {
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
         let first = install(
             &store,
+            home.path(),
             repository.clone(),
             vec!["desktop".into()],
             &[],
@@ -338,6 +344,7 @@ mod tests {
         routes.lock().unwrap().remove("/web/package.json");
         let next = install(
             &store,
+            home.path(),
             repository.clone(),
             vec!["desktop".into()],
             &[],
@@ -349,6 +356,7 @@ mod tests {
         assert!(
             install(
                 &store,
+                home.path(),
                 repository,
                 vec!["desktop".into(), "web".into()],
                 &[],
@@ -468,8 +476,10 @@ mod tests {
         ))
         .unwrap();
         let store = PackageStore::open(&home.path().join("packages")).unwrap();
+        let scratch = home.path().join("selected-scratch");
         let first = install(
             &store,
+            &scratch,
             configuration.clone(),
             vec!["fixture".into()],
             &[],
@@ -477,6 +487,12 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(scratch.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&scratch).unwrap().count(),
+            0,
+            "staging must be cleaned after publication"
+        );
         let lease = store.acquire("fixture").unwrap();
         assert_eq!(
             std::fs::read(
@@ -502,6 +518,7 @@ mod tests {
         assert!(
             install(
                 &store,
+                &scratch,
                 configuration.clone(),
                 vec!["fixture".into()],
                 &[],
@@ -518,6 +535,7 @@ mod tests {
             .insert("/repository.json".into(), signed(2));
         let failure = install(
             &store,
+            &scratch,
             configuration.clone(),
             vec!["fixture".into()],
             &[],
@@ -538,6 +556,7 @@ mod tests {
         assert!(
             install(
                 &store,
+                &scratch,
                 configuration,
                 vec!["fixture".into()],
                 &[],

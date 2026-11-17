@@ -9,8 +9,10 @@ fn embedded_metadata_publishes_replaces_and_releases_its_native_owner() {
     let root = tempfile::tempdir().unwrap();
     let host = HostPaths::new(
         root.path().join("config"),
+        root.path().join("data"),
         root.path().join("state"),
         root.path().join("cache"),
+        root.path().join("tmp"),
     )
     .unwrap();
     let paths = ServiceHostPaths::from_host_paths(&host).unwrap();

@@ -170,7 +170,14 @@ max_output_reserve_tokens = 16384
     )
     .unwrap();
     Fixture {
-        paths: HostPaths::new(config, state, cache).unwrap(),
+        paths: HostPaths::new(
+            &config,
+            std::path::Path::new(&cache).with_file_name("data"),
+            &state,
+            &cache,
+            std::path::Path::new(&cache).with_file_name("tmp"),
+        )
+        .unwrap(),
         profile,
         workspace,
         temporary,

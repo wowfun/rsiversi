@@ -1,11 +1,21 @@
 use super::*;
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One native authoring lifecycle verifies selection, loading and Host identity together."
+)]
 async fn authoring_uses_declared_native_selection_without_loading_or_changing_host_identity() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let paths =
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+    let paths = HostPaths::new(
+        root.join("config"),
+        root.join("data"),
+        root.join("state"),
+        root.join("cache"),
+        root.join("tmp"),
+    )
+    .unwrap();
     let composition = rsi::StandardComposition::new(
         paths,
         std::collections::BTreeMap::new(),

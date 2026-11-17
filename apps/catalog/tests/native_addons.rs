@@ -115,7 +115,14 @@ fn tampered_source_object_fails_exact_admission_before_any_native_callback() {
 
 fn composition(root: &Path) -> StandardComposition {
     StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         rsi_app_catalog::metadata(),

@@ -197,8 +197,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let config = home.path().join("config");
         let state = home.path().join("s".repeat(120));
-        let homes =
-            rsi_host::HostPaths::new(config, state.clone(), home.path().join("cache")).unwrap();
+        let homes = rsi_host::HostPaths::new(
+            &config,
+            home.path().join("data"),
+            state.clone(),
+            home.path().join("cache"),
+            home.path().join("tmp"),
+        )
+        .unwrap();
         let paths = ServiceHostPaths::from_host_paths(&homes).unwrap();
         assert!(paths.owner_directory().starts_with(&state));
         assert!(!paths.socket().starts_with(&state));

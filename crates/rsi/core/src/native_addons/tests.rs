@@ -4,8 +4,14 @@ use super::*;
 fn failed_current_selection_cannot_be_bypassed_by_a_saved_catalog() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
-    let paths =
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+    let paths = HostPaths::new(
+        root.join("config"),
+        root.join("data"),
+        root.join("state"),
+        root.join("cache"),
+        root.join("tmp"),
+    )
+    .unwrap();
     let composition = crate::StandardComposition::new(
         paths,
         std::collections::BTreeMap::new(),

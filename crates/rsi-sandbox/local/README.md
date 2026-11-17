@@ -12,7 +12,11 @@ need no persistent lock file. Only a caller-owned directory may receive
 the owner's missing label-setting right; other ownership is not changed.
 
 Both restricted modes own a distinct temporary directory outside the workspace,
-with its own SID. Its TEMP/TMP selection is applied before freezing the execution
+under the optional absolute `temporary_root` (the OS temporary directory when
+omitted). Wrapper staging uses the same parent. Standard product composition
+supplies its frozen tmp home. The DSH-compatible ACL lock namespace continues
+to use the shared OS temporary directory, independently of this scratch setting.
+Each scratch directory has its own SID. Its TEMP/TMP selection is applied before freezing the execution
 environment. The plan retains token and grants through child settlement;
 releasing the final plan schedules blocking temp revocation and removal, owned
 through completion even when its waiter is gone. Workspace grants are retained

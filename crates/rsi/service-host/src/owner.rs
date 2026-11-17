@@ -123,7 +123,7 @@ pub struct HostOwnerMetadata {
     pub mode: HostOwnerMode,
     /// Exact launch identity.
     pub launch_key: String,
-    /// Canonical config/state authority pair; absent in older lifecycle records.
+    /// Canonical config/data/state authority set; absent in older lifecycle records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_authority: Option<String>,
     /// Digest of the currently accepted Service Profile sources.
@@ -396,6 +396,7 @@ pub(crate) fn signal_generation(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceHostPaths {
     config_owner_directory: PathBuf,
+    data_owner_directory: PathBuf,
     owner_directory: PathBuf,
     owner_lock: PathBuf,
     owner_metadata: PathBuf,
@@ -405,12 +406,16 @@ pub struct ServiceHostPaths {
 }
 
 impl ServiceHostPaths {
-    /// Stable authority of the canonical config/state pair, independent of applications.
-    /// Both homes must already exist; callers may acquire the startup coordinator first.
+    /// Stable authority of canonical config/data/state roots, independent of applications.
+    /// Homes must already exist; callers may acquire the startup coordinator first.
     pub fn home_authority(&self) -> Result<String, ServiceHostError> {
         let mut digest = Sha256::new();
-        digest.update(b"rsi.home-authority.v1\0");
-        for directory in [&self.config_owner_directory, &self.owner_directory] {
+        digest.update(b"rsi.home-authority.v2\0");
+        for directory in [
+            &self.config_owner_directory,
+            &self.data_owner_directory,
+            &self.owner_directory,
+        ] {
             let root = directory
                 .parent()
                 .ok_or_else(|| ServiceHostError::Invalid("owner root has no home".into()))?;
@@ -458,6 +463,7 @@ impl ServiceHostPaths {
         ));
         Ok(Self {
             config_owner_directory: paths.config().join(OWNER_DIRECTORY),
+            data_owner_directory: paths.data().join(OWNER_DIRECTORY),
             owner_lock: owner_directory.join(OWNER_LOCK_FILE),
             owner_metadata: owner_directory.join(OWNER_METADATA_FILE),
             owner_log: owner_directory.join(OWNER_LOG_FILE),
@@ -550,7 +556,7 @@ impl ServiceHostPaths {
             && self.home_authority()?.as_str() != authority
         {
             return Err(ServiceHostError::Invalid(
-                "the active Service Host belongs to a different config/state home pair".into(),
+                "the active Service Host belongs to a different config/data/state home set".into(),
             ));
         }
         Ok(())
@@ -643,7 +649,7 @@ pub struct HostOwnerLease {
 }
 
 impl HostOwnerLease {
-    /// Acquires both home authorities in canonical order without waiting.
+    /// Acquires all three home authorities in canonical order without waiting.
     pub fn try_acquire(paths: ServiceHostPaths) -> Result<Self, ServiceHostError> {
         let locks = acquire_home_locks(&paths, OWNER_LOCK_FILE)?;
         Ok(Self {
@@ -701,7 +707,7 @@ pub struct HostStartupLease {
 }
 
 impl HostStartupLease {
-    /// Attempts to coordinate both homes without waiting or opening product configuration.
+    /// Attempts to coordinate all three homes without waiting or opening product configuration.
     pub fn try_acquire(paths: &ServiceHostPaths) -> Result<Self, ServiceHostError> {
         Ok(Self {
             _locks: acquire_home_locks(paths, "startup.lock")?,
@@ -729,7 +735,11 @@ fn acquire_home_locks(
     name: &str,
 ) -> Result<Vec<HomeLock>, ServiceHostError> {
     let mut ordered = std::collections::BTreeMap::new();
-    for directory in [&paths.config_owner_directory, &paths.owner_directory] {
+    for directory in [
+        &paths.config_owner_directory,
+        &paths.data_owner_directory,
+        &paths.owner_directory,
+    ] {
         create_private_directories(directory)?;
         // Canonical identity orders aliases consistently; acquisition still uses the
         // admitted original spelling, including Windows long-name validation.

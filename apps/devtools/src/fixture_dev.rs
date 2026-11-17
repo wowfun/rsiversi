@@ -129,11 +129,20 @@ impl Development {
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
                 .map_err(problem)?;
         }
-        for path in ["home", "config/rsi", "state", "cache", "workspace", "logs"] {
+        for path in [
+            "home",
+            "config/rsiversi",
+            "data",
+            "state",
+            "cache",
+            "tmp",
+            "workspace",
+            "logs",
+        ] {
             std::fs::create_dir_all(directory.join(path)).map_err(problem)?;
         }
         std::fs::write(
-            directory.join("config/rsi/rsi.toml"),
+            directory.join("config/rsiversi/rsi.toml"),
             "format = 1\n[service]\nkind = \"catalog\"\nid = \"dev\"\n",
         )
         .map_err(problem)?;
@@ -171,8 +180,10 @@ impl Development {
         for (name, path) in [
             ("HOME", "home"),
             ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
             ("XDG_STATE_HOME", "state"),
             ("XDG_CACHE_HOME", "cache"),
+            ("TMPDIR", "tmp"),
         ] {
             values.push((name, self.directory.join(path).into_os_string()));
         }
@@ -204,7 +215,7 @@ impl Development {
         let mut profile = json!({"format":1});
         profile["steps"] = Value::Array(steps);
         self.toml(
-            &format!("config/rsi/{role}-profiles/{name}/{role}.profile.toml"),
+            &format!("config/rsiversi/{role}-profiles/{name}/{role}.profile.toml"),
             &profile,
         )
     }
@@ -385,7 +396,7 @@ async fn start(root: PathBuf, options: Options) -> Result<(), String> {
     if !options.prepare
         && dev
             .directory
-            .join("state/rsi/session-host/owner.json")
+            .join("state/rsiversi/session-host/owner.json")
             .is_file()
     {
         // The ordinary application borrows a detached Host. Retire it before
@@ -623,7 +634,7 @@ async fn prepare(
     dev.toml("provider.toml",&json!({"format":2,"scope":"service","id":"dev.provider","plugin":"fixture.native-addon","target":target,"artifact":artifact,"source_root":dev.root}))?;
     dev.addon("provider.toml", "dev.provider", signals).await?;
     dev.write(
-        "config/rsi/settings.json",
+        "config/rsiversi/settings.json",
         serde_json::to_vec(
             &json!({"rsi.agent":{"default_model":{"deployment":"native","model":"native-text"}}}),
         )
@@ -836,7 +847,7 @@ mod tests {
         let options = Options::parse(&["web".into()]).unwrap();
         let dev = Development::create(root.path().into(), &options).unwrap();
         let launch: toml::Value = toml::from_str(
-            &std::fs::read_to_string(dev.directory.join("config/rsi/rsi.toml")).unwrap(),
+            &std::fs::read_to_string(dev.directory.join("config/rsiversi/rsi.toml")).unwrap(),
         )
         .unwrap();
         assert_eq!(launch["service"]["kind"].as_str(), Some("catalog"));

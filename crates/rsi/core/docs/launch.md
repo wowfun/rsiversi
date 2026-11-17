@@ -1,9 +1,17 @@
 # Product launch
 
-The launcher freezes `--config-home DIR`, `--state-home DIR` and `--cache-home DIR`
+The launcher freezes `--config-home DIR`, `--data-home DIR`, `--state-home DIR`,
+`--cache-home DIR` and `--tmp-home DIR`
 before selecting an application. These are final roots; unlike XDG environment
-overrides they do not append `rsi`. Relative command-line roots resolve from the
-invoking directory. Unspecified roots use the ordinary platform defaults.
+overrides they do not append `rsiversi`. Relative command-line roots resolve from
+the invoking directory. On every platform, unset or empty XDG variables select
+the user home's `.config/rsiversi`, `.local/share/rsiversi`, `.local/state/rsiversi`
+and `.cache/rsiversi`. Absolute XDG variables replace the parent and append
+`rsiversi`; relative values are ignored with a diagnostic naming the resulting
+root. Only absent overrides consult defaults; an invalid unused `TMPDIR` cannot
+reject an explicit `--tmp-home`. The scratch parent defaults to the OS temporary directory. Operations
+create private random children there. Service sockets remain in state, with the
+existing short Unix overflow fallback; Windows named pipes are unchanged.
 
 `<config-home>/rsi.toml` is a bounded versioned launch document. It references
 Profiles rather than duplicating their ordered plugin grammar. Document-relative
@@ -12,9 +20,16 @@ the built-in TUI/standard Service configuration; an explicitly selected config
 home requires a document. `config init` creates one without overwriting, and
 `config show`/`validate` never activate plugins.
 
-Settings and Credentials retain their separate providers below config-home.
+Settings remains below config-home; Credentials, packages and media use data-home.
 The launch document is not a Settings backend. Changing one home does not silently
-change any other home; independent environments select both config and state.
+change any other home; isolated environments explicitly select all five roots.
+Homes may share a parent or be nested in independent directories. A managed
+entry may not contain another home: for example, data below state/agent would
+be moved by a state reset. Admission compares the resolved managed targets,
+including cache removal targets and home coordination directories.
+Scratch cannot lie inside a managed deletion target. Disposable cache and state
+subtrees cannot overlap authored configuration, even if their home roots alias.
+There is no automatic import, fallback read or deletion of the old `rsi` namespace.
 The product does not infer a development mode from the executable path.
 Ordinary sessions and Profile previews both capture the caller’s user Home for
 user instruction, agent and skill discovery; explicit product homes do not
@@ -54,7 +69,7 @@ against that Host's frozen inputs. A mismatch produces a categorical warning
 without variable names, values or fingerprints; restart explicitly to adopt new
 environment inputs. Durable Credentials keep their usual precedence.
 
-Package references resolve named Profile exports from `<state-home>/packages`.
+Package references resolve named Profile exports from `<data-home>/packages`.
 Application catalog offers may repeat an identical core interface, but cannot
 claim a different version or schema under the same name.
 The source retains the selected immutable dependency closure for its complete
@@ -86,7 +101,7 @@ data while preserving installed packages and trust metadata. Locks and recovery
 journals remain in place. A live owner must be explicitly restarted or stopped
 before reset; invalid launch configuration cannot prevent maintenance.
 
-Maintenance takes the startup coordinator and both home leases before reading
+Maintenance takes the startup coordinator and all three home leases before reading
 or writing any reset journal. Configuration reset includes `rsi.toml`,
 `settings.json`, `application-profiles` and `host-profiles`. State reset includes
 the standard Agent, Media, ACP and Automation roots and the base SQLite database
@@ -94,8 +109,8 @@ with its WAL/SHM sidecars. Arbitrary files, explicit external Profile sources,
 credentials and installed package/trust stores are outside this allowlist.
 
 Each selected existing entry is renamed to a unique `.reset-<id>-<name>` sibling
-on its own volume. A bounded journal is flushed in both home authorities before
-the first rename. Recovery validates the exact home pair and fixed entry list,
+on its own volume. A bounded journal is flushed in all three home authorities before
+the first rename. Recovery validates the exact home set and fixed entry list,
 then validates every source/backup pair before the first rename and completes
 the recorded operation; ambiguous source/backup pairs fail
 closed. Completion receipts remain in `session-host`. Reset never removes old
@@ -161,7 +176,7 @@ precedes stopping the selected Host. The [installation owner](../../installation
 defines fixed-layout records, transaction versions, installation lease order and
 platform filesystem policy. The
 Host startup coordinator remains held across stop, executable
-promotion and readiness. Executable hashes, final config/state homes and bounded
+promotion and readiness. Executable hashes, final config/data/state homes and bounded
 single-component backup names are recorded before the first rename. The previous
 binary is retained on the same volume. Windows permits renaming the running
 launcher image; the Host already runs from its immutable artifact copy.
@@ -183,27 +198,31 @@ collected. Runtime publication converts OS-canonical local-drive spelling to the
 bounded native path representation before acquiring directory handles. There is
 no background updater.
 
-`rsi import --config-home OLD_CONFIG --state-home OLD_STATE` explicitly copies
-an existing product home pair into the final homes selected by global options.
+`rsi import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE` explicitly copies
+an existing product home set into the final homes selected by global options.
 `--dry-run` checks paths, bounds and configuration syntax, and reports selected
 entry names without creating directories, locks or guards, or changing ACLs.
 It is a read-only preview, not an exclusive snapshot; actual import repeats all
 checks under leases. SQLite verification follows staging in
-the actual import. Both source and destination Hosts must be stopped; their startup and
+the actual import. Both dry-run and actual import refuse a pending reset in either
+home set; finish reset recovery through normal maintenance before importing.
+Both source and destination Hosts must be stopped; their startup and
 home leases remain held through the operation. Source and destination roots
-cannot overlap. The import does not follow links, scan other installations,
+may be nested when their managed entries and coordination directories do not
+overlap. The import does not follow links, scan other installations,
 translate database schemas, or rewrite external Profile/Settings paths.
 
 Configuration admission covers `rsi.toml`, `settings.json`, `application-profiles`,
-`host-profiles`, `agent-presets`, `credentials`, `AGENTS.md`, `agents` and `skills`.
-State admission covers the same owned data roots as reset. Packages, native
+`host-profiles`, `agent-presets`, `AGENTS.md`, `agents` and `skills`.
+Data admission covers `credentials` and `media`; state admission covers the same
+owned state roots as reset. Packages, native
 addon binaries, caches, runtime metadata and arbitrary files are not imported.
 Missing source entries leave their destination counterparts unchanged. A missing
 source launch document produces the default document only if the destination
 also has none. Settings and launch syntax use their owning validators;
 imported Agent Stores must pass the SQLite owner's offline verification.
 
-Before copying, import records a bounded staging intent in both home authorities.
+Before copying, import records a bounded staging intent in all three home authorities.
 An interrupted preparation is fenced from ordinary launches; `rsi import recover`
 discards only its named, incomplete staging trees, without changing destination
 payloads. Synchronous preparation failures perform the same cleanup. Once a final
@@ -217,11 +236,11 @@ Only offline SQLite verification can change staged bytes and therefore replaces
 its staged fingerprint. Settlement validates the whole topology once under the
 home leases before any rename, then carries those classifications through the
 rename-only transaction; every recovery invocation validates fresh bytes.
-An immutable journal of at most 64 KiB is published under both destination home
+An immutable journal of at most 64 KiB is published under all three destination home
 authorities before the first rename. Existing destination bytes are retained as
 `.import-<id>-backup-<entry>` siblings. Recovery never replaces unexpected bytes.
 `rsi import recover` completes a journal using its staged copies and the original
-destination home pair; source availability is no longer needed. Other product
+destination home set; source availability is no longer needed. Other product
 operations refuse pending imports, including reset. Completed receipts and
 backups remain available. Imported files are still validated by their owning
 providers when activated; successful copying does not grant new runtime authority.

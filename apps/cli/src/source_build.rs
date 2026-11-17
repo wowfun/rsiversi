@@ -81,7 +81,7 @@ impl WatchSources {
                     BuildUpdate::Published { .. } => break,
                     BuildUpdate::Failed { .. } => {
                         let store =
-                            rsi_packages::PackageStore::open(&paths.state().join("packages"))
+                            rsi_packages::PackageStore::open(&paths.data().join("packages"))
                                 .map_err(error)?;
                         if store.acquire(&name).is_ok() {
                             break;
@@ -247,7 +247,7 @@ pub(super) fn frontend(
         directory,
         command,
         environment,
-        packages: paths.state().join("packages"),
+        packages: paths.data().join("packages"),
         port: frontend.port,
     }))
 }

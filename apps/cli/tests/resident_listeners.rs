@@ -29,7 +29,7 @@ async fn watch_clients_share_existing_host_and_last_exit_stops_observation() {
     let owner_path = fixture
         .temporary
         .path()
-        .join("state/rsi/session-host/owner.json");
+        .join("state/rsiversi/session-host/owner.json");
     let owner = || -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(&owner_path).unwrap()).unwrap()
     };
@@ -52,7 +52,7 @@ async fn watch_clients_share_existing_host_and_last_exit_stops_observation() {
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let original = std::fs::read_to_string(&profile).unwrap();
     let change = |generation| {
         std::fs::write(&profile, format!("{original}\n# generation {generation}\n")).unwrap();
@@ -282,7 +282,7 @@ async fn ordinary_product_runtime_smoke() {
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/session-host/owner.json"),
+                .join("state/rsiversi/session-host/owner.json"),
         )
         .unwrap(),
     )
@@ -291,7 +291,7 @@ async fn ordinary_product_runtime_smoke() {
         fixture
             .temporary
             .path()
-            .join("config/rsi/host-profiles/fixture/host.profile.toml"),
+            .join("config/rsiversi/host-profiles/fixture/host.profile.toml"),
         "invalid Profile bytes",
     )
     .unwrap();
@@ -336,9 +336,9 @@ async fn ordinary_product_runtime_smoke() {
             .is_ok()
     );
     let launch_configuration =
-        std::fs::read(fixture.temporary.path().join("config/rsi/rsi.toml")).unwrap();
+        std::fs::read(fixture.temporary.path().join("config/rsiversi/rsi.toml")).unwrap();
     std::fs::write(
-        fixture.temporary.path().join("config/rsi/rsi.toml"),
+        fixture.temporary.path().join("config/rsiversi/rsi.toml"),
         "broken = [",
     )
     .unwrap();
@@ -359,7 +359,7 @@ async fn ordinary_product_runtime_smoke() {
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/session-host/owner.json"),
+                .join("state/rsiversi/session-host/owner.json"),
         )
         .unwrap(),
     )
@@ -367,7 +367,7 @@ async fn ordinary_product_runtime_smoke() {
     assert_eq!(owner_before["pid"], owner_after["pid"]);
     assert_eq!(owner_before["host_epoch"], owner_after["host_epoch"]);
     std::fs::write(
-        fixture.temporary.path().join("config/rsi/rsi.toml"),
+        fixture.temporary.path().join("config/rsiversi/rsi.toml"),
         launch_configuration,
     )
     .unwrap();
@@ -393,7 +393,7 @@ async fn installed_renderer_refresh_preserves_listeners_and_bootstrap_changes_re
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/session-host/owner.json"),
+                .join("state/rsiversi/session-host/owner.json"),
         )
         .unwrap(),
     )
@@ -511,7 +511,7 @@ async fn serve_admits_independent_assets_and_connection_loss_retires_only_its_li
     let owner = fixture
         .temporary
         .path()
-        .join("state/rsi/session-host/owner.json");
+        .join("state/rsiversi/session-host/owner.json");
     let identity = std::fs::read(&owner).unwrap();
     let client = reqwest::Client::new();
     let response = client
@@ -556,11 +556,11 @@ async fn failed_first_browser_ticket_releases_listener_and_allows_retry() {
     let owner_path = fixture
         .temporary
         .path()
-        .join("state/rsi/session-host/owner.json");
+        .join("state/rsiversi/session-host/owner.json");
     let owner: rsi_service_host::HostOwnerMetadata =
         serde_json::from_slice(&std::fs::read(owner_path).unwrap()).unwrap();
     let database =
-        rusqlite::Connection::open(fixture.temporary.path().join("state/rsi/base.sqlite3"))
+        rusqlite::Connection::open(fixture.temporary.path().join("state/rsiversi/base.sqlite3"))
             .unwrap();
     database.execute_batch("CREATE TRIGGER fixture_reject_ticket BEFORE INSERT ON rsi_storage_records BEGIN SELECT RAISE(FAIL, 'fixture ticket failure'); END;").unwrap();
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -607,9 +607,11 @@ async fn leased_listener_capacity_preserves_status_and_stop_commands() {
     let fixture = CliFixture::new("http://127.0.0.1:9");
     fixture.assert_success(&["host", "start"]);
     let paths = rsi_host::HostPaths::new(
-        fixture.temporary.path().join("config/rsi"),
-        fixture.temporary.path().join("state/rsi"),
-        fixture.temporary.path().join("cache/rsi"),
+        fixture.temporary.path().join("config/rsiversi"),
+        fixture.temporary.path().join("data/rsiversi"),
+        fixture.temporary.path().join("state/rsiversi"),
+        fixture.temporary.path().join("cache/rsiversi"),
+        fixture.temporary.path().join("tmp"),
     )
     .unwrap();
     let owner = rsi_service_host::ServiceHostPaths::from_host_paths(&paths)

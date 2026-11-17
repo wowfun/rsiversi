@@ -63,7 +63,14 @@ fn paths() -> HostPaths {
     } else {
         "/rsi-host-fixture"
     });
-    HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap()
+    HostPaths::new(
+        root.join("config"),
+        root.join("data"),
+        root.join("state"),
+        root.join("cache"),
+        root.join("tmp"),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -122,7 +129,7 @@ fn catalog_markers_fragments_defines_and_profile_identity_freeze_before_build() 
 #[test]
 fn path_and_collection_bounds_fail_before_runtime_construction() {
     assert!(matches!(
-        HostPaths::new("relative", "/state", "/cache"),
+        HostPaths::new("relative", "/data", "/state", "/cache", "/tmp"),
         Err(HostError::PathNotAbsolute { kind: "config", .. })
     ));
     let limits = HostLimits {

@@ -32,9 +32,9 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
         };
         super::launch::maintain()?;
         let paths = super::launch::paths()?;
-        let store = PackageStore::open(&paths.state().join("packages")).map_err(error)?;
+        let store = PackageStore::open(&paths.data().join("packages")).map_err(error)?;
         let resolution = if command == "importer" {
-            importer::install(std::sync::Arc::new(store), &arguments[2..]).await?
+            importer::install(std::sync::Arc::new(store), &arguments[2..], paths.tmp()).await?
         } else if command == "local" {
             let cwd = std::env::current_dir().map_err(error)?;
             let sources = arguments[2..]
@@ -58,6 +58,7 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
                 download::configured(super::launch::current()?.configuration()?.repository)?;
             download::install(
                 &store,
+                paths.tmp(),
                 repository,
                 names,
                 &rsi_serve::supported_protocols(),
@@ -95,7 +96,7 @@ pub(super) async fn run(arguments: &[OsString]) -> u8 {
 #[cfg(any(target_os = "linux", windows))]
 pub(super) async fn install_core(local: Option<&Path>) -> rsi::Result<rsi_packages::PackageLease> {
     let paths = super::launch::paths()?;
-    let store = PackageStore::open(&paths.state().join("packages")).map_err(error)?;
+    let store = PackageStore::open(&paths.data().join("packages")).map_err(error)?;
     let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     if let Some(local) = local {
         let source = local_source(local, &std::env::current_dir().map_err(error)?)?;
@@ -114,6 +115,7 @@ pub(super) async fn install_core(local: Option<&Path>) -> rsi::Result<rsi_packag
             download::configured_core(super::launch::current()?.configuration()?.repository)?;
         download::install(
             &store,
+            paths.tmp(),
             repository,
             vec!["core".into()],
             &rsi_serve::supported_protocols(),

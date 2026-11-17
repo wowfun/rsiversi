@@ -54,7 +54,7 @@ def configure(root, task, model, provider):
         provider.configure(root)
     # Host ownership retains this lock in the config home. Seed it before
     # freezing every config file so startup and actual config drift stay distinct.
-    owner = root / "config/rsi/session-host"
+    owner = root / "config/rsiversi/session-host"
     owner.mkdir(mode=0o700)
     (owner / "owner.lock").touch(mode=0o600)
     return settings
@@ -236,7 +236,7 @@ def fact_chain(facts):
 
 def canonical_trace(root):
     trace = {"facts": [], "controls": []}
-    with (root / "state/rsi/session-api-eval-trace.jsonl").open(encoding="utf-8") as captured:
+    with (root / "state/rsiversi/session-api-eval-trace.jsonl").open(encoding="utf-8") as captured:
         for line in captured:
             row = json.loads(line)
             if set(row) == {"fact"}:
@@ -466,6 +466,7 @@ def execute_task(task, binary, destination, model, key, provider, report, starte
         env.update(
             {
                 "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_DATA_HOME": str(root / "data"),
                 "XDG_STATE_HOME": str(root / "state"),
                 "XDG_CACHE_HOME": str(root / "cache"),
                 "XDG_RUNTIME_DIR": str(root / "r"),

@@ -23,13 +23,15 @@ impl Fixture {
         let layout = Layout::new(&temporary.path().join("prefix")).unwrap();
         let homes = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let bin = native::create_absolute_directory_no_follow(&layout.bin).unwrap();
         let control = native::create_absolute_directory_no_follow(&layout.control).unwrap();
-        for root in [homes.config(), homes.state(), homes.cache()] {
+        for root in [homes.config(), homes.data(), homes.state(), homes.cache()] {
             native::create_absolute_directory_no_follow(root).unwrap();
         }
         for role in [Role::Core, Role::Uninstaller, Role::Launcher] {
@@ -88,6 +90,38 @@ fn installation_records_bound_input_and_cannot_redirect_targets() {
     let mut json = serde_json::to_value(f.layout.record().unwrap().unwrap()).unwrap();
     json["delete"] = "../../outside".into();
     assert!(Record::parse(&serde_json::to_vec(&json).unwrap(), &f.layout).is_err());
+}
+
+#[tokio::test]
+async fn purge_refuses_scratch_and_authored_overlap_before_installation_mutation() {
+    for authored in [false, true] {
+        let f = Fixture::new();
+        let before = std::fs::read(f.layout.target(Role::Core)).unwrap();
+        let mut options = f.options(true);
+        options.homes = HostPaths::new(
+            f.homes.config(),
+            f.homes.data(),
+            f.homes.state(),
+            if authored {
+                f.homes.config()
+            } else {
+                f.homes.cache()
+            },
+            if authored {
+                f.homes.tmp().to_owned()
+            } else {
+                f.homes.data().join("media")
+            },
+        )
+        .unwrap();
+        let error = uninstall(options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(if authored { "authored" } else { "product home" }),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(f.layout.target(Role::Core)).unwrap(), before);
+        assert_eq!(f.layout.record().unwrap().unwrap().phase, Phase::Installed);
+    }
 }
 
 #[cfg(windows)]
@@ -157,8 +191,13 @@ async fn purge_preserves_authored_content_and_removes_validated_secret_backups()
         "agent-presets",
         "native-addons",
     ] {
-        std::fs::create_dir(f.homes.config().join(name)).unwrap();
-        std::fs::write(f.homes.config().join(name).join("file"), name).unwrap();
+        let home = if name == "credentials" {
+            f.homes.data()
+        } else {
+            f.homes.config()
+        };
+        std::fs::create_dir(home.join(name)).unwrap();
+        std::fs::write(home.join(name).join("file"), name).unwrap();
     }
     for name in ["agent", "desktop-webview"] {
         std::fs::create_dir(f.homes.state().join(name)).unwrap();
@@ -168,19 +207,20 @@ async fn purge_preserves_authored_content_and_removes_validated_secret_backups()
     native::create_absolute_directory_no_follow(&f.homes.state().join("session-host")).unwrap();
     let id = "b".repeat(32);
     let receipt = crate::receipts::ImportJournal {
-        format: 1,
+        format: 2,
         id: id.clone(),
         config: std::fs::canonicalize(f.homes.config()).unwrap(),
+        data: std::fs::canonicalize(f.homes.data()).unwrap(),
         state: std::fs::canonicalize(f.homes.state()).unwrap(),
         entries: vec![
             crate::receipts::ImportEntry {
-                config: true,
+                home: crate::receipts::HomeKind::Data,
                 name: "credentials".into(),
                 old: Some("c".repeat(64)),
                 new: "d".repeat(64),
             },
             crate::receipts::ImportEntry {
-                config: true,
+                home: crate::receipts::HomeKind::Config,
                 name: "skills".into(),
                 old: Some("c".repeat(64)),
                 new: "d".repeat(64),
@@ -197,7 +237,7 @@ async fn purge_preserves_authored_content_and_removes_validated_secret_backups()
     .unwrap();
     let secret = f
         .homes
-        .config()
+        .data()
         .join(format!(".import-{id}-backup-credentials"));
     std::fs::create_dir(&secret).unwrap();
     std::fs::write(secret.join("key"), "secret").unwrap();
@@ -206,7 +246,7 @@ async fn purge_preserves_authored_content_and_removes_validated_secret_backups()
     uninstall(f.options(true)).await.unwrap();
     assert!(!secret.exists());
     assert!(authored.exists());
-    assert!(!f.homes.config().join("credentials").exists());
+    assert!(!f.homes.data().join("credentials").exists());
     for name in [
         "skills",
         "agents",
@@ -365,16 +405,17 @@ async fn purge_recognizes_reset_receipts_using_the_producers_home_spelling() {
     let backup_directory = native::create_absolute_directory_no_follow(&backup).unwrap();
     fs::write(&backup_directory, "session", b"secret", false).unwrap();
     let receipt = crate::receipts::ResetJournal {
-        format: 1,
+        format: 2,
         id: id.clone(),
         config: f.homes.config().into(),
+        data: f.homes.data().into(),
         state: f.homes.state().into(),
         selection: crate::receipts::ResetSelection {
             config: false,
             state: true,
         },
         entries: vec![crate::receipts::ResetEntry {
-            config: false,
+            home: crate::receipts::HomeKind::State,
             name: "agent".into(),
             directory: true,
         }],
@@ -388,10 +429,18 @@ async fn purge_recognizes_reset_receipts_using_the_producers_home_spelling() {
         false,
     )
     .unwrap();
+    fs::write(
+        &receipt_directory,
+        &format!("reset-{id}.complete"),
+        &serde_json::to_vec(&receipt).unwrap(),
+        false,
+    )
+    .unwrap();
     drop((backup_directory, receipt_directory));
     uninstall(f.options(true)).await.unwrap();
     assert!(!backup.exists());
     assert!(!directory.join(format!("reset-{id}.json")).exists());
+    assert!(!directory.join(format!("reset-{id}.complete")).exists());
 }
 
 fn prepare(f: &Fixture, inputs: [&std::path::Path; 3]) -> crate::Result<Transaction> {
@@ -403,6 +452,21 @@ fn prepare(f: &Fixture, inputs: [&std::path::Path; 3]) -> crate::Result<Transact
         &f.homes,
         false,
     )
+}
+
+#[test]
+fn completed_managed_receipts_reject_relative_data_authority() {
+    let f = Fixture::new();
+    let inputs = [f.input("core"), f.input("uninstaller"), f.input("launcher")];
+    let receipt = prepare(&f, [&inputs[0], &inputs[1], &inputs[2]])
+        .unwrap()
+        .finish(false)
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+    value["data"] = "relative".into();
+    std::fs::write(&receipt, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(crate::transaction::preview_collection(&f.layout).is_err());
 }
 #[test]
 fn managed_upgrade_refuses_source_bytes_different_from_the_admitted_package() {

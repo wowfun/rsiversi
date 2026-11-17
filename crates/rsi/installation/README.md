@@ -29,12 +29,14 @@ process, failed stop or path safety check.
 ## Maintenance transactions
 
 Host startup coordination precedes installation leases. Directory leases use
-canonical path order (`bin` before `libexec/rsi` in the fixed layout). Recorded installations use upgrade journal format 2
+canonical path order (`bin` before `libexec/rsi` in the fixed layout). Recorded installations use upgrade journal format 4
 for the executable, uninstaller, launcher and record. Participants are fixed
 roles under the two installation directories. Each rename is same-volume;
 journaling provides recoverable consistency, not a cross-directory atomic rename.
-Recovery validates every participant before restoring old bytes. Legacy journal
-format 1 remains readable and legacy installations retain single-file upgrades.
+Recovery validates every participant before restoring old bytes. Unrecorded installations use format 3 single-file upgrades. Older journal
+formats are refused; they do not bind the current three-root home authority.
+Completed-receipt collection uses the same format 3/4 dispatch and requires
+absolute config, data and state authorities in both receipt shapes.
 Recorded installations reject packages without compatible uninstall artifacts.
 The installation library dispatches journal versions through one upgrade API;
 all formats share the pending filename and empty-file maintenance lease. Protocol
@@ -64,7 +66,7 @@ uses `--yes`. Dry-run creates no directories, locks, guards or PATH changes.
 
 Purge removes saved credentials, sessions, media, automation, databases, WebView
 storage, package/trust state, idle Host artifacts/logs and generated history,
-process-output, workspace-review, native application/addon and system-preset
+spill, workspace-review, native application/addon and system-preset
 caches. It preserves launch/settings documents, AGENTS.md, skills, agents,
 Profiles, custom presets, addon sources, external references and unknown files.
 Valid reset/import receipts authorize removal of data backups; names alone do
@@ -72,12 +74,27 @@ not. Receipts needed by retained user-authored backups remain. Unverified
 potentially sensitive residues prevent reporting complete purge success.
 The receipt owner defines explicit reset-config, import-config and state entry
 sets consumed by both archive producers and purge; list ordering has no meaning.
+Home overlap checks compare the complete managed path, including entry names,
+with Windows case folding on Windows.
+Scratch is also a protected home: no managed deletion target may contain it.
+Disposable subtrees must not overlap authored configuration subtrees, even when
+their home roots alias. Independent shared parents remain valid. Selected home
+overrides are resolved before defaults; unused environment defaults cannot reject
+an explicit root.
+Reset/import receipt format 2 binds config, data and state authorities and records
+the owning home of every entry. Reset-state also archives data/media, preserving
+data/credentials and data/packages. Every distinct authority records the intent
+before any payload rename; archives remain on each entry's own volume. Recovery
+provides consistency across volumes, not a cross-volume atomic transaction.
+Completion markers protect interrupted finalization until every authority has
+its archived receipt. Successful finalization removes those markers; purge also
+recognizes retained markers through the same validated reset receipt contract.
 
 Windows prefixes normalize drive and existing component spelling before admission;
 normalization never follows a link or junction. Roots cannot redirect through links. Descendant links are never traversed.
 Neither an entire prefix nor an entire home is a recursive deletion target.
 Pending maintenance must be recovered first. Actual execution repeats preflight
-under leases, stops the selected eligible Host gracefully, and holds both home
+under leases, stops the selected eligible Host gracefully, and holds all three home
 authorities and package-use exclusion during purge. Package traversal preflight
 completes before removing the core executable. Partial failure reports completed
 and remaining work and preserves retry capability. Size previews stop

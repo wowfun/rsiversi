@@ -43,12 +43,13 @@ pub(super) fn confine(
     program: PathBuf,
     cwd: PathBuf,
     workspace: PathBuf,
+    temporary_root: &Path,
 ) -> Result<ConfinedProcess> {
     if request.stdio != ProcessStdio::Pipes {
         return Err(SandboxError::Unsupported(request.mode));
     }
     let workspace = acl::canonical(workspace);
-    let result = prepare(request.mode, &workspace)
+    let result = prepare(request.mode, &workspace, temporary_root)
         .map_err(|error| SandboxError::Native(format!("{}: {error}", workspace.display())))?;
     let (owner, scratch, filesystem) = result;
     let stamp = EnforcementStamp {
@@ -72,13 +73,9 @@ pub(super) fn confine(
 fn prepare(
     mode: SandboxMode,
     workspace: &Path,
+    root: &Path,
 ) -> std::io::Result<(ProcessPlanOwner, SandboxScratch, SandboxFileSystem)> {
-    let root = std::env::temp_dir();
-    if !root.is_absolute() {
-        return Err(std::io::Error::other(
-            "Windows temporary root must be absolute",
-        ));
-    }
+    std::fs::create_dir_all(root)?;
     let root = acl::canonical(root.canonicalize()?);
     if root.starts_with(workspace) {
         return Err(std::io::Error::other(

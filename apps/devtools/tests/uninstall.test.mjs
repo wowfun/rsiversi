@@ -18,12 +18,12 @@ function script(name,args,cwd) {
 const flag=name=>windows?'-'+name:'--'+name.replace(/[A-Z]/g,(letter,index)=>(index?'-':'')+letter.toLowerCase());
 async function fixture() {
   const directory=await mkdtemp(join(temporaryRoot,'rsi uninstall 中文 '));
-  const prefix=join(directory,"prefix ' & $value"),config=join(directory,'config'),state=join(directory,'state'),cache=join(directory,'cache');
-  for(const path of [config,state,cache])await mkdir(path);
-  const args=[flag('Prefix'),prefix,flag('ConfigHome'),config,flag('StateHome'),state,flag('CacheHome'),cache,flag('NoPath')];
+  const prefix=join(directory,"prefix ' & $value"),config=join(directory,'config'),state=join(directory,'state'),cache=join(directory,'cache'),data=join(directory,'data'),tmp=join(directory,'tmp');
+  for(const path of [config,data,state,cache,tmp])await mkdir(path);
+  const args=[flag('Prefix'),prefix,flag('ConfigHome'),config,flag('DataHome'),data,flag('TmpHome'),tmp,flag('StateHome'),state,flag('CacheHome'),cache,flag('NoPath')];
   const installed=script('install',[flag('Prefix'),prefix,flag('Binary'),tool,flag('Uninstaller'),tool,flag('NoPath')],directory);
   assert.equal(installed.status,0,installed.stderr);
-  return {directory,prefix,config,state,cache,args,core:join(prefix,'bin',windows?'rsi.exe':'rsi'),control:join(prefix,'libexec/rsi')};
+  return {directory,prefix,config,data,state,cache,tmp,args,core:join(prefix,'bin',windows?'rsi.exe':'rsi'),control:join(prefix,'libexec/rsi')};
 }
 async function clean(f){await rm(f.directory,{recursive:true,force:true});}
 
@@ -61,6 +61,21 @@ test('purge refuses unknown backup authority before deleting the main',async()=>
     assert.notEqual(result.status,0);assert.match(result.stderr,/unverified backup/);assert(existsSync(f.core));
     assert.doesNotMatch(result.stderr,/CategoryInfo|FullyQualifiedErrorId/);
   }finally{await clean(f);}
+});
+
+test('purge rejects scratch and authored-cache overlap before removing the installed executable',async()=>{
+  for(const kind of ['scratch','authored']) {
+    const f=await fixture();try{
+      const before=await readFile(f.core),record=await readFile(join(f.control,'install.json'));
+      const args=[...f.args],selected=flag(kind==='scratch'?'TmpHome':'CacheHome');
+      args[args.indexOf(selected)+1]=kind==='scratch'?join(f.data,'media'):f.config;
+      const result=script('uninstall',[...args,flag('Purge'),flag('Yes')],f.directory);
+      assert.notEqual(result.status,0,result.stderr);
+      assert.match(result.stderr,kind==='scratch'?/product home/:/authored configuration/);
+      assert.deepEqual(await readFile(f.core),before);
+      assert.deepEqual(await readFile(join(f.control,'install.json')),record);
+    }finally{await clean(f);}
+  }
 });
 test('descendant junction or symlink removal never deletes its external target',async()=>{
   const f=await fixture();try{
@@ -101,16 +116,25 @@ test('reinstallation during removal reports the retry action before invoking Car
   }finally{await clean(f);}
 });
 
-test('Git Bash uninstall forwards all five native paths and flags', {skip:!windows},async()=>{
+test('Git Bash uninstall forwards all native home paths and flags', {skip:!windows},async()=>{
   const f=await fixture();try{
     const where=spawnSync('where.exe',['git.exe'],{encoding:'utf8'});assert.equal(where.status,0);
     const candidates=where.stdout.trim().split(/\r?\n/).flatMap(path=>[resolve(dirname(path),'../bin/bash.exe'),resolve(dirname(path),'../../bin/bash.exe')]);
     const bash=candidates.find(existsSync);assert(bash);
     const convert=path=>{const result=spawnSync(bash,['--noprofile','--norc','-c','cygpath -au -- "$1"','test',path],{encoding:'utf8'});assert.equal(result.status,0,result.stderr);return result.stdout.trim();};
-    const args=['--prefix',convert(f.prefix),'--uninstaller',convert(tool),'--config-home',convert(f.config),'--state-home',convert(f.state),'--cache-home',convert(f.cache),'--no-path','--yes','--purge'];
+    const args=['--prefix',convert(f.prefix),'--uninstaller',convert(tool),'--config-home',convert(f.config),'--data-home',convert(f.data),'--tmp-home',convert(f.tmp),'--state-home',convert(f.state),'--cache-home',convert(f.cache),'--no-path','--yes','--purge'];
     const result=spawnSync(bash,['--noprofile','--norc',join(root,'scripts/uninstall.sh').replaceAll('\\','/'),...args],{cwd:f.directory,encoding:'utf8',timeout:60_000});
     assert.equal(result.status,0,result.stderr);assert(!existsSync(f.core));
-    for(const path of [f.config,f.state,f.cache])assert(result.stdout.includes(path),result.stdout);
+    for(const path of [f.config,f.data,f.state,f.cache])assert(result.stdout.includes(path),result.stdout);
+  }finally{await clean(f);}
+});
+
+test('Windows scratch override cannot stage the running remover inside its installation',{skip:!windows},async()=>{
+  const f=await fixture();try{
+    const args=[...f.args];args[args.indexOf(flag('TmpHome'))+1]=f.prefix;
+    const result=script('uninstall',[...args,flag('Yes')],f.directory);
+    assert.notEqual(result.status,0);assert.match(result.stderr,/outside the installation prefix/);
+    assert(existsSync(f.core));assert(existsSync(join(f.control,'install.json')));
   }finally{await clean(f);}
 });
 
@@ -166,7 +190,7 @@ test('protocol probe creates nothing and native uninstall rejects install-only a
   const directory=await mkdtemp(join(temporaryRoot,'rsi-probe-'));try{
     const result=spawnSync(tool,['--installation-protocol'],{cwd:directory,encoding:'utf8'});
     assert.equal(result.status,0,result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout),{interface:1,record:1,transaction:2});
+    assert.deepEqual(JSON.parse(result.stdout),{interface:1,record:1,transaction:4});
     assert.deepEqual(await readdir(directory),[]);
     const bad=spawnSync(tool,['uninstall','--interface-version','1','--uninstaller',tool],{cwd:directory,encoding:'utf8'});
     assert.notEqual(bad.status,0);assert.match(bad.stderr,/install sources/);

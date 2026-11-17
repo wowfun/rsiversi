@@ -182,7 +182,20 @@ pub async fn session_free_shell_owns_bounded_isolated_profiles_with_shared_domai
     ));
     assert_eq!(counts.active.load(Ordering::SeqCst), 2);
     assert!(first.close().await.unwrap().is_clean());
-    assert!(shell.open(profile("reject")).await.is_err());
+    let rejected = shell.open(profile("reject")).await.unwrap();
+    assert!(rejected.lookup_local::<Label>().is_none());
+    let status = rejected
+        .lookup_local::<rsi_host::ProfileControlContract>()
+        .unwrap()
+        .status();
+    assert_eq!(status.health(), rsi_host::ProfileHealth::Degraded);
+    assert!(status.diagnostic().unwrap().contains("rejected label"));
+    assert_eq!(second.lookup_local::<Label>().unwrap().as_str(), "beta");
+    assert!(matches!(
+        shell.open(profile("still-full")).await,
+        Err(ApplicationError::Capacity)
+    ));
+    assert!(rejected.close().await.unwrap().is_clean());
     assert_eq!(counts.entered.load(Ordering::SeqCst), 2);
     drop(shell.open(profile("abandoned")));
     until(&runtime, || {

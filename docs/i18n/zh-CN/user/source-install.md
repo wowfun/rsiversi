@@ -83,15 +83,15 @@ bash scripts/uninstall.sh --prefix "$prefix" --dry-run
 待删除的 `rsi`，不需要 Cargo，也不下载工具。Windows 实际卸载使用经过摘要校验的临时副本，dry-run 原地运行已安装工具；
 Linux 直接运行卸载器。
 
-普通卸载保留配置、状态和缓存，包括共享包及 Host 运行时副本。`--purge` / `-Purge`
-会展示最终配置、状态和缓存目录 并确认后清理保存的凭据、会话、生成状态、WebView 数据和缓存。
+普通卸载保留配置、数据、状态和缓存，包括共享包及 Host 运行时副本。`--purge` / `-Purge`
+会展示最终配置、数据、状态和缓存目录 并确认后清理保存的凭据、会话、生成状态、WebView 数据和缓存。
 其他安装和开发版本也可能使用这些目录；非交互确认使用 `--yes` / `-Yes`。
 用户编写的启动与 settings 配置、AGENTS.md、skills、agents、Profiles、自定义 presets
 及 addon 源码继续保留，无关文件和外部引用也不会被删除。完整规则见
 [卸载契约](../../../../crates/rsi/installation/README.md)。
 
-使用 `--config-home`、`--state-home`、`--cache-home`（PowerShell 对应 `-ConfigHome`、
-`-StateHome`、`-CacheHome`）直接选择最终目录，不加载配置。属于本安装的 Host 会正常停止；
+使用 `--config-home`、`--data-home`、`--state-home`、`--cache-home`、`--tmp-home`
+（PowerShell 对应 `-ConfigHome`、`-DataHome`、`-StateHome`、`-CacheHome`、`-TmpHome`）直接选择最终目录，不加载配置。属于本安装的 Host 会正常停止；
 嵌入式 Host、使用中的包和锁定文件的客户端需要先关闭再重试。部分失败会保留卸载工具
 并报告剩余工作；用于并发协调的空锁文件会保留。
 
@@ -202,13 +202,13 @@ rsi core upgrade --local "$PWD/.local/packages/core"
 后面的选项指定旧目录：
 
 ```text
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE --dry-run
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import --config-home OLD_CONFIG --state-home OLD_STATE
-rsi --config-home NEW_CONFIG --state-home NEW_STATE import recover
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE --dry-run
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE
+rsi --config-home NEW_CONFIG --data-home NEW_DATA --state-home NEW_STATE import recover
 ```
 
 dry-run 不创建目录或锁，也不修改权限。它只预览导入；实际操作会持有独占租约，
 重新执行检查。
-导入会暂存受管配置和状态，并保留目标旧数据的备份，不重写外部路径或转换数据库
+导入会暂存受管配置、凭据、媒体和状态，并保留目标旧数据的备份，不重写外部路径或转换数据库
 schema。可选包需要单独安装。尚未完成的导入会阻止普通启动，直到恢复完成。
 [启动契约](../../../../crates/rsi/core/docs/launch.md) 规定可导入路径、大小限制和恢复行为。

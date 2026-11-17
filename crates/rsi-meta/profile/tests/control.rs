@@ -288,8 +288,10 @@ impl ProfileResolver for Resolver {
 fn environment(root: &std::path::Path) -> ProfileEnvironment {
     ProfileEnvironment::new(
         root.join("config"),
+        root.join("data"),
         root.join("state"),
         root.join("cache"),
+        root.join("tmp"),
         "test",
         BTreeMap::new(),
     )

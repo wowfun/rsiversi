@@ -3,7 +3,8 @@ use crate::{LaunchConfiguration, Result, RsiError, maintenance::Home};
 use rsi_files_native_fs::{self as fs, Directory, EntryKind};
 use rsi_host::HostPaths;
 use rsi_installation::receipts::{
-    IMPORT_CONFIG as CONFIG, ImportEntry as Entry, ImportJournal as Journal, STATE,
+    HomeKind, IMPORT_CONFIG as CONFIG, IMPORT_DATA as DATA, ImportEntry as Entry,
+    ImportJournal as Journal, STATE,
 };
 use rsi_service_host::{HostOwnerLease, HostStartupLease, ServiceHostPaths};
 use serde::Serialize;
@@ -32,9 +33,9 @@ pub struct ImportReceipt {
     pub backups: Vec<PathBuf>,
 }
 
-/// Ordinary commands must not activate a partially imported home pair.
+/// Ordinary commands must not activate partially imported homes.
 pub fn reject_pending_import(paths: &HostPaths) -> Result<()> {
-    for home in [paths.config(), paths.state()] {
+    for home in [paths.config(), paths.data(), paths.state()] {
         for name in [PENDING, STAGING] {
             match std::fs::symlink_metadata(home.join("session-host").join(name)) {
                 Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
@@ -51,6 +52,7 @@ pub fn reject_pending_import(paths: &HostPaths) -> Result<()> {
 
 struct Homes {
     config: Home,
+    data: Home,
     state: Home,
     authorities: Vec<Home>,
     _owner: HostOwnerLease,
@@ -62,26 +64,38 @@ impl Homes {
         let startup = HostStartupLease::try_acquire(&host).map_err(error)?;
         let owner = HostOwnerLease::try_acquire(host).map_err(error)?;
         let config = Home::open(paths.config())?;
+        let data = Home::open(paths.data())?;
         let state = Home::open(paths.state())?;
-        let mut authorities = vec![Home::open(&paths.config().join("session-host"))?];
-        if canonical(paths.config())? != canonical(paths.state())? {
-            authorities.push(Home::open(&paths.state().join("session-host"))?);
-        }
+        let mut roots = [paths.config(), paths.data(), paths.state()]
+            .into_iter()
+            .map(|path| canonical(path).map(rsi_workspace_protocol::canonical_native_path))
+            .collect::<Result<Vec<_>>>()?;
+        roots.sort();
+        roots.dedup();
+        let authorities = roots
+            .iter()
+            .map(|root| Home::open(&root.join("session-host")))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             config,
+            data,
             state,
             authorities,
             _owner: owner,
             _startup: startup,
         })
     }
-    fn selected(&self, config: bool) -> &Home {
-        if config { &self.config } else { &self.state }
+    fn selected(&self, home: HomeKind) -> &Home {
+        match home {
+            HomeKind::Config => &self.config,
+            HomeKind::Data => &self.data,
+            HomeKind::State => &self.state,
+        }
     }
 }
 
 /// Copies only explicit owned entries, without starting providers or rewriting paths.
-/// Actual import leases both stopped home pairs; dry runs only observe their contents.
+/// Actual import leases the stopped source and destination homes; dry runs only observe their contents.
 pub fn import_product_homes(
     destination: &HostPaths,
     source: &HostPaths,
@@ -96,13 +110,19 @@ fn import_with_checkpoint(
     checkpoint: impl Fn(usize) -> Result<()>,
 ) -> Result<ImportReceipt> {
     // Resolve before creating authorities so overlap cannot change source payloads.
-    for from in [source.config(), source.state()] {
+    rsi_installation::receipts::validate_home_layout(source).map_err(error)?;
+    rsi_installation::receipts::validate_home_layout(destination).map_err(error)?;
+    for from in [source.config(), source.data(), source.state()] {
         fs::open_absolute_directory_no_follow(from).map_err(error)?;
-        for to in [destination.config(), destination.state()] {
-            if overlaps(from, to)? {
-                return Err(error("source and destination homes overlap"));
-            }
-        }
+    }
+    let source_targets = import_targets(source)?;
+    let destination_targets = import_targets(destination)?;
+    if source_targets.iter().any(|from| {
+        destination_targets
+            .iter()
+            .any(|to| from.starts_with(to) || to.starts_with(from))
+    }) {
+        return Err(error("source and destination managed entries overlap"));
     }
     reject_pending_import(source)?;
     reject_pending_import(destination)?;
@@ -123,26 +143,31 @@ fn import_with_checkpoint(
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(error)?;
     let mut journal = Journal {
-        format: 1,
+        format: 2,
         id: hex::encode(random),
         config: canonical(destination.config())?,
+        data: canonical(destination.data())?,
         state: canonical(destination.state())?,
         entries: Vec::new(),
     };
     let mut budget = Budget::default();
     // Complete preflight before copying or archiving any payload.
-    for (config, names) in [(true, CONFIG), (false, STATE)] {
-        let from = source_homes.selected(config);
+    for (home, names) in [
+        (HomeKind::Config, CONFIG),
+        (HomeKind::Data, DATA),
+        (HomeKind::State, STATE),
+    ] {
+        let from = source_homes.selected(home);
         for name in names {
             if from.kind(name)?.is_none() {
                 continue;
             }
             require_kind(from, name)?;
             let new = tree(&from.directory, name, None, &mut budget, 0)?;
-            let target = homes.selected(config);
+            let target = homes.selected(home);
             let old = fingerprint(target, name)?;
             journal.entries.push(Entry {
-                config,
+                home,
                 name: (*name).into(),
                 old,
                 new,
@@ -168,7 +193,7 @@ fn preview(destination: &HostPaths, source: &HostPaths) -> Result<ImportReceipt>
     let mut budget = Budget::default();
     let mut entries = Vec::new();
     for paths in [source, destination] {
-        for path in [paths.config(), paths.state()] {
+        for path in [paths.config(), paths.data(), paths.state()] {
             let root = match fs::open_absolute_directory_no_follow(path) {
                 Ok(root) => root,
                 Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => continue,
@@ -189,6 +214,7 @@ fn preview(destination: &HostPaths, source: &HostPaths) -> Result<ImportReceipt>
     }
     for (from, to, names) in [
         (source.config(), destination.config(), CONFIG),
+        (source.data(), destination.data(), DATA),
         (source.state(), destination.state(), STATE),
     ] {
         let home = Home::observe(from)?;
@@ -235,8 +261,8 @@ fn encode_journal(journal: &Journal) -> Result<Vec<u8>> {
 fn prepare(journal: &mut Journal, source_homes: &Homes, homes: &Homes) -> Result<()> {
     let mut copy_budget = Budget::default();
     for entry in &mut journal.entries {
-        let from = source_homes.selected(entry.config);
-        let target = homes.selected(entry.config);
+        let from = source_homes.selected(entry.home);
+        let target = homes.selected(entry.home);
         let stage = format!(".import-{}-stage-{}", journal.id, entry.name);
         let copied = tree(
             &from.directory,
@@ -250,7 +276,7 @@ fn prepare(journal: &mut Journal, source_homes: &Homes, homes: &Homes) -> Result
                 "source changed while staging; original and destination payloads are retained",
             ));
         }
-        if !entry.config && entry.name == "agent" {
+        if entry.home == HomeKind::State && entry.name == "agent" {
             rsi_agent_store_sqlite::SqliteStore::verify(target.path.join(&stage)).map_err(error)?;
             // Offline verification may settle SQLite sidecars in the private copy.
             entry.new = fingerprint(target, &stage)?.ok_or_else(|| error("staging disappeared"))?;
@@ -295,12 +321,12 @@ pub fn recover_product_import(paths: &HostPaths) -> Result<ImportReceipt> {
             || prepared
                 .entries
                 .iter()
-                .map(|e| (e.config, &e.name))
+                .map(|e| (e.home, &e.name))
                 .collect::<Vec<_>>()
                 != journal
                     .entries
                     .iter()
-                    .map(|e| (e.config, &e.name))
+                    .map(|e| (e.home, &e.name))
                     .collect::<Vec<_>>()
     }) {
         return Err(error("staging and final import identities differ"));
@@ -339,7 +365,7 @@ fn clear_staging(homes: &Homes) -> Result<()> {
 fn discard_staging(journal: &Journal, homes: &Homes) -> Result<()> {
     let mut remaining = MAX_ENTRIES;
     for entry in &journal.entries {
-        let home = homes.selected(entry.config);
+        let home = homes.selected(entry.home);
         let stage = format!(".import-{}-stage-{}", journal.id, entry.name);
         if home.kind(&stage)?.is_some() {
             remove_staging(&home.directory, Path::new(&stage), 0, &mut remaining)?;
@@ -381,11 +407,12 @@ fn remove_staging(
 }
 
 fn validate(journal: &Journal, paths: &HostPaths) -> Result<()> {
-    if journal.format != 1
+    if journal.format != 2
         || !hexadecimal(&journal.id, 32)
         || journal.config != canonical(paths.config())?
+        || journal.data != canonical(paths.data())?
         || journal.state != canonical(paths.state())?
-        || journal.entries.len() > CONFIG.len() + STATE.len()
+        || journal.entries.len() > CONFIG.len() + DATA.len() + STATE.len()
     {
         return Err(error(
             "invalid import journal or different home authorities",
@@ -393,8 +420,8 @@ fn validate(journal: &Journal, paths: &HostPaths) -> Result<()> {
     }
     let mut names = BTreeSet::new();
     for entry in &journal.entries {
-        if !(if entry.config { CONFIG } else { STATE }).contains(&entry.name.as_str())
-            || !names.insert((entry.config, &entry.name))
+        if !entry.home.import_entries().contains(&entry.name.as_str())
+            || !names.insert((entry.home, &entry.name))
             || !hexadecimal(&entry.new, 64)
             || entry.old.as_ref().is_some_and(|v| !hexadecimal(v, 64))
         {
@@ -442,7 +469,7 @@ fn settle(
     let progress = journal
         .entries
         .iter()
-        .map(|entry| progress(journal, entry, homes.selected(entry.config)))
+        .map(|entry| progress(journal, entry, homes.selected(entry.home)))
         .collect::<Result<Vec<_>>>()?;
     let archive = format!("import-{}.json", journal.id);
     for authority in &homes.authorities {
@@ -460,7 +487,7 @@ fn settle(
     }
     let mut step = 0;
     for (entry, progress) in journal.entries.iter().zip(progress) {
-        let home = homes.selected(entry.config);
+        let home = homes.selected(entry.home);
         let stage = format!(".import-{}-stage-{}", journal.id, entry.name);
         let backup = format!(".import-{}-backup-{}", journal.id, entry.name);
         match progress {
@@ -503,7 +530,7 @@ fn receipt(journal: &Journal, homes: &Homes) -> ImportReceipt {
         entries: journal
             .entries
             .iter()
-            .map(|e| homes.selected(e.config).path.join(&e.name))
+            .map(|e| homes.selected(e.home).path.join(&e.name))
             .collect(),
         backups: journal
             .entries
@@ -511,7 +538,7 @@ fn receipt(journal: &Journal, homes: &Homes) -> ImportReceipt {
             .filter(|e| e.old.is_some())
             .map(|e| {
                 homes
-                    .selected(e.config)
+                    .selected(e.home)
                     .path
                     .join(format!(".import-{}-backup-{}", journal.id, e.name))
             })
@@ -732,22 +759,27 @@ fn hexadecimal(value: &str, length: usize) -> bool {
 fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(error)
 }
-fn overlaps(first: &Path, second: &Path) -> Result<bool> {
-    let normalize = |path: &Path| -> Result<PathBuf> {
+fn import_targets(paths: &HostPaths) -> Result<Vec<PathBuf>> {
+    let mut targets = Vec::new();
+    for kind in [HomeKind::Config, HomeKind::Data, HomeKind::State] {
+        let path = kind.path(paths);
         let path = crate::normalize_launch_path(path, Path::new("."))?;
         let path = fs::resolve_absolute_root_alias(&path, true).map_err(error)?;
         #[cfg(windows)]
-        {
-            Ok(PathBuf::from(path.to_string_lossy().to_lowercase()))
-        }
-        #[cfg(not(windows))]
-        {
-            Ok(path)
-        }
-    };
-    let first = normalize(first)?;
-    let second = normalize(second)?;
-    Ok(first.starts_with(&second) || second.starts_with(&first))
+        let path = PathBuf::from(path.to_string_lossy().to_lowercase());
+        targets.extend(
+            kind.import_entries()
+                .iter()
+                .chain(&["session-host"])
+                .map(|name| {
+                    let target = path.join(name);
+                    #[cfg(windows)]
+                    let target = PathBuf::from(target.to_string_lossy().to_lowercase());
+                    target
+                }),
+        );
+    }
+    Ok(targets)
 }
 fn error(value: impl std::fmt::Display) -> RsiError {
     RsiError::Boot(format!("import: {value}"))

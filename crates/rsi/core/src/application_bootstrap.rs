@@ -18,7 +18,7 @@ pub async fn start_application(
         let (host, diagnostics) = crate::standard_application_host(composition.clone(), arguments)?;
         host.profile_input(program.clone())
             .map_err(|error| RsiError::Boot(error.to_string()))?
-            .preflight_linked(&Default::default(), |_, plugin| {
+            .preflight_linked(&std::collections::BTreeSet::new(), |_, plugin| {
                 composition
                     .catalog
                     .metadata()
@@ -230,7 +230,17 @@ mod native {
             )?;
             let entry = child
                 .lookup_local::<ApplicationRunContract>()
-                .ok_or_else(|| activation("Application Profile did not publish an entry point"))?;
+                .ok_or_else(|| {
+                    let diagnostic = diagnostics.take().unwrap_or_else(|| {
+                        boot("Application Profile did not publish an entry point")
+                    });
+                    let failure = activation(&diagnostic);
+                    *self
+                        .diagnostic
+                        .lock()
+                        .expect("bootstrap diagnostic poisoned") = Some(diagnostic);
+                    failure
+                })?;
             plan.context()
                 .provide_local::<ApplicationRunContract>(entry)?;
             plan.context()

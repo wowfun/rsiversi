@@ -32,10 +32,10 @@ The [extension contract](../../rsi-extension/README.md) owns transport, trust an
 canonical publication semantics.
 
 CLI `import_packages` and application `stage_packages` share importer preparation.
-Its caller freezes the importer, executable, workspace, requested specs, an
+Its caller freezes the importer, executable, workspace, scratch parent, requested specs, an
 optional importer-defined JSON options object of at most 64 KiB, and
 available protocols. The operation retains the exact importer, supervises
-private staging, settles the process, then admits its complete output into
+private random staging below the selected scratch parent, settles the process, then admits its complete output into
 PackageStore in one publication. Cancellation reaches staging and publication.
 Stage cancellation is confirmed after cleanup; it never masks an unrelated
 Store admission error.
@@ -156,6 +156,12 @@ generation replacement retains its separate validation-before-publication contra
 The ordinary [navigation owner](../navigation/README.md) stores title/archive
 metadata in backend `base` and serves authenticated bounded Session queries.
 
+Product-owned durable values use typed Domain declarations. Profile grants use
+schema 4 with one validated global; MCP SSH configuration uses schema 2 with one
+global, validated against the MCP owner before activation. SSH candidates use
+schema 2 with a `targets` table and validate identity binding on activation.
+Their existing admission, revision and retirement fences remain with each owner.
+
 Execution admission reserves separate pools of 64 scopes and 64 backend operations
 for Local and for SSH. Publication checks retain the current grant without
 reserving effect capacity, including after an idle stream read.
@@ -184,7 +190,7 @@ connection-owned storage. Replacing that file requires another Local confirmatio
 
 Connection requests require target Use independently of configuration or management
 grants. Each new connection resolves the independently installed `ssh-helper`
-package from the selected state home. Its native target, executable export,
+package from the selected data home. Its native target, executable export,
 exact file digest and `rsi.ssh.helper` interface must match. The connection retains
 the immutable package lease until shutdown; a later installation affects only
 new connections. Missing or invalid packages remain retryable without restarting
@@ -253,7 +259,7 @@ Existing Sessions retain their frozen settings.
 A persistent Profile instantiates the intended provider, while Settings names
 the exact default deployment and model. Tests can inject a credential store at
 the public composition seam without consulting real user state. Standard credentials
-use `HostPaths.config()/credentials/credentials.json`, including for daemon
+use `HostPaths.data()/credentials/credentials.json`, including for daemon
 clients. Only the credential owner reads or writes that file; Settings retain
 references. Old keyring entries require login again and are never imported or
 deleted. No current backend depends on a desktop credential service.
@@ -296,10 +302,12 @@ plugins and remote connection/domain-client plugins mount isolated child Profile
 The application disposes its connection subtree before shutting down its Runtime.
 Embedded connections use the same negotiated Output client as remote connections.
 An absent completed-output cache leaves conversation available and returns the
-[Output domain's unavailable result](../../rsi-process/output-api/README.md) on reads.
+[Output domain's unavailable result](../../rsi-spill/api/README.md) on reads.
 Linux and Windows discovery wait at most 15 seconds for an occupied owner to
 publish a usable endpoint, then report the owner conflict without stealing its
-lease. Both platforms support resident daemon endpoints.
+lease. An attachment attempt includes activation of the required remote client
+capabilities; a settled but degraded client Profile is cleaned up before another
+attempt within that same deadline. Both platforms support resident daemon endpoints.
 
 `StandardServiceDaemon::start_in` mounts the publishing daemon in a caller-owned
 Runtime with the same isolated child-Profile lifetime. It consumes the exact
@@ -408,7 +416,8 @@ Withdrawal drops the namespace registration together with the catalog publicatio
 An embedded Service's Agent source combines this configured preset catalog with
 the bootstrap's staged native factories. Sharing the Loader does not replace the
 Service's Settings-backed roots or default selection with bootstrap defaults.
-The catalog owner retains one bounded startup diagnostic for its management caller;
+The catalog owner retains one bounded startup diagnostic for its management caller,
+including a missing catalog capability after degraded Profile startup;
 generic Profile lifecycle diagnostics continue to redact plugin error text.
 
 Service startup preserves the SQLite factory's safe startup diagnostic separately
@@ -809,18 +818,11 @@ base seed, current MCP seed and retrieval flags are unchanged. Every snapshot
 still checks those owners before reuse, so cached bytes never substitute for
 current readiness or current executable authority.
 
-Explicit `HostPaths` remain authoritative. Absolute `XDG_CONFIG_HOME`,
-`XDG_STATE_HOME` and `XDG_CACHE_HOME` also override their respective standard
-locations on Windows, with `rsi` appended. Invalid overrides refuse before I/O.
-Unspecified Windows standard config uses
-`FOLDERID_RoamingAppData/rsi`; state and cache use
-`FOLDERID_LocalAppData/rsi/state` and `FOLDERID_LocalAppData/rsi/cache`.
-Runtime data remains below the selected local state. Missing mandatory Known
-Folders refuse standard path resolution when a fallback is needed. Personal
-skill discovery captures `FOLDERID_Profile` regardless of HOME and skips an
-unavailable or non-absolute result. These lookups
-do not create directories and do not consult HOME.
-They provide locations, not permission or confinement proofs.
+Explicit `HostPaths` remain authoritative. The [launch contract](docs/launch.md)
+owns config/data/state/cache/tmp resolution and the `rsiversi` namespace.
+Path discovery creates no directories and confers no permission or confinement.
+Windows personal skill discovery separately captures `FOLDERID_Profile`,
+regardless of HOME, and skips an unavailable or non-absolute result.
 Windows ACP uses the shared Host with native private stores and byte-verified
 shipped presets. Application and provider platform limits still apply;
 successful pure preview establishes catalog resolution only.
@@ -828,11 +830,11 @@ successful pure preview establishes catalog resolution only.
 returning a runnable Host. Generic `standard_application_host` returns the lower-level
 Profile builder, whose successful start may be degraded; SDK callers must check
 their required contracts. Optional failed leaves do not reject an otherwise usable
-application. A missing entry point closes the Host and retains available diagnostics.
+application. A missing entry point closes the Host and retains available diagnostics,
+including the child application's typed diagnostic after degraded startup.
 
 On Unix, personal skill discovery skips missing, empty or relative HOME values.
-Standard path resolution still requires an absolute HOME when an XDG fallback
-needs it.
+
 
 The standard Host includes `rsi.acp.host` with an empty endpoint list and a dedicated
 `state/acp` observation journal. Local Host Profiles may replace that leaf with
@@ -901,6 +903,10 @@ addon namespace and verify generation replacement with the public addon testkit.
 
 The standard read-only `output_read` contribution permits Local program calls
 with the same bounded cache identity and paging contract as model invocation.
+Its structured `text` reproduces safe UTF-8 pages exactly. `bytes_hex` is present
+only when rendering replaces bytes (including split code points or unsafe control
+characters); callers recover bytes from that field when present, otherwise UTF-8
+encode `text`. Paging offsets always count original bytes.
 
 Native program execution is opt-in. A Host Profile can activate
 `rsi.agent.program.runtime` with an absolute `node` executable and an explicit

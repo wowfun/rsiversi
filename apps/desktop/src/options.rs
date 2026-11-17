@@ -1,6 +1,6 @@
 use std::{ffi::OsString, path::PathBuf};
 
-pub(super) const HELP: &str = "RSIversi Desktop\nLaunch with rsi desktop. Internal invocation:\nrsi-desktop --config-home DIR --state-home DIR --cache-home DIR [--assets DIR]\nAll directories must be absolute; the selected Host must already be running.";
+pub(super) const HELP: &str = "RSIversi Desktop\nLaunch with rsi desktop. Internal invocation:\nrsi-desktop --config-home DIR --data-home DIR --state-home DIR --cache-home DIR --tmp-home DIR [--assets DIR]\nAll directories must be absolute; the selected Host must already be running.";
 pub(super) struct Options {
     pub frontend: bool,
     pub paths: rsi_host::HostPaths,
@@ -47,7 +47,12 @@ pub(super) fn parse(
         }
         if !matches!(
             key.as_str(),
-            "--config-home" | "--state-home" | "--cache-home" | "--assets"
+            "--config-home"
+                | "--data-home"
+                | "--state-home"
+                | "--cache-home"
+                | "--tmp-home"
+                | "--assets"
         ) || values.contains_key(&key)
         {
             return Err("Unknown or duplicate Desktop option; use rsi desktop".into());
@@ -68,8 +73,10 @@ pub(super) fn parse(
     };
     let paths = rsi_host::HostPaths::new(
         required("--config-home")?,
+        required("--data-home")?,
         required("--state-home")?,
         required("--cache-home")?,
+        required("--tmp-home")?,
     )
     .map_err(crate::error)?;
     let assets = values
@@ -100,7 +107,7 @@ impl Options {
         let Some((package, export, digest)) = &self.package else {
             return Ok(None);
         };
-        let lease = rsi_packages::PackageStore::open(&self.paths.state().join("packages"))
+        let lease = rsi_packages::PackageStore::open(&self.paths.data().join("packages"))
             .map_err(crate::error)?
             .acquire_exact(package, digest)
             .map_err(crate::error)?;
@@ -150,5 +157,36 @@ mod tests {
                 .unwrap_err()
                 .contains("Evergreen Runtime")
         );
+    }
+
+    #[test]
+    fn frozen_home_handoff_requires_and_preserves_each_of_the_five_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let names = ["config", "data", "state", "cache", "tmp"];
+        let arguments: Vec<_> = names
+            .iter()
+            .flat_map(|name| {
+                [
+                    OsString::from(format!("--{name}-home")),
+                    root.path().join(name).into_os_string(),
+                ]
+            })
+            .collect();
+        let options = parse(arguments.clone()).unwrap().unwrap();
+        for (name, path) in names.into_iter().zip([
+            options.paths.config(),
+            options.paths.data(),
+            options.paths.state(),
+            options.paths.cache(),
+            options.paths.tmp(),
+        ]) {
+            assert_eq!(path, root.path().join(name));
+        }
+        for omitted in 0..names.len() {
+            let mut partial = arguments.clone();
+            partial.drain(omitted * 2..omitted * 2 + 2);
+            assert!(parse(partial).is_err());
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

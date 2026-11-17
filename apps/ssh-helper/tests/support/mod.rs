@@ -120,7 +120,13 @@ impl Server {
         panic!("isolated sshd startup deadline");
     }
     pub fn prepare(&self) -> PreparedSsh {
-        PreparedSsh::new(&self.endpoint, &self.key, &self.identity).unwrap()
+        PreparedSsh::new(
+            &self.endpoint,
+            &self.key,
+            &self.identity,
+            self.directory.path(),
+        )
+        .unwrap()
     }
 }
 

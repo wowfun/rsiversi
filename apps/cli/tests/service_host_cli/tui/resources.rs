@@ -21,7 +21,7 @@ async fn skill_agent_file_and_frozen_reference_workflows_use_real_tui_actions() 
     let collision = fixture
         .temporary
         .path()
-        .join("config/rsi/skills/model-selection");
+        .join("config/rsiversi/skills/model-selection");
     std::fs::create_dir_all(&collision).unwrap();
     std::fs::write(collision.join("SKILL.md"), "---\nname: model-selection\ndescription: Skill collides with hidden Session command\n---\nCOLLISION_PREVIEW\n").unwrap();
     std::fs::write(
@@ -188,7 +188,10 @@ async fn project_and_personal_skills_and_markdown_work_through_both_tui_entries(
             };
             std::os::unix::fs::symlink(target, project_skills.join(name)).unwrap();
         }
-        let settings_path = fixture.temporary.path().join("config/rsi/settings.json");
+        let settings_path = fixture
+            .temporary
+            .path()
+            .join("config/rsiversi/settings.json");
         std::fs::remove_file(&settings_path).unwrap();
         if daemon {
             fixture.assert_success(&["host", "start"]);
@@ -274,7 +277,7 @@ async fn project_and_personal_skills_and_markdown_work_through_both_tui_entries(
             fixture
                 .temporary
                 .path()
-                .join("state/rsi/agent/sessions.sqlite3"),
+                .join("state/rsiversi/agent/sessions.sqlite3"),
         )
         .unwrap();
         assert_eq!(

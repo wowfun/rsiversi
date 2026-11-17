@@ -106,7 +106,7 @@ impl ProfileLimits {
 /// Frozen values visible to pure Profile expressions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileEnvironment {
-    paths: Option<[PathBuf; 3]>,
+    paths: Option<[PathBuf; 5]>,
     platform: String,
     defines: BTreeMap<String, ConfigValue>,
 }
@@ -115,14 +115,18 @@ impl ProfileEnvironment {
     /// Creates an environment from explicit absolute paths and frozen values.
     pub fn new(
         config: impl Into<PathBuf>,
+        data: impl Into<PathBuf>,
         state: impl Into<PathBuf>,
         cache: impl Into<PathBuf>,
+        tmp: impl Into<PathBuf>,
         platform: impl Into<String>,
         defines: BTreeMap<String, ConfigValue>,
     ) -> Result<Self> {
         let config = absolute_path("config", config.into())?;
+        let data = absolute_path("data", data.into())?;
         let state = absolute_path("state", state.into())?;
         let cache = absolute_path("cache", cache.into())?;
+        let tmp = absolute_path("tmp", tmp.into())?;
         let platform = platform.into();
         if platform.is_empty() {
             return Err(ProfileError::InvalidEnvironment(
@@ -130,7 +134,7 @@ impl ProfileEnvironment {
             ));
         }
         Ok(Self {
-            paths: Some([config, state, cache]),
+            paths: Some([config, data, state, cache, tmp]),
             platform,
             defines,
         })
@@ -161,12 +165,22 @@ impl ProfileEnvironment {
 
     /// Frozen state root.
     pub fn state(&self) -> Option<&Path> {
-        self.paths.as_ref().map(|paths| paths[1].as_path())
+        self.paths.as_ref().map(|paths| paths[2].as_path())
     }
 
     /// Frozen cache root.
     pub fn cache(&self) -> Option<&Path> {
-        self.paths.as_ref().map(|paths| paths[2].as_path())
+        self.paths.as_ref().map(|paths| paths[3].as_path())
+    }
+
+    /// Frozen durable user data root.
+    pub fn data(&self) -> Option<&Path> {
+        self.paths.as_ref().map(|paths| paths[1].as_path())
+    }
+
+    /// Frozen scratch parent.
+    pub fn tmp(&self) -> Option<&Path> {
+        self.paths.as_ref().map(|paths| paths[4].as_path())
     }
 
     /// Frozen application-selected platform name.
@@ -1052,8 +1066,10 @@ fn source_hasher(environment: &ProfileEnvironment) -> Sha256 {
     if let Some(paths) = &environment.paths {
         for (label, path) in [
             b"environment-config".as_slice(),
+            b"environment-data",
             b"environment-state",
             b"environment-cache",
+            b"environment-tmp",
         ]
         .into_iter()
         .zip(paths)
@@ -1856,7 +1872,10 @@ impl<'a> CompileState<'a> {
         let mut scope = Scope::new();
         let mut paths = Map::new();
         if let Some(values) = &self.compiler.environment.paths {
-            for (label, path) in ["config", "state", "cache"].into_iter().zip(values) {
+            for (label, path) in ["config", "data", "state", "cache", "tmp"]
+                .into_iter()
+                .zip(values)
+            {
                 paths.insert(label.into(), path.display().to_string().into());
             }
         }

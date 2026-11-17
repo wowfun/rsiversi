@@ -18,6 +18,13 @@ impl LocalContract for ServiceOwnerContract {
 #[derive(Clone, Debug)]
 pub struct ServiceOwnerFactory(Ownership);
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::large_enum_variant,
+        reason = "One startup-only path bundle stays inline to avoid a separate allocation."
+    )
+)]
 enum Ownership {
     Existing(Arc<HostOwnerLease>, HostEpoch),
     Acquire(ServiceHostPaths),

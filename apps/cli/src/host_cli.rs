@@ -17,13 +17,24 @@ pub(super) struct ProductHostLauncher;
 impl rsi::LocalHostLauncher for ProductHostLauncher {
     async fn ensure_started(&self, paths: &rsi_host::HostPaths) -> rsi::Result<()> {
         let selected = standard_paths()?;
-        if selected.config() != paths.config() || selected.state() != paths.state() {
-            return Err(RsiError::Boot(
-                "application launcher received different home authorities".into(),
-            ));
-        }
+        validate_launcher_homes(&selected, paths)?;
         start_host_daemon_inner(&HostProfileId::new("standard").expect("constant"), true).await
     }
+}
+
+fn validate_launcher_homes(
+    selected: &rsi_host::HostPaths,
+    paths: &rsi_host::HostPaths,
+) -> rsi::Result<()> {
+    if selected.config() != paths.config()
+        || selected.data() != paths.data()
+        || selected.state() != paths.state()
+    {
+        return Err(RsiError::Boot(
+            "application launcher received different home authorities".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn run_host(command: HostCommand) -> u8 {
@@ -828,4 +839,34 @@ pub(super) async fn reload_host_daemon() -> rsi::Result<()> {
         serde_json::to_string(&reply).map_err(|error| RsiError::Boot(error.to_string()))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    #[test]
+    fn launcher_requires_all_three_durable_authorities() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |names: [&str; 5]| {
+            let [config, data, state, cache, tmp] = names.map(|name| root.path().join(name));
+            rsi_host::HostPaths::new(config, data, state, cache, tmp).unwrap()
+        };
+        let names = ["config", "data", "state", "cache", "tmp"];
+        let selected = make(names);
+        validate_launcher_homes(&selected, &make(names)).unwrap();
+        for index in 0..3 {
+            let mut changed = names;
+            changed[index] = "different";
+            assert!(
+                validate_launcher_homes(&selected, &make(changed)).is_err(),
+                "authority {index}"
+            );
+        }
+        validate_launcher_homes(
+            &selected,
+            &make(["config", "data", "state", "other-cache", "other-tmp"]),
+        )
+        .unwrap();
+    }
 }

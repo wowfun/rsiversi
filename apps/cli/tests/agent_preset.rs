@@ -27,8 +27,14 @@ async fn scoped_catalog_plugins_share_parent_runtime_and_retire_their_settings_o
     let mut managers = Vec::new();
     for label in ["first", "second"] {
         let root = temporary.path().join(label);
-        let paths =
-            HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap();
+        let paths = HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap();
         let system = root.join("presets");
         write_preset(&system, "standard", "format = 1\n");
         let manager = AgentPresetManager::open_standard_in(
@@ -104,7 +110,14 @@ async fn manager_derives_settings_roots_user_root_and_default_override() {
         .unwrap(),
     )
     .unwrap();
-    let paths = HostPaths::new(config.clone(), state, cache).unwrap();
+    let paths = HostPaths::new(
+        config.clone(),
+        std::path::Path::new(&cache).with_file_name("data"),
+        &state,
+        &cache,
+        std::path::Path::new(&cache).with_file_name("tmp"),
+    )
+    .unwrap();
 
     let manager = AgentPresetManager::open(
         &rsi::StandardComposition::new(
@@ -189,7 +202,14 @@ async fn independent_managers_detect_a_concurrent_default_write_without_clobberi
     for id in ["standard", "minimal", "review"] {
         write_preset(&system, id, &format!("format = 1\n# {id}\n"));
     }
-    let paths = HostPaths::new(config, state, cache).unwrap();
+    let paths = HostPaths::new(
+        &config,
+        std::path::Path::new(&cache).with_file_name("data"),
+        &state,
+        &cache,
+        std::path::Path::new(&cache).with_file_name("tmp"),
+    )
+    .unwrap();
     let first = AgentPresetManager::open(
         &rsi::StandardComposition::new(
             paths.clone(),
@@ -350,7 +370,7 @@ fn built_binary_advertises_the_complete_management_command_tree() {
 fn built_binary_rejects_a_non_absolute_configured_root() {
     let temporary = tempfile::tempdir().unwrap();
     let xdg_config = temporary.path().join("xdg-config");
-    let config = xdg_config.join("rsi");
+    let config = xdg_config.join("rsiversi");
     fs::create_dir_all(&config).unwrap();
     fs::write(
         config.join("settings.json"),
@@ -366,6 +386,7 @@ fn built_binary_rejects_a_non_absolute_configured_root() {
     let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
         .args(["agent-preset", "list"])
         .env("XDG_CONFIG_HOME", xdg_config)
+        .env("XDG_DATA_HOME", temporary.path().join("xdg-data"))
         .env("XDG_STATE_HOME", temporary.path().join("xdg-state"))
         .env("XDG_CACHE_HOME", temporary.path().join("xdg-cache"))
         .output()
@@ -398,7 +419,7 @@ impl CliFixture {
         let xdg_config = temporary.path().join("xdg-config");
         let xdg_state = temporary.path().join("xdg-state");
         let xdg_cache = temporary.path().join("xdg-cache");
-        let config = xdg_config.join("rsi");
+        let config = xdg_config.join("rsiversi");
         let configured = temporary.path().join("configured");
         let workspace = temporary.path().join("workspace");
         fs::create_dir_all(&config).unwrap();
@@ -478,6 +499,7 @@ max_output_reserve_tokens = 16384
         Command::new(env!("CARGO_BIN_EXE_rsi"))
             .args(arguments)
             .env("XDG_CONFIG_HOME", &self.xdg_config)
+            .env("XDG_DATA_HOME", self.xdg_config.with_file_name("xdg-data"))
             .env("XDG_STATE_HOME", &self.xdg_state)
             .env("XDG_CACHE_HOME", &self.xdg_cache)
             .env("RSI_OPENAI_COMPATIBLE_API_KEY", "fixture-secret")
@@ -815,6 +837,10 @@ fn read_only_management_does_not_resolve_installation_provenance() {
     let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
         .args(["--config-home"])
         .arg(root.path().join("config"))
+        .arg("--data-home")
+        .arg(root.path().join("data"))
+        .arg("--tmp-home")
+        .arg(root.path().join("tmp"))
         .args(["--state-home"])
         .arg(root.path().join("state"))
         .args(["--cache-home"])
@@ -838,6 +864,10 @@ fn unknown_maintenance_help_does_not_initialize_or_reset_homes() {
         let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
             .args(["--config-home"])
             .arg(root.path().join("config"))
+            .arg("--data-home")
+            .arg(root.path().join("data"))
+            .arg("--tmp-home")
+            .arg(root.path().join("tmp"))
             .args(["--state-home"])
             .arg(root.path().join("state"))
             .args(["--cache-home"])

@@ -102,7 +102,7 @@ fn write_http_profile(fixture: &CliFixture) {
     let profile = fixture
         .temporary
         .path()
-        .join("config/rsi/application-profiles/test-serve/application.profile.toml");
+        .join("config/rsiversi/application-profiles/test-serve/application.profile.toml");
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(
         profile,
@@ -164,7 +164,7 @@ fn reload_executor_and_keep_listener(
     let metadata_path = fixture
         .temporary
         .path()
-        .join("state/rsi/session-host/owner.json");
+        .join("state/rsiversi/session-host/owner.json");
     let owner = std::fs::read(&metadata_path).unwrap();
     let metadata: rsi_service_host::HostOwnerMetadata = serde_json::from_slice(&owner).unwrap();
     let socket = metadata.socket_path.as_ref().unwrap();
@@ -179,7 +179,7 @@ fn reload_executor_and_keep_listener(
     let path = fixture
         .temporary
         .path()
-        .join("config/rsi/host-profiles/fixture/host.profile.toml");
+        .join("config/rsiversi/host-profiles/fixture/host.profile.toml");
     let source = std::fs::read_to_string(&path).unwrap();
     let original = source.split("\n# reload fixture\n").next().unwrap();
     std::fs::write(&path, format!("{original}\n# reload fixture\n[[steps]]\nkind = \"patch\"\ntarget = \"rsi-agent-executor\"\nconfig = {{ executor_id = \"rsi-agent-executor\", maximum_active_turns = {maximum_active_turns} }}\n")).unwrap();
@@ -374,7 +374,7 @@ async fn run_remote_headless(fixture: &CliFixture, origin: &str, registered: &se
     let remote_profile = fixture
         .temporary
         .path()
-        .join("remote-config/rsi/application-profiles/remote/application.profile.toml");
+        .join("remote-config/rsiversi/application-profiles/remote/application.profile.toml");
     std::fs::create_dir_all(remote_profile.parent().unwrap()).unwrap();
     std::fs::write(remote_profile, format!(r#"format = 1
 [[steps]]
@@ -399,6 +399,10 @@ plugin = "rsi.application.headless"
         .env(
             "XDG_CONFIG_HOME",
             fixture.temporary.path().join("remote-config"),
+        )
+        .env(
+            "XDG_DATA_HOME",
+            fixture.temporary.path().join("remote-data"),
         )
         .env("XDG_STATE_HOME", &remote_state)
         .env("XDG_CACHE_HOME", &remote_cache)
@@ -436,7 +440,7 @@ plugin = "rsi.application.headless"
         !remote_cache.join("rsi/agent-presets").exists(),
         "remote client materialized backend presets"
     );
-    let cached = std::fs::read_dir(remote_cache.join("rsi"))
+    let cached = std::fs::read_dir(remote_cache.join("rsiversi"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();

@@ -48,6 +48,7 @@ struct Journal {
     previous_digest: String,
     candidate_digest: String,
     config: PathBuf,
+    data: PathBuf,
     state: PathBuf,
     was_running: bool,
 }
@@ -111,7 +112,7 @@ impl CoreUpgrade {
         let id = hex::encode(random);
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         let journal = Journal {
-            format: 1,
+            format: 3,
             previous: format!(".rsi-previous-{id}{suffix}"),
             candidate: format!(".rsi-candidate-{id}{suffix}"),
             failed: format!(".rsi-failed-{id}{suffix}"),
@@ -120,6 +121,7 @@ impl CoreUpgrade {
             previous_digest,
             candidate_digest: expected_digest.into(),
             config: std::fs::canonicalize(paths.config()).map_err(error)?,
+            data: std::fs::canonicalize(paths.data()).map_err(error)?,
             state: std::fs::canonicalize(paths.state()).map_err(error)?,
             was_running,
         };
@@ -146,7 +148,7 @@ impl CoreUpgrade {
         Ok(Self { home, journal })
     }
 
-    /// Reads bounded recovery intent and verifies the caller's exact home pair.
+    /// Reads bounded recovery intent and verifies the caller's exact home set.
     pub fn recover(installation: &Path, paths: &HostPaths) -> Result<Self> {
         let home = open(installation)?;
         let bytes = home
@@ -306,16 +308,20 @@ enum Topology {
 fn validate(journal: &Journal, paths: &HostPaths) -> Result<()> {
     validate_shape(journal)?;
     if journal.config != std::fs::canonicalize(paths.config()).map_err(error)?
+        || journal.data != std::fs::canonicalize(paths.data()).map_err(error)?
         || journal.state != std::fs::canonicalize(paths.state()).map_err(error)?
     {
-        return Err(error("different config/state homes"));
+        return Err(error("different config/data/state homes"));
     }
     Ok(())
 }
 
 fn validate_shape(journal: &Journal) -> Result<()> {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    if journal.format != 1
+    if journal.format != 3
+        || !journal.config.is_absolute()
+        || !journal.data.is_absolute()
+        || !journal.state.is_absolute()
         || journal.id.len() != 32
         || !journal
             .id
@@ -329,7 +335,7 @@ fn validate_shape(journal: &Journal) -> Result<()> {
         || !hex(&journal.candidate_digest)
     {
         return Err(error(
-            "invalid upgrade journal or different config/state homes",
+            "invalid upgrade journal or different config/data/state homes",
         ));
     }
     Ok(())
@@ -486,9 +492,15 @@ mod tests {
             ))
             .unwrap();
             let root = temporary.path();
-            let paths = HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
-                .unwrap();
-            for path in [paths.config(), paths.state()] {
+            let paths = HostPaths::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("state"),
+                root.join("cache"),
+                root.join("tmp"),
+            )
+            .unwrap();
+            for path in [paths.config(), paths.data(), paths.state()] {
                 rsi_files_native_fs::create_absolute_directory_no_follow(path).unwrap();
             }
             let bin = root.join("bin");
@@ -711,7 +723,14 @@ mod tests {
         drop(transaction);
         let foreign = fixture.temporary.path().join("foreign");
         std::fs::create_dir(&foreign).unwrap();
-        let paths = HostPaths::new(fixture.paths.config(), foreign, fixture.paths.cache()).unwrap();
+        let paths = HostPaths::new(
+            fixture.paths.config(),
+            fixture.paths.data(),
+            &foreign,
+            fixture.paths.cache(),
+            fixture.paths.tmp(),
+        )
+        .unwrap();
         assert!(CoreUpgrade::recover(fixture.executable.parent().unwrap(), &paths).is_err());
         std::fs::write(&fixture.executable, b"unexpected").unwrap();
         assert!(
@@ -719,6 +738,42 @@ mod tests {
         );
         assert_eq!(std::fs::read(&fixture.executable).unwrap(), b"unexpected");
         fixture.preserved();
+    }
+
+    #[test]
+    fn completed_core_receipts_are_collected_by_the_shared_installation_reader() {
+        let fixture = Fixture::new();
+        let receipt = fixture.begin().finish(false).unwrap();
+        let layout = crate::record::Layout::new(fixture.temporary.path()).unwrap();
+        assert!(
+            crate::transaction::preview_collection(&layout)
+                .unwrap()
+                .contains(&receipt)
+        );
+    }
+
+    #[test]
+    fn completed_core_receipts_reject_relative_home_authorities() {
+        let fixture = Fixture::new();
+        let receipt = fixture.begin().finish(false).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        let directory =
+            rsi_files_native_fs::open_absolute_directory_no_follow(receipt.parent().unwrap())
+                .unwrap();
+        for home in ["config", "data", "state"] {
+            let mut value = original.clone();
+            value[home] = "relative".into();
+            assert!(
+                receipt_files(
+                    &directory,
+                    receipt.file_name().unwrap().to_str().unwrap(),
+                    &serde_json::to_vec(&value).unwrap()
+                )
+                .is_err(),
+                "{home}"
+            );
+        }
     }
 
     #[test]
