@@ -11,6 +11,9 @@ pub(crate) fn verify(repository: &Path, online: bool) -> Result<(), String> {
     let mut errors = Vec::new();
     for path in paths.split('\0').filter(|path| !path.is_empty()) {
         let path = repository.join(path);
+        if !path.exists() {
+            continue;
+        }
         if path.file_name().is_some_and(|name| name == "Cargo.lock") {
             locks.insert(path);
             continue;
@@ -141,7 +144,7 @@ mod tests {
                 .status
                 .success()
         );
-        for name in ["one", "two"] {
+        for name in ["one", "two", "retired"] {
             let workspace = root.path().join(name);
             fs::create_dir_all(workspace.join("member/src")).unwrap();
             fs::write(
@@ -182,6 +185,15 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        verify(root.path(), false).unwrap();
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "member/Cargo.toml",
+            "member/src/lib.rs",
+        ] {
+            fs::remove_file(root.path().join("retired").join(path)).unwrap();
+        }
         verify(root.path(), false).unwrap();
         for name in ["one", "two"] {
             let manifest = root.path().join(name).join("member/Cargo.toml");

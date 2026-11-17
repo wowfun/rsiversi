@@ -13,6 +13,7 @@ mod cargo_step;
 mod code_check;
 mod documentation;
 mod lockfiles;
+mod persistence;
 mod protocols;
 mod repository_root;
 mod rsi_meta;
@@ -51,6 +52,10 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
+        [command] if command == "verify-persistence" =>
+            persistence::run(&env::current_dir().map_err(|e| e.to_string())?, false),
+        [command, mode] if command == "verify-persistence" && mode == "--contracts-only" =>
+            persistence::run(&env::current_dir().map_err(|e| e.to_string())?, true),
         [command, rest @ ..] if command == "verify-protocols" =>
             protocols::run(&env::current_dir().map_err(|e| e.to_string())?, rest),
         [command, rest @ ..] if command == "addon" => addon::run(rest),
@@ -101,7 +106,7 @@ fn run() -> Result<(), String> {
             code_check::run(&repository).map_err(|error| format!("code-check:\n{error}"))
         }
         _ => Err(
-            "usage: rsi-xtask verify-protocols | rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-lockfiles [--online] | rsi-xtask verify-docs [--structure-only] | rsi-xtask rsi-meta conformance"
+            "usage: rsi-xtask verify-persistence | rsi-xtask verify-protocols | rsi-xtask verify-architecture | rsi-xtask code-check | rsi-xtask verify-agent-notes [--write] | rsi-xtask verify-lockfiles [--online] | rsi-xtask verify-docs [--structure-only] | rsi-xtask rsi-meta conformance"
                 .into(),
         ),
     }

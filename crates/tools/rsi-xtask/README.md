@@ -1,5 +1,25 @@
 # rsi-xtask
 
+`cargo xtask verify-persistence` runs each persistence owner's declared test target
+(an integration target or a filtered library target, so private payload codecs
+need no production export solely for testing). Owners sharing a target run in
+one Cargo feature graph. The local `persistence-contract.json` derives its package
+from the sibling `Cargo.toml`. It defaults to the library `persistence` filter and
+`tests/fixtures/persistence`; `target` (`kind: integration` with `name`, or
+`kind: library` with `filter`) and `fixtures` override those defaults.
+`--contracts-only` validates declarations and retention without compiling owner
+tests. CI uses this mode independently of the baseline-fetch outcome; normal
+package jobs run the owner tests. The gate never refreshes fixtures. In CI,
+`RSI_PERSISTENCE_BASE` is the exact SHA-1 or SHA-256 comparison commit: old corpus
+bytes and each owner's package, target and fixture home must remain present and
+unchanged; new fixtures are additive. Independent retention failures are reported
+together in path order. Format versions, schema fingerprints and decoding rules
+belong to the owning test target.
+Markdown procedure and provenance documents are editable documentation, excluded
+from byte retention. Every other file below the declared fixture home is retained.
+Retention reads the base tree once and fetches retained blobs through one Git
+batch process, comparing their bytes without checkout filters or normalization.
+
 `cargo xtask addon new NAME --directory ABSOLUTE_NEW_DIRECTORY` creates an
 independent native Tool addon workspace on Linux/WSL. `NAME` is a lowercase ASCII
 letter followed by lowercase letters, digits or hyphens, at most 48 bytes.
@@ -144,6 +164,10 @@ LLVM-compatible inspector. The ABI package test owns the maintained C11/C++17
 header compilation, while the Loader suite maps the real native fixture on the
 executing host.
 
+Independent conformance steps run even after an earlier failure and the command
+reports every failed step before returning failure. ELF inspection runs only
+after its release build succeeds; a failed prerequisite is reported as blocked.
+
 Repository commands must run from the repository root. Native evidence applies only to the platform that actually executed it.
 
 `cargo xtask verify-architecture` rejects normal, build and test dependencies from
@@ -167,8 +191,9 @@ edges, including when `apps/` is a symlink. A broken or escaping application roo
 is an error; sibling names such as `appsfoo/` are not application paths.
 
 `cargo xtask verify-lockfiles` discovers tracked and nonignored untracked
-manifests and lockfiles, so new authored workspaces are checked before staging. It
-asks Cargo for their workspace roots, and checks each distinct root with full
+manifests and lockfiles present in the working tree, so additions and deletions
+are checked consistently before staging. Missing locks for surviving workspaces
+remain errors. It asks Cargo for their workspace roots and checks each distinct root with full
 `cargo metadata --locked --offline`. It reports all independent failures and
 missing or orphaned locks, without updating locks. `--online` explicitly permits
 dependency fetching and is used by the independent CI lockfile gate.

@@ -18,6 +18,7 @@ const CONFORMANCE_PACKAGES: [&str; 7] = [
 ];
 const ECHO_MANIFEST: &str = "fixtures/rsi-meta/echo-bidi/Cargo.toml";
 const ECHO_TARGET: &str = "target/rsi-meta-conformance/echo-bidi";
+const ECHO_RELEASE_BUILD: &str = "release-build standalone echo-bidi";
 const FOUNDATION_MANIFEST: &str = "fixtures/rsi-meta/foundation-probe/Cargo.toml";
 const FOUNDATION_TARGET: &str = "target/rsi-meta-conformance/foundation-probe";
 const ENTRY_PREFIX: &str = "rsi_meta_plugin_entry_";
@@ -47,12 +48,29 @@ pub fn run(repository: &Path) -> Result<(), String> {
     repository_root::require(repository, "rsi-meta conformance")?;
     let host = Host::current();
     let target = rustc_host_target()?;
-    cargo_step::execute(repository, &conformance_steps(host, &target))?;
+    let steps = conformance_steps(host, &target);
+    let mut outcomes = cargo_step::execute(repository, &steps);
     if host == Host::Linux {
-        eprintln!("[release exports] verify standalone echo-bidi ELF symbols");
-        verify_linux_entry_exports(repository, &target)?;
+        if export_build_succeeded(&steps, &outcomes) {
+            eprintln!("[release exports] verify standalone echo-bidi ELF symbols");
+            outcomes.push(verify_linux_entry_exports(repository, &target));
+        } else {
+            eprintln!("[release exports] blocked: standalone echo-bidi release build failed");
+        }
     }
-    Ok(())
+    let failures: Vec<_> = outcomes.into_iter().filter_map(Result::err).collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
+}
+
+fn export_build_succeeded(steps: &[CargoStep], outcomes: &[Result<(), String>]) -> bool {
+    steps
+        .iter()
+        .zip(outcomes)
+        .any(|(step, outcome)| step.label == ECHO_RELEASE_BUILD && outcome.is_ok())
 }
 
 fn conformance_steps(host: Host, target: &str) -> Vec<CargoStep> {
@@ -136,7 +154,7 @@ fn standalone_steps(host: Host, target: &str) -> Vec<CargoStep> {
             ),
         ),
         CargoStep::new(
-            "release-build standalone echo-bidi",
+            ECHO_RELEASE_BUILD,
             standalone_build_arguments("build", ECHO_MANIFEST, ECHO_TARGET, &target, ["--release"]),
         ),
         CargoStep::new(
@@ -342,6 +360,23 @@ fn command_failure(
 mod tests {
     use super::*;
 
+    #[test]
+    fn export_inspection_depends_only_on_its_release_build() {
+        let steps = [
+            CargoStep::new("clippy rsi-meta", []),
+            CargoStep::new(ECHO_RELEASE_BUILD, []),
+        ];
+        assert!(export_build_succeeded(
+            &steps,
+            &[Err("lint".into()), Ok(())]
+        ));
+        assert!(!export_build_succeeded(
+            &steps,
+            &[Ok(()), Err("build".into())]
+        ));
+        assert!(!export_build_succeeded(&steps, &[Ok(())]));
+    }
+
     fn arguments(step: &CargoStep) -> Vec<&str> {
         step.arguments
             .iter()
@@ -393,7 +428,7 @@ mod tests {
                 "format standalone echo-bidi",
                 "clippy standalone echo-bidi",
                 "test standalone echo-bidi table header",
-                "release-build standalone echo-bidi",
+                ECHO_RELEASE_BUILD,
                 "metadata standalone foundation-probe",
                 "format standalone foundation-probe",
                 "clippy standalone foundation-probe",
@@ -443,7 +478,7 @@ mod tests {
                 "format standalone echo-bidi",
                 "clippy standalone echo-bidi",
                 "test standalone echo-bidi table header",
-                "release-build standalone echo-bidi",
+                ECHO_RELEASE_BUILD,
                 "metadata standalone foundation-probe",
                 "format standalone foundation-probe",
                 "clippy standalone foundation-probe",

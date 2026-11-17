@@ -25,7 +25,7 @@ concurrency:
 jobs:
   documentation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,6 +88,18 @@ jobs:
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 5
         run: cargo xtask verify-protocols
+      - name: Verify retained durable writer formats
+        if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          PERSISTENCE_BASE: ${{ steps.notes_base.outputs.base }}
+        run: |
+          if [[ -n "$PERSISTENCE_BASE" ]]; then
+            export RSI_PERSISTENCE_BASE="$PERSISTENCE_BASE"
+          else
+            printf '%s\n' 'No persistence baseline available; validating declarations only.'
+          fi
+          cargo xtask verify-persistence --contracts-only
       - name: Verify architecture
         if: ${{ !cancelled() && steps.docs_setup.outcome == 'success' }}
         timeout-minutes: 5
@@ -369,6 +381,9 @@ jobs:
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/process-transcript" node process-transcript.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/composer-controls" node composer-controls.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/composer-initialization" node composer-initialization.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/command-visibility" node command-visibility.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/draft-recovery-review" node draft-recovery-review.mjs
+          RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/recovery-followup" node recovery-followup.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/markdown" node markdown.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-regressions" node presentation-invariants.mjs
           RSI_REPORT_DIR="$RUNNER_TEMP/rsi-web-evidence/review-composer" node review-composer.mjs
@@ -576,11 +591,11 @@ jobs:
           workspaces: . -> target
       - name: Lint Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-spill*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets -- -D warnings
         timeout-minutes: 30
       - name: Exercise Base services
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' }}
-        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-permission*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p rsi-projection -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-host -p 'rsi-api*' -p 'rsi-storage*' -p 'rsi-settings*' -p 'rsi-credentials*' -p 'rsi-media*' -p 'rsi-approval*' -p 'rsi-user-questions*' -p 'rsi-sandbox*' -p 'rsi-process*' -p 'rsi-spill*' -p 'rsi-pty*' -p 'rsi-commands*' -p 'rsi-jobs*' -p 'rsi-tools*' -p rsi-shell-native -p rsi-apply-patch -p 'rsi-workspace*' -p 'rsi-files*' -p 'rsi-mcp*' -p 'rsi-retrieval*' -p rsi-acp -p rsi-acp-protocol -p rsi-acp-journal -p rsi-acp-client -p rsi-acp-host -p rsi-acp-api -p rsi-acp-tools --all-targets --no-fail-fast
         timeout-minutes: 30
       - name: Exercise ACP client phase budgets
         if: ${{ !cancelled() && steps.base_setup.outcome == 'success' && runner.os == 'Linux' }}
@@ -943,10 +958,10 @@ jobs:
         run: cargo fmt --all --check
         timeout-minutes: 10
       - name: Lint repository tools
-        run: cargo clippy --locked -p rsi-xtask --all-targets -- -D warnings
+        run: cargo clippy --locked -p rsi-xtask -p rsi-persistence-testkit --all-targets -- -D warnings
         timeout-minutes: 15
       - name: Exercise repository tools
-        run: cargo test --locked -p rsi-xtask --all-targets --no-fail-fast
+        run: cargo test --locked -p rsi-xtask -p rsi-persistence-testkit --all-targets --no-fail-fast
         timeout-minutes: 15
       - name: Verify Browser fixture lifecycle and native gate failure propagation
         run: |

@@ -26,6 +26,12 @@ first-push predecessor is empty. Documentation structure, archive notes,
 architecture, rustdoc and doctests have independent outcomes. A baseline fetch
 failure affects notes only; product lint does not suppress unrelated tests.
 
+The foundation conformance command also collects independent step failures.
+Its ELF export inspection depends only on the echo-bidi release build, so a
+Clippy failure cannot suppress either tests or a successfully built artifact's
+inspection. Failed build prerequisites are reported explicitly instead of
+inspecting a stale artifact from a previous run.
+
 CI uses independent jobs for documentation, `rsi-meta` conformance, Base
 services, `rsi-ai`, `rsi-agent`, the standard `rsi` product, repository tools,
 dependency audit, lockfile consistency, and Windows `rsi-meta`.
@@ -166,7 +172,9 @@ Git-tracked lockfiles, fetching registry and advisory evidence for every graph
 as required by the [independent audit decision](2026-10-14-independent-lockfile-audit-index.md).
 A separate read-only lockfile gate discovers workspace
 roots through Cargo and runs full locked metadata, aggregating stale, missing
-and orphaned lock diagnostics. Its explicit online mode fetches dependencies;
+and orphaned lock diagnostics. Discovery uses current authored files regardless
+of staging: deleted manifests do not create phantom workspace roots, while
+surviving workspaces still require their lockfiles. Its explicit online mode fetches dependencies;
 local verification defaults to offline. This detects manifest drift that a
 vulnerability audit of old dependency versions cannot establish.
 The lockfile job also installs the source bootstrap's pinned npm tools with
