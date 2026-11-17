@@ -61,7 +61,7 @@ outputs are committed individually through Media and persisted only as refs;
 tail failure preserves the durable prefix. Effect-owned pre-terminal
 finalizers settle process-local Jobs before the sole terminal Fact.
 
-Approval, Permission Presets, and Sandbox are independent Local services, not
+Approval and Sandbox are independent Local services, not
 ambient enforcement. The current Tool registry contains trusted process-local
 definitions and no effect taxonomy or standard effect-bearing registration.
 Before the standard product admits its first effect-bearing Tool, that Tool's
@@ -70,6 +70,10 @@ approval when required, and a Sandbox plan at the actual effect site, then
 place the decision and truthful enforcement stamp at the Agent durability
 boundary. Merely registering these services does not claim that enforcement
 already exists.
+
+The permission-preset service portion is superseded by
+[removal of unused foundation services](../simplification/2026-11-15-unused-foundation-services.md).
+Approval and Sandbox remain the enforcing owners.
 
 Factory construction may impose a product-owned readiness invariant that
 cannot be weakened by Profile replacement. The standard composition constructs

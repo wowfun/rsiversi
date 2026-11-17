@@ -42,8 +42,10 @@ fn test_compiler() -> AgentPresetProfileCompiler {
         ProfileCompiler::new(
             ProfileEnvironment::new(
                 std::env::temp_dir().join("test-config"),
+                std::env::temp_dir().join("test-data"),
                 std::env::temp_dir().join("test-state"),
                 std::env::temp_dir().join("test-cache"),
+                std::env::temp_dir().join("test-tmp"),
                 "test-platform",
                 BTreeMap::from([("feature".to_owned(), Value::Bool(true))]),
             )
@@ -77,8 +79,10 @@ async fn replacing_a_compiler_keeps_root_and_default_authority_without_changing_
         ProfileCompiler::new(
             ProfileEnvironment::new(
                 std::env::temp_dir().join("config"),
+                std::env::temp_dir().join("data"),
                 std::env::temp_dir().join("state"),
                 std::env::temp_dir().join("cache"),
+                std::env::temp_dir().join("tmp"),
                 "test",
                 BTreeMap::new(),
             )

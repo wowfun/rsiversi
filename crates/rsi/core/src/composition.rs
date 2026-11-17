@@ -38,9 +38,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation, UpdateMode,
 };
 use rsi_meta_scope::ScopeRoot;
-use rsi_permission_presets::PermissionPresetsContract;
 use rsi_process::ProcessContract;
-use rsi_projection::ProjectionRegistryContract;
 use rsi_sandbox::SandboxContract;
 use rsi_session_protocol::AgentSettingsContract;
 use rsi_settings_protocol::{SettingsContract, SettingsProviderContract};
@@ -85,14 +83,12 @@ const APPROVAL_BROKER_FACTORY: &str = "rsi.approval.broker";
 const QUESTIONS_FACTORY: &str = "rsi.user-questions";
 const QUESTION_TOOLS_FACTORY: &str = "rsi.agent.questions";
 const APPROVAL_FACTORY: &str = "rsi.approval";
-const PERMISSIONS_FACTORY: &str = "rsi.permission-presets";
 const SANDBOX_FACTORY: &str = "rsi.sandbox.local";
 const PROCESS_FACTORY: &str = "rsi.process.local";
 const OUTPUT_READ_FACTORY: &str = "rsi.output.read";
 const COMMANDS_FACTORY: &str = "rsi.commands";
 const JOBS_FACTORY: &str = "rsi.jobs.local";
 const JOBS_FINALIZER_FACTORY: &str = "rsi.session.jobs-finalizer";
-const PROJECTION_FACTORY: &str = "rsi.projection";
 const WORKSPACE_FACTORY: &str = "rsi.workspace";
 const FILES_FACTORY: &str = "rsi.files.local";
 const FILES_TOOLS_FACTORY: &str = "rsi.files.tools";
@@ -418,6 +414,14 @@ fn register_extensions(
         "rsi.extension.agent",
         Arc::new(rsi_extension_agent::AgentAdapterFactory),
     )?;
+    register(
+        "rsi.spill.policy",
+        Arc::new(rsi_spill_policy::SpillPolicyFactory),
+    )?;
+    register(
+        OUTPUT_READ_FACTORY,
+        Arc::new(crate::output_read::OutputReadToolFactory),
+    )?;
     Ok(())
 }
 
@@ -425,10 +429,6 @@ fn register_coding_tools(
     register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
     coding: &StandardCodingTools,
 ) -> rsi_host::Result<()> {
-    register(
-        OUTPUT_READ_FACTORY,
-        Arc::new(crate::output_read::OutputReadToolFactory),
-    )?;
     register(SHELL_TOOL_FACTORY, Arc::new(coding.shell_tool.clone()))?;
     if let Some(tool) = &coding.apply_patch {
         register(APPLY_PATCH_FACTORY, Arc::new(tool.clone()))?;
@@ -1001,7 +1001,7 @@ impl StandardComposition {
             source_watch: false.into(),
             host_launcher: None,
             credential_store: Arc::new(FileSecretStore::with_trusted_root_alias(
-                paths.config().join("credentials/credentials.json"),
+                paths.data().join("credentials/credentials.json"),
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
             user_home: None,
@@ -1110,7 +1110,7 @@ impl StandardComposition {
         ))?;
         self.addons.merged(standard_agent_addon(
             self.coding_tools.as_ref(),
-            &self.paths.state().join("packages"),
+            &self.paths.data().join("packages"),
         )?)
     }
 
@@ -1496,6 +1496,12 @@ impl StandardComposition {
             )],
         ))?;
         register_preset_settings(&mut builder, preset_settings)?;
+        register(
+            &mut builder,
+            "rsi.spill.local",
+            UpdateMode::RestartRequired,
+            crate::spill::StandardSpillFactory(paths.cache().to_owned()),
+        )?;
         let review_git = self
             .coding_tools
             .as_ref()
@@ -1654,7 +1660,7 @@ impl StandardComposition {
             .addons
             .merged(standard_agent_addon(
                 self.coding_tools.as_ref(),
-                &self.paths.state().join("packages"),
+                &self.paths.data().join("packages"),
             )?)?
             .merged(service_addon.clone())?
             .digest()?;
@@ -1858,12 +1864,6 @@ fn register_runtime_factories(
     )?;
     register(
         builder,
-        PERMISSIONS_FACTORY,
-        UpdateMode::Replayable,
-        rsi_permission_presets::PermissionPresetsFactory,
-    )?;
-    register(
-        builder,
         SANDBOX_FACTORY,
         UpdateMode::RestartRequired,
         sandbox_factory,
@@ -1979,12 +1979,6 @@ fn register_runtime_factories(
         JOBS_FINALIZER_FACTORY,
         UpdateMode::Replayable,
         SessionJobsFinalizerFactory,
-    )?;
-    register(
-        builder,
-        PROJECTION_FACTORY,
-        UpdateMode::Replayable,
-        rsi_projection::ProjectionFactory,
     )?;
     register(
         builder,
@@ -2143,7 +2137,6 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_media_protocol::PublishedImagesContract>()?;
     builder.register_local_contract::<ApprovalContract>()?;
     builder.register_local_contract::<ApprovalAnswerersContract>()?;
-    builder.register_local_contract::<PermissionPresetsContract>()?;
     builder.register_local_contract::<SandboxContract>()?;
     builder.register_local_contract::<ProcessContract>()?;
     builder.register_local_contract::<rsi_process::DuplexProcessContract>()?;
@@ -2156,11 +2149,11 @@ fn register_contracts(builder: &mut StandardAddonBuilder) -> rsi_host::Result<()
     builder.register_local_contract::<rsi_retrieval::RetrievalContract>()?;
     #[cfg(not(unix))]
     builder.register_local_contract::<rsi_agent_composition::AgentCompositionSourceContract>()?;
-    builder.register_local_contract::<rsi_process::ProcessOutputCacheContract>()?;
+    builder.register_local_contract::<rsi_spill::SpillReaderContract>()?;
+    builder.register_local_contract::<rsi_spill::SpillStoreContract>()?;
     builder.register_local_contract::<rsi_user_questions_protocol::UserQuestionsContract>()?;
     builder.register_local_contract::<CommandRuntimeContract>()?;
     builder.register_local_contract::<JobsContract>()?;
-    builder.register_local_contract::<ProjectionRegistryContract>()?;
     builder.register_local_contract::<WorkspaceRegistryContract>()?;
     builder.register_local_contract::<rsi_workspace_protocol::WorkspaceIngressContract>()?;
     builder.register_local_contract::<ToolCatalogProviderContract>()?;
@@ -2241,38 +2234,26 @@ fn base_fragment(
         ProfileEntry::new(
             "rsi-media-local",
             MEDIA_LOCAL_FACTORY,
-            json!({ "root": paths.state().join("media") }),
+            json!({ "root": paths.data().join("media") }),
         ),
         ProfileEntry::new("rsi-media", MEDIA_FACTORY, Value::Null),
         ProfileEntry::new("rsi-approval", APPROVAL_FACTORY, Value::Null),
         ProfileEntry::new("rsi-approval-broker", APPROVAL_BROKER_FACTORY, Value::Null),
         ProfileEntry::new("rsi-user-questions", QUESTIONS_FACTORY, Value::Null),
         ProfileEntry::new(
-            "rsi-permission-presets",
-            PERMISSIONS_FACTORY,
-            json!({
-                "read-only": { "sandbox": "read-only", "require_approval": false },
-                "workspace-write": { "sandbox": "workspace-write", "require_approval": false },
-                "danger-full-access": { "sandbox": "danger-full-access", "require_approval": false }
-            }),
-        ),
-        ProfileEntry::new(
             "rsi-sandbox",
             SANDBOX_FACTORY,
             if cfg!(target_os = "linux") {
-                json!({"bubblewrap": ["/usr/bin/bwrap"], "landlock": []})
+                json!({"bubblewrap": ["/usr/bin/bwrap"], "landlock": [], "temporary_root": paths.tmp()})
             } else {
-                json!({})
+                json!({"temporary_root": paths.tmp()})
             },
         ),
+        ProfileEntry::new("rsi-spill", "rsi.spill.local", Value::Null),
         ProfileEntry::new(
             "rsi-process",
             PROCESS_FACTORY,
-            if cfg!(unix) {
-                json!({"output_cache":{"directory":paths.cache().join("process-output/v1")}})
-            } else {
-                Value::Null
-            },
+            json!({"capture_output":true}),
         ),
         ProfileEntry::new("rsi-pty", "rsi.pty", Value::Null),
         ProfileEntry::new("rsi-mcp", "rsi.mcp", Value::Null),
@@ -2517,8 +2498,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let composition = StandardComposition::new(
@@ -2552,8 +2535,10 @@ mod tests {
             }
             let paths = HostPaths::new(
                 temporary.path().join("config"),
+                temporary.path().join("data"),
                 temporary.path().join("state"),
                 &cache,
+                temporary.path().join("tmp"),
             )
             .unwrap();
             assert!(
@@ -2641,8 +2626,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let home = temporary.path().join("home");
@@ -2685,7 +2672,7 @@ mod tests {
     #[test]
     fn captured_home_rejects_non_utf8_before_profile_serialization() {
         use std::os::unix::ffi::OsStringExt as _;
-        let paths = HostPaths::new("/config", "/state", "/cache").unwrap();
+        let paths = HostPaths::new("/config", "/data", "/state", "/cache", "/tmp").unwrap();
         let home = std::ffi::OsString::from_vec(vec![b'/', 0xff]);
         assert!(
             StandardComposition::new(
@@ -2707,7 +2694,14 @@ mod tests {
             &mut builder,
             rsi_agent_store_sqlite::SqliteStoreFactory::default(),
             crate::application_receipts::Receipts(
-                HostPaths::new(home.path(), home.path(), home.path()).unwrap(),
+                HostPaths::new(
+                    home.path(),
+                    home.path(),
+                    home.path(),
+                    home.path(),
+                    home.path(),
+                )
+                .unwrap(),
             ),
         )
         .unwrap();
@@ -2722,34 +2716,15 @@ mod tests {
     }
 
     #[test]
-    fn standard_unconfined_preset_grants_standing_access() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = HostPaths::new(
-            temporary.path().join("config"),
-            temporary.path().join("state"),
-            temporary.path().join("cache"),
-        )
-        .unwrap();
-        let fragment = base_fragment(&paths, false, None, None);
-        let permissions = fragment
-            .entries()
-            .iter()
-            .find(|entry| entry.plugin().as_str() == PERMISSIONS_FACTORY)
-            .expect("standard permission preset registration");
-        assert_eq!(
-            permissions.config()["danger-full-access"]["require_approval"],
-            false
-        );
-    }
-
-    #[test]
     #[cfg(unix)]
     fn standard_agent_preset_is_digest_addressed_and_byte_verified() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let root = standard_agent_preset_root(&paths).unwrap();
@@ -2778,8 +2753,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let composition = StandardComposition::new(
@@ -2835,8 +2812,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let root = standard_agent_preset_root(&paths).unwrap();
@@ -2845,14 +2824,12 @@ mod tests {
             ProfileCompiler::new(
                 ProfileEnvironment::new(
                     paths.config(),
+                    paths.data(),
                     paths.state(),
                     paths.cache(),
+                    paths.tmp(),
                     "test-platform",
                     BTreeMap::from([
-                        (
-                            "standard_output_cache".to_owned(),
-                            Value::Bool(coding_tools_enabled),
-                        ),
                         (
                             "standard_coding_tools".to_owned(),
                             Value::Bool(coding_tools_enabled),
@@ -2907,6 +2884,7 @@ mod tests {
                 "rsi.history.tools",
                 "rsi.browser.tools",
                 "rsi.profile-leaves.tools",
+                "rsi.spill.policy",
             ]
         );
         assert_eq!(
@@ -2931,6 +2909,7 @@ mod tests {
                 GOAL_DOMAIN_FACTORY,
                 "rsi.agent.schedule",
                 REPEAT_REMINDER_FACTORY,
+                OUTPUT_READ_FACTORY,
                 JOBS_TOOLS_FACTORY,
                 AGENT_TOOLS_FACTORY,
                 QUESTION_TOOLS_FACTORY,
@@ -2939,6 +2918,7 @@ mod tests {
                 "rsi.acp.tools",
                 "rsi.history.tools",
                 "rsi.browser.tools",
+                "rsi.spill.policy",
             ]
         );
 
@@ -2977,8 +2957,10 @@ mod tests {
         let paths = Arc::new(
             HostPaths::new(
                 temporary.path().join("config"),
+                temporary.path().join("data"),
                 temporary.path().join("state"),
                 temporary.path().join("cache"),
+                temporary.path().join("tmp"),
             )
             .unwrap(),
         );
@@ -3020,8 +3002,10 @@ mod tests {
         symlink(&outside, cache.join("agent-presets")).unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             &cache,
+            temporary.path().join("tmp"),
         )
         .unwrap();
 
@@ -3039,8 +3023,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let root = standard_agent_preset_root(&paths).unwrap();
