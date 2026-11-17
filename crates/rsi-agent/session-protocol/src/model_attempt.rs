@@ -19,7 +19,8 @@ fn invalid(reason: impl Into<String>) -> SessionError {
     SessionError::Invalid(format!("model attempt: {}", reason.into()))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq)]
+#[schemars(with = "String")]
 struct Chunk(Arc<str>);
 impl Serialize for Chunk {
     fn serialize<S: serde::Serializer>(
@@ -41,7 +42,7 @@ impl<'de> Deserialize<'de> for Chunk {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StreamData {
     v: u8,
@@ -50,7 +51,8 @@ struct StreamData {
 }
 
 /// Validated complete attempt. Clones share immutable encoded blocks.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq)]
+#[schemars(with = "StreamData")]
 pub struct ModelAttemptLog {
     data: Arc<StreamData>,
     terminal: Arc<LanguageEvent>,
@@ -176,7 +178,7 @@ fn events_after<'a>(
 }
 
 /// Immutable event-aligned live prefix. Encoded blocks are shared with the accumulator.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ModelAttemptPrefix {
     chunks: Vec<Chunk>,
     events: u64,

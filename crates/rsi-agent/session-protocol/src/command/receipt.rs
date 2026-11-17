@@ -7,7 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 /// The actual mutation boundary crossed by a command.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommandOutcome {
     /// State changed only within the existing process-local draft lease.
@@ -23,7 +23,7 @@ pub enum CommandOutcome {
 }
 
 /// Bounded receipt for clients; does not duplicate complete domain state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCommandReceipt {
     command: ContributionId,

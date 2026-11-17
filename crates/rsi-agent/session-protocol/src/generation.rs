@@ -3,7 +3,7 @@ use crate::{Result, validate_sha256};
 use serde::{Deserialize, Serialize};
 
 /// Digest of the evaluated configuration and executable catalog. This is not a CAS address.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationSelection {
     sha256: String,

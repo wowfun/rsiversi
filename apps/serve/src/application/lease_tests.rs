@@ -1,11 +1,12 @@
 use super::{Importer, Imports};
+use rsi_extension::Handler;
 use rsi_packages::{
     Export, ExportKind, FileRecord, InstallSource, Manifest, PackageStore, PayloadHeader,
     Provenance,
 };
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 fn install(store: &PackageStore, directory: &Path, version: u8) -> String {
@@ -78,6 +79,7 @@ async fn releasing_a_digest_returns_capacity_and_permits_collection() {
             program: root.path().into(),
         },
         workspace: root.path().into(),
+        temporary_root: root.path().into(),
         store: store.clone(),
         lane: tokio::sync::Mutex::default(),
         leases: tokio::sync::Mutex::default(),
@@ -126,11 +128,7 @@ async fn releasing_a_digest_returns_capacity_and_permits_collection() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires an explicitly selected Node via RSI_EXTENSION_NODE"]
-async fn stage_callback_pins_releases_bounds_and_confirms_cleanup() {
-    use rsi_extension::Handler;
-    use std::time::Duration;
+fn stage_service() -> (tempfile::TempDir, Arc<Imports>) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     std::fs::create_dir(&source).unwrap();
@@ -178,10 +176,19 @@ async fn stage_callback_pins_releases_bounds_and_confirms_cleanup() {
         workspace: rsi_workspace_protocol::canonical_native_path(
             root.path().canonicalize().unwrap(),
         ),
+        temporary_root: root.path().into(),
         store: store.clone(),
         lane: tokio::sync::Mutex::default(),
         leases: tokio::sync::Mutex::default(),
     });
+    (root, service)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly selected Node via RSI_EXTENSION_NODE"]
+async fn stage_callback_pins_releases_bounds_and_confirms_cleanup() {
+    let (_root, service) = stage_service();
+    let store = &service.store;
     assert!(service.drain_on_cancel("application.stage"));
     assert!(!service.drain_on_cancel("application.payloads"));
     let input = json!({"specifications":["fixture"]});
@@ -270,7 +277,13 @@ async fn stage_callback_pins_releases_bounds_and_confirms_cleanup() {
     service.leases.lock().await.stages.clear();
     drop(held);
     assert_eq!(store.collect().unwrap(), [digest]);
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an explicitly selected Node via RSI_EXTENSION_NODE"]
+async fn stage_callback_cancellation_confirms_cleanup() {
+    let (root, service) = stage_service();
+    let store = &service.store;
     // Both queued and running importer cancellation use the owner's reply contract.
     let lane = service.lane.lock().await;
     let cancelled = CancellationToken::new();

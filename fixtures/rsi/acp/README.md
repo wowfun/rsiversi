@@ -8,11 +8,18 @@ Install with `npm ci --prefix fixtures/rsi/acp`. Run `node
 fixtures/rsi/acp/verify.mjs --binary target/debug/rsi --output OUTPUT`. The
 default fixture starts an isolated deterministic provider and fresh product
 configuration. Its `rsi.toml` selects the fixture Service Profile for the resident
-Host, which is stopped after the stdio client exits. Live verification is opt-in with `--live-env .local/dev/.env`;
+Host, which is stopped after the stdio client exits. On Windows, the final Host
+Profile explicitly patches `rsi-agent-workspace-context` to use only the private
+configuration's instruction file, Agent roots and Skill roots before starting
+the Host. `HOME` alone does not redirect Windows Profile Known Folder discovery.
+The startup regression checks the final profile and the report records the
+explicit paths. Live verification is opt-in with `--live-env .local/dev/.env`;
 only `DEEPSEEK_API_KEY` is read, and reports contain no credential values.
 Live mode also requires `RSI_LIVE_MODEL` and the three explicit
 `DEEPSEEK_*_TOKENS` limits described by the [Web fixture](../web-product/README.md).
 It uses the same DeepSeek profile and credential owner as that fixture.
+The live prompt uses the available native shell and checks exact file bytes;
+it does not require a Unix shell on Windows.
 `node --test fixtures/rsi/acp/live-startup.test.mjs` checks live configuration
 and child credential routing with synthetic inputs and a stub launch.
 The Python live launchers share the bounded, line-local key reader in

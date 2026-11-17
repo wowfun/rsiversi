@@ -11,7 +11,9 @@ pub const MAXIMUM_REQUEST_EVIDENCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAXIMUM_EVIDENCE_CONTENT_COUNT: usize = 131_072;
 
 /// One of the three independently reusable request sections.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceSection {
     /// Prepared route, generation and semantic generation settings.
@@ -23,7 +25,7 @@ pub enum EvidenceSection {
 }
 
 /// Exact UTF-8 section or a direct reference to an earlier inline section.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidencePart {
     /// Complete source bytes in this intent.
@@ -100,7 +102,9 @@ impl EvidencePart {
 }
 
 /// Content types represented in the actual request; no content body is repeated.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceContentKind {
     /// Ordinary visible text.
@@ -120,7 +124,7 @@ pub enum EvidenceContentKind {
 }
 
 /// Number and source byte length of one ordinary content kind.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceContentCount {
     /// Exact semantic category.
@@ -132,7 +136,7 @@ pub struct EvidenceContentCount {
 }
 
 /// A closed explanation when optional request inspection cannot be retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceUnavailable {
     /// Optional evidence exceeded its independent per-request byte allowance.
@@ -142,7 +146,7 @@ pub enum EvidenceUnavailable {
 }
 
 /// Complete optional inspection data published with one prepared model intent.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "availability",
     rename_all = "snake_case",
@@ -166,7 +170,7 @@ pub enum RequestEvidence {
         reason: EvidenceUnavailable,
     },
 }
-#[derive(Deserialize)]
+#[derive(schemars::JsonSchema, Deserialize)]
 #[serde(tag = "availability", rename_all = "snake_case", deny_unknown_fields)]
 enum EvidenceWire {
     Available {

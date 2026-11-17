@@ -2,6 +2,8 @@
 use super::*;
 use rsi_agent_composition_protocol::{ContributionKind, ContributionRegistration, DomainCatalog};
 use rsi_agent_session_protocol::{ContributionId, ExtensionJournal};
+#[path = "extension/bodies.rs"]
+mod bodies;
 #[path = "extension/commands.rs"]
 mod commands;
 #[path = "extension/fork.rs"]
@@ -253,7 +255,7 @@ async fn installed_original_todo_commits_through_kernel_and_restores_without_rep
     connection
         .request(
             "agent.load.events",
-            json!({"session_id": submitted.session_id, "offset": 0, "events": events}),
+            json!({"session_id": submitted.session_id, "offset": 0, "events": {"kind":"inline","value":events}}),
             CancellationToken::new(),
         )
         .await

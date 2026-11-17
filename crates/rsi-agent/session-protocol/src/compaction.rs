@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const MAXIMUM_COMPACTION_PLAN_BYTES: usize = 256 * 1024;
 
 /// Purpose of one serial model effect, fixed before provider I/O.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     content = "plan",
@@ -22,7 +22,7 @@ pub enum ModelPurpose {
 }
 
 /// Self-contained interpretation for a model event in a partial history page.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelEventPurpose {
     /// Ordinary assistant output.
@@ -57,7 +57,7 @@ impl ModelPurpose {
 }
 
 /// Exact builder implementation and normalized configuration binding.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionBuilder {
     /// Stable contribution identity.
@@ -69,7 +69,7 @@ pub struct CompactionBuilder {
 }
 
 /// Complete visible Facts of one Turn inside an exact source interval.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionSource {
     /// Originating Session, including a selected fork parent.
@@ -85,7 +85,7 @@ pub struct CompactionSource {
 }
 
 /// Contiguous complete messages selected from one current projected Turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionSelection {
     /// Exact source Session; Turn identities are Session-local.
@@ -99,7 +99,7 @@ pub struct CompactionSelection {
 }
 
 /// Prior installed summary included in the new summary's input.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionPrior {
     /// Originating Session; inherited sequence numbers stay in that Session.
@@ -113,7 +113,7 @@ pub struct CompactionPrior {
 }
 
 /// Evidence that caused one pressure event.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionTrigger {
     /// Last successful ordinary response reported this input Usage.
@@ -132,7 +132,7 @@ pub enum CompactionTrigger {
 }
 
 /// Frozen versioned input and installation predicate for one summary effect.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextCompactionPlan {
     /// Session in which this model effect was planned.

@@ -11,12 +11,13 @@ async fn native_process_handshake_multiplex_cancellation_and_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "opt-in installed Node and actual RSI_EXTENSION_DSH_TRANSPORT module"]
+#[ignore = "opt-in installed Node and actual RSI_DSH_INSTALLED_COHORT"]
 async fn actual_dsh_peer_preserves_control_progress_at_capacity() {
-    run_native(Some(
-        std::env::var("RSI_EXTENSION_DSH_TRANSPORT").expect("explicit DSH transport module"),
-    ))
-    .await;
+    let cohort = std::path::PathBuf::from(
+        std::env::var("RSI_DSH_INSTALLED_COHORT").expect("explicit installed DSH cohort"),
+    );
+    assert!(cohort.is_absolute(), "installed cohort must be absolute");
+    run_native(Some(cohort)).await;
 }
 
 #[derive(Debug, Default)]
@@ -24,16 +25,25 @@ struct Callbacks {
     entered: std::sync::atomic::AtomicUsize,
     changed: tokio::sync::Notify,
     ping: tokio::sync::Notify,
+    body: std::sync::Mutex<Option<Vec<u8>>>,
 }
 #[async_trait::async_trait]
 impl Handler for Callbacks {
     async fn call(
         &self,
         method: &str,
-        _: serde_json::Value,
+        payload: serde_json::Value,
         _: CancellationToken,
     ) -> rsi_extension::Result<serde_json::Value> {
         match method {
+            "body.read" => {
+                let body = self.body.lock().unwrap();
+                assert_eq!(payload["token"], "a".repeat(32));
+                return rsi_extension::body::fragment(
+                    body.as_ref().unwrap(),
+                    usize::try_from(payload["offset"].as_u64().unwrap()).unwrap(),
+                );
+            }
             "entered" => {
                 self.entered
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -47,7 +57,7 @@ impl Handler for Callbacks {
 }
 
 #[allow(clippy::too_many_lines)] // One process lifetime proves admission, wire progress and owned teardown.
-async fn run_native(dsh: Option<String>) {
+async fn run_native(dsh: Option<std::path::PathBuf>) {
     let node = std::env::var("RSI_EXTENSION_NODE").expect("explicit installed Node path");
     let root = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
@@ -95,8 +105,15 @@ async fn run_native(dsh: Option<String>) {
             .to_owned(),
         "native-test".into(),
     ];
-    if let Some(module) = &dsh {
-        arguments.push(module.clone());
+    if let Some(cohort) = &dsh {
+        for relative in [
+            "node_modules/rsi-dsh-cordis/src/runtime/transport.mjs",
+            "node_modules/rsi-dsh-plugin-bridge/src/request-body.mjs",
+        ] {
+            let module = cohort.join(relative);
+            assert!(module.is_file(), "installed cohort is missing {relative}");
+            arguments.push(module.to_string_lossy().into_owned());
+        }
     }
     let extension = runtime.root().apply(ResolvedFactory::linked("extension", "test", UpdateMode::Replayable,
         Arc::new(ExtensionFactory::new(callbacks.clone()))), json!({
@@ -137,6 +154,35 @@ async fn run_native(dsh: Option<String>) {
         .await
         .unwrap();
     if dsh.is_some() {
+        for (expected, text, maximum) in [
+            ("message", "\n".repeat(1024 * 1024), 8 * 1024 * 1024),
+            ("tool", "界".repeat(1024 * 1024), 4 * 1024 * 1024),
+            (
+                "application-limit",
+                "x".repeat(8 * 1024 * 1024 - 11),
+                8 * 1024 * 1024,
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&json!({"text": text})).unwrap();
+            assert!(bytes.len() <= maximum);
+            let body = rsi_extension::body::Body::Paged {
+                token: "a".repeat(32),
+                bytes: bytes.len(),
+            };
+            *callbacks.body.lock().unwrap() = Some(bytes);
+            assert_eq!(
+                connection
+                    .request(
+                        "echo-body",
+                        json!({"body":body,"expected":expected}),
+                        CancellationToken::new()
+                    )
+                    .await
+                    .unwrap(),
+                json!(true)
+            );
+            callbacks.body.lock().unwrap().take();
+        }
         let mut saturated = tokio::task::JoinSet::new();
         for _ in 0..64 {
             let connection = connection.clone();
@@ -165,7 +211,9 @@ async fn run_native(dsh: Option<String>) {
             connection
                 .request("echo", json!(null), CancellationToken::new())
                 .await,
-            Err(rsi_extension::Error::Capacity)
+            Err(rsi_extension::RequestFailure::NotDispatched(
+                rsi_extension::Error::Capacity
+            ))
         ));
         connection.shutdown().await.unwrap();
         while let Some(result) = saturated.join_next().await {

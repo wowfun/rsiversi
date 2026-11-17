@@ -1,3 +1,4 @@
+use crate::encoding::BoundedBytes;
 use rsi_agent_session_protocol::{
     EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
 };
@@ -65,30 +66,6 @@ impl Serialize for Fact<'_> {
     }
 }
 
-struct Bounded {
-    bytes: Vec<u8>,
-    maximum: usize,
-}
-impl Write for Bounded {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > self.maximum {
-            return Err(std::io::Error::other("history page capacity"));
-        }
-        let needed = self.bytes.len() + bytes.len();
-        if needed > self.bytes.capacity() {
-            let capacity = needed
-                .max(self.bytes.capacity().saturating_mul(2))
-                .min(self.maximum);
-            self.bytes.reserve_exact(capacity - self.bytes.len());
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Encodes a captured Fact page with model events decoded in place of durable chunks.
 /// Returns the covered cursor and its bounded JSON array. Claim-invisible positions
 /// remain covered by `through`; a page ending early stops before the next visible Fact.
@@ -105,7 +82,7 @@ pub fn project_history_page<'a>(
     if !(2..=rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 2).contains(&maximum) {
         return Err(Error::Protocol);
     }
-    let mut output = Bounded {
+    let mut output = BoundedBytes {
         bytes: vec![b'['],
         maximum: maximum - 1,
     };
@@ -141,20 +118,6 @@ pub fn project_history_page<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encoding_growth_stays_within_the_supplied_budget() {
-        let mut output = Bounded {
-            bytes: vec![b'['],
-            maximum: 101,
-        };
-        for _ in 0..10 {
-            output.write_all(b"0123456789").unwrap();
-            assert!(output.bytes.capacity() <= output.maximum);
-        }
-        assert!(output.write_all(b"x").is_err());
-        assert_eq!(output.bytes.len(), 101);
-    }
 
     #[test]
     fn page_capacity_keeps_whole_facts_and_claim_invisible_cursors() {

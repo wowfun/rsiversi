@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 pub const MAXIMUM_RECORD_REFERENCES: usize = 1024;
 
 /// A typed durable edge; arbitrary strings and Media addresses are not Agent-CAS roots.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(
     tag = "kind",
     content = "reference",
@@ -28,7 +30,7 @@ pub enum DurableReference {
 }
 
 /// Bounded deduplicating output owned by the canonical record reader.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ReferenceCollector(BTreeSet<DurableReference>);
 impl ReferenceCollector {

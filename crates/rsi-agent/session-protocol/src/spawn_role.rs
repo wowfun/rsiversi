@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 /// Stable provider and name, independent of editable source contents.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnRoleReference {
     /// Trusted definition provider namespace.
@@ -28,7 +28,7 @@ impl SpawnRoleReference {
 }
 
 /// Complete normalized source, separate from the effective descendant restriction.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnRoleSeed {
     /// Source name used for selection and retry identity.
@@ -64,7 +64,7 @@ impl SpawnRoleSeed {
 }
 
 /// Accepted invocation identity and its exact source definition.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnRoleRecord {
     /// Complete admitted definition.

@@ -12,8 +12,16 @@ pub(super) fn registration(
     adapter: &Arc<rsi_extension_agent::AgentAdapter>,
 ) -> ContributionRegistration {
     let id = ContributionId::new("rsi.extension.command.plan").unwrap();
-    let descriptor =
-        SessionCommandDescriptor::new(id.clone(), "plan", "Original Plan", true).unwrap();
+    let descriptor = SessionCommandDescriptor::new(
+        id.clone(),
+        "plan",
+        "Original Plan",
+        true,
+        Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            hint: "Arguments".into(),
+        }),
+    )
+    .unwrap();
     ContributionRegistration::new(
         id.clone(),
         0,
@@ -82,6 +90,71 @@ async fn draft_command(
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+#[ignore = "requires RSI_EXTENSION_NODE and RSI_DSH_INSTALLED_COHORT built from original upstream"]
+async fn rejected_command_preparation_acknowledges_or_retains_uncertainty() {
+    let cohort = std::path::PathBuf::from(std::env::var("RSI_DSH_INSTALLED_COHORT").unwrap());
+    for mode in ["reject-unloaded", "reject-invalid"] {
+        let stack = BaseStack::activate().await;
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/extension-lost-ack.mjs");
+        let (process, extension, connection) = connect(&stack, &cohort, &entry).await;
+        connection
+            .request(
+                "fixture.arm",
+                json!({"mode":mode}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let definition = rsi_extension_agent::definition().unwrap();
+        let domains = DomainCatalog::new([definition.registration()]).unwrap();
+        let handle = domains.bind(&definition).unwrap();
+        *stack.composition.domains.lock().unwrap() = domains;
+        let adapter = rsi_extension_agent::AgentAdapter::new(
+            connection.clone(),
+            stack.store.clone(),
+            stack
+                .runtime
+                .root()
+                .lookup_local::<TurnExecutionContract>()
+                .unwrap(),
+            handle,
+        )
+        .unwrap();
+        let callbacks = contributions::install(&stack, vec![registration(&adapter)]).await;
+        let mut draft = AgentSessionDraft::new(
+            header_for_session("rejected-command"),
+            stack.composition.clone(),
+        )
+        .await
+        .unwrap();
+        let first = invocation(&draft, "rejected-input", "Inspect source before editing");
+        assert!(draft_command(&mut draft, first).await.is_err());
+        let counts = connection
+            .request("fixture.rejections", Value::Null, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(counts["receipts"].as_array().unwrap().len(), 1);
+        assert_eq!(counts["receipts"][0]["outcome"], "rejected");
+        assert_eq!(counts["receipts"][0]["operationId"], "rejected-input");
+        let next = invocation(&draft, "next-command", "");
+        draft_command(&mut draft, next).await.unwrap();
+        let counts = connection
+            .request("fixture.rejections", Value::Null, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(counts["abandonments"], u64::from(mode == "reject-invalid"));
+        assert!(callbacks.dispose().await.is_clean());
+        drop(draft);
+        drop(adapter);
+        drop(connection);
+        assert!(extension.dispose().await.is_clean());
+        assert!(process.dispose().await.is_clean());
+        assert!(stack.runtime.shutdown().await.is_clean());
+    }
 }
 
 #[tokio::test]

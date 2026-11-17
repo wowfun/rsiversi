@@ -1,4 +1,4 @@
-use super::Sessions;
+use super::{BoundSessions, Sessions};
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::{
     SessionError, SessionHandle,
@@ -194,13 +194,24 @@ impl Sessions {
             .map_err(|error| Error::Remote(error.to_string()))?;
         Ok(json!({"session_id":input.session_id,"receipt":receipt}))
     }
-    pub(super) async fn submit(&self, payload: Value) -> Result<Value> {
+}
+impl BoundSessions {
+    pub(super) async fn submit(
+        &self,
+        payload: Value,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
             request: String,
             session_id: rsi_agent_session_protocol::SessionId,
             message_id: rsi_agent_session_protocol::MessageId,
+            body: rsi_extension::body::Body,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
             #[serde(default)]
             origin: rsi_session_protocol::SubmissionOrigin,
             attribution: Option<rsi_agent_session_protocol::MessageAttribution>,
@@ -212,13 +223,36 @@ impl Sessions {
         let handle = self
             .interactive_handle(&input.request, &input.session_id)
             .await?;
+        let _permit = if matches!(&input.body, rsi_extension::body::Body::Paged { .. }) {
+            Some(
+                self.submissions
+                    .try_acquire()
+                    .map_err(|_| Error::Capacity)?,
+            )
+        } else {
+            None
+        };
+        let connection = self.connection.upgrade().ok_or(Error::Disconnected)?;
+        let body = input.body.resolve(8 * 1024 * 1024, |token, offset| {
+            let request = json!({"request":input.request,"session_id":input.session_id,"message_id":input.message_id,"token":token,"offset":offset});
+            let connection = &connection;
+            async move { connection.request("application.submit.read", request, stop.clone()).await.map_err(|failure| Error::Remote(failure.to_string())) }
+        }).await?;
+        let body: Body =
+            serde_json::from_value(body).map_err(|error| Error::Remote(error.to_string()))?;
+        self.routes
+            .caller(&input.request)
+            .map_err(|_| Error::Cancelled)?;
+        if stop.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let receipt = handle
             .submit(rsi_session_protocol::SubmitInput {
-                origin: input.origin,
-                attribution: input.attribution,
-                delivery: input.delivery,
+                origin: body.origin,
+                attribution: body.attribution,
+                delivery: body.delivery,
                 message_id: input.message_id,
-                content: input.content,
+                content: body.content,
                 model: None,
                 reasoning_effort: None,
                 sandbox: None,

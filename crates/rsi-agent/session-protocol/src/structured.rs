@@ -18,7 +18,8 @@ pub const MAXIMUM_COMPLETION_MESSAGE_BYTES: usize = 8 * 1024;
 pub const REPORT_RESULT_TOOL: &str = "report_result";
 
 /// Validated finite, local-only Draft 7 object schema.
-#[derive(Clone)]
+#[derive(schemars::JsonSchema, Clone)]
+#[schemars(with = "Value")]
 pub struct OutputContract(std::sync::Arc<CompiledOutput>);
 struct CompiledOutput {
     schema: Value,
@@ -126,7 +127,7 @@ impl OutputContract {
 }
 
 /// Initial spawn input carrying the contract; follow-ups never inherit it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialOutputContract {
     /// Exact initial accepted spawn message.
@@ -136,7 +137,7 @@ pub struct InitialOutputContract {
 }
 
 /// Small descriptor of a value held only in its `ToolResult` Fact.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StructuredResultSummary {
     /// Frozen schema SHA-256.
@@ -159,7 +160,7 @@ impl StructuredResultSummary {
 }
 
 /// Pure Tool settlement request, authoritative only after Kernel publication.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolConclusion {
     /// Optional schema-validated output descriptor.
@@ -175,7 +176,7 @@ impl ToolConclusion {
 }
 
 /// Exact immutable output locator, never a latest-result query.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResultRef {
     /// Child which owns the result.
@@ -445,7 +446,7 @@ fn scalar(kind: Option<&str>, value: &Value) -> Result<()> {
 }
 
 /// Small model-facing coordinates for reading a settled result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResultLocator {
     /// Exact child Session.

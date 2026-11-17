@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// One application declaration actually selected for a Conversation request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationToolBinding {
     /// Model-visible name selected from the captured runtime.
@@ -16,7 +16,7 @@ pub struct ApplicationToolBinding {
 }
 
 /// Application participation in one model request series.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationToolView {
     /// The selected process did not supply an executable catalog by preparation.

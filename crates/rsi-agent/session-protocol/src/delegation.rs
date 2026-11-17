@@ -10,7 +10,7 @@ pub const MAXIMUM_DELEGATION_PERSONA_BYTES: usize = 32 * 1024;
 pub const MAXIMUM_DELEGATION_TOOLS: usize = 64;
 
 /// Trusted configuration selected by a model-facing role name.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegationRole {
     /// Stable configured role identity.
@@ -39,7 +39,7 @@ impl DelegationRole {
 }
 
 /// Durable effective restriction, independent of future configuration changes.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegationPolicy {
     role: Option<String>,

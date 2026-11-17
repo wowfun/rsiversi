@@ -74,8 +74,9 @@ jobs:
         timeout-minutes: 10
         run: |
           export RSI_EXTENSION_NODE="$(command -v node)"
-          export RSI_EXTENSION_DSH_TRANSPORT="$GITHUB_WORKSPACE/.local/extension-ci/cohort/node_modules/rsi-dsh-cordis/src/runtime/transport.mjs"
-          test -f "$RSI_EXTENSION_DSH_TRANSPORT"
+          export RSI_DSH_INSTALLED_COHORT="$GITHUB_WORKSPACE/.local/extension-ci/cohort"
+          test -f "$RSI_DSH_INSTALLED_COHORT/node_modules/rsi-dsh-cordis/src/runtime/transport.mjs"
+          test -f "$RSI_DSH_INSTALLED_COHORT/node_modules/rsi-dsh-plugin-bridge/src/request-body.mjs"
           cargo test --locked -p rsi-extension --test native actual_dsh_peer_preserves_control_progress_at_capacity -- --ignored --exact --list | tee .local/extension-ci/peer-selected.txt
           grep -qx 'actual_dsh_peer_preserves_control_progress_at_capacity: test' .local/extension-ci/peer-selected.txt
           cargo test --locked -p rsi-extension --test native actual_dsh_peer_preserves_control_progress_at_capacity -- --ignored --exact --nocapture 2>&1 | tee .local/extension-ci/peer.log

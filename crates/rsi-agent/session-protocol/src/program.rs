@@ -32,7 +32,7 @@ pub const MAXIMUM_PROGRAM_PHASE_BYTES: usize = 256;
 pub const RUN_WORKFLOW_TOOL_NAME: &str = "run_workflow";
 
 /// Non-authorizing locator returned by the Workflow coordinator.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRunLocator {
     /// Exact owning Session.
@@ -41,7 +41,7 @@ pub struct WorkflowRunLocator {
     pub run_id: ProgramRunId,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum InvocationStatus {
     Running,
@@ -49,7 +49,7 @@ enum InvocationStatus {
 
 /// Coordinator return value shared by the producer and history presentation.
 /// `T` lets readers ignore curated JSON without allocating another owned copy.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowInvocationResult<T = serde_json::Value> {
     run: WorkflowRunLocator,
@@ -113,7 +113,7 @@ impl WorkflowInvocationResult {
 }
 
 /// Execution ownership is independent of inherited history and tree presentation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)]
 pub enum ExecutionOwner {
@@ -141,7 +141,7 @@ impl ExecutionOwner {
     }
 }
 /// Fixed completed-parent interval reused by every initial child in one run.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramForkBoundary {
@@ -177,7 +177,7 @@ impl ProgramForkBoundary {
     }
 }
 /// Immutable CAS binding for a script or final curated JSON result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramBlob {
@@ -195,7 +195,7 @@ impl ProgramBlob {
     }
 }
 /// Frozen durable authorization facts. This value alone is never live authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramRunDescriptor {
@@ -238,7 +238,7 @@ impl ProgramRunDescriptor {
     }
 }
 /// Digest-bound output receipt, excluding the display preview's repeated bytes.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramResultBinding {
@@ -257,7 +257,7 @@ impl ProgramResultBinding {
     }
 }
 /// Terminal child receipt written only by exact initial-activation settlement.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramChildReceipt {
@@ -268,7 +268,7 @@ pub struct ProgramChildReceipt {
     pub result: Option<ProgramResultBinding>,
 }
 /// Closed run/child outcome. Interruptions never authorize replay.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)]
 pub enum ProgramOutcome {
@@ -311,7 +311,7 @@ fn invalid(message: &str) -> SessionError {
 }
 
 /// One append-only run event. External execution and replay decisions remain Kernel-owned.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)]
 pub enum ProgramRunEvent {
@@ -394,7 +394,7 @@ impl ProgramRunEvent {
 }
 
 /// Exact optional policy snapshot whose mutation revokes live run admission.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramDomainGuard {
@@ -412,7 +412,7 @@ impl ProgramDomainGuard {
     }
 }
 /// One bounded notification coordinate, claimable only in its live Kernel generation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct ProgramCompletionSource {

@@ -23,7 +23,7 @@ pub const MAXIMUM_DOMAIN_BASELINE_BYTES: usize = 1024 * 1024;
 pub const MAXIMUM_DOMAIN_CONTROL_BYTES: usize = 2 * 1024 * 1024;
 
 /// Exact domain name and semantic state codec version.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainIdentity {
     id: String,
@@ -70,7 +70,19 @@ impl<'de> Deserialize<'de> for DomainIdentity {
 }
 
 /// Checked per-domain revision. Zero denotes absence; initial generation uses one.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    schemars::JsonSchema,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
 #[serde(transparent)]
 pub struct DomainRevision(u64);
 
@@ -93,7 +105,8 @@ impl DomainRevision {
 }
 
 /// Complete bounded JSON value. Null is a value, never an absent-state sentinel.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq)]
+#[schemars(with = "serde_json::Value")]
 pub struct DomainStateValue {
     value: std::sync::Arc<serde_json::Value>,
     encoded_len: usize,
@@ -171,7 +184,7 @@ impl<'de> Deserialize<'de> for DomainStateValue {
 }
 
 /// Opaque complete state paired with the codec required for typed interpretation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainSnapshot {
     identity: DomainIdentity,
@@ -222,7 +235,7 @@ impl DomainSnapshot {
 }
 
 /// Durable provenance assigned by Kernel admission, never by a typed proposal.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DomainMutationSource {
     /// Frozen complete initial domain set in the fresh Session commit.
@@ -331,7 +344,7 @@ impl DomainMutationSource {
 }
 
 /// Complete replacement at one exact predecessor revision.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainStateUpdate {
     expected_revision: DomainRevision,
@@ -403,7 +416,7 @@ impl<'de> Deserialize<'de> for DomainStateUpdate {
 }
 
 /// Exact contiguous canonical Facts belonging to a mixed domain request.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainFactSpan {
     first_seq: u64,
@@ -523,7 +536,7 @@ impl<'de> Deserialize<'de> for DomainFactSpan {
 }
 
 /// One bounded canonical domain request; all replacements and its receipt commit together.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainStateCommit {
     request_id: Option<crate::DomainRequestId>,
@@ -803,7 +816,7 @@ fn request_digest(
     fact_span: Option<&DomainFactSpan>,
     command_inputs: &[crate::CommandMessage],
 ) -> Result<String> {
-    #[derive(Serialize)]
+    #[derive(schemars::JsonSchema, Serialize)]
     struct Payload<'a> {
         source: &'a DomainMutationSource,
         updates: &'a [DomainStateUpdate],

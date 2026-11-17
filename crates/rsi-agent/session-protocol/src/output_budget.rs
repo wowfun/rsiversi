@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// One configured request cap; model capacities do not supply this value.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelOutputBudget {
     /// Exact deployment and model; aliases are not inferred.
@@ -16,7 +16,7 @@ pub struct ModelOutputBudget {
 }
 
 /// Bounded Session-frozen output budgets with unique exact model keys.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct OutputBudgetTable(Vec<ModelOutputBudget>);
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Complete bounded frozen text for one reserved automatic round.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuationInput {
     /// Owning Goal or equivalent linked domain identity.
@@ -35,7 +35,7 @@ impl ContinuationInput {
 }
 
 /// Canonical allocation evidence selected before message acceptance.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContinuationProvenance {
     /// First round staged in the actual fresh baseline.
@@ -61,7 +61,7 @@ impl ContinuationProvenance {
 }
 
 /// Immutable mailbox origin, authenticated by Kernel continuation admission.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuationSource {
     /// Exact state codec authorizing this reservation.

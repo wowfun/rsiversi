@@ -27,7 +27,7 @@ const service = await startService({
         environment: Object.fromEntries(Object.entries(configuration.environment).map(([key,value]) => [key,{kind:'literal',value}])),
       },
     };
-    const patch = JSON.stringify({directory:join(config,'../../state/rsi/acp'), endpoints:[endpoint]});
+    const patch = JSON.stringify({directory:join(config,'../../state/rsiversi/acp'), endpoints:[endpoint]});
     await appendFile(join(config,'host-profiles/fixture/host.profile.toml'),
       `\n[[steps]]\nkind="patch"\ntarget="rsi-acp"\nconfig_json=${JSON.stringify(patch)}\n`);
   },

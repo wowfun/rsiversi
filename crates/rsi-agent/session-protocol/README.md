@@ -1,5 +1,25 @@
 # rsi-agent-session-protocol
 
+Durable format verification uses the actual serialization representation of
+`SessionHeader`, `SessionFact`, `AgentControlRecord` and their reachable payloads.
+The serialization-mode JSON schema is structural evidence, not a substitute for
+constructor validation. Custom serializers describe their emitted wire value;
+opaque JSON remains explicitly opaque. Retained writer bytes additionally guard
+field order and the exact Fact/control prefix digest inputs. The
+[Store corpus](../store-sqlite/README.md) owns retained database replay and
+unsupported-version refusal. A format bump retains the previous corpus; a
+same-version change may add cases but must not refresh existing evidence.
+Older schema corpora are retained shape evidence: their hashes are checked, but
+they are not serialized Session inputs and are not decoded as such. The Store
+corpus exercises runtime read/refusal using actual database and payload bytes.
+
+`SessionCommandDescriptor.composer_input` is explicit presentation metadata:
+`null` means a structured-only command, `{"kind":"none"}` permits immediate
+execution without arguments, and `{"kind":"text","hint":"..."}` enters text
+argument editing. It does not change the command's typed execution arguments or
+grant dispatch authority. Every producer supplies the field; consumers never
+infer it from a name or description.
+
 Domain control records have a 2 MiB complete encoded bound, including command
 inputs, invocation arguments, removals and the control envelope. SQLite Domain
 reads use that same protocol bound. A Domain commit admits at most 1,024 distinct
@@ -25,8 +45,8 @@ after Header/persona. Omission retains the current Step's tagged value. Empty as
 sections clear the full system prompt; empty appended sections retain Header/persona.
 Step start/end resets the value to empty append mode. Tool selection and application
 capture remain explicit on every preparation independently of prompt equality.
-Format 37 owns this distinction; older durable formats are rejected explicitly rather
-than reinterpreted or reset. No saved-state migration is performed implicitly.
+Unsupported durable formats are rejected explicitly rather than reinterpreted or
+reset. No saved-state migration is performed implicitly.
 
 `TurnOutcome::Blocked` records an input-preparation rejection. It is distinct from
 cancellation, provider failure and successful completion; no provider request is
@@ -46,7 +66,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 38 retains verbatim files as
+without repeating serialization. Session format 39 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -114,7 +134,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 38 admits this content under both pending and claimed command
+Session format 39 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-2 envelope for a trusted process
@@ -125,6 +145,11 @@ and an optional recovery checkpoint. Checkpoint JSON cannot
 carry implicit Agent references: every retained CAS or Session edge must occur
 in the envelope's typed reference fields. Up to 256 segments and 64 MiB of
 segment bytes are admitted; a consumer must reject capacity before effects.
+Each segment holds at most 4096 complete events. Small events pack toward a
+256 KiB target; a larger event occupies its own segment within the same aggregate
+byte allowance. CAS event data is independent of the inline Domain-state limit.
+Readers may transfer authenticated segment bytes directly while retaining their
+Store byte admission; semantic restore checks the decoded event count.
 The Store understands these reference semantics without an installed extension.
 The current composition owns code selection; journal data can be adopted by a
 replacement only after its semantic adapter validates it. Old envelope versions
@@ -293,7 +318,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 38 is accepted; all other formats are unsupported. Header protection is
+format 39 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -478,3 +503,8 @@ Provider retries and Tools produced by that request retain its selection.
 It also records up to 64 producer-bound instruction sections, at most 64 KiB in
 aggregate. They apply until the next preparation or Step boundary; they
 are not appended as historical conversation messages.
+
+Format 39 retains typed Tool spill references independently of Media. They survive
+Fact replay and fork without copying cache files; cache expiry or original-owner
+purge can make retrieval unavailable. The schema gate retains previous shapes
+without rewriting their bytes; runtime version refusal belongs to Store replay.

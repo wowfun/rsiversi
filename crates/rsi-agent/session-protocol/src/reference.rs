@@ -21,7 +21,7 @@ pub const MAXIMUM_REFERENCE_SCAN_BYTES: usize = 16 * 1024 * 1024;
 pub const MAXIMUM_REFERENCE_PAGE_BYTES: usize = 64 * 1024;
 
 /// Exact immutable Session binding. Fingerprints correlate; they grant no access.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceBinding {
     /// Selected Session.
@@ -36,7 +36,7 @@ impl ReferenceBinding {
     }
 }
 /// Closed reasons why earlier material was omitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceOmission {
     /// The fixed Fact count stopped the backward scan.
@@ -53,7 +53,7 @@ pub use source::{
 };
 
 /// Agent-owned content address; the mechanical Store adapts this to its CAS type.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSnapshotRef {
     /// Unique pending-capture release identity, independent of CAS deduplication.
@@ -82,7 +82,7 @@ impl ReferenceSnapshotRef {
     }
 }
 /// Captured user input. The preview is verified against CAS before admission.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenReference {
     /// Immutable content address.
@@ -112,7 +112,7 @@ impl FrozenReference {
     }
 }
 /// Closed canonical CAS envelope; its owning reader verifies the digest first.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSnapshotEnvelope {
     /// Exact supported envelope version, two.
@@ -182,13 +182,14 @@ mod decimal {
 }
 
 /// Exact recorded input coordinate; its reader separately checks Session authority.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceReadRequest {
     /// Current Session or the direct parent whose actual inherited interval contains this Fact.
     pub recorded_session_id: SessionId,
     /// Positive durable claim or preparation Fact, serialized as an exact decimal string.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub fact_seq: u64,
     /// Reference's index in original content or flattened authored preparation blocks.
     pub content_index: usize,
@@ -247,7 +248,7 @@ pub fn validate_reference_page_bounds(offset: usize, maximum: usize) -> Result<(
     Ok(())
 }
 /// Finite exact text window from immutable reference contents.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceTextPage {
     /// Exact recorded read request, absent for an unsubmitted draft preview.

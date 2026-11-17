@@ -13,6 +13,62 @@ waits for human input.
 
 ## Decision
 
+The connection reports whether a failed request entered its writer queue. A
+provably unqueued operation releases its new reservation locally; an admitted
+request still requires the domain's receipt evidence. Treating encoding or
+capacity refusal as an uncertain effect would fence a Session despite no peer
+execution and retain capacity without a useful recovery obligation.
+
+After execution, transient local read admission can obstruct settlement even
+while the peer still retains its staged bytes. One shared bounded reattempt for
+provably unsent reads allows that pressure to clear without replaying business
+callbacks or extending the caller's deadline. Persistent pressure preserves the
+receipt obligation: retained peer memory is not canonical durability. Sharing
+the allowance across parts prevents large transfers from multiplying retry delay.
+
+Large Tool arguments and Application submissions use request-owned, immutable
+body bytes rather than widening the transport frame limit or introducing a
+durable upload session. The same small body codec serves both real consumers;
+each business owner retains its own authorization, byte budget and cleanup.
+Fragment reads carry no execution authority, and the original invocation still
+owns the single execution and receipt. Domain protocol versions reject an old
+peer before it can misinterpret the new body envelope.
+
+Native-sized Tool input also becomes journal history and may produce a large
+result. Paging only its request would let execution succeed before an unrelated
+reply or checkpoint-value ceiling prevented settlement. Journal segments therefore
+use the Store object's own bounded encoding, while staged result and event pages
+reuse the existing operation token and receipt lifetime. The peer charges only
+one encoded part at a time to its existing mirror budget; large CAS reload and
+fork input borrow authenticated retained bytes instead of decoding and re-encoding
+them. Small segments keep the inline JSON path to avoid another round trip.
+A random staged token identifies the retained operation; canonical result
+and publication equality, not a redundant hash of the entire reply, proves receipt.
+
+Operation-count admission alone is insufficient when a retained Tool result can
+be much larger than a process frame. The native adapter reserves worst-case
+argument/result encoded weight before dispatch, then shrinks to the actual typed
+payload. This credit follows the publication payload, not the independently
+released operation slot; an observer may still retain that payload after receipt.
+The scope is one adapter generation, and a returned Tool runtime clone remains
+that runtime's owner. The peer mirror policy informs the native aggregate budget
+without claiming an exact heap or whole-Host memory cap.
+
+Opaque event arrays need no aggregate decoded tree in the native adapter. Decode
+one event at a time into canonical JSON and pack the encoded arrays independent
+of transport page boundaries. Persisting raw peer JSON instead would change CAS
+hashes when whitespace, key order or number spelling differs. Received canonical
+bytes retain separate aggregate credit through CAS staging; a merged old tail
+keeps its existing Store read admission through the derived encoding's staging.
+Separating transient read ownership from received suffix ownership allows a full
+valid journal to authenticate its small tail without waiting on its own credits.
+
+Request-body tokens use a monotonic serial shared across native registrations.
+Their exact connection generation, Session, operation and live-scope checks grant
+read authority; unpredictability adds none for this already authorized peer.
+Process-wide uniqueness matters because an adapter can be replaced on the same
+connection. An instance-local counter would let an old token name a new body.
+
 The generic [process connection](../../../../crates/rsi-extension/core/README.md)
 owns bounded duplex framing, generation identity, cancellation, native settlement
 and a liveness watchdog. It runs explicitly trusted native-equivalent code. The
@@ -218,6 +274,12 @@ These mechanisms do not by themselves establish full DSH compatibility. CLI
 importer installation
 and workbench service integration require their own owning contracts and tests.
 The external DSH packages remain in their independent repository.
+
+Native-sized process acceptance uses the product's multithread runtime shape.
+A single-thread fixture can starve its own pipe and deadline tasks during large
+serialization, reporting a heartbeat failure even while the peer replies promptly.
+Matching the runtime preserves the actual watchdog contract instead of extending
+its timeout to compensate for the fixture.
 
 Fork transformation runs against a captured historical domain/Fact cut and
 publishes only a child baseline. It never invokes business callbacks to recreate

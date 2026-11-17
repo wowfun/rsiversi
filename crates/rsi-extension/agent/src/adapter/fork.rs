@@ -1,7 +1,6 @@
 use super::{
     AgentAdapter, CancellationToken, ContributionError, ContributionResult, Deserialize,
-    DomainStateValue, ExtensionJournal, Ordering, Value, async_trait, invalid, json, prepare,
-    restore_segment,
+    DomainStateValue, ExtensionJournal, Ordering, async_trait, invalid, json, prepare, read_error,
 };
 use rsi_agent_composition_protocol::{
     ForkTransform, ForkTransformContext, ValidatedDomainProposal,
@@ -10,6 +9,19 @@ use rsi_agent_session_protocol::DomainRevision;
 use std::sync::atomic::AtomicU64;
 
 static NEXT_OPERATION: AtomicU64 = AtomicU64::new(1);
+
+fn transport_error(error: rsi_extension::RequestFailure) -> ContributionError {
+    match error {
+        rsi_extension::RequestFailure::NotDispatched(cause)
+        | rsi_extension::RequestFailure::MayHaveExecuted(cause) => read_error(cause),
+    }
+}
+fn journal_error(error: crate::Error) -> ContributionError {
+    match error {
+        crate::Error::Capacity => ContributionError::Capacity,
+        other @ crate::Error::Invalid(_) => invalid(other),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +34,7 @@ struct ResultHeader {
 struct Page {
     offset: u64,
     next_offset: u64,
-    events: Vec<Value>,
+    events: rsi_extension::body::Body,
 }
 
 #[async_trait]
@@ -53,7 +65,7 @@ impl ForkTransform for AgentAdapter {
                 context.through_seq,
                 &cancellation,
             )
-            .map_err(invalid)?;
+            .map_err(read_error)?;
         let result = self
             .transform_journal(context, &current, &operation, cancellation)
             .await;
@@ -86,23 +98,32 @@ impl AgentAdapter {
             "count": current.segments.iter().map(|segment| segment.count).sum::<u64>(), "checkpoint": current.checkpoint,
             "after_seq": context.after_seq, "through_seq": context.through_seq,
             "include_inherited": matches!(context.selection, rsi_agent_session_protocol::ForkTurnSelection::All),
-        }), cancellation.clone()).await.map_err(invalid)?;
+        }), cancellation.clone()).await.map_err(transport_error)?;
         for segment in &current.segments {
-            let events = restore_segment(
+            let events = crate::restore_segment_bytes(
                 self.store.as_ref(),
                 segment,
                 self.read_budget.clone().into(),
             )
             .await
-            .map_err(invalid)?;
+            .map_err(journal_error)?;
+            let (body, _body_scope) = self
+                .arguments
+                .enter_bytes(
+                    context.source.session_id().as_str(),
+                    operation,
+                    events,
+                    &cancellation,
+                )
+                .map_err(read_error)?;
             self.connection
                 .request(
                     "agent.fork.events",
-                    json!({"operation_id": operation, "offset": segment.first, "events": events}),
+                    json!({"session_id":context.source.session_id(),"operation_id": operation, "offset": segment.first, "events": body}),
                     cancellation.clone(),
                 )
                 .await
-                .map_err(invalid)?;
+                .map_err(transport_error)?;
         }
         let reply: ResultHeader = serde_json::from_value(
             self.connection
@@ -112,7 +133,7 @@ impl AgentAdapter {
                     cancellation.clone(),
                 )
                 .await
-                .map_err(invalid)?,
+                .map_err(transport_error)?,
         )
         .map_err(invalid)?;
         if reply.count > 100_000 || reply.checkpoint.encoded_len() > 64 * 1024 {
@@ -133,29 +154,36 @@ impl AgentAdapter {
             &self.handle,
             DomainRevision::default(),
             &journal,
-            vec![],
+            crate::events::Events::default(),
             reply.checkpoint.clone(),
             self.read_budget.clone().into(),
         )
         .await
-        .map_err(invalid)?;
+        .map_err(journal_error)?;
         let mut cursor = 0;
+        let reads = super::bodies::Reads::new(self, &cancellation);
         while cursor < reply.count {
             let page: Page = serde_json::from_value(
-                self.connection
+                reads
                     .request(
-                        "agent.fork.read",
+                        super::bodies::ReadMethod::ForkPage,
                         json!({"operation_id": operation, "offset": cursor}),
-                        cancellation.clone(),
                     )
                     .await
-                    .map_err(invalid)?,
+                    .map_err(read_error)?,
             )
             .map_err(invalid)?;
+            let events = reads
+                .events(
+                    page.events,
+                    super::bodies::ReadMethod::ForkPage,
+                    json!({"operation_id":operation,"offset":cursor}),
+                )
+                .await
+                .map_err(read_error)?;
             if page.offset != cursor
-                || page.events.is_empty()
-                || page.events.len() > 4096
-                || page.next_offset != cursor + page.events.len() as u64
+                || events.arrays.is_empty()
+                || page.next_offset != cursor + events.arrays.len() as u64
                 || page.next_offset > reply.count
             {
                 return Err(invalid("invalid transformed journal page"));
@@ -165,12 +193,12 @@ impl AgentAdapter {
                 &self.handle,
                 DomainRevision::default(),
                 &journal,
-                page.events,
+                events,
                 reply.checkpoint.clone(),
                 self.read_budget.clone().into(),
             )
             .await
-            .map_err(invalid)?;
+            .map_err(journal_error)?;
             journal = self
                 .handle
                 .decode(next.proposal().snapshot())
@@ -179,5 +207,38 @@ impl AgentAdapter {
             cursor = page.next_offset;
         }
         Ok(prepared.proposal().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pure_transfer_preserves_capacity_and_closed_dependencies() {
+        assert!(matches!(
+            read_error(rsi_extension::Error::Capacity),
+            ContributionError::Capacity
+        ));
+        assert!(matches!(
+            journal_error(crate::Error::Capacity),
+            ContributionError::Capacity
+        ));
+        assert!(matches!(
+            transport_error(rsi_extension::RequestFailure::NotDispatched(
+                rsi_extension::Error::Capacity
+            )),
+            ContributionError::Capacity
+        ));
+        for cause in [
+            rsi_extension::Error::Cancelled,
+            rsi_extension::Error::Disconnected,
+        ] {
+            assert!(matches!(read_error(cause), ContributionError::Closed));
+        }
+        assert!(matches!(
+            read_error(rsi_extension::Error::Protocol),
+            ContributionError::Invalid(_)
+        ));
     }
 }

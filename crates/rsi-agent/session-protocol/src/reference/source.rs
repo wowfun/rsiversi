@@ -6,7 +6,7 @@ use super::{
 use std::fmt;
 
 /// Reference provenance keeps native durability and product observations distinct.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReferenceSource {
     /// One native immutable Header.
@@ -22,6 +22,7 @@ pub enum ReferenceSource {
         id: String,
         /// Immutable observation/replay epoch.
         #[serde(with = "decimal")]
+        #[schemars(with = "String")]
         epoch: u64,
     },
 }
@@ -69,7 +70,7 @@ impl fmt::Display for ReferenceSource {
     }
 }
 /// Closed, explicit text export classes. Reasoning and provider inputs are absent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceContentKind {
     /// Direct human text.
@@ -80,11 +81,12 @@ pub enum ReferenceContentKind {
     ToolEvidence,
 }
 /// One source record and its exact text-content item.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceRecord {
     /// Positive source-local record sequence.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub sequence: u64,
     /// Explicit export class.
     pub kind: ReferenceContentKind,
@@ -103,13 +105,14 @@ impl ReferenceRecord {
     }
 }
 /// Exact selected range and original evidence, independent of the latest suffix.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSelection {
     /// Record and original text field to reread.
     pub record: ReferenceRecord,
     /// Source cutoff observed when the original was selected.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub through_seq: u64,
     /// Inclusive scalar-aligned UTF-8 byte start in the original text field.
     pub start: usize,
@@ -139,7 +142,7 @@ impl ReferenceSelection {
     }
 }
 /// A capture records either a suffix interval or one exact selected original.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReferenceCapture {
     /// Existing finite native suffix capture.
@@ -154,22 +157,26 @@ pub enum ReferenceCapture {
     },
 }
 /// Source interval of a bounded native suffix.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceSuffix {
     /// Source Fact cutoff.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub through_seq: u64,
     /// Canonical prefix digest at the cutoff.
     pub fact_prefix_sha256: String,
     /// Exclusive first scanned coordinate.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub scanned_after_seq: u64,
     /// Exclusive first retained coordinate.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub retained_after_seq: u64,
     /// Last retained coordinate.
     #[serde(with = "decimal")]
+    #[schemars(with = "String")]
     pub retained_through_seq: u64,
     /// Exact admitted canonical original bytes.
     pub scanned_bytes: usize,
@@ -202,7 +209,7 @@ impl ReferenceSuffix {
     }
 }
 /// Frozen source identity, target binding and capture provenance.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceMetadata {
     /// Native or observed source identity.

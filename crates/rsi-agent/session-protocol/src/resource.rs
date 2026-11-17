@@ -12,7 +12,7 @@ pub const MAXIMUM_RESOURCE_TEXT_BYTES: usize = 256 * 1024;
 pub const MAXIMUM_RESOURCE_ENTRIES: usize = 256;
 
 /// One explicitly selected finite read. It grants no execution authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)]
 pub enum SessionResourceRequest {
@@ -46,7 +46,7 @@ impl SessionResourceRequest {
 }
 
 /// Human-readable metadata from the owning resource provider.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionResourceDescriptor {
     /// Opaque provider-local coordinate, never ambient filesystem authority.
@@ -74,7 +74,7 @@ impl SessionResourceDescriptor {
 }
 
 /// Complete, bounded result of one resource operation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)]
 pub enum SessionResourceValue {
@@ -131,7 +131,7 @@ impl SessionResourceValue {
 }
 
 /// Result bound to the actual selected Header and composition source.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionResourceResponse {
     /// Actual Session identity.

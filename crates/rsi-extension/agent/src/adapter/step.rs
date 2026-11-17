@@ -1,6 +1,6 @@
 use super::{
     AgentAdapter, Arc, AtomicU8, CancellationToken, ContributionError, ContributionResult,
-    Deserialize, DomainStateValue, EffectId, Expected, Pending, Publication, Unobserved, Value,
+    Deserialize, DomainStateValue, EffectId, Expected, Pending, Publication, Unobserved,
     async_trait, invalid, json,
 };
 use rsi_agent_composition_protocol::{
@@ -13,7 +13,7 @@ struct StagedStep {
     operation_id: String,
     expected_revision: u64,
     token: String,
-    events: Vec<Value>,
+    events: super::bodies::Events,
     checkpoint: DomainStateValue,
     instructions: String,
     decision: DecisionReply,
@@ -29,11 +29,10 @@ enum DecisionReply {
 impl DecisionReply {
     async fn resolve(
         self,
-        adapter: &AgentAdapter,
+        reads: &super::bodies::Reads<'_>,
         session: &str,
         operation: &str,
         token: &str,
-        cancellation: &CancellationToken,
     ) -> ContributionResult<rsi_agent_session_protocol::StepInputDecision> {
         match self {
             Self::Inline(decision) => Ok(decision),
@@ -45,9 +44,9 @@ impl DecisionReply {
                 }
                 let mut data = String::with_capacity(bytes);
                 while data.len() < bytes {
-                    let value = adapter.connection.request("agent.step-decision.read", json!({
+                    let value = reads.request(super::bodies::ReadMethod::StepDecision, json!({
                         "session_id":session,"operation_id":operation,"token":token,"offset":data.len()
-                    }), cancellation.clone()).await.map_err(invalid)?;
+                    })).await.map_err(invalid)?;
                     let part = value
                         .as_str()
                         .filter(|s| {
@@ -132,7 +131,13 @@ impl BeforeStepContributor for AgentAdapter {
         let response = self.connection.request("agent.before-step", json!({
             "session_id": session, "operation_id": effect, "turn_id": context.captured.turn_id,
             "previous": previous, "model_selection": context.selection, "step_id": context.captured.step_id, "tools": context.tools, "fact_horizon": context.captured.horizon.fact_seq,
-        }), cancellation.clone()).await.map_err(invalid)?;
+        }), cancellation.clone()).await.map_err(|failure| {
+            if let rsi_extension::RequestFailure::NotDispatched(cause) = failure {
+                super::withdraw_unobserved(&self.unobserved, session, &effect, &context.captured.turn_id);
+                return super::read_error(cause);
+            }
+            invalid(failure)
+        })?;
         let mut staged = match serde_json::from_value::<StepReply>(response).map_err(invalid)? {
             StepReply::Staged(staged) => staged,
             StepReply::Rejected { diagnostic } => {
@@ -149,8 +154,7 @@ impl BeforeStepContributor for AgentAdapter {
         staged.tools.sort();
         if staged.operation_id != effect.as_str()
             || staged.expected_revision != revision.get()
-            || staged.token.len() != 64
-            || !staged.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !super::valid_operation_token(&staged.token)
             || staged.tools.len() > context.tools.len()
             || staged.tools.windows(2).any(|pair| pair[0] == pair[1])
             || staged
@@ -164,22 +168,22 @@ impl BeforeStepContributor for AgentAdapter {
                 "staged Step identity, instructions or Tool subset mismatch",
             ));
         }
+        let reads = super::bodies::Reads::new(self, &cancellation);
+        let events = staged
+            .events
+            .resolve(&reads, session.as_str(), effect.as_str(), &staged.token)
+            .await
+            .map_err(invalid)?;
         let decision = staged
             .decision
-            .resolve(
-                self,
-                session.as_str(),
-                effect.as_str(),
-                &staged.token,
-                &cancellation,
-            )
+            .resolve(&reads, session.as_str(), effect.as_str(), &staged.token)
             .await?;
-        let prepared = match crate::prepare(
+        let prepared = match crate::prepare_encoded(
             self.store.as_ref(),
             &self.handle,
             revision,
             &journal,
-            staged.events,
+            events,
             staged.checkpoint,
             self.read_budget.clone().into(),
         )
@@ -187,10 +191,15 @@ impl BeforeStepContributor for AgentAdapter {
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                let response = self.connection.request("operation.receipt", json!({"sessionId":session,"operationId":effect,"token":staged.token,"outcome":"rejected","revision":revision.get()}), CancellationToken::new()).await.map_err(invalid)?;
-                if !response.is_null() {
-                    return Err(invalid("invalid rejection acknowledgement"));
-                }
+                super::acknowledge_operation(
+                    &self.connection,
+                    session,
+                    effect.as_str(),
+                    &staged.token,
+                    "rejected",
+                    revision.get(),
+                )
+                .await?;
                 self.unobserved
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)

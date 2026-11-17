@@ -148,6 +148,9 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
         "plan",
         "Plan mode",
         true,
+        Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            hint: "Arguments".into(),
+        }),
     )
     .unwrap();
     let second = SessionCommandDescriptor::new(
@@ -155,6 +158,9 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
         "plan",
         "Another plan",
         false,
+        Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            hint: "Arguments".into(),
+        }),
     )
     .unwrap();
     assert!(
@@ -172,7 +178,10 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
             ContributionId::new("first").unwrap(),
             "plan",
             "x".repeat(4097),
-            true
+            true,
+            Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                hint: "Arguments".into()
+            }),
         )
         .is_err()
     );
@@ -181,7 +190,51 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
             ContributionId::new("first").unwrap(),
             "/plan",
             "Plan mode",
-            true
+            true,
+            Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                hint: "Arguments".into()
+            }),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn composer_discovery_is_explicit_and_bounds_text_hints() {
+    use rsi_agent_session_protocol::{ComposerCommandInput, SessionCommandDescriptor};
+    for input in [
+        None,
+        Some(ComposerCommandInput::None),
+        Some(ComposerCommandInput::Text {
+            hint: "Arguments".into(),
+        }),
+    ] {
+        let descriptor = SessionCommandDescriptor::new(
+            ContributionId::new("command").unwrap(),
+            "command",
+            "Command",
+            true,
+            input,
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionCommandDescriptor>(wire.clone()).unwrap(),
+            descriptor
+        );
+        let mut missing = wire;
+        missing.as_object_mut().unwrap().remove("composer_input");
+        assert!(serde_json::from_value::<SessionCommandDescriptor>(missing).is_err());
+    }
+    assert!(
+        SessionCommandDescriptor::new(
+            ContributionId::new("command").unwrap(),
+            "command",
+            "Command",
+            true,
+            Some(ComposerCommandInput::Text {
+                hint: "x".repeat(257)
+            })
         )
         .is_err()
     );

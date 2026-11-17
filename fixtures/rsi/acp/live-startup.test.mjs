@@ -18,7 +18,7 @@ test('ACP live startup uses the explicit model and provider credential without c
       import assert from 'node:assert/strict';
       cp.spawn=(binary,args,{env})=>{
         try {
-          const config=join(env.XDG_CONFIG_HOME,'rsi');
+          const config=join(env.XDG_CONFIG_HOME,'rsiversi');
           assert.match(readFileSync(join(config,'rsi.toml'),'utf8'),/\\[service\\][\\s\\S]*id = "fixture"/);
           const route=JSON.parse(readFileSync(join(config,'settings.json'),'utf8'))['rsi.agent'].default_model;
           assert.deepEqual(route,{deployment:'live',model:'fixture.v1'});
@@ -29,6 +29,16 @@ test('ACP live startup uses the explicit model and provider credential without c
           assert(profile.includes('credential={owner="rsi.ai.provider.deepseek",slot="default"}'));
           assert(profile.includes('context_window_tokens=1048576'));
           assert(profile.includes('max_output_reserve_tokens=393216'));
+          if(process.platform==='win32') {
+            const patch=profile.split("target = 'rsi-agent-workspace-context'")[1];
+            assert(patch,'final Host profile must isolate personal discovery before launch');
+            const encoded=patch.split('config_json = ')[1].trim();
+            assert.deepEqual(JSON.parse(JSON.parse(encoded)),{
+              user_instruction_file:join(config,'AGENTS.md'),
+              user_agent_roots:[join(config,'agents')],
+              user_skill_roots:[join(config,'skills')],
+            });
+          }
           console.log('live configuration reached isolated launch boundary');
         } finally {rmSync(dirname(env.HOME),{recursive:true,force:true});}
         process.exit(0);

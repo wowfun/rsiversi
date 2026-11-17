@@ -17,7 +17,7 @@ pub const MAXIMUM_COMMAND_INPUTS: usize = 64;
 pub const MAXIMUM_COMMAND_INPUT_BYTES: usize = 256 * 1024;
 
 /// Exact mailbox input bound to a domain publication, before active-Turn routing.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandMessage {
     /// Immutable command source, identity and typed content.
@@ -102,7 +102,7 @@ impl CommandMessage {
 }
 
 /// Immutable provenance assigned by a command owner, never a dispatch credential.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandMessageSource {
     /// Registered producer identity.
@@ -142,7 +142,7 @@ impl CommandMessageSource {
 }
 
 /// Exact predecessor in either the process-local draft or durable control stream.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommandRevision {
     /// Draft-local revision; zero is the newly created payload.
@@ -158,7 +158,7 @@ pub enum CommandRevision {
 }
 
 /// Closed command arguments, bounded before callback dispatch or durable retention.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct CommandArguments(serde_json::Value);
 
@@ -193,7 +193,7 @@ impl<'de> Deserialize<'de> for CommandArguments {
 }
 
 /// Immutable logical invocation retained across retries, including its expected revision.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCommandInvocation {
     /// Exact registered contribution identity; presentation names do not select execution.
@@ -218,14 +218,28 @@ impl SessionCommandInvocation {
     }
 }
 
+/// Composer input declaration, independent of structured execution arguments.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComposerCommandInput {
+    /// Execute without changing unrelated editor content.
+    None,
+    /// Enter visible argument editing and wait for submission.
+    Text {
+        /// Bounded presentation hint; the command still validates its arguments.
+        hint: String,
+    },
+}
+
 /// Bounded discovery metadata; selecting a command still uses its contribution identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCommandDescriptor {
     id: ContributionId,
     name: String,
     description: String,
     draft_safe: bool,
+    composer_input: Option<ComposerCommandInput>,
 }
 
 impl SessionCommandDescriptor {
@@ -235,6 +249,7 @@ impl SessionCommandDescriptor {
         name: impl Into<String>,
         description: impl Into<String>,
         draft_safe: bool,
+        composer_input: Option<ComposerCommandInput>,
     ) -> Result<Self> {
         let name = name.into();
         let description = description.into();
@@ -249,11 +264,20 @@ impl SessionCommandDescriptor {
             ));
         }
         crate::validate_safe_diagnostic("command description", &description)?;
+        if let Some(ComposerCommandInput::Text { hint }) = &composer_input {
+            crate::validate_safe_diagnostic("command input hint", hint)?;
+            if hint.len() > 256 {
+                return Err(SessionError::Invalid(
+                    "command input hint exceeds 256 bytes".into(),
+                ));
+            }
+        }
         Ok(Self {
             id,
             name,
             description,
             draft_safe,
+            composer_input,
         })
     }
     /// Returns exact dispatch identity from the frozen generation.
@@ -272,6 +296,10 @@ impl SessionCommandDescriptor {
     pub const fn draft_safe(&self) -> bool {
         self.draft_safe
     }
+    /// Returns composer input semantics, or none for structured-only commands.
+    pub const fn composer_input(&self) -> Option<&ComposerCommandInput> {
+        self.composer_input.as_ref()
+    }
 }
 
 impl<'de> Deserialize<'de> for SessionCommandDescriptor {
@@ -285,15 +313,23 @@ impl<'de> Deserialize<'de> for SessionCommandDescriptor {
             name: String,
             description: String,
             draft_safe: bool,
+            #[serde(deserialize_with = "Option::deserialize")]
+            composer_input: Option<ComposerCommandInput>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.id, wire.name, wire.description, wire.draft_safe)
-            .map_err(serde::de::Error::custom)
+        Self::new(
+            wire.id,
+            wire.name,
+            wire.description,
+            wire.draft_safe,
+            wire.composer_input,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
 /// One bounded discovery snapshot tied to the caller-visible predecessor.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCommandsView {
     revision: CommandRevision,

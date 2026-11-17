@@ -1,8 +1,8 @@
 use super::{
     AgentAdapter, Arc, AtomicU8, BTreeMap, CancellationToken, Connection, ContributionError,
     ContributionResult, Deserialize, DomainStateValue, ExtensionJournal, Mutex, Ordering,
-    PreparedJournal, Publication, PublicationObserver, PublicationReceipt, SessionId, Value,
-    async_trait, invalid, json, prepare,
+    PreparedJournal, Publication, PublicationObserver, PublicationReceipt, SessionId, async_trait,
+    invalid, json, prepare,
 };
 use rsi_agent_composition_protocol::{
     CommandInput, CommandInputDelivery, CommandOutcome, CommandOutcomeEvidence,
@@ -18,6 +18,29 @@ pub(super) struct Commands {
     lanes: Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     pending: Mutex<BTreeMap<SessionId, Arc<PendingCommand>>>,
     unobserved: Mutex<BTreeMap<SessionId, UnobservedCommand>>,
+}
+impl Commands {
+    fn request_error(
+        &self,
+        session: &SessionId,
+        invocation: &SessionCommandInvocation,
+        failure: rsi_extension::RequestFailure,
+    ) -> ContributionError {
+        if let rsi_extension::RequestFailure::NotDispatched(cause) = failure {
+            let mut pending = self
+                .unobserved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending
+                .get(session)
+                .is_some_and(|entry| &entry.invocation == invocation)
+            {
+                pending.remove(session);
+            }
+            return super::read_error(cause);
+        }
+        invalid(failure)
+    }
 }
 #[derive(Clone, Debug)]
 struct UnobservedCommand {
@@ -39,21 +62,15 @@ struct PendingCommand {
 }
 impl PendingCommand {
     async fn acknowledge(&self, outcome: &str, revision: u64) -> ContributionResult<()> {
-        let response = self
-            .connection
-            .request(
-                "operation.receipt",
-                json!({
-                    "sessionId": self.session, "operationId": self.invocation.request_id,
-                    "token": self.token, "outcome": outcome, "revision": revision,
-                }),
-                CancellationToken::new(),
-            )
-            .await
-            .map_err(invalid)?;
-        if !super::acknowledged(&response) {
-            return Err(invalid("invalid command acknowledgement"));
-        }
+        super::acknowledge_operation(
+            &self.connection,
+            &self.session,
+            self.invocation.request_id.as_str(),
+            &self.token,
+            outcome,
+            revision,
+        )
+        .await?;
         self.state
             .store(if outcome == "rejected" { 2 } else { 1 }, Ordering::Release);
         self.ownership.release();
@@ -201,7 +218,7 @@ struct StagedCommand {
     operation_id: String,
     expected_revision: u64,
     token: String,
-    events: Vec<Value>,
+    events: super::bodies::Events,
     checkpoint: DomainStateValue,
     inputs: Vec<Input>,
 }
@@ -210,6 +227,20 @@ struct StagedCommand {
 struct Input {
     delivery: Delivery,
     text: String,
+}
+impl From<Input> for CommandInput {
+    fn from(input: Input) -> Self {
+        Self {
+            delivery: match input.delivery {
+                Delivery::Inject => CommandInputDelivery::Inject,
+                Delivery::Steer => CommandInputDelivery::Steer,
+            },
+            content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+                text: input.text,
+            }],
+            attribution: None,
+        }
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -396,7 +427,7 @@ impl SessionCommand for ExternalCommand {
         let response = self.adapter.connection.request("agent.command", json!({
             "session_id": session, "operation_id": context.request_id, "name": self.name, "input": input,
             "fact_horizon": context.history.as_ref().map_or(0, |history| history.through_seq),
-        }), cancellation).await.map_err(invalid)?;
+        }), cancellation.clone()).await.map_err(|failure| self.adapter.commands.request_error(session, &unobserved.invocation, failure))?;
         let staged = match serde_json::from_value::<Reply>(response).map_err(invalid)? {
             Reply::Staged(staged) => staged,
             Reply::Rejected { diagnostic } => {
@@ -412,8 +443,15 @@ impl SessionCommand for ExternalCommand {
                 return Err(invalid(diagnostic));
             }
         };
-        self.stage(context, unobserved, view.revision, &journal, *staged)
-            .await
+        self.stage(
+            context,
+            unobserved,
+            view.revision,
+            &journal,
+            *staged,
+            &cancellation,
+        )
+        .await
     }
 }
 impl ExternalCommand {
@@ -424,6 +462,7 @@ impl ExternalCommand {
         revision: rsi_agent_session_protocol::DomainRevision,
         journal: &ExtensionJournal,
         staged: StagedCommand,
+        cancellation: &CancellationToken,
     ) -> ContributionResult<SessionCommandOutput> {
         let UnobservedCommand {
             invocation,
@@ -432,38 +471,60 @@ impl ExternalCommand {
         } = unobserved;
         if staged.operation_id != invocation.request_id.as_str()
             || staged.expected_revision != revision.get()
-            || staged.token.len() != 64
-            || !staged.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !super::valid_operation_token(&staged.token)
         {
             return Err(invalid("staged command identity mismatch"));
         }
-        let inputs: Vec<_> = staged
-            .inputs
-            .into_iter()
-            .map(|input| CommandInput {
-                delivery: match input.delivery {
-                    Delivery::Inject => CommandInputDelivery::Inject,
-                    Delivery::Steer => CommandInputDelivery::Steer,
-                },
-                content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
-                    text: input.text,
-                }],
-                attribution: None,
-            })
-            .collect();
+        let reads = super::bodies::Reads::new(&self.adapter, cancellation);
+        let events = staged
+            .events
+            .resolve(
+                &reads,
+                context.header.session_id().as_str(),
+                invocation.request_id.as_str(),
+                &staged.token,
+            )
+            .await
+            .map_err(invalid)?;
+        let inputs: Vec<_> = staged.inputs.into_iter().map(CommandInput::from).collect();
         // The pending observer retains its own expectation across a lost host reply.
-        let prepared_inputs = PreparedCommandInput::prepare(&invocation, inputs.clone())?;
-        let prepared = prepare(
-            self.adapter.store.as_ref(),
-            &self.adapter.handle,
-            revision,
-            journal,
-            staged.events,
-            staged.checkpoint,
-            self.adapter.read_budget.clone().into(),
-        )
-        .await
-        .map_err(invalid)?;
+        let preparation = async {
+            let prepared_inputs = PreparedCommandInput::prepare(&invocation, inputs.clone())?;
+            let prepared = prepare(
+                self.adapter.store.as_ref(),
+                &self.adapter.handle,
+                revision,
+                journal,
+                events,
+                staged.checkpoint,
+                self.adapter.read_budget.clone().into(),
+            )
+            .await
+            .map_err(invalid)?;
+            Ok::<_, ContributionError>((prepared_inputs, prepared))
+        }
+        .await;
+        let (prepared_inputs, prepared) = match preparation {
+            Ok(value) => value,
+            Err(error) => {
+                super::acknowledge_operation(
+                    &self.adapter.connection,
+                    context.header.session_id(),
+                    invocation.request_id.as_str(),
+                    &staged.token,
+                    "rejected",
+                    revision.get(),
+                )
+                .await?;
+                self.adapter
+                    .commands
+                    .unobserved
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(context.header.session_id());
+                return Err(error);
+            }
+        };
         let operation = Arc::new(PendingCommand {
             ownership,
             connection: self.adapter.connection.clone(),

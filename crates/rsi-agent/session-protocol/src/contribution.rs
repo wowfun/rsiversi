@@ -11,7 +11,7 @@ use std::borrow::Cow;
 pub const MAXIMUM_STEP_INSTRUCTION_BYTES: usize = 64 * 1024;
 
 /// One producer's current Step guidance, separate from historical input messages.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepInstruction {
     /// Framework-assigned registered producer identity.
@@ -21,7 +21,7 @@ pub struct StepInstruction {
 }
 
 /// Resolved system prompt with explicit ownership of immutable Header defaults.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StepPrompt {
     /// Complete prompt, including any defaults chosen by the assembler.
@@ -114,7 +114,7 @@ fn validate_sections(
 }
 
 /// A Tool call was refused before any intent or external execution was admitted.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolRejection {
     /// The exact live approval request was denied.

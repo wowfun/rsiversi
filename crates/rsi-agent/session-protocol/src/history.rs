@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub const MAXIMUM_FORK_HISTORY_DEPTH: usize = 32;
 
 /// Exact durable source boundary. A through point must already be terminal.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ForkPoint {
     /// Excludes the invoking Turn and every later Turn.
@@ -45,7 +45,7 @@ impl ForkPoint {
 }
 
 /// Exact selected history with authenticated source Header and prefix bindings.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryOrigin {
     /// Exact parent session.
@@ -118,7 +118,7 @@ impl HistoryOrigin {
 }
 
 /// Agent-tree membership in addition to immutable history provenance.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkOrigin {
     /// Immutable history selected before the spawning Turn.
@@ -144,7 +144,7 @@ impl ForkOrigin {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SessionOrigin {
     Agent { origin: ForkOrigin },

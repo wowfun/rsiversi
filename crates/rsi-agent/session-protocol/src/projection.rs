@@ -12,7 +12,7 @@ pub const MAXIMUM_PROJECTION_VALUE_BYTES: usize = 64 * 1024;
 pub const MAXIMUM_SESSION_PROJECTION_BYTES: usize = 5 * 1024 * 1024;
 
 /// Exact captured draft revision or simultaneous durable watermarks.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectionCursor {
     /// An unpublished draft's actual initial values.
@@ -50,7 +50,7 @@ impl ProjectionCursor {
 }
 
 /// Validated opaque complete JSON view; shared values are immutable.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ProjectionValue(DomainStateValue);
 impl ProjectionValue {
@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for ProjectionValue {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Content {
     Value { value: ProjectionValue },
@@ -94,7 +94,7 @@ enum Content {
 }
 
 /// A single producer's complete value or isolated failure.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionEntry {
     producer: ContributionId,
@@ -157,7 +157,7 @@ impl<'de> Deserialize<'de> for ProjectionEntry {
 }
 
 /// Complete disposable extension state bound to one Header and generation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionProjectionSnapshot {
     session_id: SessionId,
@@ -167,6 +167,7 @@ pub struct SessionProjectionSnapshot {
     generation_rejection: Option<String>,
     generation_rebuilding: bool,
     #[serde(serialize_with = "serialize_entries")]
+    #[schemars(with = "Vec<ProjectionEntry>")]
     entries: Arc<[ProjectionEntry]>,
     #[serde(skip)]
     body_bytes: usize,

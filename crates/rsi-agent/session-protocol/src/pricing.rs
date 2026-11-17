@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Result, SessionError};
 
 /// One exact deployment/endpoint/model tariff in currency billionths per token.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "QuoteWire")]
 pub struct PriceQuote {
     model: ModelRef,
@@ -20,7 +20,7 @@ pub struct PriceQuote {
     cache_write_nanos: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(schemars::JsonSchema, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuoteWire {
     model: ModelRef,
@@ -122,7 +122,7 @@ pub enum PriceError {
 }
 
 /// Bounded immutable Session price table; empty means unconfigured.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<PriceQuote>", into = "Vec<PriceQuote>")]
 pub struct PriceTable(Vec<PriceQuote>);
 

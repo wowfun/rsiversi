@@ -20,7 +20,7 @@ await mkdir(output, { recursive: true });
 // Keep the isolated Unix socket path below sockaddr_un's native byte limit.
 const root = await mkdtemp(join(tmpdir(), 'rsi-'));
 const workspace = join(root, 'workspace');
-const config = join(root, 'config/rsi');
+const config = join(root, 'config/rsiversi');
 await Promise.all([workspace, config, join(root, 'state'), join(root, 'cache'), join(root, 'home'), join(root, 'runtime')].map(path => mkdir(path, { recursive: true })));
 await chmod(join(root, 'runtime'), 0o700);
 let credential = 'fixture-secret';
@@ -68,6 +68,15 @@ context_window_tokens = 128000
 default_output_reserve_tokens = 4096
 max_output_reserve_tokens = 16384
 `);
+const personalContext = process.platform === 'win32' ? {
+  user_instruction_file: join(config, 'AGENTS.md'),
+  user_agent_roots: [join(config, 'agents')],
+  user_skill_roots: [join(config, 'skills')],
+} : null;
+if (personalContext) {
+  const path = join(config, 'host-profiles/fixture/host.profile.toml');
+  await writeFile(path, `${await readFile(path, 'utf8')}\n[[steps]]\nkind = 'patch'\ntarget = 'rsi-agent-workspace-context'\nconfig_json = ${JSON.stringify(JSON.stringify(personalContext))}\n`);
+}
 await writeFile(join(config, 'application-profiles/test-acp/application.profile.toml'), `format = 1
 [[steps]]
 kind = "plugin"
@@ -79,10 +88,10 @@ kind = "plugin"
 id = "application"
 plugin = "rsi.application.acp"
 `);
-const environment = { ...process.env, HOME: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'config'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'), XDG_RUNTIME_DIR: join(root, 'runtime'), RSI_OPENAI_COMPATIBLE_API_KEY: credential };
+const environment = { ...process.env, HOME: join(root, 'home'), XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache'), XDG_RUNTIME_DIR: join(root, 'runtime'), RSI_OPENAI_COMPATIBLE_API_KEY: credential };
 for (const key of ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'RSI_DEEPSEEK_API_KEY', 'RSI_OPENAI_API_KEY']) delete environment[key];
 if (live) {delete environment.RSI_OPENAI_COMPATIBLE_API_KEY;environment.DEEPSEEK_API_KEY=credential;}
-const report = { sdk: '@agentclientprotocol/sdk@1.4.0', mode: live ? 'live' : 'deterministic', root, model, ok: false };
+const report = { sdk: '@agentclientprotocol/sdk@1.4.0', mode: live ? 'live' : 'deterministic', root, model, personal_context: personalContext, ok: false };
 let stderr = '';
 let phase = 'startup';
 const deadline = setTimeout(() => { child?.kill('SIGTERM'); }, live ? 180_000 : 90_000);
@@ -108,7 +117,8 @@ try {
   assert.equal(initialized.agentCapabilities.loadSession, true);
   phase = 'new';
   const { sessionId } = await peer.newSession({ cwd: workspace, mcpServers: [] });
-  const prompt = live ? 'Use bash to write exactly acp-live-ok followed by a newline to acp-live.txt in the current workspace, then use bash to read the file. Finish with ACP_LIVE_VERIFIED after checking the output. Do not modify any other files.' : 'ancient SDK input';
+  report.session_id = sessionId;
+  const prompt = live ? 'Use the available native shell tool to write exactly acp-live-ok followed by one LF newline as UTF-8 without a BOM to acp-live.txt in the current workspace, then use that tool to read the file. Finish with ACP_LIVE_VERIFIED after checking the output. Do not modify any other files.' : 'ancient SDK input';
   phase = 'prompt';
   const result = await peer.prompt({ sessionId, prompt: [{ type: 'text', text: prompt }] });
   assert.equal(result.stopReason, 'end_turn');

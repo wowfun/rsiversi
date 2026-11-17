@@ -4,7 +4,7 @@ use crate::{Result, SessionError};
 use serde::{Deserialize, Serialize};
 
 /// Caller-supplied presentation identity, independent of native execution provenance.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MessageAttribution {
     /// Original message identity.
     pub id: String,

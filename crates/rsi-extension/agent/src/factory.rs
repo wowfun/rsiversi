@@ -70,7 +70,7 @@ async fn catalog(connection: &rsi_extension::Connection) -> rsi_meta::Result<Cat
     .map_err(meta)?
     .map_err(meta)?;
     let catalog: Catalog = serde_json::from_value(reply).map_err(meta)?;
-    if catalog.protocol != 5
+    if catalog.protocol != 6
         || catalog.tools.is_empty()
         || catalog.tools.len() > 64
         || catalog.commands.len() > 64

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 pub const MAXIMUM_QUEUE_MUTATION_RECEIPT_BYTES: usize = 4096;
 
 /// Original scheduling position, retained by every successor and Steer promotion.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueSlot {
     /// Initial message identity.
@@ -43,7 +43,7 @@ impl QueueSlot {
 }
 
 /// Caller intent for one still-pending queue slot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueueMutation {
     /// Replace all content, retaining the original delivery and invocation options.
@@ -76,7 +76,7 @@ impl QueueMutation {
 }
 
 /// Frozen idempotent envelope; Session authority is supplied separately.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueMutationRequest {
     /// One caller-preallocated operation identity, retained across unknown replies.
@@ -140,7 +140,7 @@ impl QueueMutationRequest {
 }
 
 /// Stable domain rejection after admission, distinct from transport failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueMutationRejection {
     /// No accepted input belongs to this slot in the selected Session.
@@ -164,7 +164,7 @@ pub enum QueueMutationRejection {
 }
 
 /// Compact committed result; content remains in its canonical acceptance control.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueueMutationOutcome {
     /// Complete content was replaced within the same slot and order.
@@ -194,7 +194,7 @@ pub enum QueueMutationOutcome {
     },
 }
 /// Lifetime-retained receipt for one admitted operation in a Session.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueMutationReceipt {
     /// Frozen operation identity.

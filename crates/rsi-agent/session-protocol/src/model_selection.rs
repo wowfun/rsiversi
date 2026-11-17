@@ -5,7 +5,7 @@ use rsi_ai_protocol::{ModelRef, ReasoningEffortId};
 use serde::{Deserialize, Serialize};
 
 /// One exact route and optional adapter-owned reasoning choice.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSelection {
     /// Exact provider deployment and model.

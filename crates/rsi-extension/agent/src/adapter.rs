@@ -1,4 +1,4 @@
-use crate::{PreparedJournal, prepare, restore_segment};
+use crate::{PreparedJournal, prepare_encoded as prepare};
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
     ContributionError, ContributionResult, DomainHandle, Publication, PublicationObserver,
@@ -18,12 +18,13 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
 };
 use tokio_util::sync::CancellationToken;
 
+mod bodies;
 mod command;
 mod fork;
 mod generation;
@@ -37,20 +38,54 @@ mod step;
 fn invalid(error: impl std::fmt::Display) -> ContributionError {
     ContributionError::Invalid(error.to_string())
 }
+fn valid_operation_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+fn read_error(error: rsi_extension::Error) -> ContributionError {
+    match error {
+        rsi_extension::Error::Capacity => ContributionError::Capacity,
+        rsi_extension::Error::Cancelled | rsi_extension::Error::Disconnected => {
+            ContributionError::Closed
+        }
+        other => invalid(other),
+    }
+}
 fn acknowledged(value: &Value) -> bool {
     value.is_null() || *value == json!({"state":"unloaded"})
+}
+async fn acknowledge_operation(
+    connection: &Connection,
+    session: &SessionId,
+    operation: &str,
+    token: &str,
+    outcome: &str,
+    revision: u64,
+) -> ContributionResult<()> {
+    let response = connection
+        .request(
+            "operation.receipt",
+            json!({
+                "sessionId": session, "operationId": operation, "token": token,
+                "outcome": outcome, "revision": revision,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .map_err(invalid)?;
+    if !acknowledged(&response) {
+        return Err(invalid("invalid operation acknowledgement"));
+    }
+    Ok(())
 }
 
 fn tool_error(error: impl std::fmt::Display) -> ToolError {
     ToolError::Execution(error.to_string())
 }
 
-fn load_error(error: rsi_extension::Error) -> ToolError {
-    match error {
+fn load_error(error: &rsi_extension::RequestFailure) -> ToolError {
+    match error.cause() {
         rsi_extension::Error::Cancelled => ToolError::Cancelled,
-        rsi_extension::Error::Disconnected => {
-            tool_error("extension disconnected while loading state before execution")
-        }
+        rsi_extension::Error::Disconnected => tool_error("extension disconnected before execution"),
         rsi_extension::Error::Capacity => ToolError::Capacity,
         other => tool_error(other),
     }
@@ -61,16 +96,22 @@ mod load_tests {
     use super::*;
     #[test]
     fn load_disconnect_does_not_claim_an_uncertain_business_effect() {
-        assert!(matches!(
-            load_error(rsi_extension::Error::Disconnected),
-            ToolError::Execution(_)
-        ));
         assert_eq!(
-            load_error(rsi_extension::Error::Cancelled),
+            load_error(&rsi_extension::RequestFailure::NotDispatched(
+                rsi_extension::Error::Disconnected
+            )),
+            ToolError::Execution("extension disconnected before execution".into())
+        );
+        assert_eq!(
+            load_error(&rsi_extension::RequestFailure::NotDispatched(
+                rsi_extension::Error::Cancelled
+            )),
             ToolError::Cancelled
         );
         assert_eq!(
-            load_error(rsi_extension::Error::Capacity),
+            load_error(&rsi_extension::RequestFailure::NotDispatched(
+                rsi_extension::Error::Capacity
+            )),
             ToolError::Capacity
         );
     }
@@ -82,9 +123,9 @@ struct Staged {
     operation_id: String,
     expected_revision: u64,
     token: String,
-    events: Vec<Value>,
+    events: bodies::Events,
     checkpoint: DomainStateValue,
-    result: ToolResult,
+    result: rsi_extension::body::Body,
     conclude_turn: bool,
 }
 
@@ -100,6 +141,23 @@ struct Unobserved {
     _ownership: Arc<Ownership>,
     turn: TurnId,
     effect: EffectId,
+}
+
+fn withdraw_unobserved(
+    entries: &Mutex<BTreeMap<SessionId, Unobserved>>,
+    session: &SessionId,
+    effect: &EffectId,
+    turn: &TurnId,
+) {
+    let mut unobserved = entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if unobserved
+        .get(session)
+        .is_some_and(|entry| &entry.effect == effect && &entry.turn == turn)
+    {
+        unobserved.remove(session);
+    }
 }
 
 #[derive(Debug)]
@@ -121,8 +179,7 @@ enum Expected {
     Tool {
         name: String,
         arguments: Value,
-        result: Box<ToolResult>,
-        identity: OnceLock<rsi_tools_protocol::ToolResultIdentity>,
+        settlement: Mutex<ownership::ToolSettlement>,
         conclude: bool,
     },
     Step {
@@ -135,22 +192,15 @@ enum Expected {
 }
 impl Pending {
     async fn acknowledge(&self, outcome: &str, revision: u64) -> ContributionResult<()> {
-        let result = self
-            .connection
-            .request(
-                "operation.receipt",
-                json!({
-                    "sessionId": self.session.as_str(), "operationId": self.effect.as_str(),
-                    "token": self.token, "outcome": outcome, "revision": revision,
-                }),
-                CancellationToken::new(),
-            )
-            .await
-            .map_err(invalid)?;
-        if !acknowledged(&result) {
-            return Err(invalid("invalid acknowledgement response"));
-        }
-        Ok(())
+        acknowledge_operation(
+            &self.connection,
+            &self.session,
+            self.effect.as_str(),
+            &self.token,
+            outcome,
+            revision,
+        )
+        .await
     }
 }
 #[async_trait]
@@ -160,11 +210,7 @@ impl PublicationObserver for Pending {
             return Err(invalid("publication Session mismatch"));
         }
         match &self.expected {
-            Expected::Tool {
-                result: expected,
-                identity: retained,
-                ..
-            } => {
+            Expected::Tool { settlement, .. } => {
                 let [fact] = receipt.facts else {
                     return Err(invalid("publication lacks its single result"));
                 };
@@ -178,8 +224,10 @@ impl PublicationObserver for Pending {
                     return Err(invalid("publication lacks its exact ToolResult"));
                 };
                 if effect_id != &self.effect
-                    || result != expected.as_ref()
-                    || retained.get() != Some(identity)
+                    || !settlement
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .matches(identity, result)
                 {
                     return Err(invalid("publication identity or result mismatch"));
                 }
@@ -261,7 +309,11 @@ pub struct AgentAdapter {
     loads: Mutex<BTreeMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     operations: Arc<tokio::sync::Semaphore>,
     read_budget: rsi_api_protocol::ByteBudget,
+    event_budget: Arc<tokio::sync::Semaphore>,
+    tool_budget: Arc<tokio::sync::Semaphore>,
     history: Arc<crate::history::HistoryRouter>,
+    arguments: Arc<crate::arguments::Arguments>,
+    _argument_registration: rsi_extension::HandlerRegistration,
     _history_registrations: [rsi_extension::HandlerRegistration; 2],
     questions: Mutex<
         Option<(
@@ -282,6 +334,10 @@ impl AgentAdapter {
         handle: DomainHandle<ExtensionJournal>,
     ) -> Result<Arc<Self>, crate::Error> {
         let history = Arc::new(crate::history::HistoryRouter::default());
+        let arguments = Arc::new(crate::arguments::Arguments::default());
+        let argument_registration = connection
+            .register_handler("agent.request-body.read", arguments.clone())
+            .map_err(crate::error)?;
         let register = |method| {
             connection
                 .register_handler(method, history.clone())
@@ -293,6 +349,8 @@ impl AgentAdapter {
         ];
         Ok(Arc::new(Self {
             history,
+            arguments,
+            _argument_registration: argument_registration,
             _history_registrations: registrations,
             connection,
             store,
@@ -305,6 +363,11 @@ impl AgentAdapter {
             commands: command::Commands::default(),
             loads: Mutex::default(),
             operations: Arc::new(tokio::sync::Semaphore::new(256)),
+            event_budget: Arc::new(tokio::sync::Semaphore::new(
+                rsi_agent_session_protocol::MAXIMUM_EXTENSION_JOURNAL_BYTES
+                    + rsi_agent_session_protocol::EXTENSION_SEGMENT_TARGET_BYTES,
+            )),
+            tool_budget: Arc::new(tokio::sync::Semaphore::new(ownership::RETAINED_TOOL_BYTES)),
             read_budget: rsi_api_protocol::ByteBudget::new(64 * 1024 * 1024)
                 .map_err(crate::error)?,
         }))
@@ -556,25 +619,27 @@ impl AgentAdapter {
                 "local_cwd": local_cwd, "revision": revision.get(), "count": count, "reload": reload,
             });
             let action = self.connection.request("agent.load.begin", boundary, cancellation.clone())
-                .await.map_err(load_error)?;
+                .await.map_err(|failure| load_error(&failure))?;
             match action.as_str() {
                 Some("current") if !reload && revision.get() > 0 => return Ok(()),
                 Some("transfer") => {}
                 _ => return Err(tool_error("invalid journal load disposition")),
             }
             for segment in &journal.segments {
-                let events = restore_segment(self.store.as_ref(), segment, self.read_budget.clone().into())
+                let events = crate::restore_segment_bytes(self.store.as_ref(), segment, self.read_budget.clone().into())
                     .await.map_err(|error| match error {
                         crate::Error::Capacity => ToolError::Capacity,
                         other @ crate::Error::Invalid(_) => tool_error(other),
                     })?;
-                let page = json!({"session_id": header.session_id(), "offset": segment.first, "events": events});
+                let (body, _body_scope) = self.arguments.enter_bytes(header.session_id().as_str(), "load", events, &cancellation)
+                    .map_err(|failure| load_error(&rsi_extension::RequestFailure::NotDispatched(failure)))?;
+                let page = json!({"session_id": header.session_id(), "offset": segment.first, "events": body});
                 self.connection.request("agent.load.events", page, cancellation.clone())
-                    .await.map_err(load_error)?;
+                    .await.map_err(|failure| load_error(&failure))?;
             }
             let finish = json!({"session_id": header.session_id(), "checkpoint": journal.checkpoint});
             self.connection.request("agent.load.finish", finish, cancellation.clone())
-                .await.map_err(load_error)?;
+                .await.map_err(|failure| load_error(&failure))?;
             Ok(())
         }.await;
         if transferred.is_err() {
@@ -631,6 +696,17 @@ impl AgentAdapter {
             .transpose()
             .map_err(tool_error)?;
         let ownership = Ownership::reserve(&self.operations).ok_or(ToolError::Capacity)?;
+        let (argument_body, arguments_scope, argument_bytes) = self
+            .arguments
+            .enter(
+                caller.session_id().as_str(),
+                effect.as_str(),
+                &arguments,
+                &execution.cancellation,
+            )
+            .map_err(|error| load_error(&rsi_extension::RequestFailure::NotDispatched(error)))?;
+        let retention = ownership::Retained::reserve(&self.tool_budget, argument_bytes)
+            .ok_or(ToolError::Capacity)?;
         self.unobserved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -643,8 +719,16 @@ impl AgentAdapter {
                 },
             );
         let response = self.connection.request("agent.tool", json!({
-            "session_id": caller.session_id(), "operation_id": effect.as_str(), "name": name, "arguments": arguments, "fact_horizon": captured.through_seq,
-        }), execution.cancellation.clone()).await.map_err(|_| ToolError::OutcomeUnknown)?;
+            "session_id": caller.session_id(), "operation_id": effect.as_str(), "name": name, "arguments": argument_body, "fact_horizon": captured.through_seq,
+        }), execution.cancellation.clone()).await.map_err(|failure| {
+            if matches!(failure, rsi_extension::RequestFailure::NotDispatched(_)) {
+                withdraw_unobserved(&self.unobserved, caller.session_id(), effect, caller.turn_id());
+                load_error(&failure)
+            } else {
+                ToolError::OutcomeUnknown
+            }
+        })?;
+        drop(arguments_scope);
         let staged = match serde_json::from_value::<ToolReply>(response)
             .map_err(|_| ToolError::OutcomeUnknown)?
         {
@@ -662,17 +746,32 @@ impl AgentAdapter {
         };
         if staged.operation_id != effect.as_str()
             || staged.expected_revision != revision.get()
-            || staged.token.len() != 64
-            || !staged.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !valid_operation_token(&staged.token)
         {
             return Err(ToolError::OutcomeUnknown);
         }
+        let reads = bodies::Reads::new(self, &execution.cancellation);
+        let events = staged
+            .events
+            .resolve(
+                &reads,
+                caller.session_id().as_str(),
+                effect.as_str(),
+                &staged.token,
+            )
+            .await
+            .map_err(|_| ToolError::OutcomeUnknown)?;
+        let result: ToolResult = reads.resolve(staged.result, ownership::MAXIMUM_RESULT_BYTES,
+            bodies::ReadMethod::OperationBody, json!({"session_id":caller.session_id(),"operation_id":effect,"token":staged.token,"part":"result"}))
+            .await.map_err(|_| ToolError::OutcomeUnknown)?;
+        rsi_api_protocol::measure_json(&result, ownership::MAXIMUM_RESULT_BYTES)
+            .map_err(|_| ToolError::OutcomeUnknown)?;
         let prepared = prepare(
             self.store.as_ref(),
             &self.handle,
             revision,
             &journal,
-            staged.events,
+            events,
             staged.checkpoint,
             self.read_budget.clone().into(),
         )
@@ -680,9 +779,16 @@ impl AgentAdapter {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.connection.request("operation.receipt", json!({"sessionId": caller.session_id(),
-                    "operationId": effect.as_str(), "token": staged.token, "outcome": "rejected", "revision": revision.get()}),
-                    CancellationToken::new()).await.map_err(|_| ToolError::OutcomeUnknown)?;
+                acknowledge_operation(
+                    &self.connection,
+                    caller.session_id(),
+                    effect.as_str(),
+                    &staged.token,
+                    "rejected",
+                    revision.get(),
+                )
+                .await
+                .map_err(|_| ToolError::OutcomeUnknown)?;
                 self.unobserved
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -690,7 +796,6 @@ impl AgentAdapter {
                 return Err(tool_error(error));
             }
         };
-        let result = staged.result.clone();
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -707,9 +812,11 @@ impl AgentAdapter {
                     expected: Expected::Tool {
                         name: name.into(),
                         arguments,
-                        result: Box::new(staged.result),
+                        settlement: Mutex::new(ownership::ToolSettlement::new(
+                            retention,
+                            argument_bytes,
+                        )),
                         conclude: staged.conclude_turn,
-                        identity: OnceLock::new(),
                     },
                     state: AtomicU8::new(0),
                 }),
@@ -762,23 +869,23 @@ impl ToolSettlementContributor for AgentAdapter {
         let Expected::Tool {
             name: expected_name,
             arguments: expected_arguments,
-            result: expected_result,
-            identity: retained,
+            settlement,
             conclude,
+            ..
         } = &operation.expected
         else {
             return Ok(ToolSettlement::default());
         };
         if expected_name != name
             || expected_arguments != arguments
-            || expected_result.as_ref() != context.result
             || operation.state.load(Ordering::Acquire) != 0
         {
             return Err(invalid("retained extension result mismatch"));
         }
-        if retained.get_or_init(|| identity.clone()) != identity {
-            return Err(invalid("retained Tool identity changed"));
-        }
+        settlement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bind(identity, context.result)?;
         Ok(ToolSettlement {
             publications: vec![Publication::new(operation.clone())],
             domains: vec![operation.prepared.proposal().clone()],
@@ -808,5 +915,35 @@ impl SessionProjection for AgentAdapter {
             .ok_or_else(|| invalid("extension journal is absent"))?;
         let journal = self.handle.decode(&view.snapshot).map_err(invalid)?;
         ProjectionValue::new(journal.checkpoint.value().clone()).map_err(invalid)
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    #[test]
+    fn refused_operations_release_capacity_without_retiring_a_different_outcome() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(1));
+        let entries = Mutex::new(BTreeMap::new());
+        let session = SessionId::new("session").unwrap();
+        let turn = TurnId::new("turn").unwrap();
+        let effect = EffectId::new("effect").unwrap();
+        let other = EffectId::new("other").unwrap();
+        for _ in 0..257 {
+            entries.lock().unwrap().insert(
+                session.clone(),
+                Unobserved {
+                    _ownership: Ownership::reserve(&budget)
+                        .expect("prior refusal must release capacity"),
+                    turn: turn.clone(),
+                    effect: effect.clone(),
+                },
+            );
+            withdraw_unobserved(&entries, &session, &other, &turn);
+            assert_eq!(budget.available_permits(), 0);
+            withdraw_unobserved(&entries, &session, &effect, &turn);
+            assert_eq!(budget.available_permits(), 1);
+        }
+        assert!(entries.lock().unwrap().is_empty());
     }
 }

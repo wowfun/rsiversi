@@ -14,7 +14,7 @@ pub const MAXIMUM_PREPARED_INPUT_BYTES: usize = 32 * 1024 * 1024;
 ///
 /// This is a coordinate, not authority to read arbitrary Facts. The captured
 /// execution owner resolves membership and ordinal before entering the result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum InputClaimRef {
     /// Message in an already captured Fact.
@@ -76,7 +76,7 @@ impl InputClaimRef {
 }
 
 /// Roles supplied by input preparation; model and Tool output use their own Facts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedInputRole {
     /// Ordinary conversation input, including application-authored context.
@@ -86,7 +86,7 @@ pub enum PreparedInputRole {
 }
 
 /// An immutable validated message authored or rewritten during preparation.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 pub struct PreparedInputMessage {
     role: PreparedInputRole,
     attribution: MessageAttribution,
@@ -164,7 +164,7 @@ impl<'de> Deserialize<'de> for PreparedInputMessage {
 }
 
 /// One entry in the final ordered list; omission drops an original from model input.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PreparedInput {
     /// Preserve an original body and attribution without copying them into this record.
@@ -187,11 +187,11 @@ pub enum PreparedInput {
 }
 
 /// Validated final input decision, distinct from acceptance and claim consumption.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct StepInputDecision(Decision, #[serde(skip)] usize);
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Decision {
     Enter { messages: Vec<PreparedInput> },

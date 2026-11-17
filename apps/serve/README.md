@@ -52,6 +52,10 @@ that cut. Unpublished draft inputs are included directly; their native aggregate
 bound fits the process reply. Neither capture retains an inbox reader or needs
 message-fragment and close calls. Durable message reads use the history interface.
 
+Inherited history metadata preserves parent and child identities and creation
+timestamps from the [authenticated interval capture](../../crates/rsi-agent/store-protocol/README.md).
+Presentation adds no Header retention or Store lookup.
+
 Application inbox `wait_draft` waits until the supplied draft revision changes or
 the Session is published, using the standard Session draft subscription. It
 retains no inbox snapshot and does not extend the draft lifetime. Request
@@ -87,7 +91,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 13, a private profile directory
+host sends `application.open` with protocol 14, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -104,6 +108,14 @@ assets' listeners forward those paths. After a published process disconnects,
 the Host retires its sockets and request handles and prepares a fresh process
 for subsequent browser requests. Each process authenticates a different key.
 An initial or replacement activation failure is reported and stops recovery.
+
+`application.submit` keeps caller, Session and message identities outside its
+inline or paged body. The body carries origin, attribution, delivery and content
+within the native 8 MiB encoded request ceiling. Values above 256 KiB remain in
+the application's originating request and are pulled through
+`application.submit.read` using its token. At most two bodies (16 MiB total) are
+assembled per connection. Authorization precedes reads and is checked again
+before native admission; incomplete or cancelled bodies never submit input.
 
 A Host profile can use `replace_preset_tools` with `tools = true` to assign
 specific names to its selected application. Those native bodies are omitted
@@ -203,8 +215,8 @@ write ownership, create an Agent, or make an unpublished draft durable.
 
 `application.inbox` can observe any Session visible to the caller, including a
 Kernel subagent preparing a model request. Interactive commands and queue
-mutations on a subagent still go through its parent. A request-owned inbox
-snapshot retains the exact active Turn, Fact and
+mutations on a subagent still go through its parent. The inbox opening captures
+the exact active Turn, Fact and
 control cursors and pending-message metadata. A durable opening also returns
 `history`: the Header metadata, model baseline, `through` and `selection_cursor`
 from that same inspection. Readers replay model controls through this captured
@@ -213,13 +225,10 @@ Draft model selection remains revision-matched through the history opening,
 because a draft's selected model belongs to its command baseline, not its Header.
 Opening returns the complete
 metadata object, bounded by the native 64-message count and typed identities.
-An empty snapshot retains nothing and needs no close operation. Message bodies
-are read as bounded UTF-8 fragments; a message read must name an acceptance in that
-snapshot. Reads remain valid if execution subsequently claims the message, but
-do not assert it is still pending. Closing the snapshot or HTTP request releases
-it. Consecutive fragments of one acceptance share its encoded body; reading the
-last fragment or a different message releases that body. The snapshot never
-caches all pending message bodies. For an unpublished draft it captures the Header revision and held command
+Opening retains no reader and needs no close operation. Immutable message bodies
+are read through `application.history` using the returned acceptance cursor;
+that read does not assert the message is still pending. For an unpublished draft
+opening captures the Header revision and held command
 inputs from the same native draft snapshot. The reply distinguishes draft input
 from durable acceptance; a draft has no invented control cursor or queue slot.
 Queue mutations and receipt lookups use the same native Session methods as other

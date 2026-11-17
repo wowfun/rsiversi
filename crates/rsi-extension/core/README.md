@@ -26,6 +26,29 @@ slots remain occupied until their reply leaves the queue. IDs are safe JSON inte
 Unknown fields, malformed frames, unknown replies, duplicate incoming IDs,
 overflow and unexpected EOF close the entire connection. Calls are never replayed.
 
+`Connection::request` distinguishes a request rejected before writer-queue admission
+(`RequestFailure::NotDispatched`) from a failure after admission
+(`RequestFailure::MayHaveExecuted`). Encoding, capacity and cancellation failures
+before admission prove that this request did not reach the peer. After admission,
+transport errors alone cannot prove non-execution, even when no reply was received.
+Adapters use this evidence to retire only their own unexecuted operation resources;
+business receipts continue to determine publication and recovery.
+
+The optional body codec carries bounded business values inline up to 256 KiB or
+as immutable request-owned bytes. Paged descriptors declare their byte length
+and an owner-issued token; fragments carry at most 512 KiB of bytes as base64.
+Their 699,052-byte base64 payload leaves 349,524 bytes for the bounded JSON frame
+metadata within the existing 1 MiB limit. This reduces callback count for large
+bodies without changing retained-body admission; history and Step paging keep
+their separate limits.
+The business adapter supplies its byte ceiling, capacity permit, authorization
+and request lifetime. Outbound encoding belongs to that owner; the Agent probes
+the inline size without allocating serialized bytes and encodes only larger
+values into its request-owned buffer. Core owns neither a transfer registry nor
+persisted bodies. Body resolution deserializes directly into the caller's owning
+type, so its boundary validation also applies to paged bodies without an
+intermediate JSON value tree.
+
 Caller cancellation sends a cancellation frame but retains the correlation slot
 until the peer replies. A peer that does not settle cancellation within five
 seconds after its cancellation frame is written loses its connection. Queueing
@@ -62,9 +85,13 @@ live generations from publishing into the same slot; consumers inside each
 group resolve the connection for their own generation.
 
 The opt-in `native` target uses `RSI_EXTENSION_NODE` as an absolute installed
-Node executable. Its DSH interoperability test additionally requires an absolute
-`RSI_EXTENSION_DSH_TRANSPORT` pointing to the independent rsiversi-dsh runtime's
-`transport.mjs`. It exercises the actual peer through native pipes, including
+Node executable. Its DSH interoperability test additionally requires the absolute
+`RSI_DSH_INSTALLED_COHORT` directory. It selects the Cordis transport and bridge
+body codec by their package-relative paths inside that same installed cohort;
+neither module's location is inferred by walking the other module's parents.
+It exercises the actual peer through native pipes, including
 partial writes, callbacks, cancellation, and heartbeat/close at 64 business calls.
+The same installed cohort supplies the bridge body codec for a 1 MiB escaped
+input, 3 MiB Unicode Tool arguments and an exact 8 MiB Application body.
 The manual `extension-generations` workflow provisions that exact installed
 source cohort and runs this interoperability test alongside Agent replacement.

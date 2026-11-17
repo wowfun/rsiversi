@@ -94,7 +94,16 @@ async fn rejected_preparation_preserves_the_prior_snapshot() {
     let definition = definition().unwrap();
     let catalog = DomainCatalog::new([definition.registration()]).unwrap();
     let handle = catalog.bind(&definition).unwrap();
-    let initial = handle.decode(&catalog.baseline()[0]).unwrap();
+    let mut initial = handle.decode(&catalog.baseline()[0]).unwrap();
+    initial
+        .segments
+        .push(rsi_agent_session_protocol::ExtensionSegment {
+            first: 0,
+            count: 1,
+            sha256: "a".repeat(64),
+            byte_len: rsi_agent_session_protocol::MAXIMUM_EXTENSION_JOURNAL_BYTES as u64,
+        });
+    initial.validate().unwrap();
     let before = initial.clone();
     assert!(
         prepare(
@@ -102,7 +111,7 @@ async fn rejected_preparation_preserves_the_prior_snapshot() {
             &handle,
             DomainRevision::new(1),
             &initial,
-            vec![json!("x".repeat(256 * 1024))],
+            vec![json!(null)],
             DomainStateValue::new(json!(null)).unwrap(),
             rsi_api_protocol::ByteBudget::new(1024 * 1024)
                 .unwrap()
@@ -112,6 +121,67 @@ async fn rejected_preparation_preserves_the_prior_snapshot() {
         .is_err()
     );
     assert_eq!(initial, before);
+}
+
+#[tokio::test]
+async fn large_event_uses_its_own_cas_segment_and_small_successors_still_pack() {
+    let store = MemoryStore::default();
+    let definition = definition().unwrap();
+    let catalog = DomainCatalog::new([definition.registration()]).unwrap();
+    let handle = catalog.bind(&definition).unwrap();
+    let initial = handle.decode(&catalog.baseline()[0]).unwrap();
+    let mut expected = vec![
+        json!({"seq":0,"data":"before"}),
+        json!({"seq":1,"data":"x".repeat(3 * 1024 * 1024)}),
+        json!({"seq":2,"data":"after"}),
+    ];
+    let budget = rsi_api_protocol::ByteBudget::new(4 * 1024 * 1024).unwrap();
+    let first = prepare(
+        &store,
+        &handle,
+        DomainRevision::new(0),
+        &initial,
+        expected.clone(),
+        DomainStateValue::new(json!(null)).unwrap(),
+        budget.clone().into(),
+    )
+    .await
+    .unwrap();
+    let journal = handle.decode(first.proposal().snapshot()).unwrap();
+    assert_eq!(journal.segments.len(), 3);
+    assert_eq!(
+        journal
+            .segments
+            .iter()
+            .map(|segment| (segment.first, segment.count))
+            .collect::<Vec<_>>(),
+        [(0, 1), (1, 1), (2, 1)]
+    );
+    assert!(journal.segments[1].byte_len > 3 * 1024 * 1024);
+    assert!(first.proposal().snapshot().state().encoded_len() < 4096);
+    let suffix = vec![json!({"seq":3}), json!({"seq":4})];
+    expected.extend(suffix.clone());
+    let next = prepare(
+        &store,
+        &handle,
+        DomainRevision::new(1),
+        &journal,
+        suffix,
+        DomainStateValue::new(json!(null)).unwrap(),
+        budget.clone().into(),
+    )
+    .await
+    .unwrap();
+    let next_journal = handle.decode(next.proposal().snapshot()).unwrap();
+    assert_eq!(next_journal.segments.len(), 3);
+    assert_eq!(next_journal.segments[..2], journal.segments[..2]);
+    assert_eq!(next_journal.segments[2].count, 3);
+    assert_eq!(
+        restore(&store, &next_journal, || budget.clone().into())
+            .await
+            .unwrap(),
+        expected
+    );
 }
 
 #[tokio::test]

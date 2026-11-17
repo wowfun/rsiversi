@@ -3,7 +3,11 @@
 The journal adapter stages bounded immutable event segments in the Agent Store
 and returns a typed domain proposal. It retains each prepared CAS object until
 the caller supplies the exact Kernel receipt or proves rejection. It does not
-publish Session state or decide retries.
+publish Session state or decide business-operation retries.
+After a valid staged identity, local command-input or journal preparation failure
+sends a rejected operation receipt before releasing its unresolved ownership.
+Tool, Step and command receipts accept only null or the exact unloaded response;
+a missing or invalid acknowledgement retains the uncertainty obligation.
 BeforeStep receipts verify guidance only in `StepPrompt::AppendToHeader`; a native
 complete assembly is a different preparation owner and cannot acknowledge the
 extension's staged guidance. Omitted same-Step updates retain their existing meaning.
@@ -14,14 +18,21 @@ predecessor; a matching public operation name alone is insufficient.
 The built-in `ExtensionJournal` reference envelope is owned by the Session
 protocol. Tool restoration and resource reads select the journal domain directly
 at the current durable control cut. Event interpretation and checkpoint schemas belong to the extension.
-One segment contains at most 256 KiB of JSON; journal range, byte and segment
-limits are checked before CAS publication. Restores authenticate each segment's
+Ordinary segments target 256 KiB of JSON. A single larger event occupies its own
+segment within the journal's existing 64 MiB total and Store object limit;
+journal range, byte and segment limits are checked before CAS publication.
+CAS event bytes are not domain checkpoint values. Restores authenticate each segment's
 hash through Store reads and check its count before exposing any events.
 Staging packs a new suffix into the last segment when their combined count and
 encoded bytes fit. It authenticates that segment through the caller's read budget
 and preserves event order and sequence positions; no event is summarized or
 discarded. The replacement snapshot retains every referenced CAS object through
 publication. Small operations therefore do not consume one permanent segment each.
+Agent argument, journal and history encoders share one private bounded writer.
+Inline argument admission counts JSON bytes without allocating a speculative
+serialized buffer; larger arguments encode once into their retained buffer after
+the bounded inline probe. The inline value copy remains owned by the transport,
+while the original arguments remain available for exact publication verification.
 
 The optional `AgentAdapter` executes an admitted external Tool under the
 Kernel-issued caller authority. The generic `agent.load` / `agent.tool` wire
@@ -30,9 +41,10 @@ belongs to the external plugin.
 Loading precedes business execution: a disconnect during `agent.load.*` is an
 execution-preparation failure, not an uncertain Tool effect. Generation validation
 still reports a closed connection as unavailable rather than incompatible state.
-Its retained result, effect identity, arguments and prepared journal form one
-settlement candidate. The pure settlement callback
-only returns that candidate. Executor's publication observer verifies the exact
+Its effect identity, arguments and prepared journal form one settlement candidate.
+The pure settlement callback freezes the final result after the admitted native
+around chain, including Spill retention. Repeated settlement must match that
+same final result and identity. Executor's publication observer verifies the exact
 Session, effect, result and domain replacement before acknowledging the process.
 Unconfirmed operations remain fenced; runtime result retirement does not clear
 them. Projection reads the committed checkpoint and performs no process I/O.
@@ -72,12 +84,12 @@ ends, canonical absence permits `operation.abandon` to discard only that effect'
 tentative mirror. Neither a diagnostic string nor a missing reply proves rejection.
 
 `AgentAdapterFactory` is an ordinary Agent-scoped plugin. It freezes the external
-`agent.catalog` version-five Tool definitions and commands during activation, registers one
+`agent.catalog` version-six Tool definitions and commands during activation, registers one
 journal domain plus settlement/projection contributions, and retires registrations
 with the generation. The catalog is bounded to 64 Tools. Adapter configuration is
 null; its process connection already belongs to the selected executable generation.
 The journal uses the version-2 built-in envelope, with no artifact field.
-Packages require `rsi.extension.agent` version 9, so an older host rejects their
+Packages require `rsi.extension.agent` version 10, so an older host rejects their
 installation before selection; the generic process transport uses version 2.
 
 Human questions require an explicitly installed Agent question channel. Each
@@ -155,12 +167,80 @@ One generation-wide budget admits at most 256 unresolved Tool, Step and Command
 operations combined. A permit is reserved before dispatch, moves from unobserved
 to prepared ownership, and is released only after definite rejection or confirmed
 publication. Resource exhaustion never evicts an uncertain operation.
+Separately, each `AgentAdapter` process generation admits at most 256 MiB of
+retained Tool argument/result encoded weight. Before dispatch it reserves the
+argument bytes plus the 17 MiB result ceiling; when settlement freezes the final
+result it reduces that reservation to the canonical encoding of the typed payload,
+not the peer's transport-body length (which may differ in whitespace or defaults).
+The credit belongs to
+the retained publication payload, including observer clones, and survives release
+of the operation-count permit. This is neither a Host-wide memory limit nor an
+account of the Tool runtime's separate returned result or JSON heap overhead.
 A process may evict a settled mirror after its receipt, but must retain a newly
 loaded mirror until its operation settles, plus active, queued, reviewing and
 staged operations. A receipt for an evicted mirror returns `{"state":"unloaded"}`;
 the Rust owner accepts that only after its normal exact canonical evidence check.
 The next operation after eviction reloads the canonical journal. Eviction never authorizes
 callback replay and does not discard an unresolved tentative suffix.
+
+Transport refusal before writer-queue admission releases the exact new Tool,
+Step or Command operation reservation without an abandon RPC. After admission,
+lost responses retain their operation until ordinary publication reconciliation.
+This distinction comes from the connection's typed request failure, never a
+diagnostic string or the underlying error category.
+
+After a staged reply, the operation owns one shared capacity retry for its
+immutable result, event and Step-decision reads. A provably unsent read or local
+byte-admission refusal may wait at most 10 ms and reattempt once, under the
+original cancellation and deadline. Admitted read failures, disconnects and
+business callbacks are never retried by this path. Exhausted read pressure keeps
+the existing operation uncertainty and receipt obligation; peer staging is not
+durability. Pure fork-transfer capacity remains a typed capacity failure.
+
+Tool arguments retain their native 4 MiB JSON limit across process frames. Values
+above 256 KiB use `agent.request-body.read` under the exact Session, operation
+and owner-issued token. At most two request bodies are retained per generation;
+each is released with its originating request. Tokens are monotonic identities
+across all registrations in the native process, preventing stale token reuse when
+an adapter is replaced on the same connection. The connection generation and exact
+Session/operation binding provide their authority. Oversized argument JSON is an
+invalid request, whereas occupied body slots are temporary capacity pressure.
+The peer validates and reassembles
+the complete body before executing the Tool. Cancellation and lost receipts keep
+the existing operation-outcome semantics; a fragment read never executes a Tool.
+
+Settlement events page from the existing staged operation under its exact token.
+Normal pages contain up to 4096 events and 256 KiB; one larger event is carried
+alone. Tool results are a separate inline or paged body, bounded to 17 MiB for
+the bridge's empty-enforcement result: 4 MiB encoded value, 4 MiB encoded metadata,
+at most 8 MiB escaped text, 64 KiB contexts and bounded image descriptors/framing.
+No combined journal/result serialization is retained. `agent.operation-body.read`
+reads these immutable staged parts; receipt or abandon retires their authority.
+The existing 64 MiB native read budget admits transient encoded response buffers.
+Event arrays decode one event at a time into canonical JSON, retaining no decoded
+event aggregate. A separate per-adapter pool admits 64 MiB plus 256 KiB of retained
+canonical received event-array bytes through CAS staging. The allowance covers
+the extra array framing of at most 4096 individually encoded events; the durable
+journal limit remains 64 MiB. Separate transient admission
+lets staging authenticate an existing small CAS tail without competing with its
+own retained suffix. That tail's Store read credit remains held through staging
+its merged encoding. Both pools release on errors and cancellation. These are
+encoded-weight limits, not exact heap limits: one decoded event and its canonical
+encoding can coexist with its admitted source buffer. Reload and fork input above
+256 KiB carry authenticated CAS bytes directly under the same retained Store
+admission, without decoding and re-encoding the segment on the Rust side.
+Smaller segments are decoded into the inline JSON envelope, avoiding another
+fragment callback at the cost of parsing and serializing that bounded value.
+These CAS transfers share the two request slots; their retained bytes remain
+charged to the adapter's 64 MiB transient budget through Store read admission,
+independently of the 4 MiB Tool argument limit.
+The peer's existing 256 MiB mirror budget also admits staged encoded output and
+fork output pages. Tool execution first reserves the larger of its known event
+page and 17 MiB result bound; successful staging reduces this to the actual result
+and event-page capacity. Only the currently requested result or event page is
+encoded and cached. Later reads may reconstruct another immutable part without
+executing the operation. Receipt, abandonment or generation disposal releases the
+reservation; active reservations are visible to concurrent load and fork admission.
 
 The generic `rsi.extension.journal` Session resource exposes a read-only head and
 individual authenticated event segments. `head` returns the captured domain

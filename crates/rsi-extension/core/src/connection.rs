@@ -1,5 +1,5 @@
 use crate::{
-    Error, Frame, MAXIMUM_PENDING_REQUESTS, Message, Response, Result,
+    Error, Frame, MAXIMUM_PENDING_REQUESTS, Message, RequestFailure, Response, Result,
     wire::{Decoder, MAXIMUM_ID},
 };
 use async_trait::async_trait;
@@ -368,9 +368,9 @@ impl Connection {
         method: &str,
         payload: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value> {
+    ) -> std::result::Result<Value, RequestFailure> {
         if Class::of(method) != Class::Business {
-            return Err(Error::Protocol);
+            return Err(RequestFailure::NotDispatched(Error::Protocol));
         }
         self.request_inner(method, payload, cancellation).await
     }
@@ -379,19 +379,19 @@ impl Connection {
         method: &str,
         payload: Value,
         cancellation: CancellationToken,
-    ) -> Result<Value> {
+    ) -> std::result::Result<Value, RequestFailure> {
         if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
+            return Err(RequestFailure::NotDispatched(Error::Cancelled));
         }
         let (sender, receiver) = oneshot::channel();
         let id = {
             let mut state = self.shared.state.lock().expect("extension state");
             if let Some((_, error)) = &state.failure {
-                return Err(error.clone());
+                return Err(RequestFailure::NotDispatched(error.clone()));
             }
             let class = Class::of(method);
             if state.closing && class != Class::Close {
-                return Err(Error::Disconnected);
+                return Err(RequestFailure::NotDispatched(Error::Disconnected));
             }
             if state
                 .pending
@@ -401,14 +401,16 @@ impl Connection {
                 >= class.capacity()
                 || state.next == MAXIMUM_ID
             {
-                return Err(Error::Capacity);
+                return Err(RequestFailure::NotDispatched(Error::Capacity));
             }
             let id = state.next + 1;
-            self.shared.send(Message::Request {
-                id,
-                method: method.into(),
-                payload,
-            })?;
+            self.shared
+                .send(Message::Request {
+                    id,
+                    method: method.into(),
+                    payload,
+                })
+                .map_err(RequestFailure::NotDispatched)?;
             state.next = id;
             state.pending.insert(
                 id,
@@ -429,8 +431,8 @@ impl Connection {
             done: false,
         };
         tokio::select! { biased;
-            result = receiver => { guard.done = true; result.unwrap_or(Err(Error::Disconnected)) },
-            () = cancellation.cancelled() => Err(Error::Cancelled),
+            result = receiver => { guard.done = true; result.unwrap_or(Err(Error::Disconnected)).map_err(RequestFailure::MayHaveExecuted) },
+            () = cancellation.cancelled() => Err(RequestFailure::MayHaveExecuted(Error::Cancelled)),
         }
     }
     /// Requests graceful close before forced termination and complete Process settlement.

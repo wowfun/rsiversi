@@ -69,6 +69,7 @@ struct Imports {
     profile: String,
     selection: Importer,
     workspace: PathBuf,
+    temporary_root: PathBuf,
     store: Arc<rsi_packages::PackageStore>,
     lane: tokio::sync::Mutex<()>,
     leases: tokio::sync::Mutex<ImportLeases>,
@@ -112,12 +113,14 @@ impl Imports {
         profile: String,
         selection: Importer,
         workspace: PathBuf,
+        temporary_root: PathBuf,
         store: Arc<rsi_packages::PackageStore>,
     ) -> rsi_meta::Result<Vec<rsi_extension::HandlerRegistration>> {
         let imports = Arc::new(Self {
             profile,
             selection,
             workspace,
+            temporary_root,
             store,
             lane: tokio::sync::Mutex::new(()),
             leases: tokio::sync::Mutex::default(),
@@ -279,6 +282,18 @@ struct Sessions {
     store: Arc<dyn rsi_agent_store_protocol::SessionStore>,
     routes: Arc<rsi_api_http::ApplicationUpstream>,
 }
+#[derive(Debug)]
+struct BoundSessions {
+    sessions: Sessions,
+    connection: std::sync::Weak<rsi_extension::Connection>,
+    submissions: tokio::sync::Semaphore,
+}
+impl std::ops::Deref for BoundSessions {
+    type Target = Sessions;
+    fn deref(&self) -> &Sessions {
+        &self.sessions
+    }
+}
 impl Sessions {
     async fn owner_callback(
         &self,
@@ -294,9 +309,13 @@ impl Sessions {
 
     fn attach(
         self,
-        connection: &rsi_extension::Connection,
+        connection: &Arc<rsi_extension::Connection>,
     ) -> rsi_meta::Result<Vec<rsi_extension::HandlerRegistration>> {
-        let sessions: Arc<dyn rsi_extension::Handler> = Arc::new(self);
+        let sessions: Arc<dyn rsi_extension::Handler> = Arc::new(BoundSessions {
+            sessions: self,
+            connection: Arc::downgrade(connection),
+            submissions: tokio::sync::Semaphore::new(2),
+        });
         register_methods(
             connection,
             &sessions,
@@ -323,7 +342,7 @@ impl Sessions {
     }
 }
 #[async_trait]
-impl rsi_extension::Handler for Sessions {
+impl rsi_extension::Handler for BoundSessions {
     async fn call(
         &self,
         method: &str,
@@ -351,7 +370,7 @@ impl rsi_extension::Handler for Sessions {
                     "application.descendants"=>self.descendants(payload).await,
                     "application.history"=>self.history(payload).await,
                     "application.interactions"=>self.interactions(payload).await,
-                    "application.submit"=>self.submit(payload).await,
+                    "application.submit"=>self.submit(payload, &stop).await,
                     "application.cancel"=>self.cancel(payload).await,
                     "application.terminal"=>self.terminal(payload).await,
                     "application.actor"=>self.actor(payload).await,
@@ -435,6 +454,7 @@ impl rsi_extension::Handler for Imports {
                 export: self.selection.export.clone(),
                 program: self.selection.program.clone(),
                 workspace: self.workspace.clone(),
+                temporary_root: self.temporary_root.clone(),
                 specifications: request.specifications,
                 options: request.options,
             },
@@ -506,7 +526,7 @@ async fn open_application(
     tools: Option<&tools::Publisher>,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
-    const PROTOCOL: u32 = 13;
+    const PROTOCOL: u32 = 14;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
     if let Some(source) = tools {
         payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});
@@ -552,7 +572,7 @@ impl PluginFactory for Factory {
                 return Err(failure("importer program must be absolute"));
             }
         }
-        rsi::package_extension_factory(self.0.state().join("packages")).prepare(&input.process)?;
+        rsi::package_extension_factory(self.0.data().join("packages")).prepare(&input.process)?;
         let use_tools = input.tools;
         let activation = PreparedActivation::with_state(config.clone(), input, 0)
             .requiring_local::<rsi_api_http::BrowserOwnerContract>()
@@ -573,7 +593,7 @@ impl PluginFactory for Factory {
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config: Config = plan.take_state()?;
-        let root = self.0.state().join("packages");
+        let paths = self.0.clone();
         let profile = self
             .0
             .state()
@@ -624,7 +644,7 @@ impl PluginFactory for Factory {
         let task = scope.runtime().execution().clone().spawn(async move {
             loop {
                 let child = scope.clone().isolate_local_fresh::<ExtensionContract>()?.0;
-                let operation = start_process(child,root.clone(),profile.clone(),config.process.clone(),
+                let operation = start_process(child,paths.clone(),profile.clone(),config.process.clone(),
                     config.importer.clone(),key,sessions.clone());
                 let result = tokio::select! {biased; ()=stop.cancelled()=>return Ok(()), result=operation=>result};
                 sessions.routes.retire();
@@ -674,9 +694,13 @@ fn preparing(
     Ok((key, Arc::new(upstream)))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One scope owns process startup, import leases, route publication and child cleanup."
+)]
 async fn start_process(
     scope: rsi_meta::Context,
-    root: PathBuf,
+    paths: HostPaths,
     profile: PathBuf,
     process: ConfigValue,
     importer: Option<Importer>,
@@ -688,7 +712,7 @@ async fn start_process(
         launch,
         resolved,
         store,
-    } = rsi::resolve_package_process(root, process).await?;
+    } = rsi::resolve_package_process(paths.data().join("packages"), process).await?;
     let profile_name = profile
         .file_name()
         .and_then(|name| name.to_str())
@@ -742,6 +766,7 @@ async fn start_process(
                     packages,
                     selection,
                     profile.clone(),
+                    paths.tmp().to_owned(),
                     store.clone(),
                 )
             })

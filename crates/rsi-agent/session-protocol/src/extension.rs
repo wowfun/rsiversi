@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 pub const EXTENSION_JOURNAL_DOMAIN: &str = "rsi.extension-journal";
 /// Current mechanical envelope, independent of executable code selection.
 pub const EXTENSION_JOURNAL_VERSION: u32 = 2;
+/// Maximum encoded bytes across the journal's immutable CAS segments.
+pub const MAXIMUM_EXTENSION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+/// Packing target for ordinary events; a larger event occupies one segment.
+pub const EXTENSION_SEGMENT_TARGET_BYTES: usize = 256 * 1024;
 
 /// One immutable contiguous event segment in Agent CAS.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionSegment {
     /// First zero-based event position.
@@ -22,7 +26,7 @@ pub struct ExtensionSegment {
 }
 
 /// Typed bounded journal roots and recovery metadata; publication uses ordinary domains.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionJournal {
     /// Immutable contiguous CAS roots, in event order.
@@ -49,7 +53,7 @@ impl ExtensionJournal {
             if segment.first != cursor
                 || segment.count == 0
                 || segment.count > 4096
-                || segment.byte_len > 256 * 1024
+                || (segment.byte_len > EXTENSION_SEGMENT_TARGET_BYTES as u64 && segment.count != 1)
             {
                 return Err("extension journal segment gap, overlap or empty range".into());
             }
@@ -62,7 +66,7 @@ impl ExtensionJournal {
             bytes = bytes
                 .checked_add(segment.byte_len)
                 .ok_or("extension byte overflow")?;
-            if bytes > 64 * 1024 * 1024 {
+            if bytes > MAXIMUM_EXTENSION_JOURNAL_BYTES as u64 {
                 return Err("extension journal byte capacity exceeded".into());
             }
             output.cas(&segment.sha256, segment.byte_len)?;
@@ -125,6 +129,19 @@ mod tests {
     fn recovery_metadata_cannot_exhaust_the_domain_budget() {
         let mut value = journal();
         value.checkpoint = DomainStateValue::new(serde_json::json!("x".repeat(64 * 1024))).unwrap();
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn large_events_are_standalone_within_the_aggregate_byte_bound() {
+        let mut value = journal();
+        value.segments[0].count = 1;
+        value.segments[0].byte_len = MAXIMUM_EXTENSION_JOURNAL_BYTES as u64;
+        value.validate().unwrap();
+        value.segments[0].count = 2;
+        assert!(value.validate().is_err());
+        value.segments[0].count = 1;
+        value.segments[0].byte_len += 1;
         assert!(value.validate().is_err());
     }
 }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rsi_extension::{Connection, Error, Handler, RejectRequests};
+use rsi_extension::{Connection, Error, Handler, RejectRequests, RequestFailure};
 use rsi_process::{
     DuplexControl, DuplexInput, DuplexOutput, DuplexRead, ManagedDuplexProcess, ProcessError,
     ProcessOutcome, ProcessOutput, ProcessRead,
@@ -181,6 +181,53 @@ fn pair(a: Arc<dyn Handler>, b: Arc<dyn Handler>) -> (Arc<Connection>, Arc<Conne
         Arc::new(Connection::new(process(right), "test".into(), b).unwrap()),
     )
 }
+
+#[tokio::test]
+async fn local_refusals_never_reach_the_peer_or_consume_request_capacity() {
+    #[derive(Debug, Default)]
+    struct Count(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl Handler for Count {
+        async fn call(
+            &self,
+            _: &str,
+            value: Value,
+            _: CancellationToken,
+        ) -> rsi_extension::Result<Value> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(value)
+        }
+    }
+    let count = Arc::new(Count::default());
+    let (left, right) = pair(Arc::new(RejectRequests), count.clone());
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    for _ in 0..=rsi_extension::MAXIMUM_PENDING_REQUESTS {
+        assert_eq!(
+            left.request("echo", Value::Null, cancelled.clone()).await,
+            Err(RequestFailure::NotDispatched(Error::Cancelled))
+        );
+        assert_eq!(
+            left.request(
+                "echo",
+                json!("x".repeat(rsi_extension::MAXIMUM_FRAME_BYTES)),
+                CancellationToken::new()
+            )
+            .await,
+            Err(RequestFailure::NotDispatched(Error::Capacity))
+        );
+    }
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        left.request("echo", json!(42), CancellationToken::new())
+            .await
+            .unwrap(),
+        json!(42)
+    );
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+}
 #[derive(Debug)]
 struct Stalled;
 
@@ -244,7 +291,7 @@ async fn bidirectional_business_saturation_preserves_heartbeat_and_close() {
     assert_eq!(
         left.request("overflow", Value::Null, CancellationToken::new())
             .await,
-        Err(Error::Capacity)
+        Err(RequestFailure::NotDispatched(Error::Capacity))
     );
     left.start_watchdog();
     right.start_watchdog();
@@ -281,7 +328,10 @@ async fn cancellation_deadline_starts_after_write_and_missing_ack_disconnects() 
     });
     tokio::task::yield_now().await;
     token.cancel();
-    assert_eq!(request.await.unwrap(), Err(Error::Cancelled));
+    assert_eq!(
+        request.await.unwrap(),
+        Err(RequestFailure::MayHaveExecuted(Error::Cancelled))
+    );
     tokio::time::advance(std::time::Duration::from_secs(6)).await;
     tokio::task::yield_now().await;
     assert_eq!(
@@ -319,7 +369,10 @@ async fn acknowledged_cancellation_churn_leaves_no_expiring_deadlines() {
         });
         review.review_started.notified().await;
         token.cancel();
-        assert_eq!(request.await.unwrap(), Err(Error::Cancelled));
+        assert_eq!(
+            request.await.unwrap(),
+            Err(RequestFailure::MayHaveExecuted(Error::Cancelled))
+        );
         assert_eq!(
             left.request("echo", Value::Null, CancellationToken::new())
                 .await
@@ -383,7 +436,7 @@ async fn stalled_peer_watchdog_terminates_pending_work_without_replay() {
     assert_eq!(
         left.request("work", Value::Null, CancellationToken::new())
             .await,
-        Err(Error::Disconnected)
+        Err(RequestFailure::MayHaveExecuted(Error::Disconnected))
     );
     assert!(started.elapsed() <= std::time::Duration::from_secs(9));
     assert_eq!(
@@ -464,7 +517,10 @@ async fn cancelled_call_does_not_close_a_healthy_peer() {
         tokio::spawn(async move { active.request("review", Value::Null, request_token).await });
     review.review_started.notified().await;
     token.cancel();
-    assert_eq!(waiting.await.unwrap(), Err(Error::Cancelled));
+    assert_eq!(
+        waiting.await.unwrap(),
+        Err(RequestFailure::MayHaveExecuted(Error::Cancelled))
+    );
     assert_eq!(
         left.request("command", json!(true), CancellationToken::new())
             .await

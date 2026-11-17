@@ -73,16 +73,17 @@ pub use contribution::{
 mod command;
 pub use command::{
     CommandArguments, CommandMessage, CommandMessageSource, CommandOutcome, CommandRevision,
-    MAXIMUM_COMMAND_ARGUMENT_BYTES, MAXIMUM_COMMAND_INPUT_BYTES, MAXIMUM_COMMAND_INPUTS,
-    MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor, SessionCommandInvocation,
-    SessionCommandReceipt, SessionCommandsView,
+    ComposerCommandInput, MAXIMUM_COMMAND_ARGUMENT_BYTES, MAXIMUM_COMMAND_INPUT_BYTES,
+    MAXIMUM_COMMAND_INPUTS, MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor,
+    SessionCommandInvocation, SessionCommandReceipt, SessionCommandsView,
 };
 mod domain;
 mod generation;
 pub use generation::GenerationSelection;
 mod extension;
 pub use extension::{
-    EXTENSION_JOURNAL_DOMAIN, EXTENSION_JOURNAL_VERSION, ExtensionJournal, ExtensionSegment,
+    EXTENSION_JOURNAL_DOMAIN, EXTENSION_JOURNAL_VERSION, EXTENSION_SEGMENT_TARGET_BYTES,
+    ExtensionJournal, ExtensionSegment, MAXIMUM_EXTENSION_JOURNAL_BYTES,
 };
 mod projection;
 mod reference;
@@ -115,7 +116,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 38;
+pub const SESSION_FORMAT_VERSION: u32 = 39;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -160,7 +161,9 @@ pub const MAXIMUM_RUNNING_AGENT_TREE_NODES: usize = 3;
 macro_rules! string_identity {
     ($name:ident, $kind:literal) => {
         #[doc = concat!("Validated ", $kind, " identity.")]
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+        #[derive(
+            schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+        )]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -215,7 +218,7 @@ string_identity!(DomainRequestId, "domain request");
 string_identity!(ContributionId, "contribution");
 
 /// Stable path from an Agent-tree root to one descendant.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct AgentPath(Vec<u16>);
 
@@ -261,7 +264,7 @@ impl AgentPath {
 }
 
 /// Requested completed-turn selection for one subagent fork.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForkTurnSelection {
     /// Start without parent turns.
@@ -335,7 +338,7 @@ impl ForkTurnSelection {
 }
 
 /// Model-visible durable content in one accepted mailbox message.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines these transparent payload fields as one contract.
 pub enum AgentMessageContent {
@@ -356,7 +359,7 @@ pub enum AgentMessageContent {
 }
 
 /// Authority-neutral origin of one queued message.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum AgentMessageSource {
@@ -389,7 +392,7 @@ pub enum AgentMessageSource {
 }
 
 /// Authority-neutral classification of an accepted message source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMessageSourceKind {
     /// Input emitted by an admitted Session command.
@@ -428,7 +431,7 @@ impl AgentMessageSource {
 }
 
 /// Delivery horizon for one accepted message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageTarget {
     /// Enter a newly claimed Turn.
@@ -438,7 +441,7 @@ pub enum MessageTarget {
 }
 
 /// Immutable caller intent, retained independently of later message promotion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDelivery {
     /// Queue a waking next Turn.
@@ -497,7 +500,7 @@ impl MessageDelivery {
 }
 
 /// Optional execution controls which can only enter a newly claimed Turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MessageOptions {
     /// Optional exact invocation route.
@@ -509,7 +512,7 @@ pub struct MessageOptions {
 }
 
 /// One validated message retained by the Agent control plane.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMessage {
     /// Caller-preallocated durable identity.
@@ -733,7 +736,7 @@ fn validate_input_content(
 }
 
 /// Durable reason an accepted mailbox message will never be claimed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDiscardReason {
     /// Human input was replaced or converted by an atomic queue mutation.
@@ -749,7 +752,7 @@ pub enum MessageDiscardReason {
 }
 
 /// Model-visible durable source of one entered input message.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each source payload as one closed contract.
 pub enum InputMessageSource {
@@ -816,7 +819,7 @@ pub enum InputMessageSource {
 }
 
 /// Source coordinates of one message retained in an original `ToolResult`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolContextOrigin {
     /// Original Session, including on independently forked histories.
@@ -835,7 +838,7 @@ pub struct ToolContextOrigin {
 pub const TOOL_CONTEXT_PRODUCER: &str = "rsi.tools.context";
 
 /// A deferred tool message and its durable position within the originating result.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettledToolContext {
     /// Originating Session, including across a fork boundary.
@@ -952,7 +955,7 @@ impl InputMessageSource {
 }
 
 /// Terminal result of one model Step within a Turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each outcome payload.
 pub enum StepOutcome {
@@ -974,7 +977,7 @@ impl StepOutcome {
 }
 
 /// Final state of one complete Agent activation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Variant prose defines each closed outcome payload.
 pub enum ActivationOutcome {
@@ -987,7 +990,7 @@ pub enum ActivationOutcome {
 }
 
 /// Winning cause which resumed one parked wait.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitResumeCause {
     /// The synchronous human interaction settled and execution admission returned.
@@ -1003,7 +1006,7 @@ pub enum WaitResumeCause {
 }
 
 /// Scheduling reason for a durable activation park.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitKind {
     /// Bounded Agent progress wait; execution elapsed time continues.
@@ -1013,7 +1016,7 @@ pub enum WaitKind {
 }
 
 /// Append-only non-Fact Agent control transition.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
@@ -1241,7 +1244,7 @@ impl AgentControlRecordBody {
 }
 
 /// One sequenced durable Agent-control record.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentControlRecord {
     seq: u64,
@@ -1341,7 +1344,7 @@ impl AgentControlRecord {
 /// The lowercase alphanumeric-and-dash grammar is safe to use as one preset
 /// directory segment. Filesystem resolution must still remain beneath the
 /// preset provider's separately validated root.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct AgentPresetId(String);
 
@@ -1394,7 +1397,7 @@ impl AsRef<str> for AgentPresetId {
 }
 
 /// Immutable redacted settings captured when one session becomes durable.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenAgentSettings {
     settings_id: String,
@@ -1575,7 +1578,7 @@ impl FrozenAgentSettings {
 }
 
 /// Immutable product-owned protection identity; this data conveys no live authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionProtectionScope {
     namespace: String,
@@ -1632,7 +1635,7 @@ impl<'de> Deserialize<'de> for SessionProtectionScope {
 }
 
 /// Immutable durable session header written with the first durable admission.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHeader {
     format_version: u32,
@@ -2085,7 +2088,7 @@ impl SessionHeader {
 }
 
 /// External effect family used in interrupted outcomes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
     /// Language model effect.
@@ -2097,7 +2100,7 @@ pub enum EffectKind {
 }
 
 /// Single terminal outcome of one accepted turn.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnOutcome {
     /// The request completed normally, including an initially empty input decision.
@@ -2181,7 +2184,7 @@ impl TurnOutcome {
 }
 
 /// Append-only semantic body of one durable or speculative Fact.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(clippy::large_enum_variant)] // Fact pages bound both count and bytes; keep owned semantic payloads inline.
 pub enum SessionFactBody {
@@ -2839,7 +2842,7 @@ fn validate_tool_intent(
 }
 
 /// Durable proof of the producer of one Tool call.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolOrigin {
     /// One exact call produced by a completed Conversation response.
@@ -2857,7 +2860,7 @@ pub enum ToolOrigin {
 }
 
 /// One sequenced append-only session Fact.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionFact {
     seq: u64,
