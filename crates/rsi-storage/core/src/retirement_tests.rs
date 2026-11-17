@@ -23,13 +23,10 @@ impl KvBackend for Backend {
     fn ensure_available(&self) -> Result<()> {
         Ok(())
     }
-    async fn load(&self, _: &str) -> Result<Option<StoredDomain>> {
-        unreachable!()
+    fn capabilities(&self, _: crate::Layout) -> crate::Capabilities {
+        crate::Capabilities::default()
     }
-    async fn put(&self, _: &str, _: u32, _: &str, _: &Value) -> Result<()> {
-        unreachable!()
-    }
-    async fn delete(&self, _: &str, _: u32, _: &str) -> Result<()> {
+    async fn open(&self, _: crate::UnitDescriptor) -> crate::Result<crate::OpenedUnit> {
         unreachable!()
     }
 }

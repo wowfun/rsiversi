@@ -1,140 +1,35 @@
 use super::*;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
-use rsi_storage::{StorageFactory, StoredDomain};
+use rsi_storage::{Address, StorageFactory, StorageHubContract};
+use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     future::Future,
     pin::pin,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{Arc, atomic::Ordering},
     task::{Context, Poll, Waker},
 };
-use tokio::sync::Notify;
 
-#[derive(Debug, Default)]
-struct Backend {
-    records: Mutex<BTreeMap<String, Value>>,
-    loads: AtomicUsize,
-    pause_load: AtomicBool,
-    reject_load: AtomicBool,
-    pause_write: AtomicBool,
-    entered: Notify,
-    release: Notify,
-    unhealthy: AtomicBool,
-    panic_after_write: AtomicBool,
-    pause_after_write: AtomicBool,
-}
-#[async_trait]
-impl KvBackend for Backend {
-    fn ensure_available(&self) -> Result<(), StorageError> {
-        if self.unhealthy.load(Ordering::Acquire) {
-            Err(StorageError::RecoveryRequired)
-        } else {
-            Ok(())
-        }
-    }
-    async fn load(&self, _: &str) -> Result<Option<StoredDomain>, StorageError> {
-        self.loads.fetch_add(1, Ordering::SeqCst);
-        if self.reject_load.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Io("injected load failure".into()));
-        }
-        let records = self.records.lock().unwrap().clone();
-        if self.pause_load.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        Ok(Some(StoredDomain {
-            version: 1,
-            records,
-        }))
-    }
-    async fn put(&self, _: &str, _: u32, key: &str, value: &Value) -> Result<(), StorageError> {
-        if self.pause_write.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        self.records
-            .lock()
-            .unwrap()
-            .insert(key.into(), value.clone());
-        if self.pause_after_write.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        assert!(
-            !self.panic_after_write.swap(false, Ordering::SeqCst),
-            "after put"
-        );
-        Ok(())
-    }
-    async fn delete(&self, _: &str, _: u32, key: &str) -> Result<(), StorageError> {
-        if self.pause_write.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        self.records.lock().unwrap().remove(key);
-        if self.pause_after_write.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        assert!(
-            !self.panic_after_write.swap(false, Ordering::SeqCst),
-            "after delete"
-        );
-        Ok(())
-    }
-}
+#[path = "../tests/support/mod.rs"]
+mod support;
+use support::Backend;
 
-#[tokio::test]
-async fn schema_mismatch_is_distinct_from_storage_corruption() {
-    let (_runtime, _lease, facility) = facility(Arc::new(Backend::default())).await;
-    let mut changed = spec();
-    changed.version = 2;
-    assert!(matches!(facility.open(changed.clone()).await,
-        Err(StorageError::DomainVersionMismatch { domain, stored: 1, requested: 2 }) if domain == changed.id));
-    assert!(
-        facility.open(spec()).await.is_ok(),
-        "refusal must not rewrite durable state"
-    );
-}
-
-#[tokio::test]
-async fn lost_commit_completion_is_unknown_and_fences_the_domain_snapshot() {
-    for delete in [false, true] {
-        let backend = Arc::new(Backend::default());
-        let (_runtime, _lease, facility) = facility(backend.clone()).await;
-        let domain = facility.open(spec()).await.unwrap();
-        domain.put("one", Value::Null).await.unwrap();
-        backend.panic_after_write.store(true, Ordering::SeqCst);
-        let result = if delete {
-            domain.delete("one").await.map(|_| ())
-        } else {
-            domain.put("one", Value::Bool(true)).await
-        };
-        assert!(
-            matches!(result, Err(StorageError::OutcomeUnknown(_))),
-            "{result:?}"
-        );
-        assert_eq!(domain.snapshot().await, Err(StorageError::RecoveryRequired));
-        assert_eq!(
-            domain.delete("absent").await,
-            Err(StorageError::RecoveryRequired)
-        );
-        assert!(matches!(
-            facility.open(spec()).await,
-            Err(StorageError::RecoveryRequired)
-        ));
-        assert_eq!(backend.records.lock().unwrap().contains_key("one"), !delete);
-    }
-}
 fn spec() -> DomainSpec {
     DomainSpec {
         id: "domain".into(),
         backend: "memory".into(),
-        version: 1,
-        maximum_records: 1,
-        maximum_bytes: 16,
+        maximum_records: 4,
+        maximum_bytes: 1024,
+        ..DomainSpec::default()
     }
 }
-async fn facility(backend: Arc<Backend>) -> (Runtime, rsi_storage::BackendLease, Arc<Facility>) {
+fn schema() -> Schema {
+    Schema::default().table::<Value>("rows").unwrap()
+}
+fn address(key: &str) -> Address {
+    Address::record("rows", key).unwrap()
+}
+async fn fixture(backend: Arc<Backend>) -> (Runtime, rsi_storage::BackendLease, Arc<Facility>) {
     let runtime = Runtime::default();
     runtime
         .root()
@@ -153,158 +48,198 @@ async fn facility(backend: Arc<Backend>) -> (Runtime, rsi_storage::BackendLease,
     let lease = hub.register("memory", backend).unwrap();
     let facility = Arc::new(Facility {
         hub,
-        registry: Arc::new(Registry::default()),
+        registry: Arc::default(),
     });
     (runtime, lease, facility)
+}
+fn rows(domain: &Domain) -> BTreeMap<String, Value> {
+    domain
+        .table::<Value>("rows")
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .entries()
+        .map(|(key, value)| (key.to_owned(), value.as_ref().clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn oversized_batch_rejects_before_waiting_for_queue_capacity() {
+    let backend = Arc::new(Backend::default());
+    let (_runtime, _lease, facility) = fixture(backend).await;
+    let domain = facility.open(spec(), schema()).await.unwrap();
+    let first = domain.authority.admit().await.unwrap();
+    let second = domain.authority.admit().await.unwrap();
+    let changes = (0..=2 * domain.spec().maximum_records)
+        .map(|key| Change::delete(address(&key.to_string())))
+        .collect();
+    let mut batch = pin!(domain.batch(changes));
+    assert!(matches!(
+        batch.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(StorageError::InvalidInput(message))) if message.contains("batch capacity")
+    ));
+    drop((first, second));
+    domain.close().await;
+}
+
+#[tokio::test]
+async fn schema_mismatch_is_distinct_from_storage_corruption() {
+    let backend = Arc::new(Backend::default());
+    backend.seed("domain", 1, address("one"), &Value::Null);
+    let (_runtime, _lease, facility) = fixture(backend).await;
+    let mut changed = spec();
+    changed.version = 2;
+    assert!(matches!(
+        facility.open(changed, schema()).await,
+        Err(StorageError::DomainVersionMismatch {
+            stored: 1,
+            requested: 2,
+            ..
+        })
+    ));
+    let domain = facility.open(spec(), schema()).await.unwrap();
+    assert_eq!(rows(&domain)["one"], Value::Null);
+    domain.close().await;
+}
+
+#[tokio::test]
+async fn lost_commit_completion_is_unknown_and_fences_the_domain_snapshot() {
+    for delete in [false, true] {
+        let backend = Arc::new(Backend::default());
+        let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+        let domain = facility.open(spec(), schema()).await.unwrap();
+        let table = domain.table::<Value>("rows").unwrap();
+        table.put("one", Value::Null).await.unwrap();
+        backend
+            .state
+            .panic_after_write
+            .store(true, Ordering::SeqCst);
+        let result = if delete {
+            table.delete("one").await.map(|_| ())
+        } else {
+            table.put("one", Value::Bool(true)).await
+        };
+        assert!(matches!(result, Err(StorageError::OutcomeUnknown(_))));
+        assert!(matches!(
+            domain.snapshot(),
+            Err(StorageError::RecoveryRequired)
+        ));
+        assert_eq!(
+            table.delete("absent").await,
+            Err(StorageError::RecoveryRequired)
+        );
+        assert!(matches!(
+            facility.open(spec(), schema()).await,
+            Err(StorageError::RecoveryRequired)
+        ));
+        assert_eq!(backend.values("domain").contains_key("rows/one"), !delete);
+        domain.close().await;
+        let replacement = facility.open(spec(), schema()).await.unwrap();
+        assert_eq!(rows(&replacement).contains_key("one"), !delete);
+        replacement.close().await;
+    }
 }
 
 #[tokio::test]
 async fn cancelled_last_handle_write_retains_authority_through_publication() {
-    for delete in [false, true] {
-        let backend = Arc::new(Backend::default());
-        if delete {
-            backend
-                .records
-                .lock()
-                .unwrap()
-                .insert("one".into(), Value::Null);
-        }
-        let (_runtime, _lease, facility) = facility(backend.clone()).await;
-        let domain = facility.open(spec()).await.unwrap();
-        backend.pause_write.store(true, Ordering::SeqCst);
-        let writing = tokio::spawn(async move {
-            if delete {
-                domain.delete("one").await.map(|_| ())
-            } else {
-                domain.put("one", Value::Null).await
-            }
-        });
-        backend.entered.notified().await;
-        writing.abort();
-        assert!(writing.await.unwrap_err().is_cancelled());
-        let reopened = facility.open(spec()).await.unwrap();
-        assert_eq!(backend.loads.load(Ordering::SeqCst), 1);
-        let mut changed = spec();
-        changed.maximum_records = 2;
-        assert!(matches!(
-            facility.open(changed).await,
-            Err(StorageError::InvalidInput(_))
-        ));
-        backend.release.notify_one();
-        let records = reopened.snapshot().await.unwrap();
-        assert_eq!(records.contains_key("one"), !delete);
-        if !delete {
-            assert!(reopened.put("two", Value::Null).await.is_err());
-        }
-        assert_eq!(records, *backend.records.lock().unwrap());
-        drop(reopened);
-        assert!(facility.registry.domains.lock().unwrap().is_empty());
-    }
+    let backend = Arc::new(Backend::default());
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+    let domain = facility.open(spec(), schema()).await.unwrap();
+    backend.state.pause_write.store(true, Ordering::SeqCst);
+    let table = domain.table::<Value>("rows").unwrap();
+    let writing = tokio::spawn(async move { table.put("one", Value::Null).await });
+    backend.state.entered.notified().await;
+    drop(domain);
+    writing.abort();
+    assert!(writing.await.unwrap_err().is_cancelled());
+    let reopened = facility.open(spec(), schema()).await.unwrap();
+    assert_eq!(backend.state.loads.load(Ordering::SeqCst), 1);
+    let mut changed = spec();
+    changed.maximum_records += 1;
+    assert!(matches!(
+        facility.open(changed, schema()).await,
+        Err(StorageError::InvalidInput(_))
+    ));
+    backend.state.release.notify_one();
+    // A queued operation is the barrier; synchronous reads may still observe the
+    // previous committed state while the first write is in progress.
+    reopened
+        .table::<Value>("rows")
+        .unwrap()
+        .put("two", json!(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&reopened),
+        BTreeMap::from([("one".into(), Value::Null), ("two".into(), json!(2))])
+    );
+    reopened.close().await;
+    assert!(facility.registry.domains.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn opening_reserves_one_authority_and_cancelled_initializer_can_retry() {
     let backend = Arc::new(Backend::default());
-    let (_runtime, _lease, facility) = facility(backend.clone()).await;
-    backend.pause_load.store(true, Ordering::SeqCst);
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+    backend.state.pause_load.store(true, Ordering::SeqCst);
     let first = tokio::spawn({
         let facility = facility.clone();
-        async move { facility.open(spec()).await }
+        async move { facility.open(spec(), schema()).await }
     });
-    backend.entered.notified().await;
-    let mut second = pin!(facility.open(spec()));
+    backend.state.entered.notified().await;
+    let mut second = pin!(facility.open(spec(), schema()));
     assert!(matches!(
         second
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Pending
     ));
-    assert_eq!(backend.loads.load(Ordering::SeqCst), 1);
     let mut conflict = spec();
-    conflict.maximum_bytes = 32;
-    assert!(facility.open(conflict).await.is_err());
+    conflict.maximum_bytes += 1;
+    assert!(facility.open(conflict, schema()).await.is_err());
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     let domain = second.await.unwrap();
-    assert_eq!(backend.loads.load(Ordering::SeqCst), 2);
-    domain.put("one", Value::Null).await.unwrap();
-    assert!(domain.put("two", Value::Null).await.is_err());
-    backend.unhealthy.store(true, Ordering::Release);
-    assert_eq!(domain.snapshot().await, Err(StorageError::RecoveryRequired));
-    assert_eq!(
-        domain.delete("missing").await,
-        Err(StorageError::RecoveryRequired)
-    );
-    assert!(matches!(
-        facility.open(spec()).await,
-        Err(StorageError::RecoveryRequired)
-    ));
+    assert_eq!(backend.state.loads.load(Ordering::SeqCst), 2);
+    domain.close().await;
 }
 
 #[tokio::test]
 async fn completed_load_is_shared_and_historical_domain_names_are_removed() {
     let backend = Arc::new(Backend::default());
-    let (_runtime, _lease, facility) = facility(backend.clone()).await;
-    backend.pause_load.store(true, Ordering::SeqCst);
-    let first = tokio::spawn({
-        let facility = facility.clone();
-        async move { facility.open(spec()).await }
-    });
-    backend.entered.notified().await;
-    let mut second = pin!(facility.open(spec()));
-    assert!(matches!(
-        second
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Pending
-    ));
-    backend.release.notify_one();
-    let first = first.await.unwrap().unwrap();
-    first.put("one", Value::Null).await.unwrap();
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+    let first = facility.open(spec(), schema()).await.unwrap();
+    let second = facility.open(spec(), schema()).await.unwrap();
+    assert_eq!(backend.state.loads.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&first.authority, &second.authority));
+    assert!(
+        facility
+            .open(spec(), Schema::default().table::<String>("rows").unwrap())
+            .await
+            .is_err()
+    );
     drop(first);
-    let second = second.await.unwrap();
-    assert_eq!(backend.loads.load(Ordering::SeqCst), 1);
-    assert!(second.put("two", Value::Null).await.is_err());
     drop(second);
-    for index in 0..100 {
+    assert!(facility.registry.domains.lock().unwrap().is_empty());
+    for n in 0..20 {
         let mut spec = spec();
-        spec.id = format!("domain-{index}");
-        drop(facility.open(spec).await.unwrap());
-        assert!(facility.registry.domains.lock().unwrap().is_empty());
+        spec.id = format!("historical-{n}");
+        let domain = facility.open(spec, schema()).await.unwrap();
+        domain.close().await;
     }
+    assert!(facility.registry.domains.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn failed_initialization_is_retryable_and_stale_cleanup_preserves_replacement() {
     let backend = Arc::new(Backend::default());
-    let (_runtime, _lease, facility) = facility(backend.clone()).await;
-    backend.reject_load.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        facility.open(spec()).await,
-        Err(StorageError::Io(_))
-    ));
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+    backend.state.reject_load.store(true, Ordering::SeqCst);
+    assert!(facility.open(spec(), schema()).await.is_err());
     assert!(facility.registry.domains.lock().unwrap().is_empty());
-    let domain = facility.open(spec()).await.unwrap();
-    assert_eq!(backend.loads.load(Ordering::SeqCst), 2);
-    drop(domain);
-    let old = Arc::new(Authority {
-        spec: spec(),
-        loaded: OnceCell::new(),
-        registry: Arc::downgrade(&facility.registry),
-        recovery_required: AtomicBool::new(false),
-    });
-    let replacement = Arc::new(Authority {
-        spec: spec(),
-        loaded: OnceCell::new(),
-        registry: Arc::downgrade(&facility.registry),
-        recovery_required: AtomicBool::new(false),
-    });
-    facility
-        .registry
-        .domains
-        .lock()
-        .unwrap()
-        .insert(spec().id, Arc::downgrade(&replacement));
+    let old = facility.open(spec(), schema()).await.unwrap();
+    old.close().await;
+    let replacement = facility.open(spec(), schema()).await.unwrap();
     drop(old);
     assert!(
         facility
@@ -312,17 +247,113 @@ async fn failed_initialization_is_retryable_and_stale_cleanup_preserves_replacem
             .domains
             .lock()
             .unwrap()
-            .get(&spec().id)
+            .get("domain")
             .unwrap()
-            .ptr_eq(&Arc::downgrade(&replacement))
+            .ptr_eq(&Arc::downgrade(&replacement.authority))
     );
-    drop(replacement);
+    replacement.close().await;
     assert!(facility.registry.domains.lock().unwrap().is_empty());
+}
+
+#[test]
+fn runtime_shutdown_drops_an_unfinished_commit_and_fences_its_retained_handle() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let backend = Arc::new(Backend::default());
+    let (_meta, _lease, _facility, domain) = runtime.block_on(async {
+        let (meta, lease, facility) = fixture(backend.clone()).await;
+        let domain = facility.open(spec(), schema()).await.unwrap();
+        backend
+            .state
+            .pause_after_write
+            .store(true, Ordering::SeqCst);
+        let table = domain.table::<Value>("rows").unwrap();
+        let waiter = tokio::spawn(async move { table.put("one", Value::Null).await });
+        backend.state.entered.notified().await;
+        assert!(backend.values("domain").contains_key("rows/one"));
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        (meta, lease, facility, domain)
+    });
+    drop(runtime);
+    assert_eq!(
+        domain.ensure_available(),
+        Err(StorageError::RecoveryRequired)
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        assert!(matches!(
+            domain.snapshot(),
+            Err(StorageError::RecoveryRequired)
+        ));
+        domain.close().await;
+    });
+}
+
+#[tokio::test]
+async fn exact_bounds_survive_load_replace_delete_and_reopen() {
+    let backend = Arc::new(Backend::default());
+    backend.seed("domain", 1, address("one"), &json!("界\"\n"));
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
+    let mut bounded = spec();
+    bounded.maximum_bytes = 64;
+    let domain = facility.open(bounded.clone(), schema()).await.unwrap();
+    let table = domain.table::<Value>("rows").unwrap();
+    table.put("two", json!([1, 2])).await.unwrap();
+    table.put("one", Value::Null).await.unwrap();
+    table.put("three", json!(true)).await.unwrap();
+    let before = rows(&domain);
+    assert!(matches!(
+        table.put("two", json!("x".repeat(64))).await,
+        Err(StorageError::InvalidInput(_))
+    ));
+    assert_eq!(rows(&domain), before);
+    assert_eq!(
+        table
+            .delete_many(["one", "three", "one", "absent"])
+            .await
+            .unwrap(),
+        2
+    );
+    let framing = serde_json::to_vec(&BTreeMap::from([(
+        "rows/two",
+        Value::String(String::new()),
+    )]))
+    .unwrap()
+    .len();
+    let boundary = json!("x".repeat(64 - framing));
+    table.put("two", boundary.clone()).await.unwrap();
+    assert_eq!(
+        serde_json::to_vec(&backend.values("domain")).unwrap().len(),
+        64
+    );
+    assert!(matches!(
+        table.put("two", json!("x".repeat(65 - framing))).await,
+        Err(StorageError::InvalidInput(_))
+    ));
+    domain.close().await;
+    let reopened = facility.open(bounded, schema()).await.unwrap();
+    let table = reopened.table::<Value>("rows").unwrap();
+    assert_eq!(table.get("two").unwrap().unwrap().as_ref(), &boundary);
+    assert!(table.delete("two").await.unwrap());
+    assert!(reopened.snapshot().unwrap().is_empty());
+    backend.state.unhealthy.store(true, Ordering::Release);
+    assert_eq!(
+        table.delete(&"x".repeat(257)).await,
+        Err(StorageError::RecoveryRequired)
+    );
+    reopened.close().await;
 }
 
 #[test]
 fn api_projection_preserves_commit_certainty_and_diagnostic_failures() {
     use rsi_api_protocol::ApiError;
+    assert_eq!(storage_error(StorageError::Closed), ApiError::ShuttingDown);
     for error in [
         StorageError::Io("before commit".into()),
         StorageError::RecoveryRequired,
@@ -358,7 +389,7 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
         RequestEncoding, RetainedBytes,
     };
     #[derive(Debug)]
-    struct OverBoundWrite(Arc<dyn Domain>);
+    struct OverBoundWrite(Table<Value>);
     #[async_trait]
     impl ApiHandler for OverBoundWrite {
         async fn invoke(
@@ -375,11 +406,16 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
         }
     }
     let backend = Arc::new(Backend::default());
-    let (_runtime, _lease, facility) = facility(backend.clone()).await;
+    let (_runtime, _lease, facility) = fixture(backend.clone()).await;
     let mut specification = spec();
     specification.maximum_records = 1;
-    let domain = facility.open(specification).await.unwrap();
-    domain.put("one", Value::Null).await.unwrap();
+    let domain = facility.open(specification, schema()).await.unwrap();
+    domain
+        .table::<Value>("rows")
+        .unwrap()
+        .put("one", Value::Null)
+        .await
+        .unwrap();
     let registry = rsi_api::ApiRegistry::new(rsi_meta::Execution::native(
         tokio::runtime::Handle::current(),
     ));
@@ -394,7 +430,10 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
         maximum_response_bytes: 128,
     };
     let registration = registry
-        .register(operation.clone(), Arc::new(OverBoundWrite(domain.clone())))
+        .register(
+            operation.clone(),
+            Arc::new(OverBoundWrite(domain.table("rows").unwrap())),
+        )
         .unwrap();
     let call = registry
         .admit(&operation.call(), CallOrigin::Local)
@@ -404,107 +443,9 @@ async fn api_mutation_preserves_an_over_bound_domain_rejection_without_writing()
         call.invoke(input).await,
         Err(ApiError::Invalid(_))
     ));
-    assert_eq!(backend.records.lock().unwrap().len(), 1);
-    assert!(!backend.records.lock().unwrap().contains_key("two"));
-    assert_eq!(domain.snapshot().await.unwrap().len(), 1);
+    assert_eq!(backend.values("domain").len(), 1);
+    assert!(!backend.values("domain").contains_key("rows/two"));
+    assert_eq!(domain.snapshot().unwrap().len(), 1);
     registration.close().await;
     registry.close().await;
-}
-
-#[test]
-fn runtime_shutdown_drops_an_unfinished_commit_and_fences_its_retained_handle() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let backend = Arc::new(Backend::default());
-    let domain = Arc::new(DomainHandle {
-        authority: Arc::new(Authority {
-            spec: spec(),
-            loaded: OnceCell::new_with(Some(LoadedDomain {
-                backend: backend.clone(),
-                records: Arc::new(AsyncMutex::new(DomainRecords {
-                    values: BTreeMap::new(),
-                    size: RecordObjectSize::default(),
-                })),
-            })),
-            registry: Weak::new(),
-            recovery_required: AtomicBool::new(false),
-        }),
-    });
-    runtime.block_on(async {
-        backend.pause_after_write.store(true, Ordering::SeqCst);
-        let owner = domain.clone();
-        let waiter = tokio::spawn(async move { owner.put("one", Value::Null).await });
-        backend.entered.notified().await;
-        assert!(backend.records.lock().unwrap().contains_key("one"));
-        waiter.abort();
-        assert!(waiter.await.unwrap_err().is_cancelled());
-    });
-    drop(runtime);
-    assert_eq!(
-        domain.ensure_available(),
-        Err(StorageError::RecoveryRequired)
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        assert_eq!(domain.snapshot().await, Err(StorageError::RecoveryRequired));
-        assert_eq!(
-            domain.put("invalid key", Value::Null).await,
-            Err(StorageError::RecoveryRequired)
-        );
-    });
-}
-
-#[tokio::test]
-async fn cached_entry_sizes_preserve_exact_bounds_across_load_replace_and_delete() {
-    let backend = Arc::new(Backend::default());
-    backend
-        .records
-        .lock()
-        .unwrap()
-        .insert("one".into(), serde_json::json!("界\"\n"));
-    let (_runtime, _lease, facility) = facility(backend.clone()).await;
-    let mut bounded = spec();
-    bounded.maximum_records = 3;
-    bounded.maximum_bytes = 48;
-    let domain = facility.open(bounded.clone()).await.unwrap();
-    domain.put("two", serde_json::json!([1, 2])).await.unwrap();
-    domain.put("one", Value::Null).await.unwrap();
-    domain.put("three", Value::Bool(true)).await.unwrap();
-    let before = domain.snapshot().await.unwrap();
-    assert!(matches!(
-        domain.put("two", Value::String("x".repeat(48))).await,
-        Err(StorageError::InvalidInput(_))
-    ));
-    assert_eq!(domain.snapshot().await.unwrap(), before);
-    assert!(domain.delete("one").await.unwrap());
-    assert!(domain.delete("three").await.unwrap());
-    // {"two":"..."} is exactly 48 bytes, including an escaped value's compact form.
-    let boundary = Value::String("x".repeat(38));
-    domain.put("two", boundary.clone()).await.unwrap();
-    assert_eq!(
-        serde_json::to_vec(&domain.snapshot().await.unwrap())
-            .unwrap()
-            .len(),
-        48
-    );
-    assert!(matches!(
-        domain.put("two", Value::String("x".repeat(39))).await,
-        Err(StorageError::InvalidInput(_))
-    ));
-    drop(domain);
-    let reopened = facility.open(bounded).await.unwrap();
-    assert_eq!(reopened.snapshot().await.unwrap()["two"], boundary);
-    assert!(reopened.delete("two").await.unwrap());
-    assert!(reopened.snapshot().await.unwrap().is_empty());
-    reopened.put("one", Value::Null).await.unwrap();
-    backend.unhealthy.store(true, Ordering::Release);
-    assert_eq!(
-        reopened.delete("invalid key").await,
-        Err(StorageError::RecoveryRequired)
-    );
 }

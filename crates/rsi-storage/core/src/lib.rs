@@ -12,16 +12,29 @@ pub use directories::create_private_directories;
 mod size;
 pub use size::{RecordObjectSize, encoded_entry_bytes};
 
+mod encoded;
+pub use encoded::EncodedValue;
+
+mod unit;
+pub use unit::{
+    Address, Capabilities, Layout, Mutation, RecordPolicy, Recovery, RecoveryCause, UnitDescriptor,
+    UnitSnapshot, validate_key,
+};
+
+mod backend;
+pub use backend::{KvBackend, KvUnit, OpenedUnit, admit_mutations};
+mod units;
+pub use units::{UnitLease, UnitNames};
+
 mod operations;
-pub use operations::{BackendOperations, BackendRegistration};
+pub use operations::{BackendOperations, BackendRegistration, BackendSlot};
 
 use async_trait::async_trait;
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
 use thiserror::Error;
@@ -40,6 +53,9 @@ pub const MAXIMUM_STORAGE_DOMAIN_BYTES: usize = 256 * 1024 * 1024;
 /// Failure returned by the non-session storage contracts.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StorageError {
+    /// The owning Domain or facility has closed admission or completed retirement.
+    #[error("storage owner is closed")]
+    Closed,
     /// The backend or platform cannot supply a required capability before admission.
     #[error("storage capability unsupported: {0}")]
     Unsupported(String),
@@ -81,7 +97,8 @@ impl StorageError {
     pub const fn requires_recovery(&self) -> bool {
         match self {
             Self::OutcomeUnknown(_) | Self::RecoveryRequired => true,
-            Self::InvalidInput(_)
+            Self::Closed
+            | Self::InvalidInput(_)
             | Self::Unsupported(_)
             | Self::DuplicateBackend(_)
             | Self::BackendUnavailable(_)
@@ -94,32 +111,6 @@ impl StorageError {
 
 /// Result returned by storage services.
 pub type Result<T> = std::result::Result<T, StorageError>;
-
-/// Complete bounded state loaded for one domain.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredDomain {
-    /// Exact consumer-owned schema version.
-    pub version: u32,
-    /// Ordered record map.
-    pub records: BTreeMap<String, Value>,
-}
-
-/// Durable JSON KV backend implemented by one ordinary backend plugin.
-#[async_trait]
-pub trait KvBackend: fmt::Debug + Send + Sync + 'static {
-    /// Checks local generation health without I/O.
-    fn ensure_available(&self) -> Result<()>;
-
-    /// Loads one complete domain, returning `None` when it has never existed.
-    async fn load(&self, domain: &str) -> Result<Option<StoredDomain>>;
-
-    /// Atomically publishes one record under the exact domain schema version.
-    async fn put(&self, domain: &str, version: u32, key: &str, value: &Value) -> Result<()>;
-
-    /// Atomically deletes one record under the exact domain schema version.
-    async fn delete(&self, domain: &str, version: u32, key: &str) -> Result<()>;
-}
 
 /// Process-local exact-name backend registry.
 pub trait StorageHub: fmt::Debug + Send + Sync + 'static {

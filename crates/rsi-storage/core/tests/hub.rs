@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
-use rsi_storage::{
-    KvBackend, Result as StorageResult, StorageError, StorageFactory, StorageHubContract,
-    StoredDomain,
-};
+use rsi_storage::{KvBackend, StorageError, StorageFactory, StorageHubContract};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -15,22 +12,14 @@ impl KvBackend for NoopBackend {
     fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
         Ok(())
     }
-    async fn load(&self, _domain: &str) -> StorageResult<Option<StoredDomain>> {
-        Ok(None)
+    fn capabilities(&self, _: rsi_storage::Layout) -> rsi_storage::Capabilities {
+        rsi_storage::Capabilities::default()
     }
-
-    async fn put(
+    async fn open(
         &self,
-        _domain: &str,
-        _version: u32,
-        _key: &str,
-        _value: &Value,
-    ) -> StorageResult<()> {
-        Ok(())
-    }
-
-    async fn delete(&self, _domain: &str, _version: u32, _key: &str) -> StorageResult<()> {
-        Ok(())
+        _: rsi_storage::UnitDescriptor,
+    ) -> rsi_storage::Result<rsi_storage::OpenedUnit> {
+        unreachable!()
     }
 }
 

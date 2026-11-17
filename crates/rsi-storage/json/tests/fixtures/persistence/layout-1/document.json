@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "domains": {
+    "corpus": {
+      "version": 1,
+      "records": {
+        "dynamic": {
+          "z": 1.25,
+          "a": [
+            null,
+            false,
+            18446744073709551615
+          ],
+          "text": "中 🦀\n\"\\"
+        },
+        "null": null,
+        "scalar": true
+      }
+    }
+  }
+}

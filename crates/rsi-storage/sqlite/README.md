@@ -1,5 +1,10 @@
 # rsi-storage-sqlite
 
+The backend owns `SQLITE_STORAGE_FORMAT`. Its retained writer corpus records the
+actual SQLite schema and record bytes. Same-format edits must preserve both;
+unsupported corpora remain refusal cases and are never regenerated. Capture is
+explicit, writes only to a new directory, and uses the production plugin.
+
 Factory preparation preserves malformed configuration as `MetaError::InvalidInput`
 and reports unavailable native capability as `MetaError::Activation`, the Meta
 category for plugin preparation and activation failure.
@@ -7,8 +12,11 @@ category for plugin preparation and activation failure.
 This ordinary backend plugin stores routed non-session domains in one explicit
 SQLite database. It creates a strict versioned schema, enables foreign keys,
 uses WAL with explicit `synchronous=FULL`,
-checks each domain schema version, and commits each record mutation in one
-transaction. One async operation slot is acquired before a blocking SQLite task
+opens owned units with declared tables and a distinct global slot, and commits
+each batch in one transaction. Table name and business key occupy separate
+columns; empty columns name the global, including a stored JSON null. Prepared
+statements are reused. Unit names remain reserved through actual worker
+completion, including cancelled openers and writers. One async operation slot is acquired before a blocking SQLite task
 is created, bounding dispatched work against the single connection. Backend
 operation concurrency is one, including reads; WAL does not imply a read pool.
 Newly created path components and the database are private on Unix; existing
@@ -40,13 +48,20 @@ stored length before materializing it as an owned value. The write transaction
 rejects a new key when its domain already has 65,536 records, so the raw backend
 cannot durably create a domain that its own load boundary must reject.
 The same transaction projects aggregate record-object bytes through the core
-helper and updates durable byte metadata. Mutations validate the stored domain
+helper and updates count, byte metadata and the current unit version once per
+batch. Per-row count triggers are unnecessary because the transaction already
+computed the final geometry. Final bounds are checked before row mutations, so
+insert-before-delete ordering cannot reject a valid replacement batch. Mutations validate the stored domain
 version, accounting and previous record length together before projection.
 Deleting a missing domain or key is a no-op; an existing domain must still match
-the requested schema version. Loads check the byte and count metadata
-against the actual compact values before publication. Raw `KvBackend::put` accepts
-a typed JSON value and uses the core's bounded compact encoder before dispatch;
-it does not accept caller-supplied BLOB bytes. Opening verifies domain accounting
+the requested current or explicitly compatible older version. Missing-key
+deletes do not advance the version; actual writes stamp current without
+rewriting untouched payloads. Loads check the byte and count metadata
+against the actual compact values before publication. Raw units accept validated `EncodedValue` buffers and bind their exact bytes.
+They neither decode business records nor build or serialize JSON value trees.
+Loaded values admit bounded compact framing, then the Domain decodes its business
+codec once. Exact accounting uses stored lexeme lengths, without requiring a
+second serialization of the decoded business value. Opening verifies domain accounting
 against bounded stored keys and BLOB lengths before mutations can use it, without
 materializing BLOB bodies. Activation also rejects zero or out-of-range domain
 versions and invalid counters as `Corrupt`, retaining the database unchanged.
@@ -65,7 +80,10 @@ with the accepted persisted domain and record counts; these are cardinality boun
 not a startup latency guarantee.
 Unmanaged edits while a backend generation is active have no coherence guarantee.
 The exact schema includes
-`record_bytes`; older layouts are rejected without mutation or automatic migration.
+`table_name`, `record_count` and `record_bytes`; the owning format is version 2.
+The exact owned SQL shape is the runtime format discriminator; the retained
+writer corpus binds it to that version. Older layouts are rejected without
+payload mutation or automatic migration.
 
 It is not the Agent session store and carries no session recovery semantics.
 

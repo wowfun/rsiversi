@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// Owned serialization and generation health for blocking backend operations.
 #[derive(Debug, Default)]
@@ -84,20 +84,55 @@ impl BackendOperations {
         }
     }
 
+    /// Acquires serialization before reserving resources belonging to one I/O
+    /// operation. Dispatch rechecks generation admission after this acquisition.
+    pub async fn acquire(self: &Arc<Self>) -> Result<BackendSlot> {
+        self.ensure_available()?;
+        let slot = Arc::clone(&self.slot).lock_owned().await;
+        self.ensure_available()?;
+        Ok(BackendSlot {
+            owner: Arc::clone(self),
+            slot,
+        })
+    }
+
     /// Acquires admission before dispatch; admitted work survives waiter cancellation.
     pub async fn run<T, F>(self: &Arc<Self>, work: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T> + Send + 'static,
     {
-        self.ensure_available()?;
-        let slot = Arc::clone(&self.slot).lock_owned().await;
+        self.acquire().await?.run(work).await
+    }
+
+    /// Permanently closes admission and waits for the admitted worker to finish.
+    pub async fn close(&self) {
+        self.close_admission();
+        let _slot = self.slot.lock().await;
+    }
+}
+
+/// A serialized backend operation slot, acquired before unit-name reservation.
+/// Dropping an undispatched slot has no durable effect.
+#[derive(Debug)]
+pub struct BackendSlot {
+    owner: Arc<BackendOperations>,
+    slot: OwnedMutexGuard<()>,
+}
+impl BackendSlot {
+    /// Dispatches one cancellation-owned blocking operation after checking health.
+    pub async fn run<T, F>(self, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
         {
             let mut admission = self
+                .owner
                 .admission
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.recovery_required.load(Ordering::Acquire) {
+            if self.owner.recovery_required.load(Ordering::Acquire) {
                 return Err(StorageError::RecoveryRequired);
             }
             if admission.closed {
@@ -106,11 +141,11 @@ impl BackendOperations {
             admission.active = true;
         }
         let completion = Completion {
-            owner: Arc::clone(self),
+            owner: Arc::clone(&self.owner),
             finished: false,
         };
         tokio::task::spawn_blocking(move || {
-            let _slot = slot;
+            let _slot = self.slot;
             let mut completion = completion;
             let result = work();
             if result.as_ref().is_err_and(StorageError::requires_recovery) {
@@ -126,12 +161,6 @@ impl BackendOperations {
         .map_err(|error| {
             StorageError::OutcomeUnknown(format!("storage worker did not complete: {error}"))
         })?
-    }
-
-    /// Permanently closes admission and waits for the admitted worker to finish.
-    pub async fn close(&self) {
-        self.close_admission();
-        let _slot = self.slot.lock().await;
     }
 }
 
@@ -188,13 +217,10 @@ mod tests {
         fn ensure_available(&self) -> Result<()> {
             Ok(())
         }
-        async fn load(&self, _: &str) -> Result<Option<crate::StoredDomain>> {
-            unreachable!()
+        fn capabilities(&self, _: crate::Layout) -> crate::Capabilities {
+            crate::Capabilities::default()
         }
-        async fn put(&self, _: &str, _: u32, _: &str, _: &serde_json::Value) -> Result<()> {
-            unreachable!()
-        }
-        async fn delete(&self, _: &str, _: u32, _: &str) -> Result<()> {
+        async fn open(&self, _: crate::UnitDescriptor) -> crate::Result<crate::OpenedUnit> {
             unreachable!()
         }
     }

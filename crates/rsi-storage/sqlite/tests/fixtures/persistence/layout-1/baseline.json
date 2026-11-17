@@ -1,0 +1,72 @@
+{
+  "format": 1,
+  "database_sha256": [
+    190,
+    54,
+    129,
+    136,
+    185,
+    34,
+    176,
+    32,
+    20,
+    4,
+    53,
+    75,
+    164,
+    18,
+    127,
+    159,
+    34,
+    131,
+    238,
+    28,
+    243,
+    191,
+    238,
+    223,
+    24,
+    0,
+    105,
+    140,
+    195,
+    160,
+    226,
+    99
+  ],
+  "schema": [
+    [
+      "table",
+      "rsi_storage_domains",
+      "CREATE TABLE rsi_storage_domains ( domain TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL CHECK(version > 0), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count >= 0 AND record_count <= 65536), record_bytes INTEGER NOT NULL DEFAULT 2 CHECK(record_bytes >= 2 AND record_bytes <= 268435456) ) STRICT"
+    ],
+    [
+      "table",
+      "rsi_storage_records",
+      "CREATE TABLE rsi_storage_records ( domain TEXT NOT NULL, key TEXT NOT NULL, value BLOB NOT NULL, PRIMARY KEY(domain, key), FOREIGN KEY(domain) REFERENCES rsi_storage_domains(domain) ON DELETE CASCADE ) STRICT"
+    ],
+    [
+      "trigger",
+      "rsi_storage_records_delete_count",
+      "CREATE TRIGGER rsi_storage_records_delete_count AFTER DELETE ON rsi_storage_records BEGIN UPDATE rsi_storage_domains SET record_count = record_count - 1 WHERE domain = OLD.domain; END"
+    ],
+    [
+      "trigger",
+      "rsi_storage_records_insert_count",
+      "CREATE TRIGGER rsi_storage_records_insert_count AFTER INSERT ON rsi_storage_records BEGIN UPDATE rsi_storage_domains SET record_count = record_count + 1 WHERE domain = NEW.domain; END"
+    ]
+  ],
+  "values": {
+    "dynamic": {
+      "z": 1.25,
+      "a": [
+        null,
+        false,
+        18446744073709551615
+      ],
+      "text": "中 🦀\n\"\\"
+    },
+    "null": null,
+    "scalar": true
+  }
+}

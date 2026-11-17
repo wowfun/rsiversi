@@ -7,13 +7,15 @@
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use rsi_storage::{
-    BackendLease, BackendOperations, KvBackend, MAXIMUM_STORAGE_DOMAIN_BYTES,
-    MAXIMUM_STORAGE_IDENTIFIER_BYTES, MAXIMUM_STORAGE_RECORDS, MAXIMUM_STORAGE_VALUE_BYTES,
-    RecordObjectSize, StorageError, StorageHubContract, StoredDomain, create_private_directories,
-    encode_value, encoded_entry_bytes, validate_identifier, validate_value,
+    BackendLease, BackendOperations, Capabilities, KvBackend, KvUnit, Layout,
+    MAXIMUM_STORAGE_DOMAIN_BYTES, MAXIMUM_STORAGE_IDENTIFIER_BYTES, MAXIMUM_STORAGE_RECORDS,
+    MAXIMUM_STORAGE_VALUE_BYTES, Mutation, OpenedUnit, RecordObjectSize, StorageError,
+    StorageHubContract, UnitDescriptor, UnitLease, UnitNames, admit_mutations,
+    create_private_directories, validate_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Durable backend layout version, independent of consumer domain versions.
+pub const SQLITE_STORAGE_FORMAT: u32 = 2;
 const MAXIMUM_SQLITE_DOMAINS: i64 = 1024;
 fn domains_table_schema() -> String {
     format!("CREATE TABLE IF NOT EXISTS rsi_storage_domains (
@@ -32,24 +36,17 @@ fn domains_table_schema() -> String {
 }
 const RECORDS_TABLE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS rsi_storage_records (
   domain TEXT NOT NULL,
+  table_name TEXT NOT NULL,
   key TEXT NOT NULL,
   value BLOB NOT NULL,
-  PRIMARY KEY(domain, key),
+  CHECK(table_name != '' OR key = ''),
+  PRIMARY KEY(domain, table_name, key),
   FOREIGN KEY(domain) REFERENCES rsi_storage_domains(domain) ON DELETE CASCADE
 ) STRICT";
-const INSERT_TRIGGER_SCHEMA: &str = "CREATE TRIGGER IF NOT EXISTS rsi_storage_records_insert_count
-AFTER INSERT ON rsi_storage_records
-BEGIN
-  UPDATE rsi_storage_domains SET record_count = record_count + 1 WHERE domain = NEW.domain;
-END";
-const DELETE_TRIGGER_SCHEMA: &str = "CREATE TRIGGER IF NOT EXISTS rsi_storage_records_delete_count
-AFTER DELETE ON rsi_storage_records
-BEGIN
-  UPDATE rsi_storage_domains SET record_count = record_count - 1 WHERE domain = OLD.domain;
-END";
 fn schema_with_domains(domains: &str) -> String {
-    format!("{domains}; {RECORDS_TABLE_SCHEMA}; {INSERT_TRIGGER_SCHEMA}; {DELETE_TRIGGER_SCHEMA};")
+    format!("{domains}; {RECORDS_TABLE_SCHEMA};")
 }
+mod unit;
 
 /// Configuration accepted by [`SqliteStorageFactory`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -76,10 +73,11 @@ impl SqliteStorageConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SqliteBackend {
     connection: Arc<Mutex<ConnectionOwner>>,
     operation: Arc<BackendOperations>,
+    units: Arc<UnitNames>,
 }
 
 #[derive(Debug)]
@@ -143,7 +141,7 @@ impl SqliteBackend {
             .execute_batch("PRAGMA synchronous = FULL")
             .map_err(|error| sqlite_io(&error))?;
         initialize_or_validate_schema(&connection)?;
-        validate_accounting(&connection)?;
+        unit::validate_accounting(&connection)?;
         connection
             .execute_batch("PRAGMA journal_mode = WAL")
             .map_err(|error| sqlite_io(&error))?;
@@ -161,6 +159,7 @@ impl SqliteBackend {
                 _database: database,
             })),
             operation: Arc::new(BackendOperations::default()),
+            units: Arc::default(),
         })
     }
 }
@@ -218,209 +217,82 @@ fn finish_transaction(
     Err(failure)
 }
 
-fn load_domain(
-    connection: &mut Connection,
-    domain: &str,
-    after_header: impl FnOnce(),
-) -> Result<Option<StoredDomain>, StorageError> {
-    let snapshot = connection
-        .transaction()
-        .map_err(|error| sqlite_io(&error))?;
-    let stored_header = snapshot
-        .query_row(
-            "SELECT version, record_count, record_bytes FROM rsi_storage_domains WHERE domain = ?1",
-            [&domain],
-            |row| {
-                Ok((
-                    row.get::<_, u32>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| sqlite_io(&error))?;
-    let Some((version, stored_record_count, stored_bytes)) = stored_header else {
-        return Ok(None);
-    };
-    let stored_bytes = usize::try_from(stored_bytes).map_err(|_| domain_byte_bound(domain))?;
-    let stored_record_count = usize::try_from(stored_record_count).map_err(|_| {
-        StorageError::Corrupt(format!(
-            "domain `{domain}` has an invalid backend record count"
-        ))
-    })?;
-    if stored_record_count > MAXIMUM_STORAGE_RECORDS {
-        return Err(StorageError::Corrupt(format!(
-            "domain `{domain}` exceeds the backend record bound"
-        )));
-    }
-    after_header();
-    let mut size = RecordObjectSize::default();
-    let mut statement = snapshot
-        .prepare(
-            "SELECT key, length(value), value
-         FROM rsi_storage_records WHERE domain = ?1 ORDER BY key",
-        )
-        .map_err(|error| sqlite_io(&error))?;
-    let mut rows = statement
-        .query([&domain])
-        .map_err(|error| sqlite_io(&error))?;
-    let mut records = BTreeMap::new();
-    while let Some(row) = rows.next().map_err(|error| sqlite_io(&error))? {
-        if records.len() == MAXIMUM_STORAGE_RECORDS {
-            return Err(StorageError::Corrupt(format!(
-                "domain `{domain}` exceeds the backend record bound"
-            )));
-        }
-        let key = row.get::<_, String>(0).map_err(|error| sqlite_io(&error))?;
-        let encoded_len = row.get::<_, i64>(1).map_err(|error| sqlite_io(&error))?;
-        if encoded_len < 0
-            || usize::try_from(encoded_len)
-                .map_or(true, |length| length > MAXIMUM_STORAGE_VALUE_BYTES)
-        {
-            return Err(StorageError::Corrupt(format!(
-                "domain `{domain}` contains an oversized stored value"
-            )));
-        }
-        validate_identifier("record key", &key)
-            .map_err(|_| StorageError::Corrupt("invalid record key".into()))?;
-        let encoded_len = usize::try_from(encoded_len).map_err(|_| {
-            StorageError::Corrupt(format!(
-                "domain `{domain}` contains an invalid stored value length"
-            ))
-        })?;
-        size = size
-            .with_entry(
-                None,
-                encoded_entry_bytes(&key, encoded_len).map_err(|_| domain_byte_bound(domain))?,
-            )
-            .map_err(|_| domain_byte_bound(domain))?;
-        if size.bytes() > MAXIMUM_STORAGE_DOMAIN_BYTES {
-            return Err(domain_byte_bound(domain));
-        }
-        let bytes = row
-            .get::<_, Vec<u8>>(2)
-            .map_err(|error| sqlite_io(&error))?;
-        let value = serde_json::from_slice(&bytes)
-            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
-        let compact_bytes = validate_value(&value)
-            .map_err(|_| StorageError::Corrupt("invalid stored value".into()))?;
-        if compact_bytes != encoded_len {
-            return Err(StorageError::Corrupt(
-                "stored value is not compact JSON".into(),
-            ));
-        }
-        records.insert(key, value);
-    }
-    if records.len() != stored_record_count || size.bytes() != stored_bytes {
-        return Err(StorageError::Corrupt(format!(
-            "domain `{domain}` has inconsistent record-accounting metadata"
-        )));
-    }
-    drop(rows);
-    drop(statement);
-    snapshot.commit().map_err(|error| sqlite_io(&error))?;
-    Ok(Some(StoredDomain { version, records }))
-}
-
 #[async_trait]
 impl KvBackend for SqliteBackend {
     fn ensure_available(&self) -> Result<(), StorageError> {
         self.operation.ensure_available()
     }
-
-    async fn load(&self, domain: &str) -> Result<Option<StoredDomain>, StorageError> {
-        self.ensure_available()?;
-        validate_identifier("domain", domain)?;
+    fn capabilities(&self, _: Layout) -> Capabilities {
+        Capabilities {
+            atomic_batch: true,
+            backup_record: false,
+        }
+    }
+    async fn open(&self, descriptor: UnitDescriptor) -> Result<OpenedUnit, StorageError> {
+        self.open_unit(descriptor, || {}).await
+    }
+}
+impl SqliteBackend {
+    async fn open_unit(
+        &self,
+        descriptor: UnitDescriptor,
+        after_header: impl FnOnce() + Send + 'static,
+    ) -> Result<OpenedUnit, StorageError> {
+        let slot = self.operation.acquire().await?;
+        let lease = self.units.reserve(descriptor.name())?;
+        let descriptor = Arc::new(descriptor);
+        let retained = Arc::clone(&descriptor);
         let connection = Arc::clone(&self.connection);
-        let domain = domain.to_owned();
-        self.operation
+        let worker_lease = lease.clone();
+        let snapshot = slot
             .run(move || {
+                let _lease = worker_lease;
                 let mut connection = connection
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                load_domain(&mut connection, &domain, || {})
+                unit::load(&mut connection, &retained, after_header)
+            })
+            .await?;
+        Ok(OpenedUnit {
+            snapshot,
+            unit: Arc::new(SqliteUnit {
+                backend: self.clone(),
+                descriptor,
+                lease,
+            }),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SqliteUnit {
+    backend: SqliteBackend,
+    descriptor: Arc<UnitDescriptor>,
+    lease: UnitLease,
+}
+#[async_trait]
+impl KvUnit for SqliteUnit {
+    fn descriptor(&self) -> &UnitDescriptor {
+        &self.descriptor
+    }
+    fn ensure_available(&self) -> Result<(), StorageError> {
+        self.backend.ensure_available()
+    }
+    async fn write(&self, changes: Vec<Mutation>) -> Result<(), StorageError> {
+        self.ensure_available()?;
+        admit_mutations(
+            &self.descriptor,
+            &changes,
+            self.backend.capabilities(self.descriptor.layout()),
+        )?;
+        let descriptor = Arc::clone(&self.descriptor);
+        let lease = self.lease.clone();
+        self.backend
+            .transaction(move |transaction| {
+                let _lease = lease;
+                unit::write(transaction, &descriptor, changes)
             })
             .await
-    }
-
-    async fn put(
-        &self,
-        domain: &str,
-        version: u32,
-        key: &str,
-        value: &Value,
-    ) -> Result<(), StorageError> {
-        self.ensure_available()?;
-        validate_identifier("domain", domain)?;
-        validate_identifier("record key", key)?;
-        if version == 0 {
-            return Err(StorageError::InvalidInput(
-                "domain version must be nonzero".into(),
-            ));
-        }
-        let bytes = encode_value(value)?;
-        let domain = domain.to_owned();
-        let key = key.to_owned();
-        self.transaction(move |transaction| {
-            insert_domain(transaction, &domain, version)?;
-            let stored = stored_record(transaction, &domain, version, &key)?
-                .ok_or_else(|| StorageError::Corrupt("inserted domain is missing".into()))?;
-            let projected = stored
-                .size
-                .with_entry(stored.entry_bytes, encoded_entry_bytes(&key, bytes.len())?)?;
-            if projected.records() > MAXIMUM_STORAGE_RECORDS {
-                return Err(StorageError::InvalidInput(format!(
-                    "domain `{domain}` record bound exceeded"
-                )));
-            }
-            if projected.bytes() > MAXIMUM_STORAGE_DOMAIN_BYTES {
-                return Err(StorageError::InvalidInput(format!(
-                    "domain `{domain}` aggregate bound exceeded"
-                )));
-            }
-            transaction
-                .execute(
-                    "INSERT INTO rsi_storage_records(domain, key, value) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(domain, key) DO UPDATE SET value = excluded.value",
-                    params![domain, key, bytes],
-                )
-                .map_err(|error| sqlite_io(&error))?;
-            publish_size(transaction, &domain, projected)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn delete(&self, domain: &str, version: u32, key: &str) -> Result<(), StorageError> {
-        self.ensure_available()?;
-        validate_identifier("domain", domain)?;
-        validate_identifier("record key", key)?;
-        if version == 0 {
-            return Err(StorageError::InvalidInput(
-                "domain version must be nonzero".into(),
-            ));
-        }
-        let domain = domain.to_owned();
-        let key = key.to_owned();
-        self.transaction(move |transaction| {
-            let Some(stored) = stored_record(transaction, &domain, version, &key)? else {
-                return Ok(());
-            };
-            let Some(previous) = stored.entry_bytes else {
-                return Ok(());
-            };
-            let projected = stored.size.without_entry(previous)?;
-            transaction
-                .execute(
-                    "DELETE FROM rsi_storage_records WHERE domain = ?1 AND key = ?2",
-                    params![domain, key],
-                )
-                .map_err(|error| sqlite_io(&error))?;
-            publish_size(transaction, &domain, projected)?;
-            Ok(())
-        })
-        .await
     }
 }
 
@@ -489,14 +361,6 @@ fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
         ),
         ("table".to_owned(), "rsi_storage_domains".to_owned()),
         ("table".to_owned(), "rsi_storage_records".to_owned()),
-        (
-            "trigger".to_owned(),
-            "rsi_storage_records_delete_count".to_owned(),
-        ),
-        (
-            "trigger".to_owned(),
-            "rsi_storage_records_insert_count".to_owned(),
-        ),
     ]);
     let mut statement = connection
         .prepare(
@@ -521,16 +385,6 @@ fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
     for (object_type, name, expected) in [
         ("table", "rsi_storage_domains", domains_schema.as_str()),
         ("table", "rsi_storage_records", RECORDS_TABLE_SCHEMA),
-        (
-            "trigger",
-            "rsi_storage_records_insert_count",
-            INSERT_TRIGGER_SCHEMA,
-        ),
-        (
-            "trigger",
-            "rsi_storage_records_delete_count",
-            DELETE_TRIGGER_SCHEMA,
-        ),
     ] {
         let actual = connection
             .query_row(
@@ -602,8 +456,7 @@ fn checked_stored_size(
     if bytes > MAXIMUM_STORAGE_DOMAIN_BYTES {
         return Err(domain_byte_bound(domain));
     }
-    RecordObjectSize::from_parts(records, bytes)
-        .map_err(|_| StorageError::Corrupt(format!("domain `{domain}` has invalid accounting")))
+    RecordObjectSize::from_parts(records, bytes).map_err(|_| unit::inconsistent(domain))
 }
 
 fn domain_record_bound(domain: &str) -> StorageError {
@@ -620,85 +473,6 @@ fn bounded_domain_count(connection: &Connection) -> Result<i64, StorageError> {
             |row| row.get(0),
         )
         .map_err(|error| sqlite_io(&error))
-}
-
-fn validate_accounting(connection: &Connection) -> Result<(), StorageError> {
-    let identifier_limit = i64::try_from(MAXIMUM_STORAGE_IDENTIFIER_BYTES)
-        .expect("storage identifier bound fits SQLite");
-    let record_limit =
-        i64::try_from(MAXIMUM_STORAGE_RECORDS + 1).expect("storage record bound fits SQLite");
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| sqlite_io(&error))?;
-    if bounded_domain_count(&transaction)? > MAXIMUM_SQLITE_DOMAINS {
-        return Err(StorageError::Corrupt(format!(
-            "SQLite domain count exceeds {MAXIMUM_SQLITE_DOMAINS}"
-        )));
-    }
-    let mut domains = transaction.prepare(
-        "SELECT CASE WHEN length(CAST(domain AS BLOB)) <= ?1 THEN domain END, record_count, record_bytes, version FROM rsi_storage_domains ORDER BY domain LIMIT ?2",
-    ).map_err(|error| sqlite_io(&error))?;
-    let mut rows = domains
-        .query([identifier_limit, MAXIMUM_SQLITE_DOMAINS])
-        .map_err(|error| sqlite_io(&error))?;
-    let mut records = transaction.prepare(
-        "SELECT CASE WHEN length(CAST(key AS BLOB)) <= ?2 THEN key END, length(value) FROM rsi_storage_records WHERE domain=?1 ORDER BY key LIMIT ?3",
-    ).map_err(|error| sqlite_io(&error))?;
-    while let Some(row) = rows.next().map_err(|error| sqlite_io(&error))? {
-        let domain: String = row
-            .get::<_, Option<String>>(0)
-            .map_err(|error| sqlite_io(&error))?
-            .ok_or_else(|| StorageError::Corrupt("oversized stored domain".into()))?;
-        validate_identifier("domain", &domain)
-            .map_err(|_| StorageError::Corrupt("invalid stored domain".into()))?;
-        let version: u32 = row.get(3).map_err(|_| {
-            StorageError::Corrupt(format!("domain `{domain}` has an invalid stored version"))
-        })?;
-        if version == 0 {
-            return Err(StorageError::Corrupt(format!(
-                "domain `{domain}` has an invalid stored version"
-            )));
-        }
-        let stored = checked_stored_size(
-            &domain,
-            row.get(1).map_err(|error| sqlite_io(&error))?,
-            row.get(2).map_err(|error| sqlite_io(&error))?,
-        )?;
-        let mut measured = RecordObjectSize::default();
-        let mut entries = records
-            .query(params![domain, identifier_limit, record_limit])
-            .map_err(|error| sqlite_io(&error))?;
-        while let Some(row) = entries.next().map_err(|error| sqlite_io(&error))? {
-            let key: String = row
-                .get::<_, Option<String>>(0)
-                .map_err(|error| sqlite_io(&error))?
-                .ok_or_else(|| StorageError::Corrupt("oversized stored record key".into()))?;
-            validate_identifier("record key", &key)
-                .map_err(|_| StorageError::Corrupt("invalid stored record key".into()))?;
-            let length: i64 = row.get(1).map_err(|error| sqlite_io(&error))?;
-            let length = usize::try_from(length).map_err(|_| domain_byte_bound(&domain))?;
-            if length > MAXIMUM_STORAGE_VALUE_BYTES {
-                return Err(StorageError::Corrupt(format!(
-                    "domain `{domain}` contains an oversized stored value"
-                )));
-            }
-            measured = measured
-                .with_entry(None, encoded_entry_bytes(&key, length)?)
-                .map_err(|_| domain_byte_bound(&domain))?;
-            if measured.records() > MAXIMUM_STORAGE_RECORDS {
-                return Err(domain_record_bound(&domain));
-            }
-            if measured.bytes() > MAXIMUM_STORAGE_DOMAIN_BYTES {
-                return Err(domain_byte_bound(&domain));
-            }
-        }
-        if measured != stored {
-            return Err(StorageError::Corrupt(format!(
-                "domain `{domain}` has inconsistent record-accounting metadata"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn insert_domain(
@@ -718,68 +492,6 @@ fn insert_domain(
             "SQLite domain count would exceed {MAXIMUM_SQLITE_DOMAINS}"
         )));
     }
-    Ok(())
-}
-
-struct StoredRecord {
-    size: RecordObjectSize,
-    entry_bytes: Option<usize>,
-}
-
-fn stored_record(
-    connection: &Connection,
-    domain: &str,
-    version: u32,
-    key: &str,
-) -> Result<Option<StoredRecord>, StorageError> {
-    let Some((actual, records, bytes, length)) = connection
-        .query_row(
-            "SELECT d.version, d.record_count, d.record_bytes, length(r.value)
-             FROM rsi_storage_domains d
-             LEFT JOIN rsi_storage_records r ON r.domain=d.domain AND r.key=?2
-             WHERE d.domain=?1",
-            params![domain, key],
-            |row| {
-                Ok((
-                    row.get::<_, u32>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| sqlite_io(&error))?
-    else {
-        return Ok(None);
-    };
-    if actual != version {
-        return Err(StorageError::Corrupt(format!(
-            "domain `{domain}` has version {actual}, expected {version}"
-        )));
-    }
-    let size = checked_stored_size(domain, records, bytes)?;
-    let entry_bytes = length
-        .map(|length| {
-            let length = usize::try_from(length).map_err(|_| domain_byte_bound(domain))?;
-            encoded_entry_bytes(key, length)
-        })
-        .transpose()?;
-    Ok(Some(StoredRecord { size, entry_bytes }))
-}
-
-fn publish_size(
-    connection: &Connection,
-    domain: &str,
-    size: RecordObjectSize,
-) -> Result<(), StorageError> {
-    let bytes = i64::try_from(size.bytes()).map_err(|_| domain_byte_bound(domain))?;
-    connection
-        .execute(
-            "UPDATE rsi_storage_domains SET record_bytes=?2 WHERE domain=?1",
-            params![domain, bytes],
-        )
-        .map_err(|error| sqlite_io(&error))?;
     Ok(())
 }
 
@@ -945,6 +657,69 @@ fn set_sqlite_sidecar_permissions(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+// Fault-injection tests below address the SQL engine directly. These helpers
+// keep their fixtures small while exercising the same unit load/write bodies.
+#[cfg(test)]
+fn test_unit(name: &str, version: u32) -> UnitDescriptor {
+    UnitDescriptor::new(
+        name.into(),
+        version,
+        BTreeSet::new(),
+        BTreeMap::from([("rows".into(), rsi_storage::RecordPolicy::Reject)]),
+        false,
+        Layout::Single,
+    )
+    .unwrap()
+}
+#[cfg(test)]
+fn test_records(snapshot: rsi_storage::UnitSnapshot) -> BTreeMap<String, Value> {
+    snapshot
+        .records
+        .into_iter()
+        .map(|(address, value)| (address.key().to_owned(), value.decode().unwrap()))
+        .collect()
+}
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+struct TestRows {
+    records: BTreeMap<String, Value>,
+}
+#[cfg(test)]
+impl SqliteBackend {
+    async fn load(&self, name: &str) -> Result<Option<TestRows>, StorageError> {
+        let opened = <Self as KvBackend>::open(self, test_unit(name, 1)).await?;
+        Ok(opened.snapshot.version.map(|_| TestRows {
+            records: test_records(opened.snapshot),
+        }))
+    }
+    async fn put(
+        &self,
+        name: &str,
+        version: u32,
+        key: &str,
+        value: &Value,
+    ) -> Result<(), StorageError> {
+        self.ensure_available()?;
+        let descriptor = test_unit(name, version);
+        let change = Mutation {
+            address: rsi_storage::Address::record("rows", key)?,
+            value: Some(rsi_storage::EncodedValue::encode(value)?),
+        };
+        self.transaction(move |tx| unit::write(tx, &descriptor, vec![change]))
+            .await
+    }
+    #[cfg(unix)]
+    async fn delete(&self, name: &str, version: u32, key: &str) -> Result<(), StorageError> {
+        let descriptor = test_unit(name, version);
+        let change = Mutation {
+            address: rsi_storage::Address::record("rows", key)?,
+            value: None,
+        };
+        self.transaction(move |tx| unit::write(tx, &descriptor, vec![change]))
+            .await
+    }
+}
+
 #[cfg(all(test, not(any(unix, windows))))]
 mod unsupported_platform_tests {
     use super::*;
@@ -1088,7 +863,7 @@ mod tests {
                     .unwrap(),
                 2
             );
-            let loaded = load_domain(&mut connection, "domain", || {
+            let loaded = unit::load(&mut connection, &test_unit("domain", 1), || {
                 let mut writer = other.connection.lock().unwrap();
                 let transaction = writer
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1101,10 +876,9 @@ mod tests {
                     .unwrap();
                 transaction.commit().unwrap();
             })
-            .unwrap()
             .unwrap();
             assert_eq!(
-                loaded.records,
+                test_records(loaded),
                 BTreeMap::from([("old".into(), Value::Bool(true))])
             );
         }
@@ -1249,16 +1023,16 @@ mod tests {
                 "oversized stored domain",
             ),
             (
-                "INSERT INTO rsi_storage_records(domain,key,value) VALUES ('domain',printf('%0257d',0),X'6e756c6c'); UPDATE rsi_storage_domains SET record_bytes=266",
-                "oversized stored record key",
+                "INSERT INTO rsi_storage_records(domain,table_name,key,value) VALUES ('domain','rows',printf('%0257d',0),X'6e756c6c'); UPDATE rsi_storage_domains SET record_count=1,record_bytes=271",
+                "oversized stored address",
             ),
             (
                 "UPDATE rsi_storage_domains SET domain='invalid / domain'",
-                "invalid stored domain",
+                "domain",
             ),
             (
-                "INSERT INTO rsi_storage_records(domain,key,value) VALUES ('domain','invalid/key',X'6e756c6c'); UPDATE rsi_storage_domains SET record_bytes=20",
-                "invalid stored record key",
+                "INSERT INTO rsi_storage_records(domain,table_name,key,value) VALUES ('domain','invalid/table','key',X'6e756c6c'); UPDATE rsi_storage_domains SET record_count=1,record_bytes=20",
+                "table",
             ),
         ] {
             let root = tempfile::tempdir().unwrap();
@@ -1439,7 +1213,7 @@ mod tests {
         let result = backend.transaction(|transaction| {
             transaction.execute_batch(
                 "PRAGMA defer_foreign_keys=ON;
-                 INSERT INTO rsi_storage_records(domain,key,value) VALUES ('absent','a',x'6e756c6c')"
+                 INSERT INTO rsi_storage_records(domain,table_name,key,value) VALUES ('absent','rows','a',x'6e756c6c')"
             ).map_err(|error| sqlite_io(&error))?;
             Ok(())
         }).await;
@@ -1631,7 +1405,7 @@ mod tests {
             insert_domain(transaction, "uncommitted", 1)?;
             transaction.execute_batch(
                 "PRAGMA defer_foreign_keys=ON;
-                 INSERT INTO rsi_storage_records(domain,key,value) VALUES ('absent','a',x'6e756c6c')"
+                 INSERT INTO rsi_storage_records(domain,table_name,key,value) VALUES ('absent','rows','a',x'6e756c6c')"
             ).map_err(|error| sqlite_io(&error))
         }).await;
         let Err(StorageError::OutcomeUnknown(message)) = result else {
@@ -1764,13 +1538,73 @@ mod portable_sql_tests {
     use super::*;
 
     #[test]
+    fn one_navigation_edit_touches_two_payload_rows_and_one_unit_header() {
+        use rsi_storage::{Address, EncodedValue, Layout, Mutation, RecordPolicy, UnitDescriptor};
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize_or_validate_schema(&connection).unwrap();
+        let unit = UnitDescriptor::new(
+            "navigation".into(),
+            2,
+            BTreeSet::new(),
+            BTreeMap::from([("metadata".into(), RecordPolicy::Reject)]),
+            true,
+            Layout::Single,
+        )
+        .unwrap();
+        let original = EncodedValue::encode(
+            &serde_json::json!({"title":"original","archived":false,"rank":null}),
+        )
+        .unwrap();
+        let mut changes = vec![Mutation {
+            address: Address::global(),
+            value: Some(EncodedValue::encode(&serde_json::json!({"revision":1})).unwrap()),
+        }];
+        changes.extend((0..8192).map(|index| Mutation {
+            address: Address::record("metadata", format!("row-{index:04}")).unwrap(),
+            value: Some(original.clone()),
+        }));
+        let transaction = connection.transaction().unwrap();
+        unit::write(&transaction, &unit, changes).unwrap();
+        transaction.commit().unwrap();
+        let before = connection.total_changes();
+        let transaction = connection.transaction().unwrap();
+        unit::write(
+            &transaction,
+            &unit,
+            vec![
+                Mutation {
+                    address: Address::global(),
+                    value: Some(EncodedValue::encode(&serde_json::json!({"revision":2})).unwrap()),
+                },
+                Mutation {
+                    address: Address::record("metadata", "row-0001").unwrap(),
+                    value: Some(
+                        EncodedValue::encode(
+                            &serde_json::json!({"title":"changed","archived":false,"rank":null}),
+                        )
+                        .unwrap(),
+                    ),
+                },
+            ],
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(connection.total_changes() - before, 3);
+        let untouched: Vec<u8> = connection.query_row(
+            "SELECT value FROM rsi_storage_records WHERE domain='navigation' AND table_name='metadata' AND key='row-0002'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(untouched, original.as_bytes());
+        unit::validate_accounting(&connection).unwrap();
+    }
+
+    #[test]
     fn recomputed_record_overflow_reports_record_count() {
         let mut connection = Connection::open_in_memory().unwrap();
         initialize_or_validate_schema(&connection).unwrap();
         connection.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO rsi_storage_domains(domain,version) VALUES ('domain',1);").unwrap();
         let transaction = connection.transaction().unwrap();
         {
-            let mut insert = transaction.prepare("INSERT INTO rsi_storage_records(domain,key,value) VALUES ('domain',?1,X'6e756c6c')").unwrap();
+            let mut insert = transaction.prepare("INSERT INTO rsi_storage_records(domain,table_name,key,value) VALUES ('domain','rows',?1,X'6e756c6c')").unwrap();
             for index in 0..=MAXIMUM_STORAGE_RECORDS {
                 insert.execute([format!("record-{index:05}")]).unwrap();
             }
@@ -1782,7 +1616,7 @@ mod portable_sql_tests {
             )
             .unwrap();
         transaction.commit().unwrap();
-        assert!(matches!(validate_accounting(&connection),
+        assert!(matches!(unit::validate_accounting(&connection),
             Err(StorageError::Corrupt(reason)) if reason.contains("record count")));
     }
 }
@@ -1808,5 +1642,45 @@ mod factory_preparation_tests {
             assert!(matches!(result, Err(MetaError::Activation(_))));
         }
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod open_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancelled_open_retries_after_its_actual_read_releases_the_name() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let backend =
+            Arc::new(SqliteBackend::open(&root.path().join("private/data.sqlite3")).unwrap());
+        backend.put("domain", 1, "a", &Value::Null).await.unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn({
+            let backend = backend.clone();
+            async move {
+                backend
+                    .open_unit(test_unit("domain", 1), move || {
+                        entered.send(()).unwrap();
+                        released.blocking_recv().unwrap();
+                    })
+                    .await
+            }
+        });
+        started.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let mut retry = pin!(backend.open_unit(test_unit("domain", 1), || {}));
+        assert!(matches!(
+            retry.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        release.send(()).unwrap();
+        assert_eq!(retry.await.unwrap().snapshot.records.len(), 1);
     }
 }

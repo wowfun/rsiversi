@@ -1,524 +1,461 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_storage::{
-    MAXIMUM_STORAGE_RECORDS, MAXIMUM_STORAGE_VALUE_BYTES, StorageError, StorageFactory,
-    StorageHubContract,
+    Address, EncodedValue, KvBackend, Layout, MAXIMUM_STORAGE_DOMAIN_BYTES,
+    MAXIMUM_STORAGE_RECORDS, MAXIMUM_STORAGE_VALUE_BYTES, Mutation, RecordObjectSize, RecordPolicy,
+    StorageError, StorageFactory, StorageHubContract, UnitDescriptor,
 };
-use rsi_storage_domain::{DomainFacilityContract, DomainFactory, DomainSpec};
+use rsi_storage_domain::{DomainFacilityContract, DomainFactory, DomainSpec, Schema};
 use rsi_storage_sqlite::SqliteStorageFactory;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::fs;
-use std::sync::Arc;
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 fn linked(id: &str, factory: Arc<dyn rsi_meta::PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(id, "test", UpdateMode::Replayable, factory)
 }
-#[tokio::test]
-async fn mutation_accounting_distinguishes_missing_domain_key_and_wrong_version() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("mutations.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
-        .root()
-        .apply(linked("hub", Arc::new(StorageFactory)), Value::Null)
-        .await
-        .unwrap();
-    let plugin = runtime
-        .root()
-        .apply(
-            linked("sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite","path":path}),
-        )
-        .await
-        .unwrap();
-    let registry = runtime.root().lookup_local::<StorageHubContract>().unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    backend.delete("records", 7, "absent").await.unwrap();
-    assert!(backend.load("records").await.unwrap().is_none());
-    backend
-        .put("records", 7, "first", &json!("中文"))
-        .await
-        .unwrap();
-    backend
-        .put("records", 7, "second", &json!({"n":1}))
-        .await
-        .unwrap();
-    backend
-        .put("records", 7, "first", &json!([true, null]))
-        .await
-        .unwrap();
-    backend.delete("records", 7, "absent").await.unwrap();
-    for key in ["absent", "first"] {
-        assert!(matches!(
-            backend.delete("records", 8, key).await,
-            Err(StorageError::Corrupt(_))
-        ));
-        assert!(matches!(
-            backend.put("records", 8, key, &Value::Null).await,
-            Err(StorageError::Corrupt(_))
-        ));
+struct Harness {
+    runtime: Runtime,
+    backend: Arc<dyn KvBackend>,
+    path: PathBuf,
+    _root: tempfile::TempDir,
+}
+impl Harness {
+    async fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("private/domains.sqlite3");
+        let runtime = Runtime::default();
+        runtime
+            .root()
+            .apply(linked("hub", Arc::new(StorageFactory)), Value::Null)
+            .await
+            .unwrap();
+        let plugin = runtime
+            .root()
+            .apply(
+                linked("sqlite", Arc::new(SqliteStorageFactory)),
+                json!({"name":"sqlite","path":path}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            plugin.snapshot().state,
+            rsi_meta::FiberState::Active,
+            "{:?}",
+            plugin.snapshot()
+        );
+        let backend = runtime
+            .root()
+            .lookup_local::<StorageHubContract>()
+            .unwrap()
+            .resolve("sqlite")
+            .unwrap();
+        Self {
+            runtime,
+            backend,
+            path,
+            _root: root,
+        }
     }
-    let inspect = rusqlite::Connection::open(&path).unwrap();
-    let expected = std::collections::BTreeMap::from([
-        ("first".to_owned(), json!([true, null])),
-        ("second".to_owned(), json!({"n":1})),
-    ]);
-    let assert_accounting =
-        |expected: &std::collections::BTreeMap<String, Value>| {
-            let (count, bytes) = inspect.query_row(
-            "SELECT record_count, record_bytes FROM rsi_storage_domains WHERE domain='records'",
-            [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        ).unwrap();
-            assert_eq!(usize::try_from(count).unwrap(), expected.len());
-            assert_eq!(
-                usize::try_from(bytes).unwrap(),
-                serde_json::to_vec(expected).unwrap().len()
-            );
-        };
-    assert_accounting(&expected);
-    assert_eq!(
-        backend.load("records").await.unwrap().unwrap().records,
-        expected
-    );
-    backend.delete("records", 7, "first").await.unwrap();
-    let expected = std::collections::BTreeMap::from([("second".to_owned(), json!({"n":1}))]);
-    assert_accounting(&expected);
-    backend.delete("records", 7, "second").await.unwrap();
-    backend.delete("records", 7, "second").await.unwrap();
-    assert_accounting(&std::collections::BTreeMap::new());
-    drop(inspect);
-    drop(backend);
-    assert!(plugin.dispose().await.is_clean());
-    let reopened = runtime
-        .root()
-        .apply(
-            linked("sqlite-reopened", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite","path":path}),
+}
+fn spec(version: u32) -> UnitDescriptor {
+    UnitDescriptor::new(
+        "records".into(),
+        version,
+        std::collections::BTreeSet::new(),
+        BTreeMap::from([("rows".into(), RecordPolicy::Reject)]),
+        true,
+        Layout::Single,
+    )
+    .unwrap()
+}
+fn change(key: &str, value: Option<Value>) -> Mutation {
+    Mutation {
+        address: Address::record("rows", key).unwrap(),
+        value: value.map(|v| EncodedValue::encode(&v).unwrap()),
+    }
+}
+fn decoded(snapshot: rsi_storage::UnitSnapshot) -> BTreeMap<String, Value> {
+    snapshot
+        .records
+        .into_iter()
+        .map(|(a, v)| (a.accounting_key(), v.decode().unwrap()))
+        .collect()
+}
+fn assert_accounting(h: &Harness, expected: &BTreeMap<String, Value>) {
+    let db = rusqlite::Connection::open(&h.path).unwrap();
+    let (count, bytes): (i64, i64) = db
+        .query_row(
+            "SELECT record_count,record_bytes FROM rsi_storage_domains WHERE domain='records'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .await
         .unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    let empty = backend.load("records").await.unwrap().unwrap();
-    assert_eq!(empty.version, 7);
-    assert!(empty.records.is_empty());
-    drop(backend);
-    drop(registry);
-    assert!(reopened.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
+    assert_eq!(usize::try_from(count).unwrap(), expected.len());
+    assert_eq!(
+        usize::try_from(bytes).unwrap(),
+        serde_json::to_vec(expected).unwrap().len()
+    );
 }
 
 #[tokio::test]
-async fn typed_raw_put_reopens_while_noncompact_offline_blobs_are_rejected() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("domains.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
-        .root()
-        .apply(linked("hub", Arc::new(StorageFactory)), Value::Null)
+async fn mutation_accounting_distinguishes_absence_global_null_arbitrary_keys_and_versions() {
+    let h = Harness::new().await;
+    let opened = h.backend.open(spec(7)).await.unwrap();
+    opened
+        .unit
+        .write(vec![change("absent", None)])
         .await
         .unwrap();
-    let plugin = runtime
-        .root()
-        .apply(
-            linked("sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite","path":path}),
-        )
+    drop(opened);
+    let opened = h.backend.open(spec(7)).await.unwrap();
+    assert_eq!(opened.snapshot.version, None);
+    opened
+        .unit
+        .write(vec![
+            change("中文/\0", Some(json!("中"))),
+            change("", Some(json!([true, null]))),
+            Mutation {
+                address: Address::global(),
+                value: Some(EncodedValue::encode(&Value::Null).unwrap()),
+            },
+        ])
         .await
         .unwrap();
-    let registry = runtime.root().lookup_local::<StorageHubContract>().unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    let values = std::collections::BTreeMap::from([
-        ("structured".to_owned(), serde_json::from_str::<Value>(
-            r#" { "z": 1.2300, "a": [ -0, 18446744073709551616, 1e+09 ], "text": "\u4e2d\n" } "#,
-        ).unwrap()),
-        ("whitespace".to_owned(), json!(" \n\t中文 ")),
-        ("null".to_owned(), Value::Null),
-        ("scalar".to_owned(), json!(true)),
+    let expected = BTreeMap::from([
+        ("rows/中文/\0".into(), json!("中")),
+        ("rows/".into(), json!([true, null])),
+        (String::new(), Value::Null),
     ]);
-    for (key, value) in &values {
-        backend.put("typed", 1, key, value).await.unwrap();
-    }
+    assert_accounting(&h, &expected);
+    // One backend owns exactly one live handle for a unit.
+    assert!(h.backend.open(spec(7)).await.is_err());
+    drop(opened);
+    assert!(matches!(
+        h.backend.open(spec(8)).await,
+        Err(StorageError::DomainVersionMismatch {
+            stored: 7,
+            requested: 8,
+            ..
+        })
+    ));
+    let opened = h.backend.open(spec(7)).await.unwrap();
+    assert_eq!(decoded(opened.snapshot), expected);
+    opened
+        .unit
+        .write(vec![change("中文/\0", None), change("missing", None)])
+        .await
+        .unwrap();
+    drop(opened.unit);
+    let opened = h.backend.open(spec(7)).await.unwrap();
+    assert_eq!(opened.snapshot.version, Some(7));
+    assert_accounting(&h, &decoded(opened.snapshot));
+}
+
+#[tokio::test]
+async fn compatible_read_preserves_stamp_and_batch_updates_only_touched_bytes() {
+    let h = Harness::new().await;
+    let opened = h.backend.open(spec(1)).await.unwrap();
+    let exact = br#"{"z":1.2300,"a":"\u4e2d"}"#.to_vec();
+    opened
+        .unit
+        .write(vec![Mutation {
+            address: Address::record("rows", "old").unwrap(),
+            value: Some(EncodedValue::from_bytes(exact.clone()).unwrap()),
+        }])
+        .await
+        .unwrap();
+    drop(opened);
+    let next = UnitDescriptor::new(
+        "records".into(),
+        2,
+        [1].into(),
+        spec(1).tables().clone(),
+        true,
+        Layout::Single,
+    )
+    .unwrap();
+    let opened = h.backend.open(next.clone()).await.unwrap();
+    assert_eq!(opened.snapshot.version, Some(1));
+    opened
+        .unit
+        .write(vec![change("missing", None)])
+        .await
+        .unwrap();
+    drop(opened);
+    let opened = h.backend.open(next.clone()).await.unwrap();
+    assert_eq!(opened.snapshot.version, Some(1));
+    opened
+        .unit
+        .write(vec![
+            change("new", Some(json!(3))),
+            Mutation {
+                address: Address::global(),
+                value: Some(EncodedValue::encode(&2).unwrap()),
+            },
+        ])
+        .await
+        .unwrap();
+    drop(opened);
+    let opened = h.backend.open(next).await.unwrap();
+    assert_eq!(opened.snapshot.version, Some(2));
     assert_eq!(
-        backend.load("typed").await.unwrap().unwrap().records,
-        values
+        opened.snapshot.records[&Address::record("rows", "old").unwrap()].as_bytes(),
+        exact
     );
+}
 
-    let injection = rusqlite::Connection::open(&path).unwrap();
-    let pretty = serde_json::to_vec_pretty(&values["structured"]).unwrap();
-    injection
-        .execute(
-            "INSERT INTO rsi_storage_domains(domain,version) VALUES ('offline',1)",
-            [],
-        )
-        .unwrap();
-    injection
-        .execute(
-            "INSERT INTO rsi_storage_records(domain,key,value) VALUES ('offline','record',?1)",
-            [&pretty],
-        )
-        .unwrap();
-    let size = rsi_storage::RecordObjectSize::default()
-        .with_entry(
-            None,
-            rsi_storage::encoded_entry_bytes("record", pretty.len()).unwrap(),
-        )
-        .unwrap();
-    injection
-        .execute(
-            "UPDATE rsi_storage_domains SET record_bytes=?1 WHERE domain='offline'",
-            [i64::try_from(size.bytes()).unwrap()],
-        )
-        .unwrap();
-    assert!(matches!(backend.load("offline").await,
-        Err(StorageError::Corrupt(message)) if message.contains("not compact JSON")));
-    drop(injection);
-    drop(backend);
-    assert!(plugin.dispose().await.is_clean());
-
-    let reopened = runtime
-        .root()
-        .apply(
-            linked("sqlite-reopened", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite","path":path}),
+#[tokio::test]
+async fn raw_backend_batch_uses_final_geometry_and_rejects_before_mutation() {
+    let h = Harness::new().await;
+    let opened = h.backend.open(spec(1)).await.unwrap();
+    opened
+        .unit
+        .write(
+            (0..MAXIMUM_STORAGE_RECORDS)
+                .map(|i| change(&format!("key-{i:05}"), Some(Value::Null)))
+                .collect(),
         )
         .await
         .unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    assert_eq!(
-        backend.load("typed").await.unwrap().unwrap().records,
-        values
+    assert!(matches!(
+        opened
+            .unit
+            .write(vec![change("excess", Some(json!(true)))])
+            .await,
+        Err(StorageError::InvalidInput(_))
+    ));
+    // This begins with an insert at the ceiling, then removes an old record.
+    opened
+        .unit
+        .write(vec![
+            change("replacement", Some(json!(true))),
+            change("key-00000", None),
+        ])
+        .await
+        .unwrap();
+    opened
+        .unit
+        .write(vec![change("key-00001", Some(json!("updated")))])
+        .await
+        .unwrap();
+    assert!(matches!(
+        opened
+            .unit
+            .write(vec![
+                change("key-00001", Some(json!("should roll back"))),
+                change("excess", Some(Value::Null))
+            ])
+            .await,
+        Err(StorageError::InvalidInput(_))
+    ));
+    drop(opened);
+    let opened = h.backend.open(spec(1)).await.unwrap();
+    assert_eq!(opened.snapshot.records.len(), MAXIMUM_STORAGE_RECORDS);
+    assert!(
+        !opened
+            .snapshot
+            .records
+            .contains_key(&Address::record("rows", "key-00000").unwrap())
     );
-    assert!(matches!(backend.load("offline").await,
-        Err(StorageError::Corrupt(message)) if message.contains("not compact JSON")));
-    drop(backend);
-    drop(registry);
-    assert!(reopened.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
+    assert_eq!(
+        opened.snapshot.records[&Address::record("rows", "key-00001").unwrap()]
+            .decode::<Value>()
+            .unwrap(),
+        json!("updated")
+    );
+    assert_accounting(&h, &decoded(opened.snapshot));
 }
 
 #[tokio::test]
 async fn every_acknowledged_byte_boundary_reopens_and_raw_growth_is_rejected_before_mutation() {
-    use rsi_storage::{MAXIMUM_STORAGE_DOMAIN_BYTES, RecordObjectSize, encoded_entry_bytes};
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("boundary.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
-        .root()
-        .apply(linked("hub", Arc::new(StorageFactory)), Value::Null)
-        .await
-        .unwrap();
-    let backend_fiber = runtime
-        .root()
-        .apply(
-            linked("sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite","path":path}),
-        )
-        .await
-        .unwrap();
-    let form = runtime
-        .root()
-        .apply(linked("domain", Arc::new(DomainFactory)), Value::Null)
-        .await
-        .unwrap();
-    let facility = runtime
-        .root()
-        .lookup_local::<DomainFacilityContract>()
-        .unwrap();
-    let spec = DomainSpec {
-        id: "boundary".into(),
-        backend: "sqlite".into(),
-        version: u32::MAX,
-        maximum_records: 16,
-        maximum_bytes: MAXIMUM_STORAGE_DOMAIN_BYTES,
-    };
-    let domain = facility.open(spec.clone()).await.unwrap();
+    let h = Harness::new().await;
+    let opened = h.backend.open(spec(u32::MAX)).await.unwrap();
     let mut measured = RecordObjectSize::default();
-    let mut final_value_bytes = 0;
+    let mut final_bytes = 0;
     for index in 0..16 {
         let key = format!("k{index:02}");
-        let overhead = encoded_entry_bytes(&key, 0).unwrap() + usize::from(index != 0);
-        let value_bytes = if index < 15 {
+        let address = Address::record("rows", &key).unwrap();
+        let overhead = address.entry_bytes(0).unwrap() + usize::from(index != 0);
+        let bytes = if index < 15 {
             MAXIMUM_STORAGE_VALUE_BYTES
         } else {
             MAXIMUM_STORAGE_DOMAIN_BYTES - 1 - measured.bytes() - overhead
         };
-        domain
-            .put(&key, Value::String("x".repeat(value_bytes - 2)))
+        opened
+            .unit
+            .write(vec![change(&key, Some(json!("x".repeat(bytes - 2))))])
             .await
             .unwrap();
         measured = measured
-            .with_entry(None, encoded_entry_bytes(&key, value_bytes).unwrap())
+            .with_entry(None, address.entry_bytes(bytes).unwrap())
             .unwrap();
-        final_value_bytes = value_bytes;
+        final_bytes = bytes;
     }
     assert_eq!(measured.bytes(), MAXIMUM_STORAGE_DOMAIN_BYTES - 1);
-    drop(domain);
-    let domain = facility.open(spec.clone()).await.unwrap();
-    domain
-        .put("k15", Value::String("x".repeat(final_value_bytes - 1)))
+    drop(opened);
+    let opened = h.backend.open(spec(u32::MAX)).await.unwrap();
+    drop(opened.snapshot);
+    opened
+        .unit
+        .write(vec![change(
+            "k15",
+            Some(json!("x".repeat(final_bytes - 1))),
+        )])
         .await
         .unwrap();
-    drop(domain);
-    let domain = facility.open(spec).await.unwrap();
-    let registry = runtime.root().lookup_local::<StorageHubContract>().unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
     assert!(matches!(
-        backend
-            .put(
-                "boundary",
-                u32::MAX,
-                "k15",
-                &Value::String("x".repeat(final_value_bytes))
-            )
+        opened
+            .unit
+            .write(vec![change("k15", Some(json!("x".repeat(final_bytes))))])
             .await,
         Err(StorageError::InvalidInput(_))
     ));
     assert!(matches!(
-        backend.put("boundary", u32::MAX, "new", &Value::Null).await,
+        opened
+            .unit
+            .write(vec![change("extra", Some(Value::Null))])
+            .await,
         Err(StorageError::InvalidInput(_))
     ));
-    let loaded = backend.load("boundary").await.unwrap().unwrap();
-    assert_eq!(loaded.version, u32::MAX);
+    drop(opened.unit);
+    let opened = h.backend.open(spec(u32::MAX)).await.unwrap();
+    let size = opened
+        .snapshot
+        .records
+        .iter()
+        .fold(RecordObjectSize::default(), |size, (a, v)| {
+            size.with_entry(None, a.entry_bytes(v.encoded_len()).unwrap())
+                .unwrap()
+        });
+    assert_eq!(size.bytes(), MAXIMUM_STORAGE_DOMAIN_BYTES);
+    drop(opened.snapshot);
+    opened
+        .unit
+        .write(vec![change("k00", None), change("k15", Some(Value::Null))])
+        .await
+        .unwrap();
+    drop(opened.unit);
+    let opened = h.backend.open(spec(u32::MAX)).await.unwrap();
+    assert_eq!(opened.snapshot.records.len(), 15);
     assert_eq!(
-        serde_json::to_vec(&loaded.records).unwrap().len(),
-        MAXIMUM_STORAGE_DOMAIN_BYTES
+        opened.snapshot.records[&Address::record("rows", "k15").unwrap()].as_bytes(),
+        b"null"
     );
-    drop(loaded);
-    domain.delete("k00").await.unwrap();
-    domain.put("k15", Value::Null).await.unwrap();
-    drop(domain);
-    let loaded = backend.load("boundary").await.unwrap().unwrap();
-    assert_eq!(loaded.records.len(), 15);
-    assert_eq!(loaded.records["k15"], Value::Null);
-    drop(loaded);
-    drop((backend, registry, facility));
-    assert!(form.dispose().await.is_clean());
-    assert!(backend_fiber.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
+}
+
+#[tokio::test]
+async fn noncompact_or_oversized_durable_blobs_are_rejected_on_open() {
+    for bytes in [
+        b"{\"x\": 1}".to_vec(),
+        vec![b' '; MAXIMUM_STORAGE_VALUE_BYTES + 1],
+    ] {
+        let h = Harness::new().await;
+        let opened = h.backend.open(spec(1)).await.unwrap();
+        opened
+            .unit
+            .write(vec![change("bad", Some(Value::Null))])
+            .await
+            .unwrap();
+        drop(opened);
+        let db = rusqlite::Connection::open(&h.path).unwrap();
+        db.execute("UPDATE rsi_storage_records SET value=?1", [&bytes])
+            .unwrap();
+        let size = RecordObjectSize::default()
+            .with_entry(
+                None,
+                Address::record("rows", "bad")
+                    .unwrap()
+                    .entry_bytes(bytes.len())
+                    .unwrap(),
+            )
+            .unwrap();
+        db.execute(
+            "UPDATE rsi_storage_domains SET record_bytes=?1",
+            [i64::try_from(size.bytes()).unwrap()],
+        )
+        .unwrap();
+        assert!(matches!(
+            h.backend.open(spec(1)).await,
+            Err(StorageError::Corrupt(_))
+        ));
+        let kept: Vec<u8> = db
+            .query_row("SELECT value FROM rsi_storage_records", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, bytes);
+    }
 }
 
 #[tokio::test]
 async fn sqlite_round_trip_and_version_mismatch_are_visible_at_domain_seam() {
-    let temporary = tempfile::tempdir().unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let path = temporary.path().join("domains.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
+    let h = Harness::new().await;
+    h.runtime
         .root()
-        .apply(linked("rsi.storage", Arc::new(StorageFactory)), Value::Null)
+        .apply(linked("domain", Arc::new(DomainFactory)), Value::Null)
         .await
         .unwrap();
-    let backend = runtime
-        .root()
-        .apply(
-            linked("rsi.storage.sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite", "path":path}),
-        )
-        .await
-        .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(
-            fs::metadata(temporary.path()).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-    }
-    let form = runtime
-        .root()
-        .apply(
-            linked("rsi.storage.domain", Arc::new(DomainFactory)),
-            Value::Null,
-        )
-        .await
-        .unwrap();
-    let facility = runtime
+    let facility = h
+        .runtime
         .root()
         .lookup_local::<DomainFacilityContract>()
         .unwrap();
-    let domain = facility
-        .open(DomainSpec {
-            id: "projection".into(),
-            backend: "sqlite".into(),
-            version: 1,
-            maximum_records: 10,
-            maximum_bytes: 1024 * 1024,
-        })
+    let spec = DomainSpec {
+        id: "records".into(),
+        backend: "sqlite".into(),
+        maximum_records: 10,
+        maximum_bytes: 1024,
+        ..DomainSpec::default()
+    };
+    let schema = Schema::default().table::<Vec<u32>>("rows").unwrap();
+    let domain = facility.open(spec.clone(), schema.clone()).await.unwrap();
+    domain
+        .table::<Vec<u32>>("rows")
+        .unwrap()
+        .put("a", vec![1, 2, 3])
         .await
         .unwrap();
-    domain.put("a", json!([1, 2, 3])).await.unwrap();
-    assert_eq!(domain.snapshot().await.unwrap()["a"], json!([1, 2, 3]));
-
+    domain.close().await;
+    let domain = facility.open(spec.clone(), schema.clone()).await.unwrap();
+    assert_eq!(
+        *domain
+            .table::<Vec<u32>>("rows")
+            .unwrap()
+            .get("a")
+            .unwrap()
+            .unwrap(),
+        vec![1, 2, 3]
+    );
+    domain.close().await;
+    assert!(matches!(
+        facility
+            .open(DomainSpec { version: 2, ..spec }, schema)
+            .await,
+        Err(StorageError::DomainVersionMismatch { .. })
+    ));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        for sidecar in ["domains.sqlite3-wal", "domains.sqlite3-shm"] {
+        for name in [
+            "domains.sqlite3",
+            "domains.sqlite3-wal",
+            "domains.sqlite3-shm",
+        ] {
             assert_eq!(
-                fs::metadata(temporary.path().join(sidecar))
+                fs::metadata(h.path.parent().unwrap().join(name))
                     .unwrap()
                     .permissions()
                     .mode()
                     & 0o777,
-                0o600,
-                "{sidecar} must be private"
+                0o600
             );
         }
     }
-    drop(domain);
-
-    assert!(
-        facility
-            .open(DomainSpec {
-                id: "projection".into(),
-                backend: "sqlite".into(),
-                version: 2,
-                maximum_records: 10,
-                maximum_bytes: 1024 * 1024,
-            })
-            .await
-            .is_err()
-    );
-
-    drop(facility);
-    assert!(form.dispose().await.is_clean());
-    assert!(backend.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
 }
 
 #[tokio::test]
-async fn oversized_durable_blob_is_rejected_at_the_backend_load_boundary() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("domains.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
-        .root()
-        .apply(linked("rsi.storage", Arc::new(StorageFactory)), Value::Null)
-        .await
-        .unwrap();
-    let plugin = runtime
-        .root()
-        .apply(
-            linked("rsi.storage.sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite", "path":path}),
-        )
-        .await
-        .unwrap();
-    let injection = rusqlite::Connection::open(&path).unwrap();
-    injection
-        .execute(
-            "INSERT INTO rsi_storage_domains(domain, version) VALUES ('oversized', 1)",
-            [],
-        )
-        .unwrap();
-    injection
-        .execute(
-            "INSERT INTO rsi_storage_records(domain, key, value)
-             VALUES ('oversized', 'record', zeroblob(?1))",
-            [i64::try_from(MAXIMUM_STORAGE_VALUE_BYTES + 1).unwrap()],
-        )
-        .unwrap();
-
-    let registry = runtime.root().lookup_local::<StorageHubContract>().unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    assert!(matches!(
-        backend.load("oversized").await,
-        Err(rsi_storage::StorageError::Corrupt(message)) if message.contains("oversized")
-    ));
-
-    drop(backend);
-    drop(registry);
-    drop(injection);
-    assert!(plugin.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
-}
-
-#[tokio::test]
-async fn raw_backend_put_enforces_the_global_record_bound_transactionally() {
-    let temporary = tempfile::tempdir().unwrap();
-    let path = temporary.path().join("domains.sqlite3");
-    let runtime = Runtime::default();
-    let hub = runtime
-        .root()
-        .apply(linked("rsi.storage", Arc::new(StorageFactory)), Value::Null)
-        .await
-        .unwrap();
-    let plugin = runtime
-        .root()
-        .apply(
-            linked("rsi.storage.sqlite", Arc::new(SqliteStorageFactory)),
-            json!({"name":"sqlite", "path":path}),
-        )
-        .await
-        .unwrap();
-    let injection = rusqlite::Connection::open(&path).unwrap();
-    injection
-        .execute(
-            "INSERT INTO rsi_storage_domains(domain, version) VALUES ('ceiling', 1)",
-            [],
-        )
-        .unwrap();
-    injection
-        .execute(
-            "WITH RECURSIVE records(index_value) AS (
-               SELECT 0
-               UNION ALL
-               SELECT index_value + 1 FROM records WHERE index_value + 1 < ?1
-             )
-             INSERT INTO rsi_storage_records(domain, key, value)
-             SELECT 'ceiling', printf('key-%05d', index_value), x'6e756c6c' FROM records",
-            [i64::try_from(MAXIMUM_STORAGE_RECORDS).unwrap()],
-        )
-        .unwrap();
-
-    let registry = runtime.root().lookup_local::<StorageHubContract>().unwrap();
-    let backend = registry.resolve("sqlite").unwrap();
-    let mut size = rsi_storage::RecordObjectSize::default();
-    for index in 0..MAXIMUM_STORAGE_RECORDS {
-        size = size
-            .with_entry(
-                None,
-                rsi_storage::encoded_entry_bytes(&format!("key-{index:05}"), 4).unwrap(),
-            )
-            .unwrap();
-    }
-    injection
-        .execute(
-            "UPDATE rsi_storage_domains SET record_bytes=?1 WHERE domain='ceiling'",
-            [i64::try_from(size.bytes()).unwrap()],
-        )
-        .unwrap();
-    assert!(matches!(
-        backend.put("ceiling", 1, "one-too-many", &json!(true)).await,
-        Err(StorageError::InvalidInput(message))
-            if message.contains("`ceiling`") && message.contains("record bound")
-    ));
-    backend
-        .put("ceiling", 1, "key-00000", &json!("updated"))
-        .await
-        .expect("updates remain valid at the record ceiling");
-    let count: i64 = injection
-        .query_row(
-            "SELECT count(*) FROM rsi_storage_records WHERE domain = 'ceiling'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(usize::try_from(count).unwrap(), MAXIMUM_STORAGE_RECORDS);
-
-    drop(backend);
-    drop(registry);
-    drop(injection);
-    assert!(plugin.dispose().await.is_clean());
-    assert!(hub.dispose().await.is_clean());
-}
-
-#[tokio::test]
+#[cfg(unix)]
 async fn an_existing_lookalike_schema_is_rejected_before_backend_publication() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("domains.sqlite3");
