@@ -5,7 +5,7 @@ mod stream;
 pub use assembler::LanguageAssembler;
 pub use stream::LanguageStreamValidator;
 
-use serde::{Deserialize, Serialize, ser::SerializeStruct as _};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -17,7 +17,7 @@ const MAX_SOURCE_FIELD_BYTES: usize = 16 * 1024;
 const MAX_WARNING_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// Inclusive token counts reported for one provider attempt.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_field_names)] // Explicit units are part of the durable usage schema.
 pub struct TokenUsage {
@@ -97,7 +97,7 @@ impl<'de> Deserialize<'de> for TokenUsage {
 }
 
 /// Why a language response stopped.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     /// The model reached a natural or caller-provided stop condition.
@@ -113,7 +113,7 @@ pub enum FinishReason {
 }
 
 /// One model-requested tool call. Arguments deliberately remain raw text.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
     /// Provider-neutral identifier used to correlate the later tool result.
@@ -127,7 +127,7 @@ pub struct ToolCall {
 }
 
 /// Provider-neutral syntax used to emit one tool call.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallKind {
     /// JSON arguments for a function tool.
@@ -137,7 +137,7 @@ pub enum ToolCallKind {
 }
 
 /// One complete provider-neutral content block.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentBlock {
     /// User-visible assistant text.
@@ -149,7 +149,7 @@ pub enum ContentBlock {
 }
 
 /// Metadata that opens one streamed content block.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentStart {
     /// Opens a user-visible text block.
@@ -168,7 +168,7 @@ pub enum ContentStart {
 }
 
 /// One incremental update for an open content block.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ContentDelta {
     /// Appends visible text to an open text block.
@@ -180,7 +180,7 @@ pub enum ContentDelta {
 }
 
 /// One citeable source returned by a provider-hosted operation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     /// Provider-neutral source identifier unique within the response.
@@ -190,7 +190,7 @@ pub struct Source {
 }
 
 /// A safe provider or compatibility warning.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Warning {
     /// Stable bounded warning code.
@@ -200,16 +200,18 @@ pub struct Warning {
 }
 
 /// Bounded provider-private JSON that never contains binary data or secrets.
-#[derive(Clone, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, PartialEq)]
+#[schemars(with = "ProviderExtensionInner")]
 pub struct ProviderExtension {
     inner: Arc<ProviderExtensionInner>,
 }
 
-#[derive(PartialEq)]
+#[derive(schemars::JsonSchema, Serialize, PartialEq)]
 struct ProviderExtensionInner {
     namespace: String,
     version: u32,
     value: Value,
+    #[serde(skip)]
     encoded_len: usize,
 }
 
@@ -229,11 +231,7 @@ impl Serialize for ProviderExtension {
     where
         S: serde::Serializer,
     {
-        let mut wire = serializer.serialize_struct("ProviderExtension", 3)?;
-        wire.serialize_field("namespace", &self.inner.namespace)?;
-        wire.serialize_field("version", &self.inner.version)?;
-        wire.serialize_field("value", &self.inner.value)?;
-        wire.end()
+        self.inner.as_ref().serialize(serializer)
     }
 }
 
@@ -262,7 +260,7 @@ impl ProviderExtension {
         version: u32,
         value: Value,
     ) -> Result<Self, StreamError> {
-        #[derive(Serialize)]
+        #[derive(schemars::JsonSchema, Serialize)]
         struct WireExtension<'a> {
             namespace: &'a str,
             version: u32,
@@ -318,7 +316,7 @@ impl ProviderExtension {
 }
 
 /// Normalized language events emitted by every adapter.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LanguageEvent {
     /// Opens the next indexed content block.
@@ -455,7 +453,7 @@ impl LanguageEvent {
 }
 
 /// Complete language output assembled through the same grammar callers stream.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageOutput {
     /// Ordered complete content blocks.
@@ -549,7 +547,7 @@ impl LanguageOutput {
 }
 
 /// Validated language content retained when a provider attempt fails.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguagePartialOutput {
     /// Complete content blocks accepted before failure.

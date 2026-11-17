@@ -1,0 +1,139 @@
+{
+  "payload": {
+    "version": 5,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "order": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "record": {
+            "$ref": "#/definitions/0"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "order",
+          "record"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "coordinates": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/5"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "created_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "coordinates",
+            "name",
+            "created_at_ms"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "location": {
+              "$ref": "#/definitions/3"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "location",
+            "path"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/4"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"order\":3,\"record\":{\"id\":\"0202020202020202020202020202020202020202020202020202020202020202\",\"coordinates\":{\"location\":{\"kind\":\"local\"},\"path\":\"/fixture/中\"},\"name\":\"fixture 中🦀\",\"created_at_ms\":123456}}"
+    ]
+  },
+  "sha256": "b19c19329a77622e69925ddffa556ea32a77c0450d84aa4ef42bea086718b848"
+}

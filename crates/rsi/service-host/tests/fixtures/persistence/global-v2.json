@@ -1,0 +1,28 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/definitions/0"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "endpoint"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"endpoint\":\"07070707070707070707070707070707\"}"
+    ]
+  },
+  "sha256": "16d90dcdd80937658d86b25df78790ce9d96832144181062e7b0f8b03989f71c"
+}

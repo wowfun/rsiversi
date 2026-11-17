@@ -1,0 +1,146 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/0"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_review": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan",
+          "last_review"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "plan_ref": {
+              "$ref": "#/definitions/1"
+            },
+            "document": {
+              "$ref": "#/definitions/4"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "plan_ref",
+            "document"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/definitions/2"
+            },
+            "effect_id": {
+              "$ref": "#/definitions/3"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "session_id",
+            "effect_id",
+            "sha256"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "title",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "plan_ref": {
+              "$ref": "#/definitions/1"
+            },
+            "mode_revision": {
+              "$ref": "#/definitions/6"
+            },
+            "review_revision": {
+              "$ref": "#/definitions/6"
+            },
+            "decision": {
+              "$ref": "#/definitions/7"
+            },
+            "feedback": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "plan_ref",
+            "mode_revision",
+            "review_revision",
+            "decision",
+            "feedback"
+          ]
+        },
+        {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "enum": [
+            "approve_execute",
+            "request_changes",
+            "decline"
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"plan\":null,\"last_review\":null}",
+      "{\"plan\":{\"plan_ref\":{\"session_id\":\"fixture\",\"effect_id\":\"effect\",\"sha256\":\"be037b8bfbf82e67619a706f227ad8c1f0ff0c431c76137c396e293877cdd435\"},\"document\":{\"title\":\"fixture\",\"body\":\"plan 中🦀\\nquote \\\"\"}},\"last_review\":{\"plan_ref\":{\"session_id\":\"fixture\",\"effect_id\":\"effect\",\"sha256\":\"be037b8bfbf82e67619a706f227ad8c1f0ff0c431c76137c396e293877cdd435\"},\"mode_revision\":1,\"review_revision\":2,\"decision\":\"request_changes\",\"feedback\":\"fixture 中🦀\"}}"
+    ]
+  },
+  "sha256": "acbcdaac35efaccd340011db2b168e34855ce731f94cc656fc1c705bf5a10ff6"
+}

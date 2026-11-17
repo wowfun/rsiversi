@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 macro_rules! identity {
     ($name:ident, $bytes:literal, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+        #[derive(
+            Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, schemars::JsonSchema,
+        )]
         #[serde(transparent)]
         pub struct $name(String);
 

@@ -11,7 +11,7 @@ use crate::{
 pub const MAX_IMAGE_OUTPUTS: u8 = 10;
 
 /// One bounded image generation request.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRequest {
     prompt: String,

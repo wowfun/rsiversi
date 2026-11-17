@@ -1,0 +1,192 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "candidate": {
+            "$ref": "#/definitions/0"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "creator": {
+            "$ref": "#/definitions/3"
+          },
+          "trust": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/6"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "candidate",
+          "revision",
+          "creator",
+          "trust"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "endpoint": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "target",
+            "name",
+            "endpoint"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "user": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "port",
+            "user"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "device"
+                },
+                "id": {
+                  "$ref": "#/definitions/4"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "agent"
+                },
+                "id": {
+                  "$ref": "#/definitions/5"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "host_key": {
+              "$ref": "#/definitions/7"
+            },
+            "identity_path": {
+              "type": "string"
+            },
+            "identity_sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "host_key",
+            "identity_path",
+            "identity_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "type": "string"
+            },
+            "base64": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm",
+            "base64"
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"candidate\":{\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"fixture 中🦀\",\"endpoint\":{\"host\":\"example.invalid\",\"port\":22,\"user\":\"fixture\"}},\"revision\":1,\"creator\":{\"kind\":\"local\"},\"trust\":null}",
+      "{\"candidate\":{\"target\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"name\":\"trusted\",\"endpoint\":{\"host\":\"127.0.0.1\",\"port\":2222,\"user\":\"fixture\"}},\"revision\":2,\"creator\":{\"kind\":\"local\"},\"trust\":{\"host_key\":{\"algorithm\":\"ssh-ed25519\",\"base64\":\"AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"identity_path\":\"/fixture/key\",\"identity_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}"
+    ]
+  },
+  "sha256": "f249a8f46f4b97c1ca4529ad7445d7c3244d380b90135fd6d63607b3160740c4"
+}

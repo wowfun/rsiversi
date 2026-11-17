@@ -1,0 +1,260 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "epoch": {
+            "type": "string"
+          },
+          "scope": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/0"
+              }
+            ]
+          },
+          "turn": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "type": "string"
+          },
+          "accepted_seq": {
+            "type": "string"
+          },
+          "live_seq": {
+            "type": "string"
+          },
+          "started_ms": {
+            "type": "string"
+          },
+          "finished_ms": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/6"
+              }
+            ]
+          },
+          "changed_files": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "added_lines": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "removed_lines": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/7"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "epoch",
+          "scope",
+          "turn",
+          "execution",
+          "accepted_seq",
+          "live_seq",
+          "started_ms",
+          "finished_ms",
+          "phase",
+          "changed_files",
+          "added_lines",
+          "removed_lines",
+          "omissions"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "workspace": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "conversation": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "workspace",
+            "conversation"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "native"
+                },
+                "id": {
+                  "$ref": "#/definitions/3"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "external"
+                },
+                "id": {
+                  "$ref": "#/definitions/4"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pending"
+            },
+            {
+              "type": "string",
+              "const": "complete"
+            },
+            {
+              "type": "string",
+              "const": "partial"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/8"
+                }
+              ]
+            },
+            "count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "count"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "non_git"
+            },
+            {
+              "type": "string",
+              "const": "recovered_without_baseline"
+            },
+            {
+              "type": "string",
+              "const": "deadline"
+            },
+            {
+              "type": "string",
+              "const": "capacity"
+            },
+            {
+              "type": "string",
+              "const": "limit"
+            },
+            {
+              "type": "string",
+              "const": "unreadable"
+            },
+            {
+              "type": "string",
+              "const": "binary"
+            },
+            {
+              "type": "string",
+              "const": "git"
+            },
+            {
+              "type": "string",
+              "const": "unsettled"
+            },
+            {
+              "type": "string",
+              "const": "missing_baseline"
+            }
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"id\":\"11111111111111111111111111111111\",\"epoch\":\"22222222222222222222222222222222\",\"scope\":{\"workspace\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"conversation\":{\"kind\":\"native\",\"id\":\"fixture\"}},\"turn\":\"turn\",\"execution\":\"1\",\"accepted_seq\":\"2\",\"live_seq\":\"9\",\"started_ms\":\"1000\",\"finished_ms\":\"2000\",\"phase\":\"partial\",\"changed_files\":2,\"added_lines\":9,\"removed_lines\":3,\"omissions\":[{\"kind\":\"binary\",\"count\":1}]}"
+    ]
+  },
+  "sha256": "aa0a2464f1a205d48e98c3db16ae16c9023783013bcf22f0cabde017373696e7"
+}

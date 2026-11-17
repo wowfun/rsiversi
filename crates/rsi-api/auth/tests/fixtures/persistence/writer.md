@@ -1,0 +1,1 @@
+Payloads are actual `rsi-api-auth` serde writer output captured by `src/registry.rs::persistence::capture_current_payload`. Inputs use synthetic identities and references; they contain no credentials. Version comes from the production `STORAGE_VERSION`. Capture refuses existing files; retained evidence is never refreshed. Runtime Domain admission tests own old-version refusal.

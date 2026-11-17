@@ -8,6 +8,33 @@ use rsi_ai_protocol::{
 };
 
 #[test]
+fn tool_result_allows_one_retention_notice_without_expanding_outer_message_limits() {
+    let content = vec![
+        MessageContent::Text {
+            text: "bounded".into()
+        };
+        257
+    ];
+    let result = Message::tool_result("call", content.clone(), false).unwrap();
+    let encoded = serde_json::to_value(&result).unwrap();
+    let decoded: Message = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(decoded, result);
+    assert!(Message::user(content.clone()).is_err());
+
+    let mut too_many = content;
+    too_many.push(MessageContent::Text {
+        text: "extra".into(),
+    });
+    assert!(Message::tool_result("call", too_many, false).is_err());
+    let mut encoded = encoded;
+    let nested = encoded["content"][0]["content"]["content"]
+        .as_array_mut()
+        .unwrap();
+    nested.push(nested[0].clone());
+    assert!(serde_json::from_value::<Message>(encoded).is_err());
+}
+
+#[test]
 fn composed_request_retentions_drop_on_a_small_stack_and_preserve_clone_ownership() {
     const CHILD: &str = "RSI_REQUEST_RETENTION_STACK_CHILD";
     if std::env::var_os(CHILD).is_none() {

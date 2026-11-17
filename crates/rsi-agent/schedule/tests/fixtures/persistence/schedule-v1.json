@@ -1,0 +1,174 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "reminders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          },
+          "allocated_rounds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "reservation": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "reminders",
+          "allocated_rounds",
+          "reservation"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "anchor_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "due_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "interval_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "consumed": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "prompt",
+            "anchor_ms",
+            "due_ms",
+            "interval_ms",
+            "active",
+            "consumed"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reminder_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "input": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/3"
+                }
+              ]
+            },
+            "occurrence_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "settled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "reminder_id",
+            "prompt",
+            "input",
+            "occurrence_ms",
+            "settled"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "message_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/4"
+                }
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "round",
+            "message_id",
+            "text"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"reminders\":[],\"allocated_rounds\":0,\"reservation\":null}",
+      "{\"reminders\":[{\"id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"anchor_ms\":301000,\"due_ms\":301000,\"interval_ms\":300000,\"active\":true,\"consumed\":false}],\"allocated_rounds\":0,\"reservation\":null}",
+      "{\"reminders\":[{\"id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"anchor_ms\":301000,\"due_ms\":601000,\"interval_ms\":300000,\"active\":true,\"consumed\":false}],\"allocated_rounds\":1,\"reservation\":{\"reminder_id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"input\":{\"owner\":\"schedule\",\"round\":1,\"message_id\":\"schedule-1dd817a70b9d0fbc4cf06cc389370e9d8d8216318149e3951155772823cb74ea\",\"text\":\"Scheduled reminder fixture at UTC Unix ms 301000. Automatic parent round 1/100.\\nCheck 中🦀\\nThis finite round cannot create or replenish reminders.\"},\"occurrence_ms\":301000,\"settled\":false}}"
+    ]
+  },
+  "sha256": "b9224d7a425426e9ef208bdb10d663abf3d7e665b3446179e6acc335f6f9d633"
+}

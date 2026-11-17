@@ -1,0 +1,44 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/definitions/0"
+        }
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "contract_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "schema": true,
+            "schema_digest": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "contract_id",
+            "version",
+            "schema",
+            "schema_digest"
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{}",
+      "{\"fixture\":{\"contract_id\":\"fixture\",\"version\":1,\"schema\":{\"properties\":{\"a\":{\"type\":\"string\"},\"z\":{\"type\":\"integer\"}},\"required\":[\"z\"],\"type\":\"object\"},\"schema_digest\":\"22277f0a8f6c87498c9dfcdea3f53c0d4edad637bf15cea178866a74e92e5b8f\"}}"
+    ]
+  },
+  "sha256": "86cc69d5e3d7bfbc81d8814545e64aadf0162fa8819b2efc309fac15f1a2791c"
+}

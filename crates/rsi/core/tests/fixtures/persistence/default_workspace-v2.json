@@ -1,0 +1,121 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/0"
+              }
+            ]
+          },
+          "coordinates": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/1"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/4"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "created_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "default": null
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "coordinates",
+          "name",
+          "created_at_ms"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "location": {
+              "$ref": "#/definitions/2"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "location",
+            "path"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/3"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"id\":\"0202020202020202020202020202020202020202020202020202020202020202\",\"coordinates\":{\"location\":{\"kind\":\"local\"},\"path\":\"/fixture/中\"},\"name\":\"fixture 中🦀\",\"created_at_ms\":123456}"
+    ]
+  },
+  "sha256": "97c2734fdc756609450aef191ce8becf69d64634205f8f79897ead279a741e6f"
+}

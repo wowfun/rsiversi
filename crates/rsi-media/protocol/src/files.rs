@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 
 /// Immutable verbatim file identity, independent of its storage location.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct FileRef {
     id: MediaId,
     name: String,

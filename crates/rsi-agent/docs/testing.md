@@ -28,6 +28,11 @@ revision, and runs the two process-generation tests with `RSI_EXTENSION_NODE` an
 `RSI_DSH_INSTALLED_COHORT`. It records package receipts and test logs. Dispatch
 requires a published bridge commit containing the tested protocol; a dirty local
 bridge checkout is local acceptance evidence, not proof of a runnable CI revision.
+The native-sized Tool body publication/reload acceptance uses a two-worker Tokio
+runtime, matching the CLI and Desktop runtime shape. Large synchronous
+serialization and reconstruction must not occupy the only thread servicing
+process pipes and heartbeat deadlines. The process watchdog and body limits
+remain unchanged in this fixture.
 Time-context tests cover the default refresh interval, exact expiry, clock
 rollback and zero interval. Context tests distinguish claimed, omitted, emptied
 and entered input, including checkpoint recovery, selected fork history and Turn
@@ -88,6 +93,12 @@ Kernel shutdown or finish cold proof reads wait for that final lease before
 offline verification: a bounded wait may retry only `WriterLocked`, while any
 other verification result is asserted immediately. Kernel worker completion or a
 proof result alone does not prove that every SQLite job owner has closed.
+The fork-reader lifetime test keeps an idle reader across Kernel shutdown and
+owner release, proves that later reads fail, and verifies the Store offline while
+that reader is still held.
+Paused checkpoint reads reject loss of maintenance Session availability during
+their final inherited page. Nested reads recheck an already-consumed ancestor's
+availability without reauthenticating its immutable boundary.
 Metadata scans above the validation-cache capacity
 must not validate history. Canonical pages remain readable with unrelated damaged
 indexes, reject selected malformed rows and missing coordinates, and leave proof
@@ -160,8 +171,11 @@ queued acceptances before the first queued turn is claimed, then proves that
 the claim replays its own acceptance and excludes the later prompt.
 Race tests also prove a claim read cannot skip a prefix committed while Store
 I/O is in flight, and that a later turn accepted during that I/O cannot cross
-the claim's already captured live horizon. Repeated invalid resumes of
-historical idle sessions do not consume the resident-session bound. Capacity rejection leaves turn control
+the claim's already captured live horizon. A byte-limited durable page with a
+captured speculative suffix must resume through every durable
+Fact before returning that suffix, even when the page has spare count capacity.
+Repeated invalid resumes of historical idle sessions do not consume the
+resident-session bound. Capacity rejection leaves turn control
 unchanged and succeeds after the admitted prefix is flushed; checkpoint Store
 I/O failures remain typed at the executor-facing seam, and mutated terminal
 claims cannot invoke checkpoint maintenance. A tightened Store-read

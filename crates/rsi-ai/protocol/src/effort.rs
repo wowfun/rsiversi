@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, fmt};
 pub const MAX_REASONING_EFFORT_BYTES: usize = 32;
 
 /// Actual generation-pinned reasoning and capacity facts for one prepared request.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedLanguageSettings {
     /// Explicit caller choice; absent means the adapter default was requested.
@@ -68,7 +68,9 @@ impl PreparedLanguageSettings {
 }
 
 /// An exact adapter-owned identifier, without ordinal or cross-provider semantics.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+)]
 #[serde(try_from = "String", into = "String")]
 pub struct ReasoningEffortId(String);
 
@@ -109,7 +111,7 @@ impl fmt::Display for ReasoningEffortId {
 }
 
 /// Complete supported choices and known default from one prepared adapter generation.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningEffortProfile {
     supported: Vec<ReasoningEffortId>,

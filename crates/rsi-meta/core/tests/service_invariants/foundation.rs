@@ -98,6 +98,10 @@ impl PluginFactory for CleanupHolder {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one lifecycle probe keeps retirement, holder calls, shutdown and final cleanup together"
+)]
 async fn existing_holder_window(dynamic_withdrawal: bool, shutdown: bool) {
     let runtime = Runtime::default();
     let captured = Arc::new(CleanupHolder::default());

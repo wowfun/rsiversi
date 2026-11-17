@@ -1,0 +1,262 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "config": {
+            "$ref": "#/definitions/0"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "config"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/1"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "servers"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "resource_templates": {
+              "type": "boolean",
+              "default": false
+            },
+            "transport": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "enabled",
+            "tools",
+            "resource_templates",
+            "transport"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "credential": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/3"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "streamable_http"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "url",
+                "credential"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "program": {
+                  "type": "string"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "cwd": {
+                  "type": "string"
+                },
+                "environment": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/definitions/4"
+                  },
+                  "default": {}
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "stdio"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "program",
+                "arguments",
+                "cwd",
+                "environment"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/5"
+                    }
+                  ]
+                },
+                "command": {
+                  "type": "string"
+                },
+                "arguments": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": []
+                },
+                "cwd": {
+                  "type": "string"
+                },
+                "environment": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/definitions/4"
+                  },
+                  "default": {}
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh_stdio"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target",
+                "command",
+                "arguments",
+                "cwd",
+                "environment"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "slot": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "slot"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "literal"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reference": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/3"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "credential"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "reference"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"revision\":0,\"config\":{\"servers\":[]}}",
+      "{\"revision\":7,\"config\":{\"servers\":[{\"id\":\"fixture\",\"enabled\":false,\"tools\":[\"lookup\"],\"resource_templates\":true,\"transport\":{\"kind\":\"ssh_stdio\",\"target\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"command\":\"node\",\"arguments\":[\"server.js\"],\"cwd\":\"/fixture\",\"environment\":{\"TEXT\":{\"kind\":\"literal\",\"value\":\"中🦀\"},\"TOKEN\":{\"kind\":\"credential\",\"reference\":{\"owner\":\"rsi.mcp\",\"slot\":\"fixture\"}}}}}]}}"
+    ]
+  },
+  "sha256": "fedfc97fe40d914e54dff5707720b4f9a9a6bed39120977ab93b75800aa06d98"
+}

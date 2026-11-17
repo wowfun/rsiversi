@@ -1,0 +1,86 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/definitions/0"
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/1"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "endpoint",
+          "devices"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "record": {
+              "$ref": "#/definitions/2"
+            },
+            "token_hash": {
+              "type": "string"
+            },
+            "credential_retired": {
+              "type": "boolean",
+              "default": false
+            },
+            "managed": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "record",
+            "token_hash",
+            "credential_retired"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/3"
+                }
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "label"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"endpoint\":\"01010101010101010101010101010101\",\"devices\":[]}",
+      "{\"endpoint\":\"01010101010101010101010101010101\",\"devices\":[{\"record\":{\"id\":\"02020202020202020202020202020202\",\"label\":\"fixture 中🦀\"},\"token_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"credential_retired\":false},{\"record\":{\"id\":\"03030303030303030303030303030303\",\"label\":\"retired fixture\"},\"token_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"credential_retired\":true,\"managed\":\"web\"}]}"
+    ]
+  },
+  "sha256": "f894a66ff61fe1992915e3384abc43a3dad038b5b9db7615c4a4efe4cd47b30e"
+}

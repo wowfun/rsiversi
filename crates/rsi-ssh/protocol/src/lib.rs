@@ -37,7 +37,7 @@ pub enum SshInputError {
 pub type Result<T> = std::result::Result<T, SshInputError>;
 
 /// Exact network endpoint, without an OpenSSH alias or configurable options.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SshEndpoint {
     host: String,
     port: u16,
@@ -101,7 +101,7 @@ impl<'de> Deserialize<'de> for SshEndpoint {
 }
 
 /// Canonical bounded public-key wire bytes selected by the Local trust owner.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SshHostKey {
     algorithm: String,
     base64: String,

@@ -1,0 +1,31 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "web_fetch": {
+            "type": "boolean"
+          },
+          "web_search": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "web_fetch",
+          "web_search"
+        ]
+      },
+      "definitions": []
+    },
+    "samples": [
+      "{\"web_fetch\":false,\"web_search\":false}",
+      "{\"web_fetch\":true,\"web_search\":false}",
+      "{\"web_fetch\":false,\"web_search\":true}",
+      "{\"web_fetch\":true,\"web_search\":true}"
+    ]
+  },
+  "sha256": "ef6576677393771f4dc4d0ffa6b2e7e5f7455b2130abcaee470715fd96ce6550"
+}

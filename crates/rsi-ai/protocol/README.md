@@ -24,6 +24,9 @@ events and results, strict assemblers, safe provider errors, locator-free media
 descriptors, and prepared-call facts. Exact request JSON shapes live in
 the [product schemas](../../../schemas/rsi-ai/README.md); aggregate and temporal
 invariants remain enforced by this package.
+Nested Tool results admit the Tools protocol's complete content array plus one
+text block for retention notices. Outer message, media and request byte limits
+remain independent; Context never drops legal images to make room for a notice.
 
 `TokenUsage` totals are inclusive: input includes cache-read/cache-write tokens,
 and output includes reasoning tokens. The disjoint cache buckets cannot exceed

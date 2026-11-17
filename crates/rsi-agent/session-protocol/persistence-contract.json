@@ -1,0 +1,6 @@
+{
+  "target": {
+    "kind": "integration",
+    "name": "persistence"
+  }
+}

@@ -40,7 +40,7 @@ impl ExecutionLocations {
 }
 
 /// Stable identity assigned by the target owner, independent of connection epochs.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ExecutionTargetId(String);
 
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for ExecutionTargetId {
 }
 
 /// Filesystem and execution location, without permission to use it.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionLocation {
     /// The Service machine, regardless of the connecting client's platform.
@@ -110,7 +110,7 @@ impl<'de> Deserialize<'de> for ExecutionLocation {
 }
 
 /// A target-owned canonical directory spelling, without filesystem or grant authority.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ExecutionCoordinates {
     location: ExecutionLocation,
     path: String,

@@ -25,7 +25,7 @@ pub const MAXIMUM_AUDIO_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAXIMUM_IMAGE_DIMENSION: u32 = 65_535;
 
 /// Media class whose durable bytes travel separately from semantic JSON.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaKind {
     /// Still-image bytes with an `image/` MIME type.
@@ -35,7 +35,7 @@ pub enum MediaKind {
 }
 
 /// Locator-free durable identity and bounded metadata for one media body.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaDescriptor {
     kind: MediaKind,
@@ -223,7 +223,7 @@ impl MediaDescriptor {
 }
 
 /// Lowercase SHA-256 identity of canonical media bytes.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct MediaId(String);
 
@@ -266,7 +266,7 @@ impl fmt::Display for MediaId {
 }
 
 /// Display metadata for one image occurrence, independent of its content identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagePresentation {
     /// Publisher-selected display name with local path components removed.
@@ -298,7 +298,7 @@ fn image_display_name<'de, D: serde::Deserializer<'de>>(
 }
 
 /// Positive source pixel dimensions supplied for display.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDimensions {
     /// Width after orientation.
@@ -308,7 +308,7 @@ pub struct ImageDimensions {
 }
 
 /// Immutable canonical image reference.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaRef {
     /// Content identity of final canonical bytes.
@@ -486,7 +486,7 @@ impl LocalContract for MediaBackendContract {
 }
 
 /// Bounded image normalization and durable reference service.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageImportOptions {
     /// Caller-tightened bound on canonical PNG bytes, enforced before publication.

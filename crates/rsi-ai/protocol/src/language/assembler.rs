@@ -9,7 +9,7 @@ use super::{
 /// Collects output after applying the shared stream grammar.
 /// Serialization exposes diagnostic state, not a resumable checkpoint. Restore
 /// reconstructs an assembler only by applying validated events.
-#[derive(Debug, Default, Serialize)]
+#[derive(schemars::JsonSchema, Debug, Default, Serialize)]
 pub struct LanguageAssembler {
     #[serde(skip)]
     grammar: LanguageStreamValidator,

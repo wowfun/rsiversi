@@ -36,6 +36,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Opaque product-local external conversation identity, unrelated to native Session IDs.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(transparent)]
+#[derive(schemars::JsonSchema)]
 pub struct ConversationId(String);
 impl ConversationId {
     /// Validates at most 128 ASCII identifier bytes.

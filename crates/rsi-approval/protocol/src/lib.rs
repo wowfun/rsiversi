@@ -227,7 +227,7 @@ fn encoded_json_len(value: &impl Serialize) -> Result<usize> {
 }
 
 /// Closed approval choice.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     /// Permit this one request.
@@ -237,7 +237,7 @@ pub enum ApprovalDecision {
 }
 
 /// Decision with durable-safe provenance.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalOutcome {
     /// Final decision.

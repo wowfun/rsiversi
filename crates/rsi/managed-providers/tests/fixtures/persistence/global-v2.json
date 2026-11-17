@@ -1,0 +1,69 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "deployments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "deployments"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "config": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "config"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "openai"
+            },
+            {
+              "type": "string",
+              "const": "openai-compatible"
+            },
+            {
+              "type": "string",
+              "const": "deepseek"
+            }
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"revision\":0,\"deployments\":[]}",
+      "{\"revision\":7,\"deployments\":[{\"provider\":\"deepseek\",\"config\":{\"deployment\":\"fixture-0\",\"credential\":{\"owner\":\"rsi.ai.provider.deepseek\",\"key\":\"synthetic-reference\"},\"models\":[\"中\",\"model\"],\"ordered\":{\"z\":1,\"a\":2}}},{\"provider\":\"openai\",\"config\":{\"deployment\":\"fixture-1\",\"credential\":{\"owner\":\"rsi.ai.provider.openai\",\"key\":\"synthetic-reference\"},\"models\":[\"中\",\"model\"],\"ordered\":{\"z\":1,\"a\":2}}},{\"provider\":\"openai-compatible\",\"config\":{\"deployment\":\"fixture-2\",\"credential\":{\"owner\":\"rsi.ai.provider.openai-compatible\",\"key\":\"synthetic-reference\"},\"models\":[\"中\",\"model\"],\"ordered\":{\"z\":1,\"a\":2}}}]}"
+    ]
+  },
+  "sha256": "d1a422dbe4f5b21747a4edfb9299a00683b5b3696be97321746eafc8d9240a31"
+}

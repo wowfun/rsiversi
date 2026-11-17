@@ -1,0 +1,78 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/1"
+            }
+          },
+          "checkpoint": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/2"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "segments",
+          "sessions",
+          "checkpoint"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "first": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "count": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "byte_len": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "first",
+            "count",
+            "sha256",
+            "byte_len"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {}
+      ]
+    },
+    "samples": [
+      "{\"segments\":[],\"sessions\":[],\"checkpoint\":null}",
+      "{\"segments\":[{\"first\":0,\"count\":1,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"byte_len\":9}],\"sessions\":[\"fixture\"],\"checkpoint\":{\"z\":1,\"a\":\"中🦀\",\"optional\":null}}"
+    ]
+  },
+  "sha256": "44c2a6d0e83ba627ec729928b685ebcf2d8984a8cf8feb7b79788b9515c9c4b9"
+}

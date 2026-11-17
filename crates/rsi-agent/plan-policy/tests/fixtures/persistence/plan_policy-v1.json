@@ -1,0 +1,16 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "boolean"
+      },
+      "definitions": []
+    },
+    "samples": [
+      "false",
+      "true"
+    ]
+  },
+  "sha256": "34f598da60d4a3e66002eaa14b1e631e9e8bd26342835b8a3d4e3779b8714f0d"
+}

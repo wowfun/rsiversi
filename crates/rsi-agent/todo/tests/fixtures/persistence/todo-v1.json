@@ -1,0 +1,52 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/0"
+        }
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/1"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "content",
+            "status"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pending"
+            },
+            {
+              "type": "string",
+              "const": "in_progress"
+            },
+            {
+              "type": "string",
+              "const": "completed"
+            }
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "[]",
+      "[{\"content\":\"fixture 中🦀 \\\" \\\\\",\"status\":\"pending\"},{\"content\":\"fixture 中🦀 \\\" \\\\\",\"status\":\"in_progress\"},{\"content\":\"fixture 中🦀 \\\" \\\\\",\"status\":\"completed\"}]"
+    ]
+  },
+  "sha256": "37ec2e675ddcb054a4366f8b9c301378eb085c0d1f8cb059913d691b05978844"
+}

@@ -1,0 +1,70 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/0"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "model": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "reasoning_effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/2"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "reasoning_effort"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "deployment": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "deployment",
+            "model"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "null",
+      "{\"model\":{\"deployment\":\"fixture\",\"model\":\"model\"},\"reasoning_effort\":null}"
+    ]
+  },
+  "sha256": "c9829c91d557034aa7a4bba981491eea16d169ae5d746067d5e5717f7ec92dbe"
+}

@@ -1,0 +1,16 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "string"
+      },
+      "definitions": []
+    },
+    "samples": [
+      "\"\"",
+      "\"seed 中🦀 \\\" \\\\ \\n\""
+    ]
+  },
+  "sha256": "8915c34164960dff28384dddc30ccd500cbe14ffb5e15b87d88fe204e8e4a99c"
+}

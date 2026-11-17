@@ -1,0 +1,35 @@
+{
+  "payload": {
+    "version": 5,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "high_water": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "display_order": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "high_water"
+        ]
+      },
+      "definitions": []
+    },
+    "samples": [
+      "{\"high_water\":0}",
+      "{\"high_water\":9,\"display_order\":[7,3]}"
+    ]
+  },
+  "sha256": "f92f8266b471a9cf28fd1ab2a0f75a71f0cbc87dcddfdf9f641c16cc13647574"
+}

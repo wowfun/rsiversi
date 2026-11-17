@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_DISCOVERED_MODELS: usize = 4096;
 pub const MAX_DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveredModel {
     pub id: String,

@@ -1,0 +1,276 @@
+{
+  "payload": {
+    "version": 4,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "scopes"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "principal": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "scope": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/4"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "principal",
+            "scope"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "device"
+                },
+                "id": {
+                  "$ref": "#/definitions/2"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "agent"
+                },
+                "id": {
+                  "$ref": "#/definitions/3"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/5"
+                    }
+                  ]
+                },
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/6"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "profile"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target",
+                "operation"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/7"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh_use"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/7"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh_manage"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/7"
+                    }
+                  ]
+                },
+                "server": {
+                  "type": "string"
+                },
+                "credentials": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/8"
+                  }
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "ssh_stdio"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "target",
+                "server",
+                "credentials"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "leaf": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "root",
+            "profile",
+            "leaf"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "enable"
+            },
+            {
+              "type": "string",
+              "const": "disable"
+            },
+            {
+              "type": "string",
+              "const": "configuration"
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "slot": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "slot"
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"revision\":\"0\",\"scopes\":[]}",
+      "{\"revision\":\"7\",\"scopes\":[{\"principal\":{\"kind\":\"local\"},\"scope\":{\"kind\":\"profile\",\"target\":{\"root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"default\",\"leaf\":\"rsi.fixture\"},\"operation\":\"configuration\"}}]}"
+    ]
+  },
+  "sha256": "552b3d6d01c3a86754f343f409b319dbc2c61ea8018bd6a470f0de727d64033b"
+}

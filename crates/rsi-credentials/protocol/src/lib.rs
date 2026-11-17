@@ -19,8 +19,10 @@ pub const MAXIMUM_SECRET_BYTES: usize = 64 * 1024;
 /// Stable, non-secret credential address.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct CredentialRef {
     /// Stable owner plugin identity.
+    #[schemars(with = "String")]
     pub owner: PluginId,
     /// Owner-local slot.
     pub slot: String,
@@ -95,7 +97,7 @@ impl fmt::Debug for SecretValue {
 }
 
 /// Non-secret provenance of one resolution.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CredentialSource {
     /// Historical OS keyring provenance in durable call facts.

@@ -1,0 +1,39 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "devices": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "devices"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"revision\":0,\"devices\":[]}",
+      "{\"revision\":9,\"devices\":[\"02020202020202020202020202020202\",\"03030303030303030303030303030303\"]}"
+    ]
+  },
+  "sha256": "e8174583ccaa566ff8d78ac7b04300af8f6bc5de6651452bd7d7848e52a4bfc2"
+}

@@ -12,6 +12,7 @@ use crate::{
 
 pub const MAX_MESSAGES: usize = 256;
 pub const MAX_BLOCKS_PER_MESSAGE: usize = 256;
+const MAX_TOOL_RESULT_BLOCKS: usize = rsi_tools_protocol::MAXIMUM_TOOL_CONTENT_ITEMS + 1;
 pub const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 pub const MAX_STOP_SEQUENCES: usize = 8;
 pub const MAX_STOP_SEQUENCE_BYTES: usize = 1_024;
@@ -25,7 +26,7 @@ pub const MAX_ACCEPTED_PROVIDER_EXTENSIONS: usize = 64;
 pub const MAX_LANGUAGE_MODEL_PROFILES: usize = 256;
 
 /// Provider wire family used to project caller-owned tools and rich results.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolDialect {
     /// `OpenAI` Responses function and custom-tool items.
@@ -35,7 +36,7 @@ pub enum ToolDialect {
 }
 
 /// Provider wire projection for an image-bearing tool result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageToolResultMode {
     /// Text and image blocks remain in one Responses function-call output.
@@ -45,7 +46,7 @@ pub enum ImageToolResultMode {
 }
 
 /// Whether a generation-pinned language route accepts image tool results.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "support",
     content = "mode",
@@ -63,7 +64,7 @@ pub enum ImageToolResultCapability {
 
 /// Exact token capacities configured for one language-model identifier.
 #[allow(clippy::struct_field_names)] // The repeated suffix is part of the explicit wire unit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageModelLimits {
     context_window_tokens: u32,
@@ -211,7 +212,7 @@ impl LanguageModelProfiles {
 }
 
 /// Exact namespace and version of provider-private state accepted on replay.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderExtensionFormat {
     namespace: String,
@@ -270,7 +271,7 @@ impl ProviderExtensionFormat {
 }
 
 /// Provider-I/O-free capabilities captured before one language request is built.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageProfile {
     context_window_tokens: u32,
@@ -491,7 +492,7 @@ fn validate_language_model_limits(
 }
 
 /// Role attached to one provider-neutral message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     /// Product-level instruction with highest request precedence.
@@ -507,7 +508,7 @@ pub enum MessageRole {
 }
 
 /// One rich message block.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     content = "content",
@@ -552,7 +553,7 @@ pub enum MessageContent {
 }
 
 /// A complete provider-neutral message.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
     role: MessageRole,
@@ -725,7 +726,7 @@ fn validate_message_content(
         } => {
             validation::identifier(&format!("{field}.call_id"), call_id)
                 .map_err(|reason| SemanticError::new("message.invalid_content", field, reason))?;
-            if content.is_empty() || content.len() > MAX_BLOCKS_PER_MESSAGE {
+            if content.is_empty() || content.len() > MAX_TOOL_RESULT_BLOCKS {
                 return Err(SemanticError::new(
                     "message.invalid_content",
                     field,
@@ -784,7 +785,7 @@ fn validate_reasoning_content(text: &str, field: &str) -> Result<(), SemanticErr
 }
 
 /// Function-tool selection policy.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     content = "name",
@@ -803,7 +804,7 @@ pub enum ToolChoice {
 }
 
 /// A provider-executed tool with shared cross-provider semantics.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostedTool {
     /// Requests provider-hosted web search.
@@ -814,7 +815,7 @@ pub enum HostedTool {
 }
 
 /// Requested language output representation.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseFormat {
     /// Ordinary text or tool-call output.
@@ -869,7 +870,7 @@ impl<'de> Deserialize<'de> for ResponseFormat {
 
 /// Optional generation controls. Unsupported controls must be rejected by the
 /// selected adapter during Prepare, never silently omitted.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageSettings {
     max_output_tokens: Option<u32>,
@@ -1211,7 +1212,7 @@ impl LanguageRequestOptions {
 
 // The budget and request use this same wire view; field additions cannot silently
 // omit overhead from one serialization path.
-#[derive(Serialize)]
+#[derive(schemars::JsonSchema, Serialize)]
 struct LanguageRequestWire<'a> {
     messages: &'a [Message],
     tools: &'a [ToolDefinition],
@@ -1223,7 +1224,8 @@ struct LanguageRequestWire<'a> {
 }
 
 /// One validated language request; cloned requests share immutable backing storage.
-#[derive(Clone)]
+#[derive(schemars::JsonSchema, Clone)]
+#[schemars(with = "LanguageRequestWire<'static>")]
 pub struct LanguageRequest {
     data: std::sync::Arc<LanguageRequestData>,
     retention: Option<std::sync::Arc<Vec<std::sync::Arc<dyn Send + Sync>>>>,

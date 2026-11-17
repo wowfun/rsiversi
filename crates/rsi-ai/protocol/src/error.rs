@@ -25,7 +25,7 @@ pub fn sanitize_error_summary(value: &str) -> String {
 }
 
 /// Provider-neutral category of an AI operation failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// The caller supplied a request outside the provider-neutral contract.
@@ -118,7 +118,7 @@ impl ErrorKind {
 }
 
 /// Operation phase in which a failure became observable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorPhase {
     /// Request validation and provider preparation before external I/O.
@@ -142,7 +142,7 @@ pub enum ErrorPhase {
 }
 
 /// What is known about whether an external request crossed its effect seam.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchStatus {
     /// No provider attempt was created.
@@ -156,7 +156,7 @@ pub enum DispatchStatus {
 }
 
 /// Safe, serializable provider failure facts. Policy decides retryability.
-#[derive(Clone, Debug, Eq, Error, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Error, PartialEq, Serialize)]
 #[error("{safe_summary}")]
 #[serde(deny_unknown_fields)]
 pub struct AiError {

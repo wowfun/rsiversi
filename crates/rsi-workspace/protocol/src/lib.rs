@@ -34,6 +34,7 @@ fn parse_identity(value: String) -> Result<String> {
 /// Opaque identity of one host-local Workspace registration.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
+#[derive(schemars::JsonSchema)]
 pub struct WorkspaceId(String);
 
 impl WorkspaceId {
@@ -70,6 +71,7 @@ impl<'de> Deserialize<'de> for WorkspaceId {
 /// Stable key for complete execution coordinates, independent of registration.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
+#[derive(schemars::JsonSchema)]
 pub struct WorkspaceKey(String);
 
 impl WorkspaceKey {
@@ -126,6 +128,7 @@ pub const MAXIMUM_WORKSPACE_PATH_BYTES: usize = rsi_workspace_path::MAXIMUM_HOST
 /// Validated custom display name, independent of filesystem identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
+#[derive(schemars::JsonSchema)]
 pub struct WorkspaceName(String);
 impl WorkspaceName {
     /// Validates a trimmed, bounded name at an input boundary.
@@ -199,6 +202,7 @@ pub struct WorkspacePage {
 /// Durable workspace registration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct WorkspaceRecord {
     /// Opaque identity of this registration lifetime.
     pub id: WorkspaceId,

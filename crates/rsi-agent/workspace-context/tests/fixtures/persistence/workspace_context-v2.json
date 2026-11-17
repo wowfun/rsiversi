@@ -1,0 +1,74 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "instructions_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skill_catalog_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scanned_session": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/0"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scanned_turn": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "through_fact_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "incomplete_reported": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "instructions_sha256",
+          "skill_catalog_sha256",
+          "scanned_session",
+          "scanned_turn",
+          "through_fact_seq",
+          "incomplete_reported"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"instructions_sha256\":null,\"skill_catalog_sha256\":null,\"scanned_session\":null,\"scanned_turn\":null,\"through_fact_seq\":0,\"incomplete_reported\":false}",
+      "{\"instructions_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"skill_catalog_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"scanned_session\":\"fixture\",\"scanned_turn\":\"turn\",\"through_fact_seq\":12,\"incomplete_reported\":true}"
+    ]
+  },
+  "sha256": "59b06c089aa63e906229134319b27836f6612762895b341926ac5caa1b3a7fba"
+}

@@ -1,0 +1,76 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/0"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turn": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "through_fact_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "turn",
+          "through_fact_seq",
+          "name",
+          "signature",
+          "count"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "samples": [
+      "{\"session\":null,\"turn\":null,\"through_fact_seq\":0,\"name\":null,\"signature\":null,\"count\":0}",
+      "{\"session\":\"fixture\",\"turn\":\"turn\",\"through_fact_seq\":9,\"name\":\"read_file\",\"signature\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"count\":3}"
+    ]
+  },
+  "sha256": "f3634b44923d09445bc138caecf86406b5a504d81cd8fd28d2b61897d8b4aca9"
+}

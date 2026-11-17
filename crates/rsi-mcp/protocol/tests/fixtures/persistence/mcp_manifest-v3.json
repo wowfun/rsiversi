@@ -1,0 +1,240 @@
+{
+  "payload": {
+    "version": 3,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "servers"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "target_sha256": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "type": "string"
+            },
+            "server_info": {},
+            "capabilities": {},
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/1"
+              }
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/3"
+              }
+            },
+            "templates": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/4"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "target_sha256",
+            "protocol_version",
+            "server_info",
+            "capabilities",
+            "instructions",
+            "tools",
+            "resources",
+            "templates"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "definition": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            },
+            "selected": {
+              "type": "boolean"
+            },
+            "public_name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "definition",
+            "selected",
+            "public_name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inputSchema": {},
+            "outputSchema": {},
+            "annotations": {}
+          },
+          "required": [
+            "name",
+            "inputSchema"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mimeType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "uri",
+            "name"
+          ],
+          "additionalProperties": true
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "disabled"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "unsupported"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "templates": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/5"
+                  }
+                },
+                "state": {
+                  "type": "string",
+                  "const": "available"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "templates"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "uriTemplate": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mimeType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "uriTemplate",
+            "name"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "samples": [
+      "{\"servers\":[]}",
+      "{\"servers\":[{\"id\":\"fixture\",\"target_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocol_version\":\"2026-07-28\",\"server_info\":{\"name\":\"fixture\",\"version\":\"1\"},\"capabilities\":{\"tools\":{},\"resources\":{}},\"instructions\":\"fixture 中🦀\",\"tools\":[{\"definition\":{\"name\":\"lookup\",\"title\":\"Lookup\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"z\":{\"type\":\"integer\"},\"a\":{\"type\":\"string\"}}},\"outputSchema\":{\"type\":\"string\"},\"annotations\":{\"readOnlyHint\":true},\"x-fixture\":{\"z\":1,\"a\":2}},\"selected\":true,\"public_name\":\"mcp__fixture__lookup_d50e2c757389\"}],\"resources\":[{\"uri\":\"fixture://document\",\"name\":\"Document\",\"description\":\"fixture\",\"mimeType\":\"text/plain\"}],\"templates\":{\"state\":\"available\",\"templates\":[]}}]}"
+    ]
+  },
+  "sha256": "e6210ac91953924ea026559674eff5f5efa8969fe0f4333a1b031d1c9e577291"
+}

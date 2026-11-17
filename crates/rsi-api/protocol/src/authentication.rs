@@ -7,7 +7,7 @@ use std::fmt;
 use tokio_util::sync::CancellationToken;
 
 /// Non-secret device information available to the local operator.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceRecord {
     /// Exact registered device identity.

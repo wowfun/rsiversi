@@ -25,7 +25,9 @@ pub const MAXIMUM_DEPENDENCY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAXIMUM_STREAM_EVENTS: usize = 65_536;
 
 /// Additional normalized Language features explicitly supported by one model.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageFeature {
     /// Image inputs outside Tool results.
@@ -41,7 +43,7 @@ pub enum LanguageFeature {
 }
 
 /// Exact model declaration used before resolving effect dependencies.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageModel {
     /// Exact model identifier, without aliases.
@@ -55,7 +57,9 @@ pub struct LanguageModel {
 }
 
 /// Optional Image request features supported by one model.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFeature {
     /// Existing images may be supplied as editing inputs.
@@ -65,7 +69,7 @@ pub enum ImageFeature {
 }
 
 /// Exact Image model declaration with bounded count and input support.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageModel {
     /// Exact model identifier.
@@ -77,7 +81,7 @@ pub struct ImageModel {
 }
 
 /// Complete immutable native provider declarations, read before route publication.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Description {
     /// Exact Language model declarations.
@@ -87,7 +91,7 @@ pub struct Description {
 }
 
 /// Frozen Language input shared unchanged by Prepare and Start.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageInput {
     /// Exact model name within the selected deployment.
@@ -120,7 +124,7 @@ impl LanguageInput {
 }
 
 /// Frozen Image input shared unchanged by Prepare and Start.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageInput {
     /// Exact model name within the selected deployment.
@@ -132,7 +136,7 @@ pub struct ImageInput {
 }
 
 /// Initial request for a Portable provider call. Binary dependency replies have no JSON form.
-#[derive(Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
     /// Reads capabilities without credentials, media or provider I/O.
@@ -154,7 +158,7 @@ pub enum ControlRequest {
 }
 
 /// Image stream metadata; chunk bytes are the immediately following binary packet.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageHeader {
     /// Opens an output at the exact index.
@@ -170,7 +174,7 @@ pub enum ImageHeader {
 }
 
 /// Native-to-host control and normalized stream messages.
-#[derive(Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
     /// Complete capabilities returned only to Describe.

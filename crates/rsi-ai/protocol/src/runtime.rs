@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_credentials_protocol::CredentialSource;
 use rsi_meta_contract::LocalContract;
-use serde::{Deserialize, Serialize, ser::SerializeStruct as _};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Exact live deployment and model selection.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRef {
     deployment: String,
@@ -70,7 +70,7 @@ impl ModelRef {
 }
 
 /// Public AI capability attached to a prepared snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiCapability {
     /// Text, multimodal understanding, reasoning, and tool calls.
@@ -80,7 +80,7 @@ pub enum AiCapability {
 }
 
 /// Finite retry facts interpreted only by a durable orchestrator.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPolicy {
     max_retries: u8,
@@ -238,7 +238,7 @@ impl Default for RetryPolicy {
 }
 
 /// Redacted, persistable facts frozen before external provider I/O.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedCallSnapshot {
     /// Caller-visible call identity unique within the router generation.
@@ -385,7 +385,7 @@ pub type LanguageStream =
 pub type ImageStream = Pin<Box<dyn Stream<Item = Result<ImageEvent, AiError>> + Send + 'static>>;
 
 /// Current provider-side state of one explicitly deferred language response.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeferredStatus {
     /// Accepted remotely but not yet executing.
@@ -408,7 +408,8 @@ impl DeferredStatus {
 }
 
 /// Persistable cursor for a provider-managed background language response.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq)]
+#[schemars(with = "DeferredCheckpointWire<'static>")]
 pub struct DeferredLanguageCheckpoint {
     identity: Arc<DeferredLanguageIdentity>,
     status: DeferredStatus,
@@ -423,19 +424,30 @@ struct DeferredLanguageIdentity {
     operation_id: String,
 }
 
+#[derive(schemars::JsonSchema, Serialize)]
+struct DeferredCheckpointWire<'a> {
+    call: &'a PreparedCallSnapshot,
+    operation_id: &'a str,
+    status: DeferredStatus,
+    event_stream_terminal: bool,
+    sequence_number: Option<u64>,
+    provider_state: Option<&'a ProviderExtension>,
+}
+
 impl Serialize for DeferredLanguageCheckpoint {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut wire = serializer.serialize_struct("DeferredLanguageCheckpoint", 6)?;
-        wire.serialize_field("call", &self.identity.call)?;
-        wire.serialize_field("operation_id", &self.identity.operation_id)?;
-        wire.serialize_field("status", &self.status)?;
-        wire.serialize_field("event_stream_terminal", &self.event_stream_terminal)?;
-        wire.serialize_field("sequence_number", &self.sequence_number)?;
-        wire.serialize_field("provider_state", &self.provider_state)?;
-        wire.end()
+        DeferredCheckpointWire {
+            call: &self.identity.call,
+            operation_id: &self.identity.operation_id,
+            status: self.status,
+            event_stream_terminal: self.event_stream_terminal,
+            sequence_number: self.sequence_number,
+            provider_state: self.provider_state.as_ref(),
+        }
+        .serialize(serializer)
     }
 }
 
@@ -702,7 +714,7 @@ pub trait PreparedImageCall: fmt::Debug + Send + 'static {
 }
 
 /// Exact-route Language router service.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LanguageModelPage {
     /// Exact models in strict ascending order, after the requested exclusive cursor.
