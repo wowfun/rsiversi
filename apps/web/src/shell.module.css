@@ -204,8 +204,7 @@
 :global(.workbench.navigation-hidden):where(.scope, .scope *) {
   --left-width: 0px;
 }
-:global(.workbench.resources-closed):where(.scope, .scope *),
-:global(.workbench.showing-settings):where(.scope, .scope *) {
+:global(.workbench.resources-closed):where(.scope, .scope *) {
   --right-width: 0px;
 }
 :global(.workbench > .sidebar):where(.scope, .scope *),

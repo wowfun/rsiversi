@@ -1,5 +1,5 @@
 import css from "./conversation.module.css";
-import {workspaceName} from '../workspace-name.js';
+import {conversationTitle} from '../conversation-title.js';
 import { SessionSurfaces } from "./session/surface.tsx";
 import { useState, useLayoutEffect } from "react";
 import { useLayout } from "./presentation.tsx";
@@ -19,13 +19,9 @@ export function Conversation() {
     window.dispatchEvent(new Event("rsi:detail-mode"));
   }, [mode]);
   const surface = useView((view) => view?.surfaces[selected]);
-  const title = useView(view => {
-    const selectedSurface = view?.surfaces[selected];
-    const active = selectedSurface?.kind === "native" ? selectedSurface : undefined;
-    const entries = [...(view?.navigation?.entries ?? []), ...Object.values(view?.navigation?.groups ?? {}).flatMap(group=>group.entries)];
-    const workspace=view?.catalog.workspaces.find(entry=>entry.id===active?.workspace);
-    return entries.find(entry=>entry.session===active?.session)?.metadata.title || workspaceName(active?.path,workspace?.name);
-  });
+  const titles = useView(view => Object.keys(view?.surfaces ?? {}).map(key=>[key,conversationTitle(view,key)]),
+    (before,after)=>before.length===after.length && before.every(([key,title],index)=>key===after[index][0] && title===after[index][1]));
+  const title = (key:string) => titles?.find(([id])=>id===key)?.[1] ?? key;
   return (
     <section
       ref={setColumn}
@@ -45,11 +41,7 @@ export function Conversation() {
                   aria-pressed={selected === key}
                   onClick={() => input.select(key)}
                 >
-                  {key === "main"
-                    ? (title || "New conversation")
-                    : key === "compare"
-                      ? "Compare"
-                      : key}
+                  {title(key)}
                 </Button>
                 {key !== "main" && (
                   <Button
@@ -76,11 +68,7 @@ export function Conversation() {
                 .filter(Boolean)
                 .map((key) => (
                   <option key={key} value={key}>
-                    {key === "main"
-                      ? "Conversation"
-                      : key === "compare"
-                        ? "Compare"
-                        : key}
+                    {title(key)}
                   </option>
                 ))}
             </select>
@@ -126,7 +114,7 @@ export function Conversation() {
             )}
             <Button
               size="sm"
-              disabled={!surface || surface.kind === "external"}
+              disabled={surface?.kind === "external"}
               onClick={() => run(() => input.restoreDrafts())}
             >
               Restore drafts

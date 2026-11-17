@@ -20,6 +20,11 @@ This narrowly supersedes the independent Chat/Trajectory presentation choice.
 The later [conversation-start decision](2026-10-28-model-independent-conversation-start.md)
 partially supersedes that choice with tabs over the same index and one successful
 terminal heading; chronological boundary evidence remains available in Activity.
+The four detail modes adapt DSH's presentation policy: Standard groups process
+bodies, Detailed exposes active bodies and groups history, and Verbose exposes
+all bodies. Compact also folds active process. These are RSI process blocks,
+not a fabricated DSH Agent Step count. All assistant replies remain visible;
+completion folding and explicit disclosures preserve the existing turn owner.
 
 ## Alternatives considered
 

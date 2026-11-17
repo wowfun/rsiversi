@@ -24,6 +24,9 @@ remain usable, while an uncertain decision still requires successful readback.
 An already-settled request closes its panel without reporting a refresh failure.
 Menu activation closes its disclosure before awaiting the action. Select changes
 that close a disclosure return keyboard focus to its summary.
+Workspace choices dismiss on selection, Escape or outside interaction. Fork
+history selection keeps its form open for the turn count and Create draft action;
+the fork summary remains available in every presentation mode.
 Replacing content in an open Settings dialog moves focus into the new content;
 loading replacements keep focus on the registered host, then return it to an
 enabled control when the content is ready.
@@ -38,6 +41,25 @@ The composer journal carries those capture identities; unsupported saved
 schemas are rejected without rewriting their data. When storage cannot open, an
 explicit two-step discard action deletes this site's entire saved-draft journal
 (including saved request identities) and reloads; it never runs automatically.
+The same action includes pre-Session drafts. Both storage owners retire before
+deletion; a blocked or failed deletion keeps composition disabled and reports
+the incomplete reset instead of reloading. Retired editors cannot reopen storage.
+Pre-Session drafts have an origin-wide limit of 128 records and 4 MiB of text,
+independent of the Session journal's limits. Empty records without a workspace
+selection are removed. Saved-draft recovery includes starting drafts; nonempty
+records are never evicted to admit another draft.
+
+Command descriptors explicitly declare composer eligibility and argument input.
+Both command menus and slash completion use the same selection operation.
+Typing a leading command or restoring one loads the Session catalog, coalescing
+keystrokes while that read is pending.
+The application's `/export` also exposes its argument hint and Leave command
+input action without depending on a Session command descriptor.
+No-argument commands preserve the editor and consume only their captured trigger
+after a known successful receipt. Argument commands require a leading trigger,
+retain the tail as arguments and show the command being edited. Selection and
+asynchronous trigger consumption compare the captured editor revision; neither
+can overwrite later typing. Structured-only commands retain their dedicated UI.
 
 The shared Web/Desktop shell displays the [product name](../../../crates/rsi/README.md)
 with the canonical [logo](../public/logo.svg). Its full viewBox, grayscale gradient
@@ -58,6 +80,7 @@ DSH backdrop filter; vendor files remain byte-tracked by their provenance record
 
 The composer draft surface has no inner focus rectangle in ordinary themes;
 its caret uses the DSH business accent inside the existing rounded container.
+Keyboard focus in that surface marks the outer composer boundary.
 Forced-colors mode retains a system-color focus outline. Panel resize hit areas
 stay transparent on hover and pointer drag, leaving the column's resting hairline
 visible. Keyboard focus marks only the boundary with a two-pixel indicator;
@@ -218,26 +241,55 @@ Ctrl/Meta+K. Dialogs restore focus to their surviving trigger or composer. Stand
 modal triggers are captured before their children mount; initial focus is applied
 after `showModal()`, so hidden-dialog `autoFocus` behavior does not choose it.
 The command palette starts in its search input, and the directory picker starts
-in the path input when manual path entry is shown. Standard
-shows foldable Tool and Thinking summaries; Verbose exposes their details.
+in the path input when manual path entry is shown.
+
+The four transcript detail modes use this presentation policy:
+
+| Mode | Running process | Completed process | Preview |
+| --- | --- | --- | --- |
+| Compact | Folded with individual disclosures | Folded | No live or settled reasoning preview |
+| Standard | Individual bodies collapsed until opened | Folded | Live status and settled reasoning previews |
+| Detailed | Bodies expanded | Folded, with individual disclosures when expanded | Live status and settled reasoning previews |
+| Verbose | Bodies expanded | Bodies expanded | Settled reasoning preview; no duplicate live preview |
+
+Native conversation tabs and narrow-screen options always have a nonempty title:
+the saved conversation title, workspace name, or “New conversation”. Unrelated
+view publication does not rerender the conversation container when its surface
+keys, selected surface and titles are unchanged. Command-input announcements
+contain only the command label and hint; the Leave command input action is outside
+that live region.
+
+Assistant replies remain visible in every mode. Failed or incomplete history
+stays expanded for investigation. These are RSI process blocks; the interface
+does not claim DSH Agent-Step grouping that the Turn index does not provide.
 Process rows use a 24 px disclosure header with a leading icon, tool/Think label
 and a single-line preview. Tool names, argument previews and failure badges come
 from the typed Tool state; raw arguments and output remain in the expanded body.
+Settled Tool argument previews remain available in every detail mode.
 The label retains its width when the preview grows; only the preview gives up
 space. Unusually long tool names are bounded to 45% of the row.
-Standard running Turns keep individual process bodies collapsed until opened and show a
-live status at the end of their process, without an extra heading above it.
+Live status appears at the end of the process, without an extra heading above it.
 Per-call model metadata stays in Trajectory for running and successfully completed
 Turns; failed or incomplete settled history still exposes it for investigation.
 Process disclosures and Turn summaries remain transparent on pointer hover.
 Turn expansion reveals process rows; each row owns its disclosure independently.
-Failed and incomplete settled history remains expanded for investigation.
+Summary counts include only Tool and reasoning rows. A Turn with no such rows
+shows its status without a disclosure control.
 Expanding a summary retains its screen position and pauses automatic following.
 Stop sends the displayed Turn identity with its attachment generation, preserving
 queued input and the draft. It cannot cancel a newer Turn or a pending submission.
 
 Composer keys and the one-time legacy-key migration follow the
 [client preferences contract](../../../crates/rsi/client-preferences/README.md).
+Leaving command input follows textarea editability and does not mutate text
+during composition. Restored slash commands fetch their catalog using the same
+name grammar as command claims, including digit, underscore, dot and hyphen starts.
+Choosing an argument-taking command from the menu preserves the entire current
+draft as its arguments, regardless of selection. Completion replaces only its
+leading trigger; it refuses a trigger following non-whitespace prose.
+Selecting the already entered command keeps its existing prefix and arguments.
+A menu capture is consumed by one selection attempt; later explicit selections
+capture the current editor again, while stale attempts still fail before editing.
 The sending-options menu exposes the displayed alternate delivery to touch and
 keyboard users. Gesture handling captures the action revision before draft storage
 flush; a later frame cannot reinterpret that action. Worker and Desktop confirm
@@ -546,11 +598,12 @@ conversation references, history and the Session's actual command catalog.
 Picker lifetimes are distinct from the metrics and other dialog lifetimes;
 closing a picker removes its modal and returns focus to the original editor.
 
-Saved-input recovery previews use at most 80 Unicode code points with whitespace
-collapsed to spaces; preview truncation never splits a surrogate pair.
+Saved-input recovery summaries use at most 80 Unicode code points with whitespace
+collapsed to spaces; summary truncation never splits a surrogate pair.
 Recovery includes retained unsaved editors in the current endpoint/device namespace,
-even when their first write failed. Expired inputs expose their complete text and
-an explicit remove-and-release action for references before recreation; captures
+even when their first write failed. Read-only text follows the bounded-preview
+policy in [persistence](persistence.md). Expired inputs expose an explicit
+remove-and-release action for references before recreation; captures
 never move to another Session.
 Resolving a starting-draft conflict preserves edits made while storage is read.
 Reference removal retains local ownership until durable cleanup reservation succeeds.

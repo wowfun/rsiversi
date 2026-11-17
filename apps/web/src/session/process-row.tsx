@@ -23,7 +23,7 @@ function toolPresentation(name: string) {
   }
 }
 
-export function ProcessTitle({block, open, toggle}: {block: TranscriptBlock; open: boolean; toggle(): void}) {
+export function ProcessTitle({block, open, flat, preview:showPreview, toggle}: {block: TranscriptBlock; open: boolean; flat:boolean; preview:boolean; toggle(): void}) {
   const reasoning = block.role === 'reasoning';
   const {label, Icon} = reasoning ? {label: 'Think', Icon: IconThinkOutlineRegular}
     : toolPresentation(block.tool?.name ?? block.title);
@@ -32,13 +32,14 @@ export function ProcessTitle({block, open, toggle}: {block: TranscriptBlock; ope
   const phase = block.tool?.phase;
   const failure = phase === 'rejected' ? 'Rejected'
     : typeof phase === 'object' && phase.settled !== 'completed' ? 'Failed' : '';
-  return <button type="button" className="message-title summary-toggle" aria-expanded={open}
-    title={block.title} onClick={toggle}>
-    <span className="process-leading" aria-hidden="true"><Icon size={14}/><IconChevronRightOutlineRegular className="process-chevron" size={14}/></span>
+  const Title = flat ? 'div' : 'button';
+  return <Title type={flat ? undefined : 'button'} className="message-title summary-toggle" aria-expanded={flat ? undefined : open}
+    title={block.title} onClick={flat ? undefined : toggle}>
+    <span className="process-leading" aria-hidden="true"><Icon size={14}/>{!flat && <IconChevronRightOutlineRegular className="process-chevron" size={14}/>}</span>
     <span className="process-label">{label}</span>
-    {!!preview && <><span className="process-separator" aria-hidden="true"/><span className="process-preview">{preview}</span></>}
+    {showPreview && !!preview && <><span className="process-separator" aria-hidden="true"/><span className="process-preview">{preview}</span></>}
     {failure && <span className="process-failure">{failure}</span>}
-  </button>;
+  </Title>;
 }
 
 export function RunningStatus() {

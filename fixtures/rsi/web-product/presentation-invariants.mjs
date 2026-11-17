@@ -12,6 +12,8 @@ import {createRoot} from 'react-dom/client';
 import {flushSync} from 'react-dom';
 import {createResourceDetails} from '/src/runtime/resource-details.js';
 import {Transcript} from '/src/session/transcript.tsx';
+import {ForkTurn} from '/src/session/fork.tsx';
+import {WorkspaceChoice} from '/src/session/workspace-choice.tsx';
 import {SessionCommands} from '/src/session/projections.tsx';
 import {DraftImages,DraftReferences} from '/src/session/draft-attachments.tsx';
 import {ResourcePresentations} from '/src/details/resources.tsx';
@@ -27,6 +29,7 @@ import {createInitialState} from '/vendor/dsh/dockkit/engine/initial.ts';
 import {record,EMPTY_HISTORY} from '/vendor/dsh/dockkit/engine/sequence.ts';
 import {planOpenContent} from '/vendor/dsh/dockkit/engine/planner.ts';
 import session from '/src/session/surface.module.css';
+import chat from '/src/session/chat.module.css';
 import resourceCss from '/src/resources.module.css';
 import '/styles.css';
 window.actions=[];
@@ -70,18 +73,32 @@ window.closeImage=()=>flushSync(()=>{resourceHosts.delete('image');publishResour
 const original=PresentationStore.open;let fail=true;
 PresentationStore.open=async(...args)=>{if(fail)throw new Error('blocked');return original(...args)};
 presentationIdentity.set('review-layout');
+function PolicyProbe(){
+ const [policy,setPolicy]=useState({mode:'standard',running:true,simple:false});
+ const [policyOwner]=useState(()=>({blocks:new Map(),setReadingSummary(){},action:async()=>{}}));
+ window.setPolicy=(mode,running,simple=false)=>flushSync(()=>setPolicy({mode,running,simple}));
+ const blocks=policy.simple?[{key:'policy-meta',role:'metadata',title:'Model call',text:'Metadata'},{key:'policy-reply',role:'assistant',title:'Assistant',text:'Reply retained'}]:[{key:'policy-tool',role:'tool',title:'Tool',text:'Full tool result',tool:{name:'file_read',argument_summary:'src/main.rs',phase:policy.running?'running':{settled:'completed'}}},
+  {key:'policy-reasoning',role:'reasoning',title:'Reasoning',text:'Reasoning preview'},
+  {key:'policy-reply',role:'assistant',title:'Assistant',text:'Reply retained'}];
+ const data={blocks,turns:{entries:{policy:{id:'policy',running:policy.running,foldable:true,partial:false,status:policy.running?'Running':'Completed',
+  blocks:blocks.map(block=>block.key),process:blocks.map(block=>block.key),candidate:[],answer:[]}}}};
+ return <section aria-label="Presentation policy" className={session.scope+' '+chat.scope+' mode-'+policy.mode}><Transcript owner={policyOwner} transcript={data} generation="policy" mode={policy.mode} cards={false} register={()=>{}}/></section>;
+}
 function App(){
+ const [showPolicy,setShowPolicy]=useState(true);
+ window.finishPolicy=()=>flushSync(()=>setShowPolicy(false));
  const memberValue=useMember('session','usage');
  useSyncExternalStore(change.subscribe,change.getSnapshot);
  const notice=useSyncExternalStore(notices.subscribe,notices.getSnapshot),layout=usePresentation();
  window.layout=layout;window.enableStorage=()=>{fail=false;layout.retry()};
  return <main><output aria-label="Member value">{memberValue}</output><section className={session.scope+' mode-standard'}><Transcript owner={owner} transcript={transcript} generation="1" mode="standard" cards={false} register={()=>{}}/><button hidden={!owner.readingSummary} onClick={()=>owner.setReadingSummary(false)}>Back to bottom</button></section>
- <SessionCommands data={{commands:{revision:{kind:'draft'},commands:[{name:'help',description:'Help',draft_safe:true}]}}} owner={owner}/>
+ <section aria-label="Disclosure checks" className={session.scope+' '+chat.scope}><WorkspaceChoice owner={owner}/><ForkTurn turn="turn" owner={owner}/><div className="mode-verbose"><ForkTurn turn="verbose" owner={owner}/></div></section>
+ <SessionCommands data={{commands:{revision:{kind:'draft'},commands:[{name:'help',description:'Help',draft_safe:true,composer_input:{kind:'none'}}]}}} owner={owner}/>
  <DraftImages owner={owner} state={{images:[{width:1,height:1,bytes:4}]}}/>
  <DraftReferences owner={owner} state={{references:[{id:'r',label:'Reference'}]}}/>
  <output aria-label="Notice">{notice.transient}</output><output aria-label="Layout storage">{layout.storageNotice}</output><output aria-label="Width">{layout.layout.navigationWidth}</output>
  <div id="workbench" style={{marginLeft:80}}><aside style={{width:"var(--resources-width,450px)",height:40}}><ResizeHandle name="resources" value={800} min={300} max={700} reverse onChange={value=>window.resized=value}/></aside></div><style>{"#workbench .panel-resize{height:40px;width:6px;background:gray}"}</style><ResourcePresentations/><details className="application-options"><summary>Application options</summary><Button onClick={()=>window.actions.push('menu')}>Menu action</Button></details><button>Outside</button>
- <section aria-label="Status colors">{['warning','success','teal'].map(color=><p key={color} style={{color:'var(--'+color+')',background:color==='warning'?'var(--warning-bg)':color==='teal'?'var(--blue)':'var(--paper)'}}>{color} status and link</p>)}</section><DockProbe/></main>
+ <section aria-label="Status colors">{['warning','success','teal'].map(color=><p key={color} style={{color:'var(--'+color+')',background:color==='warning'?'var(--warning-bg)':color==='teal'?'var(--blue)':'var(--paper)'}}>{color} status and link</p>)}</section>{showPolicy&&<PolicyProbe/>}<DockProbe/></main>
 }
 installDisclosures(document);createRoot(document.getElementById('root')).render(<App/>);
 `;
@@ -97,7 +114,55 @@ try {
       await page.getByLabel('Member value').filter({hasText:'1'}).waitFor();
       await page.evaluate(()=>window.updateMember());
       await page.getByLabel('Member value').filter({hasText:'2'}).waitFor();
-      await page.locator('.turn-summary').click();
+      const policy=page.getByRole('region',{name:'Presentation policy'});
+      await policy.locator('.message.tool').evaluate(node=>window.policyToolNode=node);
+      for(const [mode,body,preview] of [['compact',false,false],['standard',false,true],['detailed',true,true],['verbose',true,false]]){
+        await page.evaluate(mode=>window.setPolicy(mode,true),mode);
+        assert.equal(await policy.locator('.message.tool .message-text').isVisible(),body,mode+' active tool body');
+        assert.equal(await policy.locator('.message.reasoning .process-preview').isVisible(),preview,mode+' reasoning preview');
+        assert.equal(await policy.locator('.message.assistant').isVisible(),true,mode+' assistant reply');
+        assert.equal(await policy.locator('.message.tool').evaluate(node=>window.policyToolNode===node),true,mode+' keeps tool node');
+        await policy.screenshot({path:join(report,name+'-policy-'+mode+'.png')});
+      }
+      await page.evaluate(()=>window.setPolicy('standard',false));
+      assert.equal(await policy.locator('.message.tool').isVisible(),false,'Standard folds completed process by default');
+      await policy.locator('.turn-summary').click();
+      for(const mode of ['standard','detailed']){
+        await page.evaluate(mode=>window.setPolicy(mode,false),mode);
+        assert.equal(await policy.locator('.message.tool').isVisible(),true);
+        assert.equal(await policy.locator('.message.tool .message-text').isVisible(),false,mode+' history stays grouped');
+      }
+      await page.evaluate(()=>window.setPolicy('verbose',false));
+      assert.equal(await policy.locator('.message.tool .message-text').isVisible(),true,'Verbose exposes completed body');
+      for(const mode of ['compact','standard','detailed','verbose']) {
+        await page.evaluate(mode=>window.setPolicy(mode,false),mode);
+        const row=policy.locator('.message.tool .process-preview');
+        if(!await row.isVisible()) await policy.locator('.turn-summary').click();
+        assert.equal(await row.isVisible(),true,mode+' shows expanded settled arguments');
+        assert.equal(await row.textContent(),'src/main.rs',mode+' retains settled tool arguments');
+        await policy.screenshot({path:join(report,name+'-settled-'+mode+'.png')});
+      }
+      await page.evaluate(()=>window.setPolicy('standard',false,true));
+      assert.equal(await policy.locator('button.turn-summary').count(),0,'no disclosure for metadata and replies alone');
+      assert.equal(await policy.locator('.turn-summary').textContent(),'Completed');
+      const disclosures=page.getByRole('region',{name:'Disclosure checks'});
+      const forks=disclosures.locator('.fork-menu');
+      await forks.first().locator('summary').click();
+      await forks.first().getByLabel('History').selectOption('last');
+      assert.equal(await forks.first().getByLabel('Turns',{exact:true}).isVisible(),true);
+      await forks.first().getByLabel('Turns',{exact:true}).press('Escape');
+      assert.equal(await forks.first().evaluate(element=>element.open),false);
+      assert.equal(await forks.last().locator('summary').isVisible(),true,'Verbose retains the fork disclosure');
+      const workspace=disclosures.locator('.workspace-choice');
+      await workspace.locator('summary').click();
+      await workspace.locator('summary').press('Escape');
+      assert.equal(await workspace.evaluate(element=>element.open),false);
+      await workspace.locator('summary').click();
+      await page.getByRole('button',{name:'Outside',exact:true}).click();
+      assert.equal(await workspace.evaluate(element=>element.open),false);
+      await disclosures.screenshot({path:join(report,name+'-disclosures.png')});
+      await page.evaluate(()=>window.finishPolicy());
+      await page.locator('.turn-summary').filter({hasText:'process item'}).first().click();
       await page.getByRole('button',{name:'Open external conversation'}).waitFor({state:'visible'});
       await page.locator('.delegation-action').click();
       await page.locator('.source-reference').click();

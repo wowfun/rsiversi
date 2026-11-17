@@ -159,8 +159,8 @@
 :global(.turn-summary:hover):where(.scope, .scope *) { background: transparent; color: var(--ink); }
 :global(.process-leading):where(.scope, .scope *) { position: relative; display: flex; flex: 0 0 16px; align-items: center; justify-content: center; margin-right: 6px; }
 :global(.process-chevron):where(.scope, .scope *) { position: absolute; opacity: 0; }
-:global(.summary-toggle:is(:hover, :focus-visible, [aria-expanded=true]) .process-leading > svg:first-child):where(.scope, .scope *) { opacity: 0; }
-:global(.summary-toggle:is(:hover, :focus-visible, [aria-expanded=true]) .process-chevron):where(.scope, .scope *) { opacity: 1; }
+:global(button.summary-toggle:is(:hover, :focus-visible, [aria-expanded=true]) .process-leading > svg:first-child):where(.scope, .scope *) { opacity: 0; }
+:global(button.summary-toggle:is(:hover, :focus-visible, [aria-expanded=true]) .process-chevron):where(.scope, .scope *) { opacity: 1; }
 :global(.summary-toggle[aria-expanded=true] .process-chevron):where(.scope, .scope *) { transform: rotate(90deg); }
 :global(.process-label):where(.scope, .scope *) { flex: 0 0 auto; max-width: 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 :global(.process-separator):where(.scope, .scope *) { flex: 0 0 2px; height: 2px; border-radius: 50%; background: var(--muted); margin: 0 8px; }
@@ -370,7 +370,7 @@
   border: 0;
   padding: 8px 4px;
 }
-:global(.draft-status:has(> [role="status"]:empty:only-child)):where(.scope, .scope *) {
+:global(.draft-status:not(:has(> :not([role="status"]:empty)))):where(.scope, .scope *) {
   min-height: 0;
   padding-block: 0;
 }
@@ -455,10 +455,10 @@
   left: auto;
   right: 0;
 }
-:global(.mode-verbose .source-menu > summary):where(.scope, .scope *) {
+:global(.mode-verbose .source-menu:not(.fork-menu) > summary):where(.scope, .scope *) {
   display: none;
 }
-:global(.mode-verbose .source-menu[open] > .source-actions):where(
+:global(.mode-verbose .source-menu:not(.fork-menu)[open] > .source-actions):where(
   .scope,
   .scope *
 ) {
@@ -472,8 +472,19 @@
 :global(.composer textarea:focus-visible):where(.scope, .scope *) {
   outline: none;
 }
+:global(.composer:has(textarea:focus-visible)):where(.scope, .scope *) {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
+:global(.composer-command):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
 @media (forced-colors: active) {
-  :global(.composer textarea:focus-visible):where(.scope, .scope *) {
+  :global(.composer:has(textarea:focus-visible)):where(.scope, .scope *) {
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
@@ -541,9 +552,11 @@
 
 
 :global(.composer [data-testid="composer-send"]):where(.scope, .scope *) {
-  width: 34px; height: 34px; padding: 7px; border: 0;
+  min-width: 34px; height: 34px; padding: 7px 12px; border: 0;
+  flex-shrink: 0; white-space: nowrap;
   background: var(--dsw-alias-button-info-fill); color: var(--dsw-static-neutral-bluish-00);
 }
+:global(.composer [data-testid="composer-send"]:has(svg)):where(.scope, .scope *) { width: 34px; padding: 7px; }
 
 :global(.message-clock):where(.scope, .scope *) { font-size: 12px; white-space: nowrap; }
 :global(.message.user .message-actions):where(.scope, .scope *) { justify-content: flex-end; }

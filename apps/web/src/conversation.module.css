@@ -107,16 +107,6 @@
   padding: 0;
   gap: 0;
 }
-:global(.setup-prompt):where(.scope, .scope *) {
-  display: grid;
-  gap: 4px;
-  padding: 10px 24px;
-  background: var(--blue);
-  font-size: 12px;
-}
-:global(.setup-prompt span):where(.scope, .scope *) {
-  color: var(--muted);
-}
 @media (max-width: 1023px) {
   :global(.session-toolbar):where(.scope, .scope *) {
     padding-left: 14px;

@@ -5,18 +5,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-:global(.workspace-form):where(.scope, .scope *) {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  margin-top: 8px;
-}
-:global(.workspace-form input):where(.scope, .scope *) {
-  font-size: 0.78rem;
-}
-:global(.workspace-form button):where(.scope, .scope *) {
-  font-size: 0.78rem;
-}
 @media (max-width: 560px) {
   :global(.nav-list):where(.scope, .scope *) {
     flex-direction: row;
@@ -25,13 +13,6 @@
   :global(.nav-item):where(.scope, .scope *) {
     flex-shrink: 0;
     max-width: 220px;
-  }
-  :global(.workspace-form):where(.scope, .scope *) {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  :global(.workspace-form label):where(.scope, .scope *) {
-    grid-column: 1 / -1;
   }
 }
 :global(.attention-navigation):where(.scope, .scope *) {
@@ -114,12 +95,6 @@
   background: var(--hover);
   border-radius: 6px;
 }
-:global(.workspace-add summary):where(.scope, .scope *) {
-  font-size: 12px;
-  color: var(--muted);
-  cursor: pointer;
-  padding: 4px;
-}
 :global(.session-options):where(.scope, .scope *) {
   position: relative;
   flex-shrink: 0;
@@ -188,27 +163,6 @@
 :global(.navigation-actions > button):where(.scope, .scope *) {
   padding: 4px !important;
   font-size: 13px;
-}
-:global(.sidebar .workspace-add):where(.scope, .scope *) {
-  margin-top: 4px;
-}
-:global(.navigation-modes):where(.scope, .scope *) {
-  display: flex;
-  gap: 8px;
-  padding: 6px 0;
-}
-:global(.navigation-modes label):where(.scope, .scope *) {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11px;
-}
-:global(.navigation-modes select):where(.scope, .scope *) {
-  min-width: 0;
-  width: 100%;
-  font: inherit;
 }
 :global(.workspace-tree-children):where(.scope, .scope *) {
   margin-left: 12px;

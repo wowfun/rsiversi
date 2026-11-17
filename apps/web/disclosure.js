@@ -1,4 +1,4 @@
-const selector='details.application-options,details.delivery-menu,details.conversation-menu,details.session-menu,details.navigation-options,details.session-options,details.source-menu:not(.mode-verbose .source-menu)';
+const selector='details.application-options,details.delivery-menu,details.conversation-menu,details.session-menu,details.navigation-options,details.session-options,details.workspace-choice,details.fork-menu,details.source-menu:not(.mode-verbose .source-menu)';
 export function closeDisclosure(target, restore=false) {
   const details=target?.closest?.(selector);
   if(!details?.open)return false;
@@ -21,7 +21,7 @@ export function installDisclosures(root) {
     if(event.relatedTarget&&details?.contains(event.relatedTarget))return;
     queueMicrotask(()=>{if(details?.open&&!details.contains(root.activeElement))details.open=false;});
   };
-  const change=event=>{if(event.target.tagName==='SELECT')closeDisclosure(event.target,true);};
+  const change=event=>{if(event.target.tagName==='SELECT'&&!event.target.closest('details.fork-menu'))closeDisclosure(event.target,true);};
   root.addEventListener('keydown',key,true);root.addEventListener('pointerdown',outside,true);
   root.addEventListener('focusout',focus);root.addEventListener('change',change);
   return()=>{root.removeEventListener('keydown',key,true);root.removeEventListener('pointerdown',outside,true);root.removeEventListener('focusout',focus);root.removeEventListener('change',change);};

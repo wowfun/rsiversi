@@ -181,12 +181,6 @@
 :global(.mcp-notice):where(.scope, .scope *) {
   overflow-wrap: anywhere;
 }
-:global(.setup-grid):where(.scope, .scope *) {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 28px;
-  margin: 28px 0;
-}
 :global(.setup-section):where(.scope, .scope *) {
   min-width: 0;
   border-top: 1px solid var(--line);
@@ -224,41 +218,6 @@
   margin: 0;
   min-width: 0;
 }
-:global(.model-definition):where(.scope, .scope *) {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0 12px 8px;
-  margin: 14px 0;
-}
-:global(.model-definition summary):where(.scope, .scope *) {
-  font-size: 11px;
-  cursor: pointer;
-  color: var(--muted);
-}
-:global(.credential-status):where(.scope, .scope *) {
-  font-size: 11px;
-  color: var(--muted);
-}
-:global(.permission-note):where(.scope, .scope *) {
-  padding: 12px;
-  background: var(--warning-bg);
-  font-size: 12px;
-  border-radius: 8px;
-}
-:global(.deployment-row):where(.scope, .scope *) {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-  font-size: 12px;
-}
-:global(.deployment-row > div):where(.scope, .scope *) {
-  flex: 1;
-  min-width: 100px;
-  overflow-wrap: anywhere;
-}
 :global(.setup-receipts):where(.scope, .scope *) {
   border-top: 1px solid var(--line);
   padding-top: 16px;
@@ -267,11 +226,6 @@
 :global(.setup-receipts [data-outcome="unknown"]):where(.scope, .scope *),
 :global(.setup-receipts [data-outcome="failed"]):where(.scope, .scope *) {
   color: var(--error);
-}
-@media (max-width: 767px) {
-  :global(.setup-grid):where(.scope, .scope *) {
-    grid-template-columns: 1fr;
-  }
 }
 :global(.ssh-targets label):where(.scope, .scope *) {
   display: grid;
@@ -423,11 +377,6 @@
     padding: 0 16px 24px;
   }
 }
-.panel :global(.setup-grid) {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
 .panel :global(.setup-section) {
   border: 0;
   background: transparent;
@@ -455,11 +404,6 @@
 .panel :global(.provider-editor fieldset) {
   display: grid;
   gap: 12px;
-}
-.panel :global(.model-definition) {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px;
 }
 .panel :global(.setup-receipts) {
   margin-top: 24px;

@@ -45,6 +45,8 @@ Transcript retention is bounded independently from the viewport. Layout retains
 two screens of row metadata and reuses unchanged block layouts. Viewport clipping
 does not mark resident text as evicted. A lost scroll anchor starts at the oldest
 retained content; only a live-tail view captures from the end.
+ToolState owns and accounts for output locators once; transcript blocks do not
+retain another string copy of those identities.
 Live snapshot updates preserve retained block identity and manual expansion;
 their source-free text crosses the bounded scene viewport and invalidates layout
 caches only when displayed text or truncation changes, preserving cached layout

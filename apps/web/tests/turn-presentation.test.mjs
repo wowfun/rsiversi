@@ -48,3 +48,15 @@ test('only a complete successful answer replaces its typed terminal with the tur
   for(const changes of [{foldable:false},{running:true},{answer:[]}])assert(!turnVisibility({...completed,...changes},'standard',false).hidden.has('terminal'));
   assert(!turnVisibility(completed,'verbose',false).hidden.has('terminal'));
 });
+
+test('DSH detail policy distinguishes running bodies and preserves every assistant reply',()=>{
+  const running={...turn,running:true};
+  assert.equal(turnVisibility(running,'standard',false).expanded,false);
+  assert.equal(turnVisibility(running,'detailed',false).expanded,true);
+  assert.equal(turnVisibility(turn,'detailed',true).expanded,false);
+  assert.equal(turnVisibility(turn,'verbose',false).expanded,true);
+  assert.deepEqual([...turnVisibility(turn,'standard',false,new Set(['earlier'])).hidden],['thinking']);
+  assert.equal(presentation.presentationPolicy('compact').reasoningPreview,false);
+  assert.equal(presentation.presentationPolicy('standard').liveDetail,true);
+  assert.equal(presentation.presentationPolicy('verbose').liveDetail,false);
+});

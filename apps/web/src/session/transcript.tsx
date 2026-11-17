@@ -18,6 +18,7 @@ import {
   restoreAnchor,
   awayFromBottom,
   turnVisibility,
+  presentationPolicy,
 } from "../../turn-presentation.js";
 import { run } from "../bridge.ts";
 import { closeDisclosure } from "../../disclosure.js";
@@ -131,6 +132,8 @@ const Message = memo(function Message({
     </button>
   );
   const foldable = block.role === "tool" || block.role === "reasoning";
+  const policy = presentationPolicy(mode);
+  const preview = streaming ? policy.liveDetail : block.role !== 'reasoning' || policy.reasoningPreview;
   return (
     <article
       ref={article}
@@ -138,7 +141,7 @@ const Message = memo(function Message({
       hidden={hidden && !block.external}
     >
       <DocumentTranscript block={block}>{foldable ? (
-        <ProcessTitle block={block} open={summary || expanded} toggle={() => setSummary(value => !value)}/>
+         <ProcessTitle block={block} open={summary || expanded} flat={expanded} preview={preview} toggle={() => setSummary(value => !value)}/>
       ) : (
         <p className="message-title">{block.title}</p>
       )}
@@ -248,17 +251,22 @@ export class Transcript extends PureComponent<Props, State, Position> {
       summaries = new Map<string, ReactNode>();
     const completed = new Map<string,string>();
     const keys = new Set(transcript.blocks.map((block) => block.key));
+    const replies = new Set(transcript.blocks.filter(block=>block.role === 'assistant').map(block=>block.key));
+    const processes = new Set(transcript.blocks.filter(block=>block.role === 'tool' || block.role === 'reasoning').map(block=>block.key));
     for (const turn of Object.values(transcript.turns?.entries ?? {})) {
+      const process = turn.process.filter(key=>processes.has(key));
+      const Summary = process.length ? 'button' : 'div';
       if (turn.terminal && !turn.running) completed.set(turn.terminal, turn.id);
       const state = turnVisibility(
         turn,
         mode,
         this.state.expanded.has(turn.id),
+        replies,
       );
       for (const key of turn.blocks)
         visibility.set(key, {
           hidden: state.hidden.has(key),
-          expanded: mode === 'verbose' || (!turn.running && !turn.foldable),
+          expanded: state.expanded,
           streaming: turn.running,
           timestamp: turn.timestamps?.[key],
           usage: (turn.answer.at(-1) ?? turn.candidate.at(-1)) === key ? turn.usage : undefined,
@@ -267,19 +275,19 @@ export class Transcript extends PureComponent<Props, State, Position> {
       if (first && (!turn.running || mode === 'compact') && mode !== "verbose")
         summaries.set(
           first,
-          <button
+          <Summary
             key={`turn:${turn.id}`}
-            type="button"
+            type={process.length ? "button" : undefined}
             className="turn-summary"
             data-turn-id={turn.id}
-            aria-expanded={turn.process.length ? !turn.process.some(key=>state.hidden.has(key)) : undefined}
-            onClick={() => this.toggle(turn.id)}
+            aria-expanded={process.length ? !process.some(key=>state.hidden.has(key)) : undefined}
+            onClick={process.length ? () => this.toggle(turn.id) : undefined}
           >
             {turn.running ? "Working" : turn.status}
             {!turn.running && turn.elapsed_ms != null && ` in ${elapsedLabel(turn.elapsed_ms)}`}
-            {turn.process.length > 0 && <> · {turn.process.length} {turn.process.length === 1 ? "step" : "steps"} {turn.process.some(key=>state.hidden.has(key)) ? "⌄" : "⌃"}</>}
+            {process.length > 0 && <> · {process.length} process {process.length === 1 ? "item" : "items"} {process.some(key=>state.hidden.has(key)) ? "⌄" : "⌃"}</>}
             {turn.partial ? " · Partial history" : ""}
-          </button>,
+          </Summary>,
         );
     }
     const nodes: ReactNode[] = [];

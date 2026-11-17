@@ -1,8 +1,12 @@
+export type ComposerCommandInput = {kind:'none'} | {kind:'text';hint:string};
+export interface ComposerCommand {name:string; composer_input:ComposerCommandInput|null; description?:string; draft_safe?:boolean}
 export interface CompletionEntry {
+  name: string;
   replacement: string;
   description: string;
   group: string;
   resource?: unknown;
+  composer_input?: ComposerCommandInput | null;
 }
 export interface SessionProjections {
   protected?: boolean;
@@ -18,7 +22,7 @@ export interface SessionProjections {
   pending?: { kind: string; title: string; owner: string; id: string }[];
   commands?: {
     revision: { kind: string };
-    commands: { name: string; description: string; draft_safe: boolean }[];
+    commands: (ComposerCommand & {description:string;draft_safe:boolean})[];
   };
   command_receipt?: {
     command: string;
@@ -48,7 +52,8 @@ export interface ProjectionActions {
   commandsExpanded?: boolean;
   action(name: string, fields?: Record<string, unknown>): Promise<unknown>;
   queueAction(slot: string, action: string): Promise<unknown>;
-  selectCommand(name: string): void;
+  selectCommand(command: ComposerCommand): Promise<void>;
+  captureCommandSelection(): void;
   focusInput(): void;
   pickCompletion(item: CompletionEntry): void;
   updateCompletions(refresh: boolean): void;

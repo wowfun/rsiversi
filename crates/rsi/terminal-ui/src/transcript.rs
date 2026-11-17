@@ -271,7 +271,6 @@ pub struct Block {
     pub completed: bool,
     pub(crate) concise: bool,
     pub(crate) fold: Option<viewport::FoldWindow>,
-    pub outputs: [Option<String>; 2],
     pub first: u64,
     last: u64,
     request_key: Option<String>,
@@ -404,12 +403,6 @@ impl Block {
                 .markdown
                 .as_ref()
                 .map_or(0, |document| document.bytes())
-            + self
-                .outputs
-                .iter()
-                .flatten()
-                .map(String::capacity)
-                .sum::<usize>()
     }
     pub fn anchor(&self, mut offset: usize) -> Option<Anchor> {
         for (index, piece) in self.pieces.iter().enumerate() {
@@ -1028,10 +1021,6 @@ impl Transcript {
         );
         block.outcome = ProcessOutcome::from_tool(tool.phase);
         block.first = block.first.min(fact.seq());
-        block.outputs = tool
-            .outputs
-            .each_ref()
-            .map(|output| output.as_ref().map(|output| output.as_str().to_owned()));
         let source = |field| Source {
             seq: fact.seq(),
             field,
@@ -1150,7 +1139,6 @@ impl Transcript {
                 completed: false,
                 concise: false,
                 fold: None,
-                outputs: [None, None],
                 first: seq,
                 last: seq,
                 request_key: None,
@@ -2065,7 +2053,7 @@ mod tests {
         assert_eq!(history.blocks[0].outcome, live.blocks[0].outcome);
         assert_eq!(history.blocks[0].text(), live.blocks[0].text());
         assert_eq!(history.blocks[0].first, 4);
-        assert!(history.blocks[0].outputs[0].is_none());
+        assert!(history.blocks[0].tool.as_ref().unwrap().outputs[0].is_none());
         let other =
             ToolResultIdentity::new("other-owner", "invoke", "call", "a".repeat(64)).unwrap();
         history.apply(&SessionFact::new(7, 1, result_body(other)).unwrap());
