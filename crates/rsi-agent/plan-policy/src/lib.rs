@@ -250,7 +250,7 @@ impl PluginFactory for PlanPolicyFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config: Config = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(PLAN_POLICY_DOMAIN, 1).expect("static domain"),
+            DomainIdentity::new(PLAN_POLICY_DOMAIN, PLAN_CODEC_VERSION).expect("static domain"),
             &false,
             |_| Ok(()),
             rsi_agent_composition_protocol::DomainReferencePolicy::None,
@@ -261,7 +261,7 @@ impl PluginFactory for PlanPolicyFactory {
             .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let (review, review_lease) = DomainDefinition::new(
-            DomainIdentity::new(REVIEW_DOMAIN, 1).expect("static domain"),
+            DomainIdentity::new(REVIEW_DOMAIN, REVIEW_CODEC_VERSION).expect("static domain"),
             &ReviewState::default(),
             ReviewState::validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::Visit(ReviewState::references),
@@ -283,6 +283,9 @@ impl PluginFactory for PlanPolicyFactory {
             "plan",
             "Set plan mode: /plan [on|off|toggle]",
             true,
+            Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                hint: "on | off | toggle".into(),
+            }),
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let registrations = [
@@ -373,3 +376,23 @@ fn register_review_tools(
         .map_err(|e| MetaError::Activation(e.to_string()))?;
     Ok(tool_lease)
 }
+
+const PLAN_CODEC_VERSION: u32 = 1;
+
+const REVIEW_CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_plan_policy,
+    bool,
+    PLAN_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/plan_policy-v{}.json",
+        PLAN_CODEC_VERSION
+    ),
+    {
+        let samples: Vec<bool> = vec![false, true];
+
+        samples
+    }
+);

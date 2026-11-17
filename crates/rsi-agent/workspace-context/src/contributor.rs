@@ -14,6 +14,7 @@ const DOMAIN_ID: &str = "rsi.workspace-context";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct State {
     instructions_sha256: Option<String>,
     skill_catalog_sha256: Option<String>,
@@ -240,7 +241,7 @@ impl PluginFactory for WorkspaceContributorFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN_ID, 2).expect("static domain"),
+            DomainIdentity::new(DOMAIN_ID, CODEC_VERSION).expect("static domain"),
             &State::default(),
             validate_state,
             rsi_agent_composition_protocol::DomainReferencePolicy::Visit(reference_state),
@@ -306,3 +307,33 @@ mod tests {
         ));
     }
 }
+
+const CODEC_VERSION: u32 = 2;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_workspace_context,
+    State,
+    CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/workspace_context-v{}.json",
+        CODEC_VERSION
+    ),
+    {
+        let samples: Vec<State> = vec![
+            State::default(),
+            State {
+                instructions_sha256: Some("a".repeat(64)),
+                skill_catalog_sha256: Some("b".repeat(64)),
+                scanned_session: Some(SessionId::new("fixture").unwrap()),
+                scanned_turn: Some(TurnId::new("turn").unwrap()),
+                through_fact_seq: 12,
+                incomplete_reported: true,
+            },
+        ];
+        for sample in &samples {
+            validate_state(sample).unwrap();
+        }
+        samples
+    }
+);

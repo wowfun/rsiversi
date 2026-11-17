@@ -185,11 +185,17 @@ impl AgentPresetManager {
             sources: system_sources,
             diagnostic: std::sync::Mutex::new(None),
         });
-        let host = boot_settings_host(parent, paths, factory).await?;
+        let host = boot_settings_host(parent, paths, factory.clone()).await?;
         let Some(catalog) = host.lookup_local::<plugin::CatalogContract>() else {
+            let diagnostic = factory
+                .diagnostic
+                .lock()
+                .expect("catalog diagnostic poisoned")
+                .take();
             let _shutdown = host.shutdown().await;
-            return Err(RsiError::Boot(
-                "Agent-preset catalog plugin did not become active".into(),
+            return Err(diagnostic.map_or_else(
+                || RsiError::Boot("Agent-preset catalog plugin did not become active".into()),
+                host_boot,
             ));
         };
         Ok(Self {
@@ -315,14 +321,12 @@ fn agent_compiler(
 ) -> Result<ProfileCompiler> {
     let environment = ProfileEnvironment::new(
         paths.config(),
+        paths.data(),
         paths.state(),
         paths.cache(),
+        paths.tmp(),
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         BTreeMap::from([
-            (
-                "standard_output_cache".to_owned(),
-                Value::Bool(coding_tools_enabled && cfg!(unix)),
-            ),
             (
                 "standard_native_files".to_owned(),
                 Value::Bool(cfg!(any(unix, windows))),

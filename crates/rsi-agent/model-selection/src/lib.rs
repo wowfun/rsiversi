@@ -45,7 +45,7 @@ pub fn resolve_selection<'a>(
         .into_iter()
         .find(|snapshot| snapshot.identity().id() == DOMAIN)
     {
-        if snapshot.identity().version() != 1 {
+        if snapshot.identity().version() != CODEC_VERSION {
             return Err(invalid("unsupported model selection domain version"));
         }
         let selection: Option<ModelSelection> =
@@ -146,7 +146,7 @@ impl PluginFactory for ModelSelectionFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN, 1).expect("static domain"),
+            DomainIdentity::new(DOMAIN, CODEC_VERSION).expect("static domain"),
             &None::<ModelSelection>,
             validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::None,
@@ -167,6 +167,7 @@ impl PluginFactory for ModelSelectionFactory {
             COMMAND_NAME,
             "Select the model and effort for the next assembled request",
             true,
+            None,
         )
         .map_err(|e| MetaError::Activation(e.to_string()))?;
         let registrar = plan.local::<ContributionRegistrarContract>()?;
@@ -206,3 +207,27 @@ impl PluginFactory for ModelSelectionFactory {
         )
     }
 }
+
+const CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_selection,
+    Option<ModelSelection>,
+    CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/selection-v{}.json",
+        CODEC_VERSION
+    ),
+    {
+        let samples: Vec<Option<ModelSelection>> = vec![
+            None,
+            Some(ModelSelection {
+                model: rsi_ai_protocol::ModelRef::new("fixture", "model").unwrap(),
+                reasoning_effort: None,
+            }),
+        ];
+
+        samples
+    }
+);

@@ -515,7 +515,7 @@ async fn admitted_credential_write_survives_lost_waiter_and_unknown_is_never_rep
         let fixture = fixture("http://127.0.0.1:1");
         let store = Arc::new(GatedFileSecrets {
             file: rsi_credentials_local::FileSecretStore::new(
-                fixture.paths.config().join("credentials/credentials.json"),
+                fixture.paths.data().join("credentials/credentials.json"),
             ),
             entered: tokio::sync::Notify::new(),
             completed: tokio::sync::Notify::new(),
@@ -577,7 +577,7 @@ async fn admitted_credential_write_survives_lost_waiter_and_unknown_is_never_rep
 async fn credential_file_failure_is_redacted_and_does_not_use_environment_or_claim_unknown_write() {
     use rsi_configuration_api::CredentialOperation;
     let fixture = fixture("http://127.0.0.1:1");
-    let path = fixture.paths.config().join("credentials/credentials.json");
+    let path = fixture.paths.data().join("credentials/credentials.json");
     let store = Arc::new(rsi_credentials_local::FileSecretStore::new(&path));
     store
         .set(
@@ -935,13 +935,18 @@ async fn malformed_durable_providers_fail_boot_and_release_the_host_owner() {
         .unwrap();
     assert!(running.shutdown().await.is_clean());
     let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
-    let original: Vec<u8> = database.query_row("SELECT value FROM rsi_storage_records WHERE domain = 'rsi.managed-providers' AND key = 'desired'", [], |row| row.get(0)).unwrap();
+    let original: Vec<u8> = database.query_row("SELECT value FROM rsi_storage_records WHERE domain = 'rsi.managed-providers' AND table_name = '' AND key = ''", [], |row| row.get(0)).unwrap();
+    let original_length = original.len();
+    let mut previous_length = original_length;
     for document in [
         json!({"revision":1,"deployments":[],"unexpected":true}),
         json!({"revision":1,"deployments":[{"provider":"deepseek","config":{"deployment":"invalid"}}]}),
         json!({"revision":1,"deployments":vec![deployment("duplicate");65]}),
     ] {
-        database.execute("UPDATE rsi_storage_records SET value = ?1 WHERE domain = 'rsi.managed-providers' AND key = 'desired'", [document.to_string().into_bytes()]).unwrap();
+        let bytes = document.to_string().into_bytes();
+        database.execute("UPDATE rsi_storage_records SET value = ?1 WHERE domain = 'rsi.managed-providers' AND table_name = '' AND key = ''", [&bytes]).unwrap();
+        database.execute("UPDATE rsi_storage_domains SET record_bytes=record_bytes+?1 WHERE domain='rsi.managed-providers'", [i64::try_from(bytes.len()).unwrap()-i64::try_from(previous_length).unwrap()]).unwrap();
+        previous_length = bytes.len();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             RunningRsi::boot_host_profile(
@@ -958,7 +963,8 @@ async fn malformed_durable_providers_fail_boot_and_release_the_host_owner() {
         let paths = ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
         drop(HostOwnerLease::try_acquire(paths).expect("failed boot leaked the owner lease"));
     }
-    database.execute("UPDATE rsi_storage_records SET value = ?1 WHERE domain = 'rsi.managed-providers' AND key = 'desired'", [original]).unwrap();
+    database.execute("UPDATE rsi_storage_records SET value = ?1 WHERE domain = 'rsi.managed-providers' AND table_name = '' AND key = ''", [original]).unwrap();
+    database.execute("UPDATE rsi_storage_domains SET record_bytes=record_bytes+?1 WHERE domain='rsi.managed-providers'", [i64::try_from(original_length).unwrap()-i64::try_from(previous_length).unwrap()]).unwrap();
     let repaired =
         RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
             .await

@@ -2,7 +2,7 @@
 use rsi_api_protocol::{ApiError, CallOrigin, Result, json_handler};
 use rsi_configuration_api::mcp_ssh as wire;
 use rsi_mcp::{McpConfig, McpOwner, ServerConfig, TransportConfig};
-use rsi_storage_domain::{Domain, DomainSpec};
+use rsi_storage_domain::{Domain, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, oneshot};
@@ -10,16 +10,17 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 type Reply = Result<std::result::Result<wire::State, wire::Failure>>;
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Document {
     revision: u64,
     config: McpConfig,
 }
 struct State {
     closed: bool,
-    document: Document,
+    document: Arc<Document>,
 }
 pub(crate) struct Owner {
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     state: Mutex<State>,
     mcp: Arc<McpOwner>,
     grants: Arc<crate::profile_management::Manager>,
@@ -30,7 +31,7 @@ pub(crate) struct Owner {
     writer: Semaphore,
 }
 impl Owner {
-    fn snapshot(&self) -> Result<Document> {
+    fn snapshot(&self) -> Result<Arc<Document>> {
         self.domain
             .ensure_available()
             .map_err(rsi_storage_domain::storage_error)?;
@@ -61,8 +62,9 @@ impl Owner {
         let config = document
             .config
             .servers
-            .into_iter()
-            .find(|config| config.id == target.server);
+            .iter()
+            .find(|config| config.id == target.server)
+            .cloned();
         let _references = self.authorize(origin, &target, config.as_ref())?;
         Ok(Ok(wire::State {
             target,
@@ -110,21 +112,23 @@ impl Owner {
                     .err(),
             }
         } else {
-            document
-                .config
+            let next = Arc::make_mut(&mut document);
+            next.config
                 .servers
                 .retain(|config| config.id != input.target.server);
             if let Some(config) = input.config {
-                document.config.servers.push(config);
+                next.config.servers.push(config);
             }
-            document.config.servers.sort_by(|a, b| a.id.cmp(&b.id));
-            if self.mcp.validate_remote_stdio(&document.config).is_err() {
+            next.config.servers.sort_by(|a, b| a.id.cmp(&b.id));
+            if self.mcp.validate_remote_stdio(&next.config).is_err() {
                 return Ok(Err(wire::Failure::Configuration));
             }
-            document.revision = document.revision.checked_add(1).ok_or(ApiError::Capacity)?;
-            let encoded = serde_json::to_value(&document).map_err(|_| ApiError::Capacity)?;
-            self.domain
-                .put("configuration", encoded)
+            next.revision = next.revision.checked_add(1).ok_or(ApiError::Capacity)?;
+            document = self
+                .domain
+                .global::<Document>()
+                .map_err(rsi_storage_domain::storage_error)?
+                .set(Arc::unwrap_or_clone(document))
                 .await
                 .map_err(rsi_storage_domain::storage_error)?;
             self.state.lock().expect("MCP SSH publication").document = document.clone();
@@ -136,8 +140,9 @@ impl Owner {
         let config = document
             .config
             .servers
-            .into_iter()
-            .find(|config| config.id == input.target.server);
+            .iter()
+            .find(|config| config.id == input.target.server)
+            .cloned();
         Ok(Ok(wire::State {
             target: input.target,
             revision: document.revision.to_string(),
@@ -178,6 +183,7 @@ impl Owner {
             self.tasks.close();
         }
         self.tasks.wait().await;
+        self.domain.close().await;
     }
 }
 pub(crate) async fn register(
@@ -189,23 +195,24 @@ pub(crate) async fn register(
     registrar: Arc<dyn rsi_api_protocol::ApiRegistrar>,
 ) -> rsi_meta::Result<(Arc<Owner>, Vec<rsi_api_protocol::ApiRegistration>)> {
     let domain = facility
-        .open(DomainSpec {
-            id: "rsi.mcp-ssh".into(),
-            backend: "base".into(),
-            version: 1,
-            maximum_records: 1,
-            maximum_bytes: 256 * 1024 + 128,
-        })
+        .open(
+            DomainSpec {
+                id: "rsi.mcp-ssh".into(),
+                backend: "base".into(),
+                version: STORAGE_VERSION,
+                maximum_records: 1,
+                maximum_bytes: 256 * 1024 + 128,
+                ..DomainSpec::default()
+            },
+            Schema::default().global::<Document>().map_err(meta)?,
+        )
         .await
         .map_err(meta)?;
-    let mut snapshot = domain.snapshot().await.map_err(meta)?;
-    let document: Document = snapshot
-        .remove("configuration")
-        .map_or(Ok(Document::default()), serde_json::from_value)
-        .map_err(meta)?;
-    if !snapshot.is_empty() {
-        return Err(meta("Invalid MCP SSH storage record"));
-    }
+    let document = domain
+        .global::<Document>()
+        .and_then(|global| global.get())
+        .map_err(meta)?
+        .unwrap_or_default();
     mcp.validate_remote_stdio(&document.config).map_err(meta)?;
     mcp.set_remote_stdio(document.config.clone())
         .await
@@ -273,3 +280,61 @@ pub(crate) async fn register(
 fn meta(error: impl std::fmt::Display) -> rsi_meta::MetaError {
     rsi_meta::MetaError::Activation(error.to_string())
 }
+
+const STORAGE_VERSION: u32 = 2;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_mcp_ssh,
+    Document,
+    STORAGE_VERSION,
+    format!(
+        "tests/fixtures/persistence/mcp_ssh-v{}.json",
+        STORAGE_VERSION
+    ),
+    {
+        let samples: Vec<Document> = vec![
+            Document::default(),
+            Document {
+                revision: 7,
+                config: McpConfig {
+                    servers: vec![ServerConfig {
+                        id: "fixture".into(),
+                        enabled: false,
+                        tools: vec!["lookup".into()],
+                        resource_templates: true,
+                        transport: TransportConfig::SshStdio {
+                            target: rsi_execution::ExecutionTargetId::parse("a".repeat(32))
+                                .unwrap(),
+                            command: "node".into(),
+                            arguments: vec!["server.js".into()],
+                            cwd: "/fixture".into(),
+                            environment: [
+                                (
+                                    "TEXT".into(),
+                                    rsi_mcp::EnvironmentValue::Literal {
+                                        value: "中🦀".into(),
+                                    },
+                                ),
+                                (
+                                    "TOKEN".into(),
+                                    rsi_mcp::EnvironmentValue::Credential {
+                                        reference: rsi_credentials_protocol::CredentialRef::new(
+                                            "rsi.mcp", "fixture",
+                                        )
+                                        .unwrap(),
+                                    },
+                                ),
+                            ]
+                            .into(),
+                        },
+                    }],
+                },
+            },
+        ];
+        for sample in &samples {
+            sample.config.validate().unwrap();
+        }
+        samples
+    }
+);

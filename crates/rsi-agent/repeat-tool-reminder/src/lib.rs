@@ -103,6 +103,7 @@ fn validate_name(name: &str) -> Result<(), String> {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct State {
     session: Option<SessionId>,
     turn: Option<TurnId>,
@@ -356,7 +357,7 @@ impl PluginFactory for RepeatToolReminderFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config: Config = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN, 1).expect("static domain"),
+            DomainIdentity::new(DOMAIN, CODEC_VERSION).expect("static domain"),
             &State::default(),
             State::validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::Visit(State::references),
@@ -389,3 +390,33 @@ impl PluginFactory for RepeatToolReminderFactory {
         )
     }
 }
+
+const CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_repeat_reminder,
+    State,
+    CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/repeat_reminder-v{}.json",
+        CODEC_VERSION
+    ),
+    {
+        let samples: Vec<State> = vec![
+            State::default(),
+            State {
+                session: Some(SessionId::new("fixture").unwrap()),
+                turn: Some(TurnId::new("turn").unwrap()),
+                through_fact_seq: 9,
+                name: Some("read_file".into()),
+                signature: Some("a".repeat(64)),
+                count: 3,
+            },
+        ];
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

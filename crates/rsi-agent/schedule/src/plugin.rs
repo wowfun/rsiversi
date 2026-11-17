@@ -358,6 +358,7 @@ impl PluginFactory for ScheduleFactory {
                 name,
                 "Internal Schedule transition",
                 false,
+                None,
             )
             .map_err(activation)?;
             let command = SessionCommandRegistration::new(

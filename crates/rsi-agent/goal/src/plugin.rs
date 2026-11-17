@@ -249,6 +249,7 @@ impl PluginFactory for GoalFactory {
                 name,
                 "Control a bounded Goal with explicit structured arguments",
                 !internal,
+                None,
             )
             .map_err(activation)?;
             let mut command = SessionCommandRegistration::new(

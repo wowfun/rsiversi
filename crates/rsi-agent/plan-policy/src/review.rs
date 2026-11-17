@@ -24,6 +24,7 @@ const MAXIMUM_PLAN_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(super) struct PlanRef {
     session_id: SessionId,
     effect_id: EffectId,
@@ -31,6 +32,7 @@ pub(super) struct PlanRef {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Document {
     title: String,
     body: String,
@@ -58,12 +60,14 @@ impl Document {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct SavedPlan {
     plan_ref: PlanRef,
     document: Document,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 enum Decision {
     ApproveExecute,
     RequestChanges,
@@ -71,6 +75,7 @@ enum Decision {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct ReviewReceipt {
     plan_ref: PlanRef,
     mode_revision: DomainRevision,
@@ -80,6 +85,7 @@ struct ReviewReceipt {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub(super) struct ReviewState {
     plan: Option<SavedPlan>,
     last_review: Option<ReviewReceipt>,
@@ -380,3 +386,44 @@ fn review_question(
     };
     Ok(request)
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_plan_review,
+    ReviewState,
+    crate::REVIEW_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/plan_review-v{}.json",
+        crate::REVIEW_CODEC_VERSION
+    ),
+    {
+        let document = Document {
+            title: "fixture".into(),
+            body: "plan 中🦀\nquote \"".into(),
+        };
+        let reference = document.reference(
+            SessionId::new("fixture").unwrap(),
+            EffectId::new("effect").unwrap(),
+        );
+        let samples: Vec<ReviewState> = vec![
+            ReviewState::default(),
+            ReviewState {
+                plan: Some(SavedPlan {
+                    plan_ref: reference.clone(),
+                    document,
+                }),
+                last_review: Some(ReviewReceipt {
+                    plan_ref: reference,
+                    mode_revision: DomainRevision::new(1),
+                    review_revision: DomainRevision::new(2),
+                    decision: Decision::RequestChanges,
+                    feedback: Some("fixture 中🦀".into()),
+                }),
+            },
+        ];
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

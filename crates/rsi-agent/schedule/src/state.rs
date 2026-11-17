@@ -26,6 +26,7 @@ pub enum ScheduleRule {
 /// Durable reminder. Active intent alone never authorizes a timer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Reminder {
     /// Stable logical identity.
     pub id: DomainRequestId,
@@ -45,6 +46,7 @@ pub struct Reminder {
 /// The most recent exact accepted automatic input.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScheduleReservation {
     /// Reminder selected at this admission.
     pub reminder_id: DomainRequestId,
@@ -60,6 +62,7 @@ pub struct ScheduleReservation {
 /// One bounded Session-wide allowance, never reset by reminder replacement.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ScheduleState {
     /// At most 16 current reminders.
     pub reminders: Vec<Reminder>,
@@ -331,3 +334,37 @@ fn render_input(id: &DomainRequestId, prompt: &str, occurrence_ms: u64, round: u
         "Scheduled reminder {id} at UTC Unix ms {occurrence_ms}. Automatic parent round {round}/100.\n{prompt}\nThis finite round cannot create or replenish reminders."
     )
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_schedule,
+    ScheduleState,
+    crate::SCHEDULE_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/schedule-v{}.json",
+        crate::SCHEDULE_CODEC_VERSION
+    ),
+    {
+        let mut state = ScheduleState::default();
+        let mut samples = vec![state.clone()];
+        state
+            .create(
+                DomainRequestId::new("fixture").unwrap(),
+                "Check 中🦀".into(),
+                ScheduleRule::Every {
+                    interval_ms: 300_000,
+                },
+                1000,
+            )
+            .unwrap();
+        samples.push(state.clone());
+        state.reserve(301_000).unwrap();
+        samples.push(state);
+
+        let samples: Vec<ScheduleState> = samples;
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

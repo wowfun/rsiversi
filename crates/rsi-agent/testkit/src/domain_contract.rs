@@ -1,7 +1,7 @@
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, DomainIdentity, DomainMutationSource,
     DomainRequestId, DomainRevision, DomainSnapshot, DomainStateCommit, DomainStateUpdate,
-    DomainStateValue, SessionFact, SessionHeader,
+    DomainStateValue, SessionFact, SessionFactBody, SessionHeader, TurnOutcome,
 };
 use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend, SessionStore, StoreError};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// # Panics
 /// Panics if the Store loses atomic Fact anchors or misorders a control page.
 pub async fn assert_control_fact_order(store: &dyn SessionStore, header: SessionHeader) {
-    use rsi_agent_session_protocol::{SessionFactBody, TurnId};
+    use rsi_agent_session_protocol::TurnId;
     let turn = TurnId::new("anchor-turn").unwrap();
     let accepted = SessionFact::new(
         1,
@@ -215,6 +215,28 @@ pub async fn assert_generation_store_contract(
     );
     assert_eq!(unchanged.durable_control_seq, 1);
     assert_eq!(unchanged.states.len(), 2);
+    let admission = store
+        .read_domain_admission(header.session_id())
+        .await
+        .unwrap();
+    assert_eq!(admission.watermarks().fact_seq, unchanged.durable_fact_seq);
+    assert_eq!(
+        admission.watermarks().control_seq,
+        unchanged.durable_control_seq
+    );
+    assert_eq!(
+        admission.watermarks().domain_seq,
+        unchanged.domain_control_seq
+    );
+    assert_eq!(
+        admission.heads(),
+        unchanged
+            .states
+            .iter()
+            .map(|state| state.head.clone())
+            .collect::<Vec<_>>()
+    );
+
     let replacement = control(2, None, next.clone(), vec![introduced("c", 2, false)]);
     let replacement = with_removed(&replacement, &["b"]);
     let references = rsi_agent_store_protocol::native_control_references(&replacement).unwrap();
@@ -307,7 +329,6 @@ pub async fn assert_generation_store_contract(
         current.generation.as_ref().map(|entry| entry.control_seq),
         Some(4)
     );
-    use rsi_agent_session_protocol::{SessionFactBody, TurnOutcome};
     let cancel = SessionFact::new(
         2,
         2,

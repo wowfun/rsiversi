@@ -4,7 +4,7 @@ use rsi_agent_store_protocol::{SessionStore, SessionStoreContract};
 use rsi_api_protocol::{ApiError, ApiRegistrarContract, CallOrigin, json_handler};
 use rsi_configuration_access::{ConfigurationAccess, ConfigurationAccessContract};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use rsi_workspace_protocol::{
     WorkspaceError, WorkspaceIngress, WorkspaceIngressContract, WorkspaceRecord, WorkspaceRegistry,
     WorkspaceRegistryContract,
@@ -62,14 +62,29 @@ fn read_failure(error: impl std::fmt::Display) -> ApiError {
 pub(crate) struct Factory {
     pub documents: Option<PathBuf>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct Receipt(#[serde(deserialize_with = "deserialize_receipt")] WorkspaceRecord);
+fn deserialize_receipt<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<WorkspaceRecord, D::Error> {
+    let record = <WorkspaceRecord as serde::Deserialize>::deserialize(deserializer)?;
+    record.validate().map_err(serde::de::Error::custom)?;
+    if record.coordinates.location() != &rsi_workspace_protocol::ExecutionLocation::Local {
+        return Err(serde::de::Error::custom("Default workspace must be local"));
+    }
+    Ok(record)
+}
+const STORAGE_VERSION: u32 = 2;
 struct Owner {
     documents: Option<PathBuf>,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     workspace: Arc<dyn WorkspaceRegistry>,
     ingress: Arc<dyn WorkspaceIngress>,
     store: Arc<dyn SessionStore>,
     access: Arc<ConfigurationAccess>,
-    receipt: Arc<Mutex<Option<WorkspaceRecord>>>,
+    receipt: Arc<Mutex<Option<Arc<Receipt>>>>,
     closed: AtomicBool,
     execution: rsi_meta::Execution,
 }
@@ -89,7 +104,7 @@ impl Owner {
                 let (_grant, mut receipt) = (grant, guard);
                 let selected = self.ingress.scoped(origin);
                 if let Some(saved) = receipt.as_ref() {
-                    return match selected.get(&saved.id).await {
+                    return match selected.get(&saved.0.id).await {
                         Ok(record) => Ok(Ok(Some(record))),
                         Err(WorkspaceError::Unknown(_)) => Ok(Ok(None)),
                         Err(error) => Ok(Err(error.to_string())),
@@ -149,16 +164,13 @@ impl Owner {
                         .map_err(read_failure)?
                         .records
                         .is_empty()
-                    {
-                        return Ok(Ok(None));
-                    }
-                    if !self
-                        .store
-                        .list_sessions(None, 1)
-                        .await
-                        .map_err(read_failure)?
-                        .sessions
-                        .is_empty()
+                        || !self
+                            .store
+                            .list_sessions(None, 1)
+                            .await
+                            .map_err(read_failure)?
+                            .sessions
+                            .is_empty()
                     {
                         return Ok(Ok(None));
                     }
@@ -167,12 +179,14 @@ impl Owner {
                         Err(error) => return Ok(Err(error.to_string())),
                     }
                 };
-                let value = serde_json::to_value(&record).map_err(read_failure)?;
-                self.domain
-                    .put("initialized", value)
-                    .await
-                    .map_err(|_| ApiError::OutcomeUnknown)?;
-                *receipt = Some(record.clone());
+                *receipt = Some(
+                    self.domain
+                        .global::<Receipt>()
+                        .map_err(read_failure)?
+                        .set(Receipt(record.clone()))
+                        .await
+                        .map_err(|_| ApiError::OutcomeUnknown)?,
+                );
                 Ok(Ok(Some(record)))
             })
             .await
@@ -198,39 +212,25 @@ impl PluginFactory for Factory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.workspace-default".into(),
-                backend: "base".into(),
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 128 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.workspace-default".into(),
+                    backend: "base".into(),
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 128 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .global::<Receipt>()
+                    .map_err(|error| MetaError::Activation(error.to_string()))?,
+            )
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        let mut snapshot = domain
-            .snapshot()
-            .await
+        let receipt = domain
+            .global::<Receipt>()
+            .and_then(|global| global.get())
             .map_err(|error| MetaError::Activation(error.to_string()))?;
-        if snapshot.len() > 1 || snapshot.keys().any(|key| key != "initialized") {
-            return Err(MetaError::Activation(
-                "Invalid default workspace receipt".into(),
-            ));
-        }
-        let receipt: Option<WorkspaceRecord> = snapshot
-            .remove("initialized")
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|_| MetaError::Activation("Invalid default workspace receipt".into()))?;
-        if let Some(record) = &receipt {
-            record
-                .validate()
-                .map_err(|error| MetaError::Activation(error.to_string()))?;
-            if record.coordinates.location() != &rsi_workspace_protocol::ExecutionLocation::Local {
-                return Err(MetaError::Activation(
-                    "Default workspace must be local".into(),
-                ));
-            }
-        }
         let owner = Arc::new(Owner {
             documents: self.documents.clone(),
             domain,
@@ -259,9 +259,35 @@ impl PluginFactory for Factory {
                     drop(registration);
                     owner.closed.store(true, Ordering::Release);
                     let _settled = owner.receipt.lock().await;
+                    owner.domain.close().await;
                     Ok(())
                 })
             }),
         )
     }
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_default_workspace,
+    Receipt,
+    STORAGE_VERSION,
+    format!(
+        "tests/fixtures/persistence/default_workspace-v{}.json",
+        STORAGE_VERSION
+    ),
+    {
+        let samples: Vec<Receipt> = vec![Receipt(WorkspaceRecord {
+            id: rsi_workspace_protocol::WorkspaceId::from_bytes([2; 32]),
+            coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                rsi_workspace_protocol::ExecutionLocation::Local,
+                "/fixture/中",
+            )
+            .unwrap(),
+            name: Some(rsi_workspace_protocol::WorkspaceName::parse("fixture 中🦀").unwrap()),
+            created_at_ms: Some(123_456),
+        })];
+
+        samples
+    }
+);

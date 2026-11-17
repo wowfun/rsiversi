@@ -1,7 +1,7 @@
 use super::{Arc, BTreeMap, Contract, Manager, Mutex, Record, Semaphore, State, TaskTracker, api};
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_storage_domain::{DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{DomainFacilityContract, DomainSpec, Schema};
 pub(crate) fn register(
     builder: &mut crate::StandardAddonBuilder,
     paths: rsi_host::HostPaths,
@@ -43,23 +43,33 @@ impl PluginFactory for Factory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.ssh-targets".into(),
-                backend: "base".into(),
-                version: 1,
-                maximum_records: 64,
-                maximum_bytes: 2 * 1024 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.ssh-targets".into(),
+                    backend: "base".into(),
+                    version: super::STORAGE_VERSION,
+                    maximum_records: 64,
+                    maximum_bytes: 2 * 1024 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .table::<Record>("targets")
+                    .map_err(|_| unavailable())?,
+            )
             .await
             .map_err(|_| unavailable())?;
         let mut records = BTreeMap::new();
-        for (key, value) in domain.snapshot().await.map_err(|_| unavailable())? {
-            let record: Record = serde_json::from_value(value).map_err(|_| unavailable())?;
+        for (key, record) in domain
+            .table::<Record>("targets")
+            .and_then(|table| table.snapshot())
+            .map_err(|_| unavailable())?
+            .entries()
+        {
             record.validate().map_err(|_| unavailable())?;
             if key != record.candidate.target.as_str() {
                 return Err(unavailable());
             }
-            records.insert(record.candidate.target.clone(), record);
+            records.insert(record.candidate.target.clone(), (*record).clone());
         }
         let description = plan.local::<rsi_api_protocol::ConnectionDescriptionContract>()?;
         let owner = Arc::new(Manager {
@@ -69,7 +79,8 @@ impl PluginFactory for Factory {
             configuration: plan.local::<rsi_configuration_access::ConfigurationAccessContract>()?,
             epoch: description.host_epoch.clone(),
             service: description.endpoint_id.as_str().into(),
-            packages: self.0.state().join("packages"),
+            packages: self.0.data().join("packages"),
+            temporary_root: self.0.tmp().to_owned(),
             state: Mutex::new(State {
                 closed: false,
                 records,

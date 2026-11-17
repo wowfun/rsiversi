@@ -134,8 +134,10 @@ impl Fixture {
         }
         let environment = ProfileEnvironment::new(
             temp.path().join("config"),
+            temp.path().join("data"),
             temp.path().join("state"),
             temp.path().join("cache"),
+            temp.path().join("tmp"),
             "fixture",
             BTreeMap::new(),
         )

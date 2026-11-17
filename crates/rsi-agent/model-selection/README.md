@@ -5,6 +5,9 @@ selection through a typed domain, Session command and projection. The initial
 state is absent and falls back to the frozen Header baseline. Fork initialization
 resets that domain; a child uses its own request-derived Header baseline.
 
+The command is structured-only (`composer_input: null`). Model and effort controls
+invoke it with typed arguments; generic composer menus and completions omit it.
+
 Each Step captures one complete selection before preparing context. An explicit
 whole-Turn override has priority, then the current domain, then the Header.
 Retries reuse the Step capture. Ordinary UI inputs have no override, including

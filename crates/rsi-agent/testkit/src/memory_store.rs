@@ -754,6 +754,28 @@ impl SessionStore for MemoryStore {
             domain_seq: domain_cut(session, control_seq),
         })
     }
+    async fn read_domain_admission(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        let control_seq = session.controls.last().map_or(0, AgentControlRecord::seq);
+        rsi_agent_store_protocol::StoreDomainAdmissionSnapshot::new(
+            rsi_agent_store_protocol::StoreDomainWatermarks {
+                fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                control_seq,
+                domain_seq: domain_cut(session, control_seq),
+            },
+            current_domain_heads(session),
+        )
+    }
     async fn read_domain_states(
         &self,
         session_id: &SessionId,
@@ -2176,17 +2198,7 @@ fn apply_domain_updates(
                 .checked_add(record.encoded_len() as u64)
                 .ok_or_else(|| StoreError::Invalid("domain byte count overflow".into()))?;
         }
-        let heads: Vec<_> = session
-            .domain_versions
-            .values()
-            .filter_map(|versions| versions.last().cloned())
-            .filter(|head| {
-                session
-                    .domain_removals
-                    .get(head.identity.id())
-                    .is_none_or(|cuts| cuts.last().is_none_or(|cut| *cut < head.control_seq))
-            })
-            .collect();
+        let heads = current_domain_heads(session);
         let next = rsi_agent_store_protocol::domain_heads_after(&heads, record.seq(), commit)?;
         if commit.source().is_generation() {
             session.generation_selections.insert(record.seq());
@@ -2215,6 +2227,20 @@ fn apply_domain_updates(
         }
     }
     Ok(())
+}
+
+fn current_domain_heads(session: &MemorySession) -> Vec<rsi_agent_store_protocol::StoreDomainHead> {
+    session
+        .domain_versions
+        .values()
+        .filter_map(|versions| versions.last().cloned())
+        .filter(|head| {
+            session
+                .domain_removals
+                .get(head.identity.id())
+                .is_none_or(|cuts| cuts.last().is_none_or(|cut| *cut < head.control_seq))
+        })
+        .collect()
 }
 
 fn validate_cas_references(

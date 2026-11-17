@@ -50,7 +50,14 @@ impl ApiClient for Client {
 }
 fn composition(root: &Path) -> StandardComposition {
     StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         rsi::ApplicationCatalogMetadata::default(),

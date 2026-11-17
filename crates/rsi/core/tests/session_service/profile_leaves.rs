@@ -89,7 +89,7 @@ fn commit(preview: &Preview) -> Commit {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn earlier_grant_storage_is_rejected_without_rewriting_it() {
-    for version in [2, 3] {
+    for version in [3, 4] {
         let fixture = fixture("http://127.0.0.1:1");
         let running = RunningRsi::boot_host_profile(
             composition(fixture.paths.clone()),
@@ -125,7 +125,7 @@ async fn earlier_grant_storage_is_rejected_without_rewriting_it() {
                 [version],
             )
             .unwrap();
-        if version == 3 {
+        if version == 4 {
             // Invalid stored accounting is a load failure, not a schema mismatch.
             database.execute("UPDATE rsi_storage_domains SET record_bytes=record_bytes+1 WHERE domain='rsi.profile-leaves'", []).unwrap();
         }
@@ -142,16 +142,16 @@ async fn earlier_grant_storage_is_rejected_without_rewriting_it() {
         let Err(error) = result else {
             panic!("old grant storage must not activate")
         };
-        if version == 2 {
+        if version == 3 {
             assert!(
-                error.to_string().contains("grant storage version 3"),
+                error.to_string().contains("grant storage version 4"),
                 "{error}"
             );
             assert!(error.to_string().contains("explicit reset"), "{error}");
         } else {
             assert!(!error.to_string().contains("explicit reset"), "{error}");
             assert!(
-                !error.to_string().contains("grant storage version 3"),
+                !error.to_string().contains("grant storage version 4"),
                 "{error}"
             );
         }
@@ -196,7 +196,7 @@ async fn exhausted_grant_revision_rejects_revocation_without_closing_its_scope()
     let mut database =
         rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
     let bytes: Vec<u8> = database.query_row(
-        "SELECT value FROM rsi_storage_records WHERE domain='rsi.profile-leaves' AND key='grants'",
+        "SELECT value FROM rsi_storage_records WHERE domain='rsi.profile-leaves' AND table_name='' AND key=''",
         [], |row| row.get(0)).unwrap();
     let mut grants: Grants = serde_json::from_slice(&bytes).unwrap();
     let previous_bytes = i64::try_from(bytes.len()).unwrap();
@@ -204,7 +204,7 @@ async fn exhausted_grant_revision_rejects_revocation_without_closing_its_scope()
     grants.validate().unwrap();
     let bytes = serde_json::to_vec(&grants).unwrap();
     let transaction = database.transaction().unwrap();
-    transaction.execute("UPDATE rsi_storage_records SET value=?1 WHERE domain='rsi.profile-leaves' AND key='grants'", [&bytes]).unwrap();
+    transaction.execute("UPDATE rsi_storage_records SET value=?1 WHERE domain='rsi.profile-leaves' AND table_name='' AND key=''", [&bytes]).unwrap();
     transaction.execute(
         "UPDATE rsi_storage_domains SET record_bytes=record_bytes+?1 WHERE domain='rsi.profile-leaves'",
         [i64::try_from(bytes.len()).unwrap() - previous_bytes],

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 /// One model-declared task state; completion is not independent verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum TodoStatus {
     /// Work has not started.
     Pending,
@@ -15,6 +16,7 @@ pub enum TodoStatus {
 /// One bounded task line.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TodoItem {
     content: String,
     status: TodoStatus,
@@ -63,6 +65,7 @@ impl<'de> Deserialize<'de> for TodoItem {
 /// A complete authoritative list, empty when cleared or freshly forked.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TodoList(Vec<TodoItem>);
 impl TodoList {
     /// Validates one complete replacement (64 items and 64 KiB encoded maximum).

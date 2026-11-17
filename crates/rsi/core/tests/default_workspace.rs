@@ -12,7 +12,14 @@ fn reserved_application_factories_match_the_linked_catalog() {
     .unwrap();
     let root = temp.path();
     let composition = StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         ApplicationCatalogMetadata::default(),
@@ -75,7 +82,14 @@ async fn model_free_initialization_is_idempotent_and_removal_survives_restart() 
     let documents = root.join("Documents 世界");
     std::fs::create_dir(&documents).unwrap();
     let composition = StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         ApplicationCatalogMetadata::default(),
@@ -139,7 +153,14 @@ async fn directory_failure_is_retryable_and_existing_workspace_suppresses_creati
     std::fs::write(&profile, "format = 1\nsteps = []\n").unwrap();
     let documents = root.join("Documents");
     let composition = StandardComposition::new(
-        HostPaths::new(root.join("config"), root.join("state"), root.join("cache")).unwrap(),
+        HostPaths::new(
+            root.join("config"),
+            root.join("data"),
+            root.join("state"),
+            root.join("cache"),
+            root.join("tmp"),
+        )
+        .unwrap(),
         BTreeMap::new(),
         None,
         ApplicationCatalogMetadata::default(),
@@ -181,8 +202,10 @@ fn invalid_documents_spelling_fails_before_initialization() {
     let composition = StandardComposition::new(
         HostPaths::new(
             root.path().join("config"),
+            root.path().join("data"),
             root.path().join("state"),
             root.path().join("cache"),
+            root.path().join("tmp"),
         )
         .unwrap(),
         BTreeMap::new(),

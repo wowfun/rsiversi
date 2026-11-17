@@ -151,7 +151,7 @@ impl PluginFactory for TodoFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (): () = plan.take_state()?;
         let definition = DomainDefinition::new(
-            DomainIdentity::new(DOMAIN, 1).map_err(activation)?,
+            DomainIdentity::new(DOMAIN, CODEC_VERSION).map_err(activation)?,
             &TodoList::default(),
             TodoList::validate,
             rsi_agent_composition_protocol::DomainReferencePolicy::None,
@@ -216,3 +216,31 @@ impl PluginFactory for TodoFactory {
         )
     }
 }
+
+const CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_todo,
+    TodoList,
+    CODEC_VERSION,
+    format!("tests/fixtures/persistence/todo-v{}.json", CODEC_VERSION),
+    {
+        let samples: Vec<TodoList> = vec![
+            TodoList::default(),
+            TodoList::new(
+                [
+                    crate::TodoStatus::Pending,
+                    crate::TodoStatus::InProgress,
+                    crate::TodoStatus::Completed,
+                ]
+                .into_iter()
+                .map(|status| crate::TodoItem::new("fixture 中🦀 \" \\".into(), status).unwrap())
+                .collect(),
+            )
+            .unwrap(),
+        ];
+
+        samples
+    }
+);

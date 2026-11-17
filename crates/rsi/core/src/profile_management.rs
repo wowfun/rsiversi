@@ -14,7 +14,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Context, LocalContract, MetaError, PluginFactory,
     PreparedActivation,
 };
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -22,7 +22,7 @@ use std::{
 use tokio::sync::Semaphore;
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 
-pub(crate) const STORAGE_REQUIREMENT: &str = "Profile grant storage version 3 is required; older rsi.profile-leaves stores require an explicit reset or fresh state";
+pub(crate) const STORAGE_REQUIREMENT: &str = "Profile grant storage version 4 is required; older rsi.profile-leaves stores require an explicit reset or fresh state";
 pub(crate) const STORAGE_UNAVAILABLE: &str =
     "Profile grant storage could not be opened; inspect storage availability and integrity";
 
@@ -84,13 +84,19 @@ impl PluginFactory for Factory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.profile-leaves".into(),
-                backend: "base".into(),
-                version: 3,
-                maximum_records: 1,
-                maximum_bytes: 256 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.profile-leaves".into(),
+                    backend: "base".into(),
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 256 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .global::<GrantDocument>()
+                    .map_err(|_| activation())?,
+            )
             .await
             .map_err(|error| {
                 MetaError::Activation(
@@ -103,21 +109,18 @@ impl PluginFactory for Factory {
                     .into(),
                 )
             })?;
-        let mut records = domain.snapshot().await.map_err(|_| activation())?;
-        let document = match records.remove("grants") {
-            Some(value) => {
-                serde_json::from_value::<wire::Grants>(value).map_err(|_| activation())?
-            }
-            None => wire::Grants {
-                revision: "0".into(),
-                scopes: vec![],
-            },
-        };
-        document.validate().map_err(|_| activation())?;
-        if !records.is_empty() {
-            return Err(activation());
-        }
+        let document = domain
+            .global::<GrantDocument>()
+            .and_then(|global| global.get())
+            .map_err(|_| activation())?
+            .unwrap_or_else(|| {
+                Arc::new(GrantDocument(wire::Grants {
+                    revision: "0".into(),
+                    scopes: vec![],
+                }))
+            });
         let gates = document
+            .0
             .scopes
             .iter()
             .cloned()
@@ -192,10 +195,21 @@ impl Gate {
         self.tasks.clone()
     }
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct GrantDocument(#[serde(deserialize_with = "deserialize_grants")] wire::Grants);
+fn deserialize_grants<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<wire::Grants, D::Error> {
+    let grants = <wire::Grants as serde::Deserialize>::deserialize(deserializer)?;
+    grants.validate().map_err(serde::de::Error::custom)?;
+    Ok(grants)
+}
 struct State {
     visibility_revision: u64,
     closed: bool,
-    document: wire::Grants,
+    document: Arc<GrantDocument>,
     gates: BTreeMap<Grant, Gate>,
 }
 struct Proposal {
@@ -211,7 +225,7 @@ pub(crate) struct Manager {
     configuration: Arc<ConfigurationAccess>,
     administration: Arc<dyn rsi_api_protocol::DeviceAdministration>,
     epoch: HostEpoch,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     state: Mutex<State>,
     slots: [Arc<Semaphore>; 3],
     writer: Arc<Semaphore>,
@@ -367,5 +381,45 @@ impl Manager {
             self.tasks.close();
         }
         self.tasks.wait().await;
+        self.domain.close().await;
     }
 }
+
+const STORAGE_VERSION: u32 = 4;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_profile_grants,
+    GrantDocument,
+    STORAGE_VERSION,
+    format!(
+        "tests/fixtures/persistence/profile_grants-v{}.json",
+        STORAGE_VERSION
+    ),
+    {
+        let samples: Vec<GrantDocument> = vec![
+            GrantDocument(wire::Grants {
+                revision: "0".into(),
+                scopes: vec![],
+            }),
+            GrantDocument(wire::Grants {
+                revision: "7".into(),
+                scopes: vec![wire::Grant {
+                    principal: wire::Principal::Local,
+                    scope: wire::GrantScope::Profile {
+                        target: wire::Target {
+                            root: "a".repeat(64),
+                            profile: "default".into(),
+                            leaf: "rsi.fixture".into(),
+                        },
+                        operation: wire::ChangeKind::Configuration,
+                    },
+                }],
+            }),
+        ];
+        for sample in &samples {
+            sample.0.validate().unwrap();
+        }
+        samples
+    }
+);

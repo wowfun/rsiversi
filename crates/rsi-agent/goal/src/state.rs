@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 /// The single current Goal; replacing a Goal does not rewrite its control history.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct GoalState {
     /// Absent until explicitly created.
     pub goal: Option<Goal>,
@@ -15,6 +16,7 @@ pub struct GoalState {
 /// Frozen task and bounded current progress.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Goal {
     /// Caller-chosen logical identity, distinct for each newly created Goal.
     pub id: DomainRequestId,
@@ -39,6 +41,7 @@ pub struct Goal {
 /// Durable phase, never a live lease indicator.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum GoalPhase {
     /// Eligible for an explicitly armed controller to allocate another round.
     Active,
@@ -53,6 +56,7 @@ pub enum GoalPhase {
 /// Model report vocabulary; it contains no create, resume or budget operation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum GoalReportKind {
     /// Evidence claims that the task is done; subject to Turn settlement.
     Complete,
@@ -65,6 +69,7 @@ pub enum GoalReportKind {
 /// A model claim authenticated by the exact settled report Tool call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct GoalReport {
     /// Requested disposition.
     pub kind: GoalReportKind,
@@ -77,6 +82,7 @@ pub struct GoalReport {
 /// Complete frozen input of one charged round.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct GoalReservation {
     /// One-based allocation number.
     pub round: u64,
@@ -95,6 +101,7 @@ pub struct GoalReservation {
 /// Small outcome retained with the latest reservation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum RoundSettlement {
     /// Explicitly abandoned before acceptance; no mailbox entry or refund is invented.
     Abandoned,
@@ -112,6 +119,7 @@ pub enum RoundSettlement {
 /// Closed terminal classes, excluding potentially large result bodies.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum RoundOutcome {
     /// Successful natural model termination.
     Completed,
@@ -531,3 +539,52 @@ pub(crate) fn safe_text(text: &str, maximum: usize, empty: bool) -> Result<(), S
     }
     Ok(())
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_goal,
+    GoalState,
+    crate::GOAL_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/goal-v{}.json",
+        crate::GOAL_CODEC_VERSION
+    ),
+    {
+        let mut state = GoalState::default();
+        let mut samples = vec![state.clone()];
+        state
+            .apply(
+                GoalAction::Create {
+                    id: DomainRequestId::new("fixture").unwrap(),
+                    objective: "Verify 中🦀".into(),
+                    constraints: "synthetic".into(),
+                    max_rounds: Some(3),
+                },
+                3,
+                false,
+            )
+            .unwrap();
+        samples.push(state.clone());
+        state.goal.as_mut().unwrap().reserve().unwrap();
+        samples.push(state.clone());
+        let turn = TurnId::new("turn").unwrap();
+        let goal = state.goal.as_mut().unwrap();
+        goal.reservation.as_mut().unwrap().settlement = Some(RoundSettlement::Turn {
+            turn_id: turn.clone(),
+            outcome: RoundOutcome::Completed,
+        });
+        goal.report = Some(GoalReport {
+            kind: GoalReportKind::Complete,
+            evidence: "validated".into(),
+            source_turn: turn,
+        });
+        goal.phase = GoalPhase::Completed;
+        samples.push(state);
+
+        let samples: Vec<GoalState> = samples;
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

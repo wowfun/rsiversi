@@ -31,6 +31,7 @@ use tokio_util::task::TaskTracker;
 type Reply<T> = wire::Reply<T>;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Trust {
     host_key: SshHostKey,
     identity_path: String,
@@ -38,6 +39,7 @@ struct Trust {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Record {
     candidate: wire::Candidate,
     revision: u64,
@@ -84,12 +86,13 @@ impl LocalContract for Contract {
 }
 pub(crate) struct Manager {
     context: Context,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     grants: Arc<crate::profile_management::Manager>,
     configuration: Arc<rsi_configuration_access::ConfigurationAccess>,
     epoch: HostEpoch,
     service: String,
     packages: std::path::PathBuf,
+    temporary_root: std::path::PathBuf,
     state: Mutex<State>,
     writer: Arc<Semaphore>,
     target_writers: TargetWriters,
@@ -273,9 +276,10 @@ impl Manager {
     }
     async fn publish(&self, origin: &CallOrigin, record: Record) -> Reply<wire::Target> {
         record.validate()?;
-        let value = serde_json::to_value(&record).map_err(|_| ApiError::Unavailable)?;
         self.domain
-            .put(record.candidate.target.as_str(), value)
+            .table::<Record>("targets")
+            .map_err(rsi_storage_domain::storage_error)?
+            .put(record.candidate.target.as_str(), record.clone())
             .await
             .map_err(rsi_storage_domain::storage_error)?;
         let retired = {
@@ -425,6 +429,7 @@ impl Manager {
             &record.candidate.endpoint,
             &trust.host_key,
             &identity.bytes,
+            &self.temporary_root,
         )
         .map_err(|_| ApiError::Unavailable)?;
         drop(identity);
@@ -629,6 +634,7 @@ impl Manager {
             self.tasks.close();
         }
         self.tasks.wait().await;
+        self.domain.close().await;
         let connections = std::mem::take(
             &mut self
                 .state
@@ -647,7 +653,7 @@ struct UseAdmission {
     origin: CallOrigin,
     target: ExecutionTargetId,
     grants: Arc<crate::profile_management::Manager>,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     effects: Arc<Semaphore>,
     operations: Arc<Semaphore>,
 }
@@ -770,3 +776,54 @@ mod tests {
         panic!("completed target operation did not release its gate");
     }
 }
+
+const STORAGE_VERSION: u32 = 2;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_ssh_targets,
+    Record,
+    STORAGE_VERSION,
+    format!(
+        "tests/fixtures/persistence/ssh_targets-v{}.json",
+        STORAGE_VERSION
+    ),
+    {
+        let samples: Vec<Record> = vec![
+            Record {
+                candidate: wire::Candidate {
+                    target: ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+                    name: "fixture 中🦀".into(),
+                    endpoint: rsi_ssh_protocol::SshEndpoint::new("example.invalid", 22, "fixture")
+                        .unwrap(),
+                },
+                revision: 1,
+                creator: Principal::Local,
+                trust: None,
+            },
+            Record {
+                candidate: wire::Candidate {
+                    target: ExecutionTargetId::parse("b".repeat(32)).unwrap(),
+                    name: "trusted".into(),
+                    endpoint: rsi_ssh_protocol::SshEndpoint::new("127.0.0.1", 2222, "fixture")
+                        .unwrap(),
+                },
+                revision: 2,
+                creator: Principal::Local,
+                trust: Some(Trust {
+                    host_key: SshHostKey::new(
+                        "ssh-ed25519",
+                        "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    )
+                    .unwrap(),
+                    identity_path: "/fixture/key".into(),
+                    identity_sha256: "a".repeat(64),
+                }),
+            },
+        ];
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);

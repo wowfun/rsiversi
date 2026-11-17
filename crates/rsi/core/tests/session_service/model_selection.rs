@@ -53,6 +53,10 @@ async fn select(handle: &Arc<dyn rsi_session_protocol::SessionHandle>, request: 
         .iter()
         .find(|command| command.name() == "model-selection")
         .expect("standard selection command");
+    assert!(
+        command.composer_input().is_none(),
+        "model controls use structured arguments"
+    );
     handle.execute_command(SessionCommandInvocation {
         command:command.id().clone(),request_id:DomainRequestId::new(request).unwrap(),expected_revision:commands.revision(),
         arguments:CommandArguments::new(serde_json::json!({"model":{"deployment":"fixture","model":"second"},"reasoning_effort":"high"})).unwrap(),

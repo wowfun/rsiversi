@@ -110,6 +110,7 @@ impl PluginFactory for ContextInputFactory {
             COMMAND_NAME,
             "Hold context for the next request without waking the Session",
             true,
+            None,
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let lease = plan

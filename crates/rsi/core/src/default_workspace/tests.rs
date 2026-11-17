@@ -71,42 +71,6 @@ impl WorkspaceRegistry for FaultyRead {
     }
 }
 
-#[derive(Debug)]
-struct FaultyReceipt {
-    inner: Arc<dyn Domain>,
-    fail: AtomicBool,
-}
-#[async_trait]
-impl Domain for FaultyReceipt {
-    fn spec(&self) -> &DomainSpec {
-        self.inner.spec()
-    }
-    fn ensure_available(&self) -> Result<(), rsi_storage::StorageError> {
-        self.inner.ensure_available()
-    }
-    async fn snapshot(
-        &self,
-    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, rsi_storage::StorageError>
-    {
-        self.inner.snapshot().await
-    }
-    async fn put(
-        &self,
-        key: &str,
-        value: serde_json::Value,
-    ) -> Result<(), rsi_storage::StorageError> {
-        if self.fail.swap(false, Ordering::SeqCst) {
-            return Err(rsi_storage::StorageError::Io(
-                "injected receipt failure".into(),
-            ));
-        }
-        self.inner.put(key, value).await
-    }
-    async fn delete(&self, key: &str) -> Result<bool, rsi_storage::StorageError> {
-        self.inner.delete(key).await
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[expect(
     clippy::too_many_lines,
@@ -119,8 +83,14 @@ async fn registry_read_failure_is_known_and_retry_does_not_duplicate_initializat
         let profile = root.join("profile.toml");
         std::fs::write(&profile, "format = 1\nsteps = []\n").unwrap();
         let host = crate::StandardComposition::new(
-            rsi_host::HostPaths::new(root.join("config"), root.join("state"), root.join("cache"))
-                .unwrap(),
+            rsi_host::HostPaths::new(
+                root.join("config"),
+                root.join("data"),
+                root.join("state"),
+                root.join("cache"),
+                root.join("tmp"),
+            )
+            .unwrap(),
             std::collections::BTreeMap::new(),
             None,
             crate::ApplicationCatalogMetadata::default(),
@@ -145,25 +115,36 @@ async fn registry_read_failure_is_known_and_retry_does_not_duplicate_initializat
         .expect("default workspace dependencies did not activate")
         .expect("Host profile ended before activation");
         let registry = host.lookup_local::<WorkspaceRegistryContract>().unwrap();
+        let backend = Arc::new(rsi_storage_testkit::MemoryBackend::default());
+        let _backend_lease = host
+            .lookup_local::<rsi_storage::StorageHubContract>()
+            .unwrap()
+            .register("receipt-test", backend.clone())
+            .unwrap();
+        backend
+            .state
+            .reject_write
+            .store(fail_at == 3, Ordering::SeqCst);
         let domain = host
             .lookup_local::<DomainFacilityContract>()
             .unwrap()
-            .open(DomainSpec {
-                id: "test.default-workspace".into(),
-                backend: "base".into(),
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 128 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "test.default-workspace".into(),
+                    backend: "receipt-test".into(),
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 128 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default().global::<Receipt>().unwrap(),
+            )
             .await
             .unwrap();
         std::fs::create_dir(root.join("Documents")).unwrap();
         let mut owner = Arc::new(Owner {
             documents: Some(root.join("Documents")),
-            domain: Arc::new(FaultyReceipt {
-                inner: domain.clone(),
-                fail: AtomicBool::new(fail_at == 3),
-            }),
+            domain: domain.clone(),
             workspace: Arc::new(FaultyRead {
                 inner: registry.clone(),
                 fail_at: if fail_at == 3 { usize::MAX } else { fail_at },
@@ -197,7 +178,8 @@ async fn registry_read_failure_is_known_and_retry_does_not_duplicate_initializat
             );
             assert!(registry.list(None, 10).await.unwrap().records.is_empty());
         }
-        assert!(domain.snapshot().await.unwrap().is_empty());
+        assert!(domain.snapshot().unwrap().is_empty());
+        backend.state.reject_write.store(false, Ordering::SeqCst);
         let one = owner
             .clone()
             .initialize(CallOrigin::Local)
@@ -214,7 +196,7 @@ async fn registry_read_failure_is_known_and_retry_does_not_duplicate_initializat
             .unwrap();
         assert_eq!(one, two);
         assert_eq!(registry.list(None, 10).await.unwrap().records.len(), 1);
-        assert_eq!(domain.snapshot().await.unwrap().len(), 1);
+        assert_eq!(domain.snapshot().unwrap().len(), 1);
         assert!(host.shutdown().await.is_clean());
     }
 }

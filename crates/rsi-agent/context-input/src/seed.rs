@@ -92,7 +92,7 @@ impl ContextContributor for Seed {
 pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<()> {
     let context = plan.context().registration_context()?;
     let (state, domain_lease) = DomainDefinition::new(
-        DomainIdentity::new(DOMAIN, 1).expect("static domain"),
+        DomainIdentity::new(DOMAIN, CODEC_VERSION).expect("static domain"),
         &String::new(),
         |text| {
             if text.len() <= 64 * 1024 {
@@ -114,6 +114,7 @@ pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<()> {
         "context-seed",
         "Set supplemental reference context for the next request",
         true,
+        None,
     )
     .map_err(|error| MetaError::Activation(error.to_string()))?;
     let registrar = plan.local::<ContributionRegistrarContract>()?;
@@ -148,3 +149,21 @@ pub(super) fn register(plan: &ActivationPlan) -> rsi_meta::Result<()> {
         }),
     )
 }
+
+const CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_context_seed,
+    String,
+    CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/context_seed-v{}.json",
+        CODEC_VERSION
+    ),
+    {
+        let samples: Vec<String> = vec![String::new(), "seed 中🦀 \" \\ \n".into()];
+
+        samples
+    }
+);

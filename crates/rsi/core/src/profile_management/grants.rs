@@ -1,4 +1,4 @@
-use super::{ApiError, Failure, Gate, Grant, Manager, Principal, Reply, wire};
+use super::{ApiError, Failure, Gate, Grant, GrantDocument, Manager, Principal, Reply, wire};
 use rsi_api_protocol::CallOrigin;
 
 impl Manager {
@@ -106,6 +106,7 @@ impl Manager {
             .lock()
             .expect("Profile grants")
             .document
+            .0
             .clone()))
     }
     pub(super) async fn set_grant(&self, change: wire::SetGrant) -> Reply<wire::Grants> {
@@ -118,7 +119,13 @@ impl Manager {
             .acquire()
             .await
             .map_err(|_| ApiError::ShuttingDown)?;
-        let mut document = self.state.lock().expect("Profile grants").document.clone();
+        let mut document = self
+            .state
+            .lock()
+            .expect("Profile grants")
+            .document
+            .0
+            .clone();
         if document.revision != change.expected {
             return Ok(Err(Failure::Conflict));
         }
@@ -155,7 +162,6 @@ impl Manager {
         if document.validate().is_err() {
             return Ok(Err(Failure::Busy));
         }
-        let value = serde_json::to_value(&document).map_err(|_| ApiError::Unavailable)?;
         let ssh = matches!(change.scope.scope, wire::GrantScope::SshUse { .. });
         let drain = if change.granted {
             None
@@ -167,13 +173,16 @@ impl Manager {
             }
             drain
         };
-        self.domain
-            .put("grants", value)
+        let committed = self
+            .domain
+            .global::<GrantDocument>()
+            .map_err(rsi_storage_domain::storage_error)?
+            .set(GrantDocument(document))
             .await
             .map_err(rsi_storage_domain::storage_error)?;
         {
             let mut state = self.state.lock().expect("Profile grant publication");
-            state.document = document.clone();
+            state.document = committed.clone();
             if change.granted && !state.closed {
                 if ssh && !state.gates.get(&change.scope).is_some_and(|gate| gate.open) {
                     state.visibility_revision = state.visibility_revision.wrapping_add(1);
@@ -191,7 +200,7 @@ impl Manager {
         if let Some(drain) = drain {
             drain.wait().await;
         }
-        Ok(Ok(document))
+        Ok(Ok(committed.0.clone()))
     }
     pub(super) fn allowed(
         &self,
