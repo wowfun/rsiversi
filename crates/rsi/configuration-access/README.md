@@ -3,9 +3,14 @@
 This ordinary Host plugin owns explicit configuration grants for registered
 DeviceIds. Local callers retain configuration authority. An authenticated device
 starts without a grant; Session and navigation operations remain independent.
-The `rsi.configuration.grants` Storage domain contains one revisioned document,
+Schema 2 of `rsi.configuration.grants` uses a typed revisioned global,
 at most 64 devices and 64 KiB, routed to the configured backend. One writer owns
-its revision CAS. API revisions are canonical decimal strings.
+its revision CAS. The durable codec checks the device bound once at open; reads
+share the immutable value. API revisions are canonical decimal strings.
+
+The owning `persistence-contract.json` and `persistence` library tests retain
+schema-2 empty and populated grant payloads, checking shape, field order and exact
+serializer bytes. Older Domain versions require explicit reset or fresh state.
 
 The Local-only grant/revoke APIs verify actual registered devices and persist
 before publishing a grant. Revocation first closes admission, then drains all

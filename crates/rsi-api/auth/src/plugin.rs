@@ -4,7 +4,7 @@ use rsi_api_protocol::{
     DeviceAdministrationContract, DeviceAuthenticationContract, EndpointIdentityContract,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_storage_domain::{DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::DomainFacilityContract;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -35,27 +35,23 @@ impl PluginFactory for DeviceAuthFactory {
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<DeviceAuthConfig>()?;
         let endpoint = plan.local::<EndpointIdentityContract>()?;
-        let domain = plan
-            .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.api.devices".into(),
-                backend: config.backend,
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 64 * 1024,
-            })
-            .await
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let registry = Arc::new(
             DeviceRegistry::open(
                 plan.context().runtime().execution().clone(),
-                domain,
+                plan.local::<DomainFacilityContract>()?.as_ref(),
+                &config.backend,
                 (*endpoint).clone(),
             )
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?,
         );
-        let cleanup = registry.clone();
+        let authentication = plan
+            .context()
+            .provide_local::<DeviceAuthenticationContract>(registry.clone())?;
+        let administration = plan
+            .context()
+            .provide_local::<DeviceAdministrationContract>(registry.clone())?;
+        let cleanup = registry;
         plan.defer(
             "revoke authentication generation",
             Box::new(move || {
@@ -65,12 +61,6 @@ impl PluginFactory for DeviceAuthFactory {
                 })
             }),
         )?;
-        let authentication = plan
-            .context()
-            .provide_local::<DeviceAuthenticationContract>(registry.clone())?;
-        let administration = plan
-            .context()
-            .provide_local::<DeviceAdministrationContract>(registry)?;
         plan.defer(
             "withdraw device capabilities",
             Box::new(move || {

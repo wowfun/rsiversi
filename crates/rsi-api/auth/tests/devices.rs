@@ -4,98 +4,86 @@ use rsi_api_auth::DeviceRegistry;
 use rsi_api_protocol::{ApiError, DeviceAdministration, DeviceAuthentication, EndpointId};
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::Execution;
-use rsi_storage::StorageError;
-use rsi_storage_domain::{Domain, DomainSpec};
+use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+use rsi_storage::{Address, StorageFactory};
+use rsi_storage_domain::{DomainFacility, DomainFacilityContract, DomainFactory};
+use rsi_storage_testkit::{BackendFactory, MemoryBackend};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-use tokio::sync::Semaphore;
+use std::sync::{Arc, atomic::Ordering};
 
 #[derive(Debug)]
 struct TestDomain {
-    spec: DomainSpec,
-    records: Mutex<BTreeMap<String, Value>>,
-    fail: AtomicBool,
-    fenced: AtomicBool,
-    block: AtomicBool,
-    entered: Semaphore,
-    release: Semaphore,
+    backend: Arc<MemoryBackend>,
+    facility: Arc<dyn DomainFacility>,
+    _runtime: Runtime,
 }
 impl TestDomain {
-    fn new() -> Arc<Self> {
+    async fn new() -> Arc<Self> {
+        let runtime = Runtime::default();
+        let backend = Arc::new(MemoryBackend::default());
+        let factories: [(&str, Arc<dyn rsi_meta::PluginFactory>); 3] = [
+            ("hub", Arc::new(StorageFactory)),
+            (
+                "memory",
+                Arc::new(BackendFactory::new("memory", backend.clone())),
+            ),
+            ("domain", Arc::new(DomainFactory)),
+        ];
+        for (name, factory) in factories {
+            let plugin = runtime
+                .root()
+                .apply(
+                    ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory),
+                    Value::Null,
+                )
+                .await
+                .unwrap();
+            assert_eq!(plugin.snapshot().state, rsi_meta::FiberState::Active);
+        }
+        let facility = runtime
+            .root()
+            .lookup_local::<DomainFacilityContract>()
+            .unwrap();
         Arc::new(Self {
-            spec: DomainSpec {
-                id: "rsi.api.devices".into(),
-                backend: "memory".into(),
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 64 * 1024,
-            },
-            records: Mutex::default(),
-            fail: AtomicBool::new(false),
-            fenced: AtomicBool::new(false),
-            block: AtomicBool::new(false),
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
+            backend,
+            facility,
+            _runtime: runtime,
         })
     }
 }
-#[async_trait]
-impl Domain for TestDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        if self.fenced.load(Ordering::Acquire) {
-            Err(StorageError::RecoveryRequired)
-        } else {
-            Ok(())
-        }
-    }
-    fn spec(&self) -> &DomainSpec {
-        &self.spec
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, Value>, rsi_storage::StorageError> {
-        self.ensure_available()?;
-        Ok(self.records.lock().unwrap().clone())
-    }
-    async fn put(&self, key: &str, value: Value) -> std::result::Result<(), StorageError> {
-        if self.block.load(Ordering::SeqCst) {
-            self.entered.add_permits(1);
-            self.release.acquire().await.unwrap().forget();
-        }
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(StorageError::Corrupt("injected publication failure".into()));
-        }
-        self.records.lock().unwrap().insert(key.into(), value);
-        Ok(())
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, StorageError> {
-        panic!("device state publishes one atomic record")
+#[derive(Clone, Debug)]
+struct TestRegistry {
+    registry: DeviceRegistry,
+    _fixture: Arc<TestDomain>,
+}
+impl std::ops::Deref for TestRegistry {
+    type Target = DeviceRegistry;
+    fn deref(&self) -> &DeviceRegistry {
+        &self.registry
     }
 }
-
-async fn open(domain: Arc<TestDomain>) -> DeviceRegistry {
-    DeviceRegistry::open(
+async fn open(fixture: Arc<TestDomain>) -> TestRegistry {
+    let registry = DeviceRegistry::open(
         Execution::native(tokio::runtime::Handle::current()),
-        domain,
+        fixture.facility.as_ref(),
+        "memory",
         EndpointId::from_bytes([1; 16]),
     )
     .await
-    .unwrap()
+    .unwrap();
+    TestRegistry {
+        registry,
+        _fixture: fixture,
+    }
 }
 
 #[tokio::test]
 async fn stored_verifiers_survive_restart_without_plaintext_and_revoke_live_leases() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry.register("browser").await.unwrap();
     assert!(!format!("{device:?}").contains(device.token.expose_secret()));
-    let stored = serde_json::to_string(&domain.snapshot().await.unwrap()).unwrap();
+    let stored = serde_json::to_string(&domain.backend.values("rsi.api.devices")).unwrap();
     assert!(!stored.contains(device.token.expose_secret()));
     let authenticated = registry.authenticate(&device.token).unwrap();
     assert_eq!(authenticated.id, device.record.id);
@@ -118,31 +106,39 @@ async fn stored_verifiers_survive_restart_without_plaintext_and_revoke_live_leas
 
 #[tokio::test]
 async fn failed_publication_preserves_valid_authentication_and_rejects_new_registration() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry.register("retained").await.unwrap();
     let lease = registry.authenticate(&device.token).unwrap();
-    let snapshot = domain.snapshot().await.unwrap();
-    domain.fail.store(true, Ordering::SeqCst);
+    let snapshot = domain.backend.values("rsi.api.devices");
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, Ordering::SeqCst);
     assert!(registry.revoke(&device.record.id).await.is_err());
     assert!(registry.register("lost").await.is_err());
     assert!(!lease.revoked.is_cancelled());
     assert!(registry.authenticate(&device.token).is_ok());
-    assert_eq!(domain.snapshot().await.unwrap(), snapshot);
+    assert_eq!(domain.backend.values("rsi.api.devices"), snapshot);
     assert_eq!(registry.list().unwrap(), vec![device.record]);
     registry.close().await;
 }
 
 #[tokio::test]
 async fn dropped_revoke_waiter_does_not_cancel_publication_or_release_commit_ownership() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry.register("remote").await.unwrap();
     let lease = registry.authenticate(&device.token).unwrap();
-    domain.block.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .pause_write
+        .store(true, Ordering::SeqCst);
     let mut revoke = Box::pin(registry.revoke(&device.record.id));
     assert!(revoke.as_mut().now_or_never().is_none());
-    domain.entered.acquire().await.unwrap().forget();
+    domain.backend.state.entered.notified().await;
     drop(revoke);
     assert!(
         !lease.revoked.is_cancelled(),
@@ -151,12 +147,12 @@ async fn dropped_revoke_waiter_does_not_cancel_publication_or_release_commit_own
     let mut queued = Box::pin(registry.register("queued"));
     assert!(queued.as_mut().now_or_never().is_none());
     assert_eq!(
-        domain.entered.available_permits(),
-        0,
-        "dropped waiter retains serialization ownership"
+        domain.backend.state.writes.load(Ordering::SeqCst),
+        2,
+        "queued registration cannot publish while the accepted revoke is paused"
     );
     drop(queued);
-    domain.release.add_permits(1);
+    domain.backend.state.release.notify_one();
     lease.revoked.cancelled().await;
     registry.close().await;
     assert!(open(domain).await.list().unwrap().is_empty());
@@ -164,14 +160,18 @@ async fn dropped_revoke_waiter_does_not_cancel_publication_or_release_commit_own
 
 #[tokio::test]
 async fn retirement_fences_escaped_access_before_waiting_for_an_owned_commit() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry.register("existing").await.unwrap();
     let lease = registry.authenticate(&device.token).unwrap();
-    domain.block.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .pause_write
+        .store(true, Ordering::SeqCst);
     let mut register = Box::pin(registry.register("admitted"));
     assert!(register.as_mut().now_or_never().is_none());
-    domain.entered.acquire().await.unwrap().forget();
+    domain.backend.state.entered.notified().await;
     let mut closing = Box::pin(registry.close());
     assert!(closing.as_mut().now_or_never().is_none());
     assert!(
@@ -182,7 +182,7 @@ async fn retirement_fences_escaped_access_before_waiting_for_an_owned_commit() {
         registry.authenticate(&device.token),
         Err(ApiError::ShuttingDown)
     ));
-    domain.release.add_permits(1);
+    domain.backend.state.release.notify_one();
     let admitted = register.await.unwrap();
     closing.await;
     assert!(matches!(
@@ -193,7 +193,7 @@ async fn retirement_fences_escaped_access_before_waiting_for_an_owned_commit() {
 
 #[tokio::test]
 async fn capacity_and_durable_validation_fail_closed_without_accepting_unknown_devices() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     for label in ["", "\n", &"a".repeat(129)] {
         assert!(registry.register(label).await.is_err());
@@ -214,8 +214,8 @@ async fn capacity_and_durable_validation_fail_closed_without_accepting_unknown_d
         Err(ApiError::Unauthorized)
     ));
     registry.close().await;
-    let correct = domain.snapshot().await.unwrap();
-    let original = &correct["deployment"];
+    let correct = domain.backend.values("rsi.api.devices");
+    let original = &correct[""];
     let mut duplicate = original.clone();
     duplicate["devices"][1] = duplicate["devices"][0].clone();
     let mut extra = original.clone();
@@ -227,14 +227,13 @@ async fn capacity_and_durable_validation_fail_closed_without_accepting_unknown_d
         json!({"endpoint":"ff".repeat(16),"devices":[]}),
     ] {
         domain
-            .records
-            .lock()
-            .unwrap()
-            .insert("deployment".into(), malformed);
+            .backend
+            .seed("rsi.api.devices", 2, Address::global(), &malformed);
         assert!(
             DeviceRegistry::open(
                 Execution::native(tokio::runtime::Handle::current()),
-                domain.clone(),
+                domain.facility.as_ref(),
+                "memory",
                 EndpointId::from_bytes([1; 16])
             )
             .await
@@ -246,13 +245,6 @@ async fn capacity_and_durable_validation_fail_closed_without_accepting_unknown_d
 #[derive(Debug)]
 struct AuthDependencies(Arc<TestDomain>);
 #[async_trait]
-impl rsi_storage_domain::DomainFacility for AuthDependencies {
-    async fn open(&self, spec: DomainSpec) -> std::result::Result<Arc<dyn Domain>, StorageError> {
-        assert_eq!(&spec, self.0.spec());
-        Ok(self.0.clone())
-    }
-}
-#[async_trait]
 impl rsi_meta::PluginFactory for AuthDependencies {
     fn prepare(&self, _: &Value) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
         Ok(rsi_meta::PreparedActivation::new(Value::Null))
@@ -260,9 +252,8 @@ impl rsi_meta::PluginFactory for AuthDependencies {
     async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
         let domain = plan
             .context()
-            .provide_local::<rsi_storage_domain::DomainFacilityContract>(Arc::new(Self(
-                self.0.clone(),
-            )))?;
+            .provide_local::<DomainFacilityContract>(self.0.facility.clone())?;
+        let fixture = self.0.clone();
         let identity = plan
             .context()
             .provide_local::<rsi_api_protocol::EndpointIdentityContract>(Arc::new(
@@ -274,6 +265,7 @@ impl rsi_meta::PluginFactory for AuthDependencies {
                 Box::pin(async move {
                     drop(identity);
                     drop(domain);
+                    drop(fixture);
                     Ok(())
                 })
             }),
@@ -296,7 +288,7 @@ async fn plugin_uses_exact_dependencies_and_retires_both_escaped_authorities() {
         "deps",
         "test",
         UpdateMode::Replayable,
-        Arc::new(AuthDependencies(TestDomain::new())),
+        Arc::new(AuthDependencies(TestDomain::new().await)),
     );
     let deps = runtime.root().apply(deps, Value::Null).await.unwrap();
     let auth = ResolvedFactory::linked(
@@ -320,6 +312,26 @@ async fn plugin_uses_exact_dependencies_and_retires_both_escaped_authorities() {
         .unwrap();
     let device = admin.register("device").await.unwrap();
     let lease = verify.authenticate(&device.token).unwrap();
+    let duplicate = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "duplicate-auth",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(DeviceAuthFactory),
+            ),
+            json!({"backend":"memory"}),
+        )
+        .await
+        .unwrap();
+    assert_ne!(duplicate.snapshot().state, rsi_meta::FiberState::Active);
+    assert_eq!(auth.snapshot().state, rsi_meta::FiberState::Active);
+    assert!(
+        verify.authenticate(&device.token).is_ok(),
+        "failed duplicate activation must not close the active registry"
+    );
+    duplicate.dispose().await;
     auth.dispose().await;
     assert!(lease.revoked.is_cancelled());
     assert!(matches!(
@@ -342,14 +354,18 @@ async fn plugin_uses_exact_dependencies_and_retires_both_escaped_authorities() {
 
 #[tokio::test]
 async fn managed_rotation_preserves_identity_and_failed_publication_preserves_authority() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let first = registry
         .rotate_managed("local-web", "Local Web")
         .await
         .unwrap();
     let lease = registry.authenticate(&first.token).unwrap();
-    domain.fail.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, Ordering::SeqCst);
     assert!(
         registry
             .rotate_managed("local-web", "Local Web")
@@ -358,7 +374,11 @@ async fn managed_rotation_preserves_identity_and_failed_publication_preserves_au
     );
     assert!(!lease.revoked.is_cancelled());
     assert!(registry.authenticate(&first.token).is_ok());
-    domain.fail.store(false, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(false, Ordering::SeqCst);
     let second = registry
         .rotate_managed("local-web", "Local Web")
         .await
@@ -376,7 +396,7 @@ async fn managed_rotation_preserves_identity_and_failed_publication_preserves_au
         .unwrap();
     assert_eq!(third.record.id, first.record.id);
     assert!(
-        !serde_json::to_string(&domain.snapshot().await.unwrap())
+        !serde_json::to_string(&domain.backend.values("rsi.api.devices"))
             .unwrap()
             .contains(third.token.expose_secret())
     );
@@ -397,7 +417,7 @@ async fn managed_rotation_preserves_identity_and_failed_publication_preserves_au
 
 #[tokio::test]
 async fn exact_credential_cleanup_cannot_revoke_a_later_managed_rotation() {
-    let registry = open(TestDomain::new()).await;
+    let registry = open(TestDomain::new().await).await;
     let old = registry
         .rotate_managed("local-web", "Local Web")
         .await
@@ -424,18 +444,26 @@ async fn exact_credential_cleanup_cannot_revoke_a_later_managed_rotation() {
 
 #[tokio::test]
 async fn retired_managed_credential_preserves_principal_across_restart_and_failed_publication() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry
         .rotate_managed("local-web", "Local Web")
         .await
         .unwrap();
     let lease = registry.authenticate(&device.token).unwrap();
-    domain.fail.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, Ordering::SeqCst);
     assert!(registry.revoke_credential(&device).await.is_err());
     assert!(!lease.revoked.is_cancelled());
     assert!(registry.authenticate(&device.token).is_ok());
-    domain.fail.store(false, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(false, Ordering::SeqCst);
     assert!(registry.revoke_credential(&device).await.unwrap());
     assert!(lease.revoked.is_cancelled());
     registry.close().await;
@@ -461,7 +489,7 @@ async fn retired_managed_credential_preserves_principal_across_restart_and_faile
 
 #[tokio::test]
 async fn managed_rotation_checks_observed_identity_without_revoking_on_conflict() {
-    let registry = open(TestDomain::new()).await;
+    let registry = open(TestDomain::new().await).await;
     assert!(registry.managed_device("local-web").unwrap().is_none());
     let first = registry
         .rotate_managed_if("local-web", "Local Web", None)
@@ -502,10 +530,14 @@ async fn managed_rotation_checks_observed_identity_without_revoking_on_conflict(
 
 #[tokio::test]
 async fn backend_failure_in_another_domain_blocks_cached_authentication_and_administration() {
-    let domain = TestDomain::new();
+    let domain = TestDomain::new().await;
     let registry = open(domain.clone()).await;
     let device = registry.register("fixture").await.unwrap();
-    domain.fenced.store(true, Ordering::Release);
+    domain
+        .backend
+        .state
+        .unhealthy
+        .store(true, Ordering::Release);
     assert!(matches!(
         registry.authenticate(&device.token),
         Err(ApiError::Unavailable)

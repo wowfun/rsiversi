@@ -2,9 +2,10 @@
 
 This package provides the native Workspace registry plugin over the shared protocol. One
 configured storage-domain backend persists a versioned record per Workspace,
-including its immutable insertion order. A separate bounded allocation record
-reserves each order durably before its registration is written. Deletion never
-removes this high-water mark. Failed creation may leave a gap; orders cannot be
+including its immutable insertion order. Registration atomically commits its
+record, allocation high-water mark and display order in one Domain batch. Deletion
+atomically removes the record and its display position without lowering the
+high-water mark. Failed creation may leave a local gap; committed orders cannot be
 reused after restart. Mutations serialize and update the live snapshot after
 durable registration publication. Readers keep
 observing the previous committed snapshot while durable I/O is in flight. Once
@@ -17,16 +18,17 @@ it does not materialize the entire registry before detecting overflow.
 
 The allocation record also retains the Host display order as creation positions,
 not copied Workspace records. On opening, the registry drops positions whose
-registration was deleted and prepends newer registrations. Deletion removes the
-live position immediately; the next allocation or changed move prunes retired
-positions from the durable list. This list stays within the registration bound
+registration was deleted and prepends newer registrations. Every registration or
+deletion commits the resulting display order. This list stays within the registration bound
 and cannot resurrect a deleted position when its path is registered again.
 One allocation-record commit publishes a changed order. A failed commit keeps the
 previous live order; unknown outcomes use the Storage generation's existing fence.
 Insertion-order pages and their durable cursors remain independent of this order.
 
-Domain version 4 stores mandatory execution coordinates and the independent
-allocation high-water mark. A new registration receives an opaque random identity
+Domain version 5 stores typed Workspace records in the `records` table and the
+independent allocation high-water mark in the global value. Durable decoding
+validates each record once; activation checks cross-record identity and order.
+A new registration receives an opaque random identity
 in its existing record; coordinate keys form a separate in-memory lookup index. Local get-or-create canonicalizes only the Service filesystem;
 it never interprets a remote registration's path as Local. Non-UTF-8 paths are
 rejected rather than silently collapsed. Older domain records are rejected.

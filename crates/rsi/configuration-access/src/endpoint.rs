@@ -43,7 +43,7 @@ pub(super) fn register(
                 if !matches!(context.origin, CallOrigin::Local) {
                     return Err(ApiError::Unauthorized);
                 }
-                service.snapshot().await.map(Ok::<_, Never>)
+                service.snapshot().map(Ok::<_, Never>)
             }
         }),
     )?);

@@ -139,7 +139,7 @@ target use, exact SSH target management, or exact target/server stdio management
 The latter binds a sorted unique list of at most 32 `rsi.mcp` credential references.
 No scope implies another scope, and ordinary configuration grants imply none of
 these SSH scopes. Local host-key and authentication-identity trust remains a
-separate Local-only operation. Grant storage uses domain version 3 and retains
+separate Local-only operation. Grant storage uses domain version 4 with a typed global and retains
 the existing CAS, gate-close, Storage-fence and admitted-operation drain contract.
 Earlier grant stores, including stored Agent grants, are unsupported. They must
 be explicitly reset or replaced with fresh state before startup; boot does not

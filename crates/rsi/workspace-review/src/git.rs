@@ -156,6 +156,7 @@ impl Git {
         let process = self
             .process
             .spawn(ProcessSpec {
+                capture: None,
                 process,
                 stdin: input,
                 environment,
@@ -231,6 +232,7 @@ impl Git {
         }
         let process = execution
             .spawn(ProcessSpec {
+                capture: None,
                 process,
                 stdin: vec![],
                 environment,

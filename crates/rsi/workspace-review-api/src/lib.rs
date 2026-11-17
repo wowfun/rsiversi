@@ -15,6 +15,7 @@ use std::sync::Arc;
 /// Current source authorization, independent of an interval's opaque ID.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Scope {
     /// Coordinate key resolved through the current registry.
     pub workspace: WorkspaceKey,
@@ -24,6 +25,7 @@ pub struct Scope {
 /// Evidence state; terminal Turn state alone is not Complete.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(schemars::JsonSchema)]
 pub enum Phase {
     /// Baseline, controlled work or final capture is still pending.
     Pending,
@@ -35,6 +37,7 @@ pub enum Phase {
 /// Stable omission taxonomy without unbounded native error output.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(schemars::JsonSchema)]
 pub enum OmissionKind {
     /// Git metadata cannot identify this workspace.
     NonGit,
@@ -60,6 +63,7 @@ pub enum OmissionKind {
 /// Counted bounded omission, never a silently complete result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Omission {
     /// Stable cause.
     pub kind: OmissionKind,
@@ -69,6 +73,7 @@ pub struct Omission {
 /// Durable summary; diff files are never embedded here.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Summary {
     /// Opaque lowercase-hex interval ID.
     pub id: String,

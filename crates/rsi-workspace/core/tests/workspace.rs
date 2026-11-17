@@ -482,22 +482,77 @@ struct FaultDomain {
     resume: tokio::sync::Notify,
     failure: std::sync::Mutex<Option<rsi_storage::StorageError>>,
 }
-#[async_trait::async_trait]
-impl rsi_storage_domain::Domain for FaultDomain {
+impl FaultDomain {
     fn ensure_available(&self) -> Result<(), rsi_storage::StorageError> {
         self.failure.lock().unwrap().clone().map_or(Ok(()), Err)
     }
-    fn spec(&self) -> &rsi_storage_domain::DomainSpec {
-        &self.spec
+}
+#[derive(Debug)]
+struct FaultBackend(Arc<FaultDomain>);
+#[derive(Debug)]
+struct FaultUnit(Arc<FaultDomain>, rsi_storage::UnitDescriptor);
+#[async_trait::async_trait]
+impl rsi_storage::KvBackend for FaultBackend {
+    fn ensure_available(&self) -> Result<(), rsi_storage::StorageError> {
+        self.0.ensure_available()
     }
-    async fn snapshot(
+    fn capabilities(&self, _: rsi_storage::Layout) -> rsi_storage::Capabilities {
+        rsi_storage::Capabilities {
+            atomic_batch: true,
+            backup_record: false,
+        }
+    }
+    async fn open(
         &self,
-    ) -> Result<std::collections::BTreeMap<String, Value>, rsi_storage::StorageError> {
-        Ok(self.values.lock().await.clone())
+        descriptor: rsi_storage::UnitDescriptor,
+    ) -> Result<rsi_storage::OpenedUnit, rsi_storage::StorageError> {
+        self.ensure_available()?;
+        descriptor.admit_version(self.0.spec.version)?;
+        let records = self
+            .0
+            .values
+            .lock()
+            .await
+            .iter()
+            .map(|(key, value)| {
+                (
+                    if key == "allocation" {
+                        rsi_storage::Address::global()
+                    } else {
+                        rsi_storage::Address::record("records", key).unwrap()
+                    },
+                    rsi_storage::EncodedValue::encode(value).unwrap(),
+                )
+            })
+            .collect();
+        Ok(rsi_storage::OpenedUnit {
+            snapshot: rsi_storage::UnitSnapshot {
+                version: Some(self.0.spec.version),
+                records,
+                recoveries: vec![],
+            },
+            unit: Arc::new(FaultUnit(self.0.clone(), descriptor)),
+        })
     }
-    async fn put(&self, key: &str, value: Value) -> Result<(), rsi_storage::StorageError> {
-        if key != "allocation"
+}
+#[async_trait::async_trait]
+impl rsi_storage::KvUnit for FaultUnit {
+    fn descriptor(&self) -> &rsi_storage::UnitDescriptor {
+        &self.1
+    }
+    fn ensure_available(&self) -> Result<(), rsi_storage::StorageError> {
+        self.0.ensure_available()
+    }
+    async fn write(
+        &self,
+        changes: Vec<rsi_storage::Mutation>,
+    ) -> Result<(), rsi_storage::StorageError> {
+        self.ensure_available()?;
+        if changes
+            .iter()
+            .any(|change| change.value.is_some() && !change.address.is_global())
             && self
+                .0
                 .fail_registration
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
@@ -505,25 +560,48 @@ impl rsi_storage_domain::Domain for FaultDomain {
                 "injected registration failure".into(),
             ));
         }
-        self.pause_commit().await;
-        self.values.lock().await.insert(key.into(), value);
+        self.0.pause_commit().await;
+        let mut values = self.0.values.lock().await;
+        let mut staged = values.clone();
+        for change in changes {
+            let key = if change.address.is_global() {
+                "allocation"
+            } else {
+                change.address.key()
+            };
+            if let Some(value) = change.value {
+                staged.insert(key.into(), value.decode()?);
+            } else if staged.remove(key).is_none() {
+                return Err(rsi_storage::StorageError::Corrupt(
+                    "registered Workspace is absent from its durable backend".into(),
+                ));
+            }
+        }
+        *values = staged;
         Ok(())
     }
-    async fn delete(&self, key: &str) -> Result<bool, rsi_storage::StorageError> {
-        self.pause_commit().await;
-        Ok(self.values.lock().await.remove(key).is_some())
-    }
 }
-#[derive(Debug)]
-struct FaultFacility(Arc<FaultDomain>);
-#[async_trait::async_trait]
-impl rsi_storage_domain::DomainFacility for FaultFacility {
-    async fn open(
-        &self,
-        spec: rsi_storage_domain::DomainSpec,
-    ) -> Result<Arc<dyn rsi_storage_domain::Domain>, rsi_storage::StorageError> {
-        assert_eq!(spec, self.0.spec);
-        Ok(self.0.clone())
+async fn install_fault_storage(runtime: &Runtime, domain: Arc<FaultDomain>) {
+    for (name, factory) in [
+        (
+            "storage",
+            Arc::new(StorageFactory) as Arc<dyn rsi_meta::PluginFactory>,
+        ),
+        (
+            "backend",
+            Arc::new(rsi_storage_testkit::BackendFactory::new(
+                "test",
+                Arc::new(FaultBackend(domain)),
+            )),
+        ),
+        ("domains", Arc::new(DomainFactory)),
+    ] {
+        let fiber = runtime
+            .root()
+            .apply(linked(name, factory), Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
     }
 }
 #[tokio::test]
@@ -531,7 +609,7 @@ impl rsi_storage_domain::DomainFacility for FaultFacility {
     clippy::too_many_lines,
     reason = "one fault-injected registration and recovery lifecycle"
 )]
-async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rejected() {
+async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
     let temporary = tempfile::tempdir().unwrap();
     for name in ["failed", "kept"] {
         fs::create_dir(temporary.path().join(name)).unwrap();
@@ -542,9 +620,10 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
         spec: rsi_storage_domain::DomainSpec {
             id: "rsi.workspace".into(),
             backend: "test".into(),
-            version: 4,
+            version: 5,
             maximum_records: 16_385,
             maximum_bytes: 128 * 1024 * 1024,
+            ..rsi_storage_domain::DomainSpec::default()
         },
         values: tokio::sync::Mutex::new(std::collections::BTreeMap::default()),
         fail_registration: std::sync::atomic::AtomicBool::new(true),
@@ -553,14 +632,7 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
         entered: tokio::sync::Notify::default(),
         resume: tokio::sync::Notify::default(),
     });
-    runtime
-        .root()
-        .apply(
-            linked("domains", Arc::new(FaultFacility(domain.clone()))),
-            Value::Null,
-        )
-        .await
-        .unwrap();
+    install_fault_storage(&runtime, domain.clone()).await;
     let fiber = runtime
         .root()
         .apply(
@@ -582,15 +654,16 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
         ))
     ));
     assert!(registry.list(None, 10).await.unwrap().records.is_empty());
-    assert_eq!(
-        domain.values.lock().await["allocation"],
-        json!({"high_water":1})
-    );
+    assert!(domain.values.lock().await.is_empty());
     let original = registry
         .get_or_create(&temporary.path().join("kept"))
         .await
         .unwrap();
     assert!(original.created_at_ms.is_some());
+    assert_eq!(
+        domain.values.lock().await["allocation"]["display_order"],
+        json!([2])
+    );
     let ingress = runtime
         .root()
         .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
@@ -660,6 +733,10 @@ async fn failed_registration_leaves_a_reserved_gap_and_invalid_allocation_is_rej
     assert_eq!(registry.get(&kept.id).await.unwrap(), kept);
     fs::write(temporary.path().join("kept/keep.txt"), b"keep").unwrap();
     assert!(registry.delete_registration(&kept.id).await.unwrap());
+    assert_eq!(
+        domain.values.lock().await["allocation"],
+        json!({"high_water":2})
+    );
     assert_eq!(
         fs::read(temporary.path().join("kept/keep.txt")).unwrap(),
         b"keep"
@@ -795,38 +872,17 @@ async fn assert_exhaustion_and_divergence(
     domain.values.lock().await.remove(kept.id.as_str());
     assert!(matches!(
         registry.delete_registration(&kept.id).await,
-        Err(rsi_workspace_protocol::WorkspaceError::Corrupt(_))
+        Err(rsi_workspace_protocol::WorkspaceError::Api(
+            rsi_api_protocol::ApiError::Backend(_)
+        ))
     ));
     assert_eq!(registry.get(&kept.id).await.unwrap(), *kept);
-}
-
-#[async_trait::async_trait]
-impl rsi_meta::PluginFactory for FaultFacility {
-    fn prepare(&self, _: &Value) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
-        Ok(rsi_meta::PreparedActivation::new(Value::Null))
-    }
-    async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
-        let supply = plan
-            .context()
-            .provide_local::<rsi_storage_domain::DomainFacilityContract>(Arc::new(Self(
-                self.0.clone(),
-            )))?;
-        plan.defer(
-            "withdraw test domain",
-            Box::new(move || {
-                Box::pin(async move {
-                    drop(supply);
-                    Ok(())
-                })
-            }),
-        )
-    }
 }
 
 // This fixture verifies the JSON backend's original bytes; that backend is Unix-only.
 #[cfg(unix)]
 #[tokio::test]
-async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
+async fn legacy_shared_json_backend_is_refused_byte_for_byte() {
     use sha2::{Digest, Sha256};
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().canonicalize().unwrap();
@@ -845,7 +901,7 @@ async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
         .apply(linked("storage", Arc::new(StorageFactory)), Value::Null)
         .await
         .unwrap();
-    runtime
+    let fiber = runtime
         .root()
         .apply(
             linked("json", Arc::new(JsonStorageFactory)),
@@ -853,28 +909,17 @@ async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
         )
         .await
         .unwrap();
-    runtime
-        .root()
-        .apply(linked("domains", Arc::new(DomainFactory)), Value::Null)
-        .await
-        .unwrap();
-    let fiber = runtime
-        .root()
-        .apply(
-            linked("workspace", Arc::new(WorkspaceFactory)),
-            json!({"backend":"json"}),
-        )
-        .await
-        .unwrap();
-    let rsi_meta::FiberState::Failed(error) = fiber.snapshot().state else {
-        panic!("v3 must fail activation")
-    };
-    assert!(error.contains("version 3, expected 4"), "{error}");
+    assert!(matches!(
+        fiber.snapshot().state,
+        rsi_meta::FiberState::Failed(_)
+    ));
     assert!(
         runtime
             .root()
-            .lookup_local::<WorkspaceRegistryContract>()
-            .is_none()
+            .lookup_local::<rsi_storage::StorageHubContract>()
+            .unwrap()
+            .resolve("json")
+            .is_err()
     );
     assert_eq!(fs::read(&file).unwrap(), original);
     assert!(runtime.shutdown().await.is_clean());
@@ -882,6 +927,10 @@ async fn version_three_rejection_preserves_the_entire_backend_byte_for_byte() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The cold-start scenario verifies local and remote identities through one registry."
+)]
 async fn cold_registry_preserves_distinct_machines_without_local_remote_probes() {
     use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceOrderSeed};
     let temporary = tempfile::tempdir().unwrap();
@@ -909,32 +958,37 @@ async fn cold_registry_preserves_distinct_machines_without_local_remote_probes()
             .join("state");
     rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
     let runtime = storage_runtime(&state.join("registry.sqlite3")).await;
-    let facility = runtime
+    let backend = runtime
         .root()
-        .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
+        .lookup_local::<rsi_storage::StorageHubContract>()
+        .unwrap()
+        .resolve("sqlite")
         .unwrap();
-    let domain = facility
-        .open(rsi_storage_domain::DomainSpec {
-            id: "rsi.workspace".into(),
-            backend: "sqlite".into(),
-            version: 4,
-            maximum_records: 16_385,
-            maximum_bytes: 128 * 1024 * 1024,
-        })
-        .await
-        .unwrap();
-    domain
-        .put("allocation", json!({"high_water":3}))
-        .await
-        .unwrap();
+    let descriptor = rsi_storage::UnitDescriptor::new(
+        "rsi.workspace".into(),
+        5,
+        std::collections::BTreeSet::new(),
+        [("records".into(), rsi_storage::RecordPolicy::Reject)].into(),
+        true,
+        rsi_storage::Layout::Single,
+    )
+    .unwrap();
+    let opened = backend.open(descriptor).await.unwrap();
+    let mut changes = vec![rsi_storage::Mutation {
+        address: rsi_storage::Address::global(),
+        value: Some(rsi_storage::EncodedValue::encode(&json!({"high_water":3})).unwrap()),
+    }];
     for (index, record) in records.iter().enumerate() {
-        domain
-            .put(record.id.as_str(), json!({"order":index+1,"record":record}))
-            .await
-            .unwrap();
+        changes.push(rsi_storage::Mutation {
+            address: rsi_storage::Address::record("records", record.id.as_str()).unwrap(),
+            value: Some(
+                rsi_storage::EncodedValue::encode(&json!({"order":index+1,"record":record}))
+                    .unwrap(),
+            ),
+        });
     }
-    drop(domain);
-    drop(facility);
+    opened.unit.write(changes).await.unwrap();
+    drop(opened);
     runtime
         .root()
         .apply(
@@ -1025,9 +1079,10 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
         spec: rsi_storage_domain::DomainSpec {
             id: "rsi.workspace".into(),
             backend: "test".into(),
-            version: 4,
+            version: 5,
             maximum_records: 16_385,
             maximum_bytes: 128 * 1024 * 1024,
+            ..rsi_storage_domain::DomainSpec::default()
         },
         values: tokio::sync::Mutex::new(values),
         fail_registration: std::sync::atomic::AtomicBool::new(false),
@@ -1038,15 +1093,11 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     });
     let resolver = Arc::new(access::Resolver::default());
     let runtime = Runtime::default();
+    install_fault_storage(&runtime, domain.clone()).await;
     for (id, factory, config) in [
         (
             "execution",
             Arc::new(access::Factory(resolver.clone())) as Arc<dyn rsi_meta::PluginFactory>,
-            Value::Null,
-        ),
-        (
-            "domains",
-            Arc::new(FaultFacility(domain.clone())),
             Value::Null,
         ),
         (
@@ -1185,9 +1236,10 @@ async fn retirement_drains_abandoned_workspace_mutations_before_withdrawal() {
             spec: rsi_storage_domain::DomainSpec {
                 id: "rsi.workspace".into(),
                 backend: "test".into(),
-                version: 4,
+                version: 5,
                 maximum_records: 16_385,
                 maximum_bytes: 128 * 1024 * 1024,
+                ..rsi_storage_domain::DomainSpec::default()
             },
             values: tokio::sync::Mutex::default(),
             fail_registration: std::sync::atomic::AtomicBool::default(),
@@ -1196,14 +1248,7 @@ async fn retirement_drains_abandoned_workspace_mutations_before_withdrawal() {
             entered: tokio::sync::Notify::default(),
             resume: tokio::sync::Notify::default(),
         });
-        runtime
-            .root()
-            .apply(
-                linked("domains", Arc::new(FaultFacility(domain.clone()))),
-                Value::Null,
-            )
-            .await
-            .unwrap();
+        install_fault_storage(&runtime, domain.clone()).await;
         let fiber = runtime
             .root()
             .apply(

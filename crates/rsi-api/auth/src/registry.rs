@@ -5,8 +5,8 @@ use rsi_api_protocol::{
 };
 use rsi_credentials_protocol::SecretValue;
 use rsi_meta::Execution;
-use rsi_storage_domain::Domain;
 use rsi_storage_domain::storage_error;
+use rsi_storage_domain::{Domain, DomainFacility, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,11 +17,12 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-const RECORD_KEY: &str = "deployment";
 const MAX_DEVICES: usize = 64;
+const STORAGE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct StoredDevice {
     record: DeviceRecord,
     token_hash: String,
@@ -32,22 +33,41 @@ struct StoredDevice {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Durable {
     endpoint: EndpointId,
+    #[serde(deserialize_with = "deserialize_devices")]
     devices: Vec<StoredDevice>,
 }
 
 #[derive(Debug)]
 struct State {
-    durable: Durable,
+    durable: Arc<Durable>,
     leases: BTreeMap<DeviceId, CancellationToken>,
     retired: bool,
 }
 #[derive(Debug)]
 struct Inner {
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     state: Mutex<State>,
     commit: Arc<AsyncMutex<()>>,
+}
+
+impl State {
+    fn admit(&self, domain: &Domain) -> Result<()> {
+        if self.retired {
+            return Err(ApiError::ShuttingDown);
+        }
+        domain.ensure_available().map_err(storage_error)
+    }
+}
+impl Inner {
+    fn ensure_open(&self) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(&self.domain)
+    }
 }
 
 /// One exclusive deployment authentication generation over an explicit durable domain.
@@ -58,36 +78,46 @@ pub struct DeviceRegistry {
 }
 
 impl DeviceRegistry {
-    /// Loads a bounded domain whose exclusive writer is protected by the deployment owner.
+    /// Loads this owner's typed global from an explicitly selected backend.
+    /// The caller retains exclusive deployment write authority for this lifetime.
     pub async fn open(
         execution: Execution,
-        domain: Arc<dyn Domain>,
+        facility: &dyn DomainFacility,
+        backend: &str,
         endpoint: EndpointId,
     ) -> Result<Self> {
-        let spec = domain.spec();
-        if spec.version != 1 || spec.maximum_records != 1 || spec.maximum_bytes > 64 * 1024 {
-            return Err(ApiError::Invalid(
-                "device domain requires schema 1, one record and at most 64 KiB".into(),
-            ));
-        }
-        let mut snapshot = domain.snapshot().await.map_err(storage_error)?;
-        if snapshot.len() > 1 || snapshot.keys().any(|key| key != RECORD_KEY) {
-            return Err(ApiError::Invalid(
-                "device domain contains unexpected records".into(),
-            ));
-        }
-        let durable = if let Some(value) = snapshot.remove(RECORD_KEY) {
-            let durable: Durable = serde_json::from_value(value)
-                .map_err(|_| ApiError::Invalid("device domain record is malformed".into()))?;
-            validate_durable(&durable, &endpoint)?;
+        let domain = facility
+            .open(
+                DomainSpec {
+                    id: "rsi.api.devices".into(),
+                    backend: backend.into(),
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 64 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .global::<Durable>()
+                    .map_err(storage_error)?,
+            )
+            .await
+            .map_err(storage_error)?;
+        let global = domain.global::<Durable>().map_err(storage_error)?;
+        let durable = if let Some(durable) = global.get().map_err(storage_error)? {
+            if durable.endpoint != endpoint {
+                return Err(ApiError::Invalid(
+                    "device domain deployment identity differs".into(),
+                ));
+            }
             durable
         } else {
-            let durable = Durable {
-                endpoint,
-                devices: Vec::new(),
-            };
-            publish(&domain, &durable).await?;
-            durable
+            global
+                .set(Durable {
+                    endpoint,
+                    devices: Vec::new(),
+                })
+                .await
+                .map_err(storage_error)?
         };
         let leases = durable
             .devices
@@ -123,6 +153,7 @@ impl DeviceRegistry {
             lease.cancel();
         }
         let _commit = self.inner.commit.lock().await;
+        self.inner.domain.close().await;
     }
 }
 
@@ -133,13 +164,7 @@ impl DeviceAuthentication for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner
-            .domain
-            .ensure_available()
-            .map_err(storage_error)?;
-        if state.retired {
-            return Err(ApiError::ShuttingDown);
-        }
+        state.admit(&self.inner.domain)?;
         let hash = token_hash(&state.durable.endpoint, token)?;
         let device = state
             .durable
@@ -172,13 +197,7 @@ impl DeviceAdministration for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner
-            .domain
-            .ensure_available()
-            .map_err(storage_error)?;
-        if state.retired {
-            return Err(ApiError::ShuttingDown);
-        }
+        state.admit(&self.inner.domain)?;
         Ok(state
             .durable
             .devices
@@ -211,13 +230,7 @@ impl DeviceAdministration for DeviceRegistry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner
-            .domain
-            .ensure_available()
-            .map_err(storage_error)?;
-        if state.retired {
-            return Err(ApiError::ShuttingDown);
-        }
+        state.admit(&self.inner.domain)?;
         Ok(state
             .durable
             .devices
@@ -234,10 +247,7 @@ enum Rotation {
 
 impl DeviceRegistry {
     async fn revoke_matching(&self, id: &DeviceId, token: Option<&SecretValue>) -> Result<bool> {
-        self.inner
-            .domain
-            .ensure_available()
-            .map_err(storage_error)?;
+        self.inner.ensure_open()?;
         let commit = self.inner.commit.clone().lock_owned().await;
         let mut durable = {
             let state = self
@@ -245,14 +255,8 @@ impl DeviceRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.inner
-                .domain
-                .ensure_available()
-                .map_err(storage_error)?;
-            if state.retired {
-                return Err(ApiError::ShuttingDown);
-            }
-            state.durable.clone()
+            state.admit(&self.inner.domain)?;
+            state.durable.as_ref().clone()
         };
         let expected = token
             .map(|token| token_hash(&durable.endpoint, token))
@@ -275,7 +279,7 @@ impl DeviceRegistry {
         self.execution
             .spawn(async move {
                 let _commit = commit;
-                publish(&inner.domain, &durable).await?;
+                let durable = publish(&inner.domain, durable).await?;
                 let lease = {
                     let mut state = inner
                         .state
@@ -300,10 +304,7 @@ impl DeviceRegistry {
         rotation: Rotation,
     ) -> Result<RegisteredDevice> {
         DeviceRecord::validate_label(label)?;
-        self.inner
-            .domain
-            .ensure_available()
-            .map_err(storage_error)?;
+        self.inner.ensure_open()?;
         let commit = self.inner.commit.clone().lock_owned().await;
         let mut durable = {
             let state = self
@@ -311,13 +312,7 @@ impl DeviceRegistry {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.inner
-                .domain
-                .ensure_available()
-                .map_err(storage_error)?;
-            if state.retired {
-                return Err(ApiError::ShuttingDown);
-            }
+            state.admit(&self.inner.domain)?;
             if state.durable.devices.len() == MAX_DEVICES
                 && !state
                     .durable
@@ -327,7 +322,7 @@ impl DeviceRegistry {
             {
                 return Err(ApiError::Capacity);
             }
-            state.durable.clone()
+            state.durable.as_ref().clone()
         };
         if let Rotation::Matching(expected) = rotation {
             let actual = durable
@@ -368,12 +363,12 @@ impl DeviceRegistry {
             None => durable.devices.push(stored),
         }
         // Entropy is not a proof of uniqueness; never publish a duplicate identity.
-        validate_durable(&durable, &durable.endpoint)?;
+        validate_devices(&durable.devices)?;
         let inner = self.inner.clone();
         self.execution
             .spawn(async move {
                 let _commit = commit;
-                publish(&inner.domain, &durable).await?;
+                let durable = publish(&inner.domain, durable).await?;
                 let mut state = inner
                     .state
                     .lock()
@@ -422,16 +417,23 @@ fn token_hash(endpoint: &EndpointId, token: &SecretValue) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-fn validate_durable(durable: &Durable, endpoint: &EndpointId) -> Result<()> {
-    if &durable.endpoint != endpoint || durable.devices.len() > MAX_DEVICES {
+fn deserialize_devices<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<StoredDevice>, D::Error> {
+    let devices = Vec::<StoredDevice>::deserialize(deserializer)?;
+    validate_devices(&devices).map_err(serde::de::Error::custom)?;
+    Ok(devices)
+}
+fn validate_devices(devices: &[StoredDevice]) -> Result<()> {
+    if devices.len() > MAX_DEVICES {
         return Err(ApiError::Invalid(
-            "device domain identity or capacity is invalid".into(),
+            "device domain capacity is invalid".into(),
         ));
     }
     let mut ids = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut slots = BTreeSet::new();
-    for device in &durable.devices {
+    for device in devices {
         DeviceRecord::validate_label(&device.record.label)?;
         if let Some(slot) = &device.managed {
             validate_slot(slot)?;
@@ -456,8 +458,48 @@ fn validate_durable(durable: &Durable, endpoint: &EndpointId) -> Result<()> {
     Ok(())
 }
 
-async fn publish(domain: &Arc<dyn Domain>, durable: &Durable) -> Result<()> {
-    let value = serde_json::to_value(durable)
-        .map_err(|_| ApiError::Backend("device encoding failed".into()))?;
-    domain.put(RECORD_KEY, value).await.map_err(storage_error)
+async fn publish(domain: &Domain, durable: Durable) -> Result<Arc<Durable>> {
+    domain
+        .global::<Durable>()
+        .map_err(storage_error)?
+        .set(durable)
+        .await
+        .map_err(storage_error)
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence,
+    Durable,
+    STORAGE_VERSION,
+    format!("tests/fixtures/persistence/global-v{STORAGE_VERSION}.json"),
+    vec![
+        Durable {
+            endpoint: EndpointId::from_bytes([1; 16]),
+            devices: vec![],
+        },
+        Durable {
+            endpoint: EndpointId::from_bytes([1; 16]),
+            devices: vec![
+                StoredDevice {
+                    record: DeviceRecord {
+                        id: DeviceId::from_bytes([2; 16]),
+                        label: "fixture 中🦀".into(),
+                    },
+                    token_hash: "a".repeat(64),
+                    credential_retired: false,
+                    managed: None,
+                },
+                StoredDevice {
+                    record: DeviceRecord {
+                        id: DeviceId::from_bytes([3; 16]),
+                        label: "retired fixture".into(),
+                    },
+                    token_hash: "b".repeat(64),
+                    credential_retired: true,
+                    managed: Some("web".into()),
+                },
+            ],
+        },
+    ]
+);

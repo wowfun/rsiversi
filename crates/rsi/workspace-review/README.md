@@ -51,7 +51,8 @@ most eight intervals retaining scratch and 1 GiB total scratch reservation.
 Capture stages expire after 30 seconds and preserve omission reasons. Drops and
 retirement cancel subsequent steps and drain admitted Process/Files/storage work.
 
-Summary Domain `rsi.workspace-review`, version 1, stores at most 8,192 summaries,
+Summary Domain `rsi.workspace-review`, version 2, stores typed records in its
+`summaries` table, with at most 8,192 summaries,
 256 KiB each and 64 MiB total. It lives outside the Agent Store. Pending summaries
 are durable before capture; a lost acknowledgement closes further write admission
 until restart and cannot be claimed as success. A list carries the current epoch

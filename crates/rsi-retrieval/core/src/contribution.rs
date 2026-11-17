@@ -35,7 +35,8 @@ impl PluginFactory for RetrievalToolsFactory {
             .requiring_local::<ToolRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let identity = DomainIdentity::new(CONFIG_DOMAIN, 1).expect("static retrieval Domain");
+        let identity = DomainIdentity::new(CONFIG_DOMAIN, crate::CONFIG_CODEC_VERSION)
+            .expect("static retrieval Domain");
         let inputs = plan.local::<AgentGenerationInputsContract>()?;
         let state = inputs
             .seed
@@ -142,6 +143,7 @@ impl ToolExecutor for Executor {
                     additional_contexts: vec![],
                     enforcement: vec![],
                     concludes_turn: false,
+                    spills: Vec::new(),
                 }
             }
             Err(error) => ToolResult {
@@ -154,6 +156,7 @@ impl ToolExecutor for Executor {
                 additional_contexts: vec![],
                 enforcement: vec![],
                 concludes_turn: false,
+                spills: Vec::new(),
             },
         })
     }

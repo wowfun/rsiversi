@@ -17,7 +17,7 @@ use rsi_meta::{
     PreparedActivation, UpdateMode,
 };
 use rsi_storage_domain::storage_error;
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -31,13 +31,23 @@ mod endpoint;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Document {
     revision: u64,
+    #[serde(deserialize_with = "deserialize_deployments")]
     deployments: Vec<ManagedProvider>,
+}
+const STORAGE_VERSION: u32 = 2;
+fn deserialize_deployments<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<ManagedProvider>, D::Error> {
+    let deployments = Vec::<ManagedProvider>::deserialize(deserializer)?;
+    validate_deployments(&deployments).map_err(serde::de::Error::custom)?;
+    Ok(deployments)
 }
 #[derive(Debug)]
 struct State {
-    document: Document,
+    document: Arc<Document>,
     applied: u64,
     applying: bool,
     diagnostic: Option<String>,
@@ -48,7 +58,7 @@ struct State {
 #[derive(Debug)]
 pub struct ManagedProviders {
     discovery: discovery::Discovery,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     access: Arc<ConfigurationAccess>,
     host: Arc<Host>,
     profile: ScopedProfile,
@@ -119,16 +129,16 @@ impl ManagedProviders {
             revision,
             deployments,
         };
-        validate_document(&document)?;
+        validate_deployments(&document.deployments)?;
         let owner = self.clone();
         let task = self.execution.spawn(self.tasks.track_future(async move {
             let (_permit, _lease) = (permit, lease);
             let input = owner.preflight(&document).await?;
-            let value = serde_json::to_value(&document)
-                .map_err(|_| ApiError::Invalid("invalid provider document".into()))?;
-            owner
+            let document = owner
                 .domain
-                .put("desired", value)
+                .global::<Document>()
+                .map_err(storage_error)?
+                .set(document)
                 .await
                 .map_err(storage_error)?;
             {
@@ -213,22 +223,18 @@ impl ManagedProviders {
             self.tasks.close();
         }
         self.tasks.wait().await;
+        self.domain.close().await;
         self.profile.shutdown().await
     }
 }
-fn validate_document(document: &Document) -> Result<()> {
-    if document.deployments.len() > 64
-        || serde_json::to_vec(&serde_json::json!({"desired": document}))
-            .map_err(|_| ApiError::Invalid("invalid provider document".into()))?
-            .len()
-            > 1024 * 1024
-    {
+fn validate_deployments(deployments: &[ManagedProvider]) -> Result<()> {
+    if deployments.len() > 64 {
         return Err(ApiError::Invalid(
-            "managed providers exceed 64 deployments or 1 MiB".into(),
+            "managed providers exceed 64 deployments".into(),
         ));
     }
     let mut names = BTreeSet::new();
-    for deployment in &document.deployments {
+    for deployment in deployments {
         let name = deployment
             .config
             .get("deployment")
@@ -353,26 +359,25 @@ impl PluginFactory for ManagedProvidersFactory {
         let host = Arc::new(catalog(execution.clone()).map_err(activation)?);
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.managed-providers".into(),
-                backend: input.backend,
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 1024 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.managed-providers".into(),
+                    backend: input.backend,
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 1024 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default().global::<Document>().map_err(activation)?,
+            )
             .await
             .map_err(activation)?;
-        let mut records = domain.snapshot().await.map_err(activation)?;
-        if records.len() > 1 || records.keys().any(|key| key != "desired") {
-            return Err(MetaError::Activation(
-                "invalid managed provider records".into(),
-            ));
-        }
-        let document: Document = records
-            .remove("desired")
-            .map_or_else(|| Ok(Document::default()), serde_json::from_value)
-            .map_err(|_| MetaError::Activation("invalid managed provider document".into()))?;
-        validate_document(&document).map_err(activation)?;
+        let document = domain
+            .global::<Document>()
+            .map_err(activation)?
+            .get()
+            .map_err(activation)?
+            .unwrap_or_default();
         // Preflight durable inputs before even the empty child scope is activated.
         let capture = host.clone();
         let desired = program(&document);
@@ -452,3 +457,10 @@ impl PluginFactory for ManagedProvidersFactory {
 fn activation(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence, Document, STORAGE_VERSION,
+    format!("tests/fixtures/persistence/global-v{STORAGE_VERSION}.json"),
+    vec![Document::default(), Document { revision: 7, deployments: [ProviderKind::Deepseek, ProviderKind::Openai, ProviderKind::OpenaiCompatible].into_iter().enumerate().map(|(i, provider)| ManagedProvider { provider, config: serde_json::json!({"deployment":format!("fixture-{i}"),"credential":{"owner":provider.owner(),"key":"synthetic-reference"},"models":["中","model"],"ordered":{"z":1,"a":2}}) }).collect() }]
+);

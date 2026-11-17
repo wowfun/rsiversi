@@ -69,6 +69,7 @@ impl TemplateParameters {
 /// Complete resource-template metadata; extra fields have no execution semantics.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct McpResourceTemplate {
     /// RFC 6570 template interpreted only by its configured MCP server.
     pub uri_template: String,
@@ -88,6 +89,7 @@ pub struct McpResourceTemplate {
 /// Discovery state is distinct from an enabled but empty catalog.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub enum TemplateCatalog {
     /// The operator has not authorized parameterized resource access.
     #[default]

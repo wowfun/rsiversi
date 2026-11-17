@@ -23,8 +23,8 @@ and directory status. An exact `get` reads one registration without filesystem
 access. Listing takes a bounded page size and a stable insertion-order cursor;
 deleting the cursor's registration does not invalidate continuation. Returned
 paths identify the server's directory and confer no client filesystem authority.
-Domain version 4 retains mandatory execution coordinates and an allocation
-high-water mark independently of live registrations, including when the registry
+Domain version 5 retains mandatory execution coordinates in a typed `records`
+table and an allocation global independently of live registrations, including when the registry
 is empty. Older domains are rejected without mutation. Registrations and cursors
 must be recreated in a separate new state directory; the old backend remains
 untouched. The product owns its complete state-directory cutover.

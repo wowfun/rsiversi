@@ -12,6 +12,7 @@ use std::sync::Arc;
 /// A candidate identity is supplied once so reply loss cannot create duplicate targets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Candidate {
     /// Stable identity independent of hostnames and connection epochs.
     pub target: ExecutionTargetId,

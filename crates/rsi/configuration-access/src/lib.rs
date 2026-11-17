@@ -18,7 +18,7 @@ use rsi_settings_api::{
 };
 use rsi_settings_protocol::{SettingsAccess, SettingsAccessContract};
 use rsi_storage_domain::storage_error;
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -33,11 +33,25 @@ mod endpoint;
 mod plugins;
 pub use plugins::register_plugin_status;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Document {
     revision: u64,
+    #[serde(deserialize_with = "deserialize_grants")]
     devices: BTreeSet<DeviceId>,
+}
+const STORAGE_VERSION: u32 = 2;
+fn deserialize_grants<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<BTreeSet<DeviceId>, D::Error> {
+    let devices = BTreeSet::<DeviceId>::deserialize(deserializer)?;
+    if devices.len() > 64 {
+        return Err(serde::de::Error::custom(
+            "configuration grant count exceeds 64",
+        ));
+    }
+    Ok(devices)
 }
 #[derive(Debug, Default)]
 struct Gate {
@@ -80,7 +94,7 @@ pub struct ConfigurationLease {
 /// Ordinary Host-owned configuration authority; it cannot resolve credentials.
 #[derive(Debug)]
 pub struct ConfigurationAccess {
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     administration: Arc<dyn DeviceAdministration>,
     settings: Arc<dyn SettingsAccess>,
     admission: Mutex<Admission>,
@@ -90,9 +104,9 @@ pub struct ConfigurationAccess {
     execution: Execution,
 }
 impl ConfigurationAccess {
-    async fn open(
+    fn open(
         execution: Execution,
-        domain: Arc<dyn Domain>,
+        domain: Domain,
         administration: Arc<dyn DeviceAdministration>,
         settings: Arc<dyn SettingsAccess>,
     ) -> Result<Arc<Self>> {
@@ -110,14 +124,15 @@ impl ConfigurationAccess {
             tasks: TaskTracker::new(),
             execution,
         });
-        let document = owner.document().await?;
+        let document = owner.document()?;
         owner
             .admission
             .lock()
             .expect("configuration admission poisoned")
             .devices = document
             .devices
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|id| (id, Gate::open()))
             .collect();
         Ok(owner)
@@ -128,7 +143,6 @@ impl ConfigurationAccess {
     /// # Panics
     /// Panics if an earlier owner panic poisoned admission state.
     pub fn admit(&self, origin: &CallOrigin) -> Result<ConfigurationLease> {
-        self.domain.ensure_available().map_err(storage_error)?;
         let admission = self
             .admission
             .lock()
@@ -136,6 +150,7 @@ impl ConfigurationAccess {
         if admission.closed {
             return Err(ApiError::ShuttingDown);
         }
+        self.domain.ensure_available().map_err(storage_error)?;
         let gate = match origin {
             CallOrigin::Local => &admission.local,
             CallOrigin::Device(device) => {
@@ -181,7 +196,6 @@ impl ConfigurationAccess {
     /// # Panics
     /// Panics if an earlier panic poisoned this owner's state lock.
     pub fn allowed(&self, origin: &CallOrigin) -> Result<bool> {
-        self.domain.ensure_available().map_err(storage_error)?;
         let admission = self
             .admission
             .lock()
@@ -189,6 +203,7 @@ impl ConfigurationAccess {
         if admission.closed {
             return Ok(false);
         }
+        self.domain.ensure_available().map_err(storage_error)?;
         Ok(match origin {
             CallOrigin::Local => true,
             CallOrigin::Device(device) => {
@@ -201,30 +216,21 @@ impl ConfigurationAccess {
     }
 
     /// Reads the durable grant state; callers reconcile this after an uncertain write.
-    pub async fn snapshot(&self) -> Result<GrantSnapshot> {
-        let doc = self.document().await?;
+    pub fn snapshot(&self) -> Result<GrantSnapshot> {
+        let doc = self.document()?;
         Ok(GrantSnapshot {
             revision: doc.revision.to_string(),
-            devices: doc.devices.into_iter().collect(),
+            devices: doc.devices.iter().cloned().collect(),
         })
     }
-    async fn document(&self) -> Result<Document> {
-        let mut records = self.domain.snapshot().await.map_err(storage_error)?;
-        if records.len() > 1 || records.keys().any(|key| key != "grants") {
-            return Err(ApiError::Backend(
-                "invalid configuration grant records".into(),
-            ));
-        }
-        let doc: Document = records
-            .remove("grants")
-            .map_or_else(|| Ok(Document::default()), serde_json::from_value)
-            .map_err(|_| ApiError::Backend("invalid configuration grant document".into()))?;
-        if doc.devices.len() > 64 {
-            return Err(ApiError::Backend(
-                "configuration grant count exceeds 64".into(),
-            ));
-        }
-        Ok(doc)
+    fn document(&self) -> Result<Arc<Document>> {
+        Ok(self
+            .domain
+            .global::<Document>()
+            .map_err(storage_error)?
+            .get()
+            .map_err(storage_error)?
+            .unwrap_or_default())
     }
 
     /// Starts one Local-only expected-revision grant change before returning its waiter.
@@ -239,7 +245,6 @@ impl ConfigurationAccess {
         expected: &str,
         granted: bool,
     ) -> Result<BoxFuture<'static, Result<GrantSnapshot>>> {
-        self.domain.ensure_available().map_err(storage_error)?;
         if !matches!(origin, CallOrigin::Local) {
             return Err(ApiError::Unauthorized);
         }
@@ -255,6 +260,7 @@ impl ConfigurationAccess {
         if admission.closed {
             return Err(ApiError::ShuttingDown);
         }
+        self.domain.ensure_available().map_err(storage_error)?;
         let permit = self
             .writer
             .clone()
@@ -276,7 +282,7 @@ impl ConfigurationAccess {
         expected: u64,
         granted: bool,
     ) -> Result<GrantSnapshot> {
-        let mut document = self.document().await?;
+        let mut document = self.document()?.as_ref().clone();
         if document.revision != expected {
             return Err(ApiError::Invalid(
                 "configuration revision conflict; refresh grants".into(),
@@ -315,13 +321,11 @@ impl ConfigurationAccess {
             .revision
             .checked_add(1)
             .ok_or_else(|| ApiError::Invalid("configuration revision exhausted".into()))?;
-        self.domain
-            .put(
-                "grants",
-                serde_json::to_value(&document).map_err(|_| {
-                    ApiError::Invalid("configuration document encoding failed".into())
-                })?,
-            )
+        let document = self
+            .domain
+            .global::<Document>()
+            .map_err(storage_error)?
+            .set(document)
             .await
             .map_err(storage_error)?;
         let mut admission = self
@@ -347,7 +351,7 @@ impl ConfigurationAccess {
         drop(admission);
         Ok(GrantSnapshot {
             revision: document.revision.to_string(),
-            devices: document.devices.into_iter().collect(),
+            devices: document.devices.iter().cloned().collect(),
         })
     }
     async fn close(&self) {
@@ -366,6 +370,7 @@ impl ConfigurationAccess {
         };
         futures_util::future::join_all(gates.iter().map(TaskTracker::wait)).await;
         self.tasks.wait().await;
+        self.domain.close().await;
     }
 }
 #[async_trait]
@@ -438,13 +443,19 @@ impl PluginFactory for ConfigurationAccessFactory {
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.configuration.grants".into(),
-                backend: input.backend,
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 64 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.configuration.grants".into(),
+                    backend: input.backend,
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 64 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .global::<Document>()
+                    .map_err(|e| MetaError::Activation(e.to_string()))?,
+            )
             .await
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let owner = ConfigurationAccess::open(
@@ -453,7 +464,6 @@ impl PluginFactory for ConfigurationAccessFactory {
             plan.local::<DeviceAdministrationContract>()?,
             plan.local::<SettingsAccessContract>()?,
         )
-        .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;
         let mut registrations = endpoint::register(
             plan.local::<rsi_api_protocol::ApiRegistrarContract>()?
@@ -499,3 +509,18 @@ impl PluginFactory for ConfigurationAccessFactory {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence,
+    Document,
+    STORAGE_VERSION,
+    format!("tests/fixtures/persistence/global-v{STORAGE_VERSION}.json"),
+    vec![
+        Document::default(),
+        Document {
+            revision: 9,
+            devices: [DeviceId::from_bytes([2; 16]), DeviceId::from_bytes([3; 16])].into(),
+        },
+    ]
+);

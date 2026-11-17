@@ -38,7 +38,14 @@ Shutdown remains `ShuttingDown`; no discovery failure is retried automatically.
 Official-endpoint capacity metadata supplements only exact discovered model IDs;
 custom endpoints never inherit those facts by model name alone.
 
-The 1 MiB bound includes the Domain record envelope. Known pre-commit storage
+Schema 2 stores one typed global document. The 1 MiB bound includes its Domain
+accounting envelope; decoding validates deployment identities and credential
+ownership once, before publication. Readers share the committed document.
+The owning `persistence-contract.json` and `persistence` library tests retain
+empty and configured schema-2 payloads, including ordered dynamic configuration
+values. They check shape and exact serializer bytes without resolving credentials
+or contacting providers. Concrete factories still own configuration semantics.
+Known pre-commit storage
 failures leave the desired revision unchanged and permit a later explicit edit.
 Unknown commit outcomes fence storage: reads and further edits fail until Host
 restart reloads durable truth. Storage failures use the shared

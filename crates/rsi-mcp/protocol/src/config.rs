@@ -8,6 +8,7 @@ use std::{
 /// Explicit settings; no servers are enabled by default.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct McpConfig {
     /// Complete configured server set.
     #[serde(default)]
@@ -16,6 +17,7 @@ pub struct McpConfig {
 /// One explicit connection identity and selected raw Tool names.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct ServerConfig {
     /// Stable local namespace, independent of the server-reported name.
     pub id: String,
@@ -34,6 +36,7 @@ pub struct ServerConfig {
 /// Non-secret configuration for an exact transport target.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub enum TransportConfig {
     /// MCP Streamable HTTP with per-request credential resolution.
     StreamableHttp {
@@ -75,6 +78,7 @@ pub enum TransportConfig {
 /// Explicit literal value or owner-local secret reference for child environment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub enum EnvironmentValue {
     /// Non-secret configuration text.
     Literal {

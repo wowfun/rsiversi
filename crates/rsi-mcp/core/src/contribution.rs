@@ -218,6 +218,7 @@ pub(crate) fn unavailable(server: &str, error: McpError) -> ToolResult {
         additional_contexts: vec![],
         enforcement: vec![],
         concludes_turn: false,
+        spills: Vec::new(),
     }
 }
 #[derive(Debug)]

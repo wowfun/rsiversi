@@ -11,7 +11,7 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, Execution, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_storage::StorageError;
-use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use rsi_workspace_protocol::{
     ExecutionCoordinates, ExecutionLocation, MAXIMUM_REGISTERED_WORKSPACES,
     MAXIMUM_WORKSPACES_PER_PAGE, Result, WorkspaceCursor, WorkspaceDisplayOrder, WorkspaceError,
@@ -29,8 +29,8 @@ use std::sync::{
 use tokio::sync::{Mutex, RwLock};
 
 const DOMAIN_ID: &str = "rsi.workspace";
-const DOMAIN_VERSION: u32 = 4;
-const ALLOCATION_KEY: &str = "allocation";
+const DOMAIN_VERSION: u32 = 5;
+const RECORDS: &str = "records";
 const MAXIMUM_WORKSPACES: usize = MAXIMUM_REGISTERED_WORKSPACES;
 const MAXIMUM_WORKSPACE_DOMAIN_BYTES: usize = 128 * 1024 * 1024;
 
@@ -44,13 +44,24 @@ pub struct WorkspaceConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct DurableWorkspaceRecord {
     order: u64,
+    #[serde(deserialize_with = "deserialize_record")]
     record: WorkspaceRecord,
+}
+
+fn deserialize_record<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<WorkspaceRecord, D::Error> {
+    let record = WorkspaceRecord::deserialize(deserializer)?;
+    record.validate().map_err(serde::de::Error::custom)?;
+    Ok(record)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Allocation {
     high_water: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -70,7 +81,7 @@ struct RegistryData {
 struct Service {
     resolver: Arc<dyn ExecutionResolver>,
     origin: CallOrigin,
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     state: Arc<RwLock<RegistryData>>,
     revision: Arc<AtomicU64>,
     commit: Arc<Mutex<()>>,
@@ -121,11 +132,10 @@ impl WorkspaceRegistry for Service {
         if next == current.display_order {
             return Ok(result);
         }
-        let value = serde_json::to_value(Allocation {
+        let value = Allocation {
             high_water: current.next_order,
             display_order: next.clone(),
-        })
-        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        };
         let permits = permissions.locations;
         drop(current);
         let domain = self.domain.clone();
@@ -135,7 +145,9 @@ impl WorkspaceRegistry for Service {
             .spawn(async move {
                 let (_commit, _permits) = (commit, permits);
                 domain
-                    .put(ALLOCATION_KEY, value)
+                    .global::<Allocation>()
+                    .map_err(storage_error)?
+                    .set(value)
                     .await
                     .map_err(storage_error)?;
                 state.write().await.display_order = next;
@@ -258,11 +270,10 @@ impl WorkspaceRegistry for Service {
             return Ok(record);
         }
         drop(state);
-        let value = serde_json::to_value(DurableWorkspaceRecord {
+        let value = DurableWorkspaceRecord {
             order,
             record: record.clone(),
-        })
-        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        };
         let domain = self.domain.clone();
         let state = self.state.clone();
         let revision = self.revision.clone();
@@ -270,6 +281,8 @@ impl WorkspaceRegistry for Service {
             .spawn(async move {
                 let (_commit, _permit) = (commit, permit);
                 domain
+                    .table::<DurableWorkspaceRecord>(RECORDS)
+                    .map_err(storage_error)?
                     .put(record.id.as_str(), value)
                     .await
                     .map_err(storage_error)?;
@@ -322,8 +335,17 @@ impl WorkspaceRegistry for Service {
         let _permit = self.admit(record.coordinates.location())?;
         let order = *order;
         let coordinates = WorkspaceKey::from_coordinates(&record.coordinates);
+        let allocation = Allocation {
+            high_water: state.next_order,
+            display_order: state
+                .display_order
+                .iter()
+                .copied()
+                .filter(|position| *position != order)
+                .collect(),
+        };
         drop(state);
-        let domain = Arc::clone(&self.domain);
+        let domain = self.domain.clone();
         let state = Arc::clone(&self.state);
         let id = id.clone();
         let revision = self.revision.clone();
@@ -331,11 +353,21 @@ impl WorkspaceRegistry for Service {
             .spawn(async move {
                 let _commit = _commit;
                 let _permit = _permit;
-                if !domain.delete(id.as_str()).await.map_err(storage_error)? {
-                    return Err(WorkspaceError::Corrupt(
-                        "registered Workspace is absent from its durable domain".into(),
-                    ));
-                }
+                domain
+                    .batch(vec![
+                        domain
+                            .table::<DurableWorkspaceRecord>(RECORDS)
+                            .map_err(storage_error)?
+                            .delete_change(id.as_str())
+                            .map_err(storage_error)?,
+                        domain
+                            .global::<Allocation>()
+                            .map_err(storage_error)?
+                            .change(allocation)
+                            .map_err(storage_error)?,
+                    ])
+                    .await
+                    .map_err(storage_error)?;
                 let mut state = state.write().await;
                 state.records.remove(&id);
                 state.coordinates.remove(&coordinates);
@@ -374,21 +406,24 @@ impl PluginFactory for WorkspaceFactory {
         let config = plan.take_state::<WorkspaceConfig>()?;
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: DOMAIN_ID.into(),
-                backend: config.backend,
-                version: DOMAIN_VERSION,
-                maximum_records: MAXIMUM_WORKSPACES + 1,
-                maximum_bytes: MAXIMUM_WORKSPACE_DOMAIN_BYTES,
-            })
-            .await
-            .map_err(|error| storage_meta(&error))?;
-        let snapshot = domain
-            .snapshot()
+            .open(
+                DomainSpec {
+                    id: DOMAIN_ID.into(),
+                    backend: config.backend,
+                    version: DOMAIN_VERSION,
+                    maximum_records: MAXIMUM_WORKSPACES + 1,
+                    maximum_bytes: MAXIMUM_WORKSPACE_DOMAIN_BYTES,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .global::<Allocation>()
+                    .and_then(|schema| schema.table::<DurableWorkspaceRecord>(RECORDS))
+                    .map_err(|error| storage_meta(&error))?,
+            )
             .await
             .map_err(|error| storage_meta(&error))?;
         let state =
-            load_registry(snapshot).map_err(|error| MetaError::Activation(error.to_string()))?;
+            load_registry(&domain).map_err(|error| MetaError::Activation(error.to_string()))?;
         let service = Arc::new(Service {
             resolver: plan.local::<ExecutionResolverContract>()?,
             origin: CallOrigin::Local,
@@ -413,6 +448,7 @@ impl PluginFactory for WorkspaceFactory {
                     // Admission and its retained task hold this same slot; a
                     // dropped requester cannot let retirement miss the commit.
                     let _drained = service.commit.lock().await;
+                    service.domain.close().await;
                     drop(supply);
                     drop(ingress);
                     Ok(())
@@ -445,24 +481,31 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<RegistryData> {
-    let allocation = snapshot.remove(ALLOCATION_KEY);
-    let Allocation {
-        high_water,
-        display_order,
-    } = match allocation {
-        Some(value) => serde_json::from_value::<Allocation>(value)
-            .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?,
-        None if snapshot.is_empty() => Allocation {
+fn load_registry(domain: &Domain) -> Result<RegistryData> {
+    let snapshot = domain
+        .table::<DurableWorkspaceRecord>(RECORDS)
+        .map_err(storage_error)?
+        .snapshot()
+        .map_err(storage_error)?;
+    let allocation = domain
+        .global::<Allocation>()
+        .map_err(storage_error)?
+        .get()
+        .map_err(storage_error)?;
+    let allocation = match allocation {
+        Some(value) => value,
+        None if snapshot.is_empty() => Arc::new(Allocation {
             high_water: 0,
             display_order: Vec::new(),
-        },
+        }),
         None => {
             return Err(WorkspaceError::Corrupt(
                 "workspace allocation is missing".into(),
             ));
         }
     };
+    let high_water = allocation.high_water;
+    let display_order = &allocation.display_order;
     if display_order.len() > MAXIMUM_WORKSPACES
         || display_order
             .iter()
@@ -487,13 +530,8 @@ fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<Registry
         next_order: high_water,
         ..RegistryData::default()
     };
-    for (key, value) in snapshot {
-        let durable: DurableWorkspaceRecord = serde_json::from_value(value)
-            .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
-        let record = durable.record;
-        record
-            .validate()
-            .map_err(|error| WorkspaceError::Corrupt(error.to_string()))?;
+    for (key, durable) in snapshot.entries() {
+        let record = durable.record.clone();
         if durable.order == 0
             || durable.order > high_water
             || key != record.id.as_str()
@@ -526,7 +564,8 @@ fn load_registry(mut snapshot: BTreeMap<String, ConfigValue>) -> Result<Registry
         .filter(|position| !known.contains(position))
         .chain(
             display_order
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|position| state.order.contains_key(position)),
         )
         .collect();
@@ -542,21 +581,20 @@ fn storage_meta(error: &StorageError) -> MetaError {
 }
 
 impl Service {
-    async fn register(
+    async fn registration_coordinates(
         &self,
         location: &ExecutionLocation,
         path: &Path,
-    ) -> Result<(WorkspaceRecord, bool)> {
-        let permit = self.admit(location)?;
+    ) -> Result<ExecutionCoordinates> {
         let text = rsi_workspace_protocol::validate_registration_path(location, path)?;
-        let coordinates = match location {
+        match location {
             ExecutionLocation::Local => {
                 let canonical = canonical_directory(path).await?;
                 ExecutionCoordinates::new(
                     location.clone(),
                     canonical.to_str().expect("validated UTF-8 path"),
                 )
-                .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?
+                .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))
             }
             ExecutionLocation::Ssh { .. } => self
                 .resolver
@@ -564,8 +602,16 @@ impl Service {
                 .map_err(WorkspaceError::Api)?
                 .canonicalize(text)
                 .await
-                .map_err(execution_error)?,
-        };
+                .map_err(execution_error),
+        }
+    }
+    async fn register(
+        &self,
+        location: &ExecutionLocation,
+        path: &Path,
+    ) -> Result<(WorkspaceRecord, bool)> {
+        let permit = self.admit(location)?;
+        let coordinates = self.registration_coordinates(location, path).await?;
         let key = WorkspaceKey::from_coordinates(&coordinates);
         let current = self.state.read().await;
         self.ensure_available()?;
@@ -601,21 +647,18 @@ impl Service {
             .next_order
             .checked_add(1)
             .ok_or_else(|| WorkspaceError::InvalidInput("workspace order exhausted".into()))?;
-        let allocation = serde_json::to_value(Allocation {
+        let mut allocation = Allocation {
             high_water: order,
             display_order: state.display_order.clone(),
-        })
-        .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
+        };
+        allocation.display_order.insert(0, order);
         drop(state);
         let durable = DurableWorkspaceRecord {
             order,
             record: record.clone(),
         };
-        let value = serde_json::to_value(durable)
-            .map_err(|error| WorkspaceError::Storage(error.to_string()))?;
-        let domain = Arc::clone(&self.domain);
+        let domain = self.domain.clone();
         let state = Arc::clone(&self.state);
-        let durable_key = id.as_str().to_owned();
         let revision = self.revision.clone();
         self.execution
             .spawn(async move {
@@ -623,14 +666,21 @@ impl Service {
                 let _permit = permit;
                 // Reserve even an uncertain allocation locally; an error cannot prove
                 // that the durable write did not happen. No registration is published
-                // until its reservation has been acknowledged.
+                // until its atomic registration batch has been acknowledged.
                 state.write().await.next_order = order;
                 domain
-                    .put(ALLOCATION_KEY, allocation)
-                    .await
-                    .map_err(storage_error)?;
-                domain
-                    .put(&durable_key, value)
+                    .batch(vec![
+                        domain
+                            .global::<Allocation>()
+                            .map_err(storage_error)?
+                            .change(allocation)
+                            .map_err(storage_error)?,
+                        domain
+                            .table::<DurableWorkspaceRecord>(RECORDS)
+                            .map_err(storage_error)?
+                            .put_change(id.as_str(), durable)
+                            .map_err(storage_error)?,
+                    ])
                     .await
                     .map_err(storage_error)?;
                 let mut state = state.write().await;
@@ -742,3 +792,56 @@ fn execution_error(error: rsi_process::ProcessError) -> WorkspaceError {
         _ => ApiError::Unavailable,
     })
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_allocation,
+    Allocation,
+    DOMAIN_VERSION,
+    format!(
+        "tests/fixtures/persistence/allocation-v{}.json",
+        DOMAIN_VERSION
+    ),
+    {
+        let samples: Vec<Allocation> = vec![
+            Allocation {
+                high_water: 0,
+                display_order: vec![],
+            },
+            Allocation {
+                high_water: 9,
+                display_order: vec![7, 3],
+            },
+        ];
+
+        samples
+    }
+);
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_records,
+    DurableWorkspaceRecord,
+    DOMAIN_VERSION,
+    format!(
+        "tests/fixtures/persistence/records-v{}.json",
+        DOMAIN_VERSION
+    ),
+    {
+        let samples: Vec<DurableWorkspaceRecord> = vec![DurableWorkspaceRecord {
+            order: 3,
+            record: WorkspaceRecord {
+                id: rsi_workspace_protocol::WorkspaceId::from_bytes([2; 32]),
+                coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+                    rsi_workspace_protocol::ExecutionLocation::Local,
+                    "/fixture/中",
+                )
+                .unwrap(),
+                name: Some(rsi_workspace_protocol::WorkspaceName::parse("fixture 中🦀").unwrap()),
+                created_at_ms: Some(123_456),
+            },
+        }];
+
+        samples
+    }
+);

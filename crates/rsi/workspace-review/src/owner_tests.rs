@@ -13,42 +13,158 @@ struct Storage {
     fail: AtomicBool,
     fenced: AtomicBool,
 }
-#[async_trait]
-impl Domain for Storage {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
+impl Storage {
+    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
         if self.fenced.load(Ordering::Acquire) {
             Err(StorageError::RecoveryRequired)
         } else {
             Ok(())
         }
     }
-    fn spec(&self) -> &DomainSpec {
-        &self.spec
-    }
     async fn snapshot(
         &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, rsi_storage::StorageError> {
+    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, StorageError> {
         self.ensure_available()?;
         Ok(self.rows.lock().unwrap().clone())
     }
-    async fn put(
+    async fn open(self: &Arc<Self>, runtime: &Runtime) -> Domain {
+        if runtime
+            .root()
+            .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
+            .is_none()
+        {
+            for (name, factory) in [
+                (
+                    "storage",
+                    Arc::new(rsi_storage::StorageFactory) as Arc<dyn rsi_meta::PluginFactory>,
+                ),
+                ("domains", Arc::new(rsi_storage_domain::DomainFactory)),
+            ] {
+                runtime
+                    .root()
+                    .apply(
+                        ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory),
+                        serde_json::Value::Null,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let route = format!("review-{:p}", Arc::as_ptr(self));
+        if runtime
+            .root()
+            .lookup_local::<rsi_storage::StorageHubContract>()
+            .unwrap()
+            .resolve(&route)
+            .is_err()
+        {
+            let factory =
+                rsi_storage_testkit::BackendFactory::new(&route, Arc::new(Backend(self.clone())));
+            let fiber = runtime
+                .root()
+                .apply(
+                    ResolvedFactory::linked(
+                        route.as_str(),
+                        "test",
+                        UpdateMode::Replayable,
+                        Arc::new(factory),
+                    ),
+                    serde_json::Value::Null,
+                )
+                .await
+                .unwrap();
+            assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
+        }
+        let mut spec = self.spec.clone();
+        spec.backend = route;
+        runtime
+            .root()
+            .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
+            .unwrap()
+            .open(
+                spec,
+                rsi_storage_domain::Schema::default()
+                    .table::<Summary>("summaries")
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+}
+#[derive(Debug)]
+struct Backend(Arc<Storage>);
+#[derive(Debug)]
+struct Unit(Arc<Storage>, rsi_storage::UnitDescriptor);
+#[async_trait]
+impl rsi_storage::KvBackend for Backend {
+    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
+        self.0.ensure_available()
+    }
+    fn capabilities(&self, _: rsi_storage::Layout) -> rsi_storage::Capabilities {
+        rsi_storage::Capabilities {
+            atomic_batch: true,
+            backup_record: false,
+        }
+    }
+    async fn open(
         &self,
-        key: &str,
-        value: serde_json::Value,
+        descriptor: rsi_storage::UnitDescriptor,
+    ) -> std::result::Result<rsi_storage::OpenedUnit, StorageError> {
+        self.ensure_available()?;
+        descriptor.admit_version(self.0.spec.version)?;
+        let records = self
+            .0
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    rsi_storage::Address::record("summaries", key).unwrap(),
+                    rsi_storage::EncodedValue::encode(value).unwrap(),
+                )
+            })
+            .collect();
+        Ok(rsi_storage::OpenedUnit {
+            snapshot: rsi_storage::UnitSnapshot {
+                version: Some(self.0.spec.version),
+                records,
+                recoveries: vec![],
+            },
+            unit: Arc::new(Unit(self.0.clone(), descriptor)),
+        })
+    }
+}
+#[async_trait]
+impl rsi_storage::KvUnit for Unit {
+    fn descriptor(&self) -> &rsi_storage::UnitDescriptor {
+        &self.1
+    }
+    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
+        self.0.ensure_available()
+    }
+    async fn write(
+        &self,
+        changes: Vec<rsi_storage::Mutation>,
     ) -> std::result::Result<(), StorageError> {
         self.ensure_available()?;
-        self.rows.lock().unwrap().insert(key.into(), value);
-        if self.fail.load(Ordering::SeqCst) {
-            self.fenced.store(true, Ordering::Release);
+        for change in changes {
+            assert_eq!(change.address.table(), "summaries");
+            let value = change.value.expect("review never deletes summaries");
+            self.0
+                .rows
+                .lock()
+                .unwrap()
+                .insert(change.address.key().into(), value.decode()?);
+        }
+        if self.0.fail.load(Ordering::SeqCst) {
+            self.0.fenced.store(true, Ordering::Release);
             Err(StorageError::OutcomeUnknown(
                 "acknowledgement lost after write".into(),
             ))
         } else {
             Ok(())
         }
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, StorageError> {
-        unreachable!()
     }
 }
 async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<WorkspaceReview> {
@@ -64,12 +180,11 @@ async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<Wo
         tasks: TaskTracker::new(),
     };
     WorkspaceReview::open(
-        domain,
+        domain.open(runtime).await,
         Root::open(path).await.unwrap(),
         git,
         runtime.execution().clone(),
     )
-    .await
     .unwrap()
 }
 fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
@@ -118,9 +233,10 @@ async fn full_durable_history_is_preserved_and_reports_omission_after_restart() 
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(false),
@@ -235,9 +351,10 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(true),
@@ -376,9 +493,10 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(false),
@@ -465,9 +583,10 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::new(BTreeMap::new()),
         fail: AtomicBool::new(false),
@@ -580,9 +699,10 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::default(),
         fail: AtomicBool::new(false),
@@ -646,9 +766,10 @@ async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_
         spec: DomainSpec {
             id: "review".into(),
             backend: "base".into(),
-            version: 1,
+            version: 2,
             maximum_records: 8192,
             maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
         },
         rows: Mutex::default(),
         fail: AtomicBool::new(false),

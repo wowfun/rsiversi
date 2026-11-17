@@ -6,7 +6,7 @@ use super::{
 use serde_json::Value;
 
 /// The three existing provider families permitted in managed configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
     /// `OpenAI` Responses and optional Image capabilities.
@@ -27,7 +27,7 @@ impl ProviderKind {
     }
 }
 /// One definition, validated by its selected concrete provider before publication.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedProvider {
     /// Closed provider family; it cannot name an arbitrary plugin.

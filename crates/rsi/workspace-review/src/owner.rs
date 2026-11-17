@@ -60,7 +60,7 @@ struct State {
 /// Ordinary product owner for non-authoritative interval evidence.
 #[derive(Debug)]
 pub struct WorkspaceReview {
-    domain: Arc<dyn Domain>,
+    domain: Domain,
     root: Root,
     git: Git,
     execution: Execution,
@@ -119,24 +119,28 @@ fn omission(rows: &mut Vec<Omission>, kind: OmissionKind, count: u32) {
     rows.sort_by_key(|row| row.kind);
 }
 impl WorkspaceReview {
-    pub(super) async fn open(
-        domain: Arc<dyn Domain>,
+    pub(super) fn open(
+        domain: Domain,
         root: Root,
         git: Git,
         execution: Execution,
     ) -> Result<Arc<Self>> {
         let tasks = git.tasks.clone();
         let mut entries = BTreeMap::new();
-        for (key, value) in domain.snapshot().await.map_err(storage_error)? {
-            let summary: Summary = serde_json::from_value(value).map_err(invalid)?;
+        for (key, summary) in domain
+            .table::<Summary>("summaries")
+            .and_then(|table| table.snapshot())
+            .map_err(storage_error)?
+            .entries()
+        {
             summary.validate()?;
             if key != summary.id {
                 return Err(invalid("review summary key mismatch"));
             }
             entries.insert(
-                key,
+                key.to_owned(),
                 Entry {
-                    summary,
+                    summary: (*summary).clone(),
                     active: false,
                     runtime: None,
                 },
@@ -263,10 +267,9 @@ impl WorkspaceReview {
         let _writer = self.writer.lock().await;
         self.domain.ensure_available().map_err(storage_error)?;
         self.domain
-            .put(
-                &summary.id,
-                serde_json::to_value(&summary).map_err(invalid)?,
-            )
+            .table::<Summary>("summaries")
+            .map_err(storage_error)?
+            .put(&summary.id, summary.clone())
             .await
             .map_err(storage_error)?;
         let mut state = self.state.lock().expect("review publication");
@@ -464,6 +467,7 @@ impl WorkspaceReview {
             }
         }
         self.tasks.wait().await;
+        self.domain.close().await;
     }
 }
 impl Interval {

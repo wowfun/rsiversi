@@ -4,7 +4,7 @@ use rsi_api_protocol::{ApiError, ApiRegistrarContract, ApiRegistration, json_han
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
-use rsi_storage_domain::{DomainFacilityContract, DomainSpec};
+use rsi_storage_domain::{DomainFacilityContract, DomainSpec, Schema};
 use rsi_workspace_review_api::{ConversationIdentity, Request};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -45,13 +45,19 @@ impl PluginFactory for WorkspaceReviewFactory {
         let input: Config = serde_json::from_value(plan.config().as_ref().clone()).map_err(meta)?;
         let domain = plan
             .local::<DomainFacilityContract>()?
-            .open(DomainSpec {
-                id: "rsi.workspace-review".into(),
-                backend: "base".into(),
-                version: 1,
-                maximum_records: 8192,
-                maximum_bytes: 64 * 1024 * 1024,
-            })
+            .open(
+                DomainSpec {
+                    id: "rsi.workspace-review".into(),
+                    backend: "base".into(),
+                    version: crate::STORAGE_VERSION,
+                    maximum_records: 8192,
+                    maximum_bytes: 64 * 1024 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default()
+                    .table::<rsi_workspace_review_api::Summary>("summaries")
+                    .map_err(meta)?,
+            )
             .await
             .map_err(meta)?;
         let root = Root::open(input.directory).await.map_err(meta)?;
@@ -69,7 +75,6 @@ impl PluginFactory for WorkspaceReviewFactory {
             git,
             plan.context().runtime().execution().clone(),
         )
-        .await
         .map_err(meta)?;
         let observer: Arc<dyn rsi_agent_turn_protocol::ExecutionObserver> =
             Arc::new(Observer(owner.clone()));

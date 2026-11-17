@@ -19,6 +19,7 @@ pub use validate::validate_leaf;
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[derive(schemars::JsonSchema)]
 pub enum Principal {
     /// Trusted local application; leaf writes still require an explicit scope grant.
     Local,
@@ -30,6 +31,7 @@ pub enum Principal {
 /// Closed source mutation classes; enable authority does not imply configuration writes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(schemars::JsonSchema)]
 pub enum ChangeKind {
     /// Enable one leaf under already enabled ancestors.
     Enable,
@@ -41,6 +43,7 @@ pub enum ChangeKind {
 /// Exact source selection, independent of a client-local filesystem path.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Target {
     /// Host-issued source-root identity.
     pub root: String,
@@ -52,6 +55,7 @@ pub struct Target {
 /// Exact independently granted authority; no variant implies another.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub enum GrantScope {
     /// One source leaf and mutation class.
     Profile {
@@ -83,6 +87,7 @@ pub enum GrantScope {
 /// One separately granted principal and exact authority scope.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Grant {
     /// Human caller identity selected by a Local administrator; Agent is invalid.
     pub principal: Principal,
@@ -92,6 +97,7 @@ pub struct Grant {
 /// Local-only durable grant observation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Grants {
     /// Exact canonical decimal CAS revision.
     pub revision: String,

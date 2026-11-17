@@ -6,69 +6,61 @@ use rsi_api_protocol::{
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_settings_protocol::{SettingsContract, SettingsMetadata, SettingsSpec, ValidateWith};
 use rsi_storage::StorageError;
+use rsi_storage_testkit::{BackendFactory, MemoryBackend};
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 struct TestDomain {
-    spec: DomainSpec,
-    values: Mutex<BTreeMap<String, Value>>,
-    fail: AtomicBool,
-    fenced: AtomicBool,
-    entered: Semaphore,
-    release: Semaphore,
-    pause: AtomicBool,
+    id: String,
+    backend: Arc<MemoryBackend>,
 }
 impl TestDomain {
     fn new(id: &str) -> Arc<Self> {
         Arc::new(Self {
-            spec: DomainSpec {
-                id: id.into(),
-                backend: "fixture".into(),
-                version: 1,
-                maximum_records: 1,
-                maximum_bytes: 64 * 1024,
-            },
-            values: Mutex::default(),
-            fail: AtomicBool::new(false),
-            fenced: AtomicBool::new(false),
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-            pause: AtomicBool::new(false),
+            id: id.into(),
+            backend: Arc::default(),
         })
     }
-}
-#[async_trait]
-impl Domain for TestDomain {
-    fn ensure_available(&self) -> std::result::Result<(), rsi_storage::StorageError> {
-        if self.fenced.load(Ordering::Acquire) {
-            Err(StorageError::RecoveryRequired)
-        } else {
-            Ok(())
+    async fn open(&self, runtime: &Runtime) -> std::result::Result<Domain, StorageError> {
+        if runtime
+            .root()
+            .lookup_local::<rsi_storage::StorageHubContract>()
+            .unwrap()
+            .resolve(&self.id)
+            .is_err()
+        {
+            let plugin = runtime
+                .root()
+                .apply(
+                    ResolvedFactory::linked(
+                        self.id.as_str(),
+                        "test",
+                        UpdateMode::Replayable,
+                        Arc::new(BackendFactory::new(&self.id, self.backend.clone())),
+                    ),
+                    Value::Null,
+                )
+                .await
+                .unwrap();
+            assert_eq!(plugin.snapshot().state, rsi_meta::FiberState::Active);
         }
-    }
-    fn spec(&self) -> &DomainSpec {
-        &self.spec
-    }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, Value>, rsi_storage::StorageError> {
-        self.ensure_available()?;
-        Ok(self.values.lock().unwrap().clone())
-    }
-    async fn put(&self, key: &str, value: Value) -> std::result::Result<(), StorageError> {
-        if self.pause.load(Ordering::SeqCst) {
-            self.entered.add_permits(1);
-            self.release.acquire().await.unwrap().forget();
-        }
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(StorageError::Io("fixture durable failure".into()));
-        }
-        self.values.lock().unwrap().insert(key.into(), value);
-        Ok(())
-    }
-    async fn delete(&self, _: &str) -> std::result::Result<bool, StorageError> {
-        unreachable!("single-document owner")
+        runtime
+            .root()
+            .lookup_local::<DomainFacilityContract>()
+            .unwrap()
+            .open(
+                DomainSpec {
+                    id: self.id.clone(),
+                    backend: self.id.clone(),
+                    version: STORAGE_VERSION,
+                    maximum_records: 1,
+                    maximum_bytes: 64 * 1024,
+                    ..DomainSpec::default()
+                },
+                Schema::default().global::<Document>().unwrap(),
+            )
+            .await
     }
 }
 async fn settings() -> Runtime {
@@ -82,6 +74,8 @@ async fn settings() -> Runtime {
         ),
         ("settings", Arc::new(rsi_settings::SettingsFactory)),
         ("api", Arc::new(rsi_api::ApiFactory)),
+        ("storage", Arc::new(rsi_storage::StorageFactory)),
+        ("domains", Arc::new(rsi_storage_domain::DomainFactory)),
     ] {
         runtime
             .root()
@@ -101,21 +95,41 @@ async fn owner(
 ) -> Arc<ConfigurationAccess> {
     ConfigurationAccess::open(
         Execution::native(tokio::runtime::Handle::current()),
-        domain,
+        domain.open(runtime).await.unwrap(),
         devices,
         runtime
             .root()
             .lookup_local::<SettingsAccessContract>()
             .unwrap(),
     )
-    .await
     .unwrap()
 }
-async fn devices() -> Arc<rsi_api_auth::DeviceRegistry> {
+async fn devices(runtime: &Runtime) -> Arc<rsi_api_auth::DeviceRegistry> {
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "device-storage",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(BackendFactory::new(
+                    "devices",
+                    Arc::new(MemoryBackend::default()),
+                )),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
     Arc::new(
         rsi_api_auth::DeviceRegistry::open(
             Execution::native(tokio::runtime::Handle::current()),
-            TestDomain::new("rsi.api.devices"),
+            runtime
+                .root()
+                .lookup_local::<DomainFacilityContract>()
+                .unwrap()
+                .as_ref(),
+            "devices",
             EndpointId::from_bytes([1; 16]),
         )
         .await
@@ -125,7 +139,7 @@ async fn devices() -> Arc<rsi_api_auth::DeviceRegistry> {
 #[tokio::test]
 async fn revocation_fences_admission_drains_existing_leases_and_survives_restart() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let domain = TestDomain::new("rsi.configuration.grants");
@@ -155,7 +169,7 @@ async fn revocation_fences_admission_drains_existing_leases_and_survives_restart
     .unwrap();
     assert!(matches!(owner.admit(&origin), Err(ApiError::Unauthorized)));
     assert_eq!(
-        owner.snapshot().await.unwrap().revision,
+        owner.snapshot().unwrap().revision,
         "1",
         "revocation must await retained mutations before commit"
     );
@@ -164,17 +178,16 @@ async fn revocation_fences_admission_drains_existing_leases_and_survives_restart
     owner.close().await;
     let reopened = ConfigurationAccess::open(
         Execution::native(tokio::runtime::Handle::current()),
-        domain,
+        domain.open(&runtime).await.unwrap(),
         devices.clone(),
         runtime
             .root()
             .lookup_local::<SettingsAccessContract>()
             .unwrap(),
     )
-    .await
     .unwrap();
     assert!(!reopened.allowed(&origin).unwrap());
-    assert_eq!(reopened.snapshot().await.unwrap().revision, "2");
+    assert_eq!(reopened.snapshot().unwrap().revision, "2");
     reopened.close().await;
     devices.close().await;
     assert!(runtime.shutdown().await.is_clean());
@@ -183,24 +196,32 @@ async fn revocation_fences_admission_drains_existing_leases_and_survives_restart
 #[tokio::test]
 async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let domain = TestDomain::new("rsi.configuration.grants");
     let owner = owner(domain.clone(), devices.clone(), &runtime).await;
-    domain.pause.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .pause_write
+        .store(true, Ordering::SeqCst);
     let waiter = owner
         .set_grant(&CallOrigin::Local, registered.record.id.clone(), "0", true)
         .unwrap();
-    domain.entered.acquire().await.unwrap().forget();
+    domain.backend.state.entered.notified().await;
     drop(waiter);
     assert!(!owner.allowed(&origin).unwrap());
     assert!(matches!(
         owner.set_grant(&CallOrigin::Local, registered.record.id.clone(), "0", true),
         Err(ApiError::Capacity)
     ));
-    domain.pause.store(false, Ordering::SeqCst);
-    domain.release.add_permits(1);
+    domain
+        .backend
+        .state
+        .pause_write
+        .store(false, Ordering::SeqCst);
+    domain.backend.state.release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !owner.allowed(&origin).unwrap() {
             tokio::task::yield_now().await;
@@ -208,7 +229,11 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
     })
     .await
     .unwrap();
-    domain.fail.store(true, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, Ordering::SeqCst);
     assert!(matches!(
         owner
             .set_grant(&CallOrigin::Local, registered.record.id.clone(), "1", false)
@@ -218,10 +243,14 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
     ));
     assert!(!owner.allowed(&origin).unwrap());
     assert_eq!(
-        owner.snapshot().await.unwrap().devices,
+        owner.snapshot().unwrap().devices,
         vec![registered.record.id.clone()]
     );
-    domain.fail.store(false, Ordering::SeqCst);
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(false, Ordering::SeqCst);
     owner
         .set_grant(&CallOrigin::Local, registered.record.id.clone(), "1", true)
         .unwrap()
@@ -245,7 +274,7 @@ async fn uncertain_grant_write_keeps_its_writer_and_failed_revoke_stays_closed()
 )]
 async fn existing_settings_wire_cannot_bypass_grants_or_change_preset_roots() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let owner = owner(
@@ -364,7 +393,7 @@ async fn existing_settings_wire_cannot_bypass_grants_or_change_preset_roots() {
 #[tokio::test]
 async fn device_authentication_revocation_fences_old_origins_but_retains_admitted_work() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let owner = owner(
@@ -395,7 +424,7 @@ async fn device_authentication_revocation_fences_old_origins_but_retains_admitte
 #[tokio::test]
 async fn grant_capacity_rejects_the_sixty_fifth_device_without_changing_durable_state() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let domain = TestDomain::new("rsi.configuration.grants");
     let owner = owner(domain.clone(), devices.clone(), &runtime).await;
     for index in 0..64 {
@@ -411,7 +440,7 @@ async fn grant_capacity_rejects_the_sixty_fifth_device_without_changing_durable_
             .await
             .unwrap();
     }
-    let before = domain.snapshot().await.unwrap();
+    let before = domain.backend.values(&domain.id);
     let retired = devices.list().unwrap()[0].id.clone();
     devices.revoke(&retired).await.unwrap();
     let registered = devices.register("overflow").await.unwrap();
@@ -422,25 +451,25 @@ async fn grant_capacity_rejects_the_sixty_fifth_device_without_changing_durable_
             .await,
         Err(ApiError::Capacity)
     ));
-    assert_eq!(domain.snapshot().await.unwrap(), before);
-    assert_eq!(owner.snapshot().await.unwrap().devices.len(), 64);
+    assert_eq!(domain.backend.values(&domain.id), before);
+    assert_eq!(owner.snapshot().unwrap().devices.len(), 64);
     owner.close().await;
     // Reject the same oversized set at the durable-input boundary on restart.
-    domain.values.lock().unwrap().get_mut("grants").unwrap()["devices"]
+    let mut oversized = before[""].clone();
+    oversized["devices"]
         .as_array_mut()
         .unwrap()
         .push(json!(registered.record.id));
-    let reopened = ConfigurationAccess::open(
-        Execution::native(tokio::runtime::Handle::current()),
-        domain,
-        devices.clone(),
-        runtime
-            .root()
-            .lookup_local::<SettingsAccessContract>()
-            .unwrap(),
-    )
-    .await;
-    assert!(matches!(reopened, Err(ApiError::Backend(_))));
+    domain.backend.seed(
+        &domain.id,
+        STORAGE_VERSION,
+        rsi_storage::Address::global(),
+        &oversized,
+    );
+    assert!(matches!(
+        domain.open(&runtime).await,
+        Err(StorageError::Corrupt(_))
+    ));
     devices.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -483,7 +512,7 @@ impl rsi_credentials_protocol::CredentialsAdmin for BlockingCredentials {
 #[tokio::test]
 async fn credential_write_survives_reply_loss_and_holds_the_revoke_fence() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let owner = owner(
@@ -539,7 +568,7 @@ async fn credential_write_survives_reply_loss_and_holds_the_revoke_fence() {
     })
     .await
     .unwrap();
-    assert_eq!(owner.snapshot().await.unwrap().revision, "1");
+    assert_eq!(owner.snapshot().unwrap().revision, "1");
     assert_eq!(credentials.writes.load(Ordering::SeqCst), 0);
     credentials.release.add_permits(1);
     assert_eq!(revoke.await.unwrap().revision, "2");
@@ -594,7 +623,7 @@ impl rsi_configuration_api::PluginStatusSource for BlockingPlugins {
 async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_finishes() {
     use rsi_configuration_api::ConfigurationOperation;
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let registered = devices.register("remote").await.unwrap();
     let origin = CallOrigin::Device(devices.authenticate(&registered.token).unwrap());
     let owner = owner(
@@ -656,7 +685,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
     })
     .await
     .unwrap();
-    assert_eq!(owner.snapshot().await.unwrap().revision, "1");
+    assert_eq!(owner.snapshot().unwrap().revision, "1");
     assert!(matches!(owner.admit(&origin), Err(ApiError::Unauthorized)));
     {
         let (lock, changed) = &source.release;
@@ -686,7 +715,7 @@ async fn plugin_read_checks_real_grant_and_holds_revocation_until_observation_fi
 #[tokio::test]
 async fn backend_failure_in_another_domain_closes_cached_grant_admission() {
     let runtime = settings().await;
-    let devices = devices().await;
+    let devices = devices(&runtime).await;
     let domain = TestDomain::new("rsi.configuration.grants");
     let owner = owner(domain.clone(), devices.clone(), &runtime).await;
     assert!(owner.allowed(&CallOrigin::Local).unwrap());
@@ -695,7 +724,11 @@ async fn backend_failure_in_another_domain_closes_cached_grant_admission() {
         .lookup_local::<ApiRegistrarContract>()
         .unwrap();
     let registrations = endpoint::register(registrar.as_ref(), owner.clone()).unwrap();
-    domain.fenced.store(true, Ordering::Release);
+    domain
+        .backend
+        .state
+        .unhealthy
+        .store(true, Ordering::Release);
     let dispatch = runtime
         .root()
         .lookup_local::<ApiDispatchContract>()
@@ -720,7 +753,7 @@ async fn backend_failure_in_another_domain_closes_cached_grant_admission() {
         owner.admit(&CallOrigin::Local),
         Err(ApiError::Unavailable)
     ));
-    assert!(matches!(owner.snapshot().await, Err(ApiError::Unavailable)));
+    assert!(matches!(owner.snapshot(), Err(ApiError::Unavailable)));
     for registration in registrations {
         registration.close().await;
     }

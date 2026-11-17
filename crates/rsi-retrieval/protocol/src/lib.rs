@@ -19,6 +19,7 @@ pub const CONFIG_DOMAIN: &str = "rsi.retrieval.config";
 /// Independent default-off flags captured before Tool catalog sealing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct RetrievalConfig {
     /// Admit the public HTTP/S fetch Tool.
     pub web_fetch: bool,
@@ -40,7 +41,8 @@ impl RetrievalConfig {
     )]
     pub fn snapshot(&self) -> DomainSnapshot {
         DomainSnapshot::new(
-            DomainIdentity::new(CONFIG_DOMAIN, 1).expect("static retrieval Domain"),
+            DomainIdentity::new(CONFIG_DOMAIN, CONFIG_CODEC_VERSION)
+                .expect("static retrieval Domain"),
             DomainStateValue::new(serde_json::to_value(self).expect("retrieval flags"))
                 .expect("bounded retrieval flags"),
         )
@@ -191,3 +193,36 @@ mod tests {
         );
     }
 }
+
+/// Exact saved retrieval configuration codec.
+pub const CONFIG_CODEC_VERSION: u32 = 1;
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_retrieval,
+    RetrievalConfig,
+    CONFIG_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/retrieval-v{}.json",
+        CONFIG_CODEC_VERSION
+    ),
+    {
+        let samples: Vec<RetrievalConfig> = vec![
+            RetrievalConfig::default(),
+            RetrievalConfig {
+                web_fetch: true,
+                web_search: false,
+            },
+            RetrievalConfig {
+                web_fetch: false,
+                web_search: true,
+            },
+            RetrievalConfig {
+                web_fetch: true,
+                web_search: true,
+            },
+        ];
+
+        samples
+    }
+);

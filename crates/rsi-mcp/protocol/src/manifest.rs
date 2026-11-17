@@ -18,6 +18,7 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
 /// Full Tool metadata retained exactly, including unknown descriptive extensions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct McpTool {
     /// Original server name, never recovered by parsing its public name.
     pub name: String,
@@ -42,6 +43,7 @@ pub struct McpTool {
 /// One declared resource; reading does not treat its URI as an HTTP URL.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct McpResource {
     /// Exact server resource identity.
     pub uri: String,
@@ -60,6 +62,7 @@ pub struct McpResource {
 /// Complete recorded Tool plus explicit selection and deterministic public identity.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct FrozenTool {
     /// Original metadata and schema.
     pub definition: McpTool,
@@ -71,6 +74,7 @@ pub struct FrozenTool {
 /// Complete verified catalog for one exact configured target.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ServerManifest {
     /// Configured local identity.
     pub id: String,
@@ -94,6 +98,7 @@ pub struct ServerManifest {
 /// One complete typed Domain value; never truncated or sharded.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct McpManifest {
     /// Sorted unique configured servers with verified catalogs.
     pub servers: Vec<ServerManifest>,
@@ -271,3 +276,55 @@ impl McpManifest {
         ))
     }
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_mcp_manifest,
+    McpManifest,
+    MANIFEST_CODEC_VERSION,
+    format!(
+        "tests/fixtures/persistence/mcp_manifest-v{}.json",
+        MANIFEST_CODEC_VERSION
+    ),
+    {
+        let samples: Vec<McpManifest> = vec![
+            McpManifest::default(),
+            McpManifest {
+                servers: vec![ServerManifest {
+                    id: "fixture".into(),
+                    target_sha256: "a".repeat(64),
+                    protocol_version: LATEST_PROTOCOL_VERSION.into(),
+                    server_info: serde_json::json!({"name":"fixture","version":"1"}),
+                    capabilities: serde_json::json!({"tools":{},"resources":{}}),
+                    instructions: Some("fixture 中🦀".into()),
+                    tools: vec![FrozenTool {
+                        definition: McpTool {
+                            name: "lookup".into(),
+                            title: Some("Lookup".into()),
+                            description: None,
+                            input_schema: serde_json::json!({"type":"object","properties":{"z":{"type":"integer"},"a":{"type":"string"}}}),
+                            output_schema: Some(serde_json::json!({"type":"string"})),
+                            annotations: Some(serde_json::json!({"readOnlyHint":true})),
+                            extensions: [("x-fixture".into(), serde_json::json!({"z":1,"a":2}))]
+                                .into(),
+                        },
+                        selected: true,
+                        public_name: public_tool_name("fixture", "lookup"),
+                    }],
+                    resources: vec![McpResource {
+                        uri: "fixture://document".into(),
+                        name: "Document".into(),
+                        description: Some("fixture".into()),
+                        mime_type: Some("text/plain".into()),
+                        extensions: BTreeMap::new(),
+                    }],
+                    templates: crate::TemplateCatalog::Available { templates: vec![] },
+                }],
+            },
+        ];
+        for sample in &samples {
+            sample.validate().unwrap();
+        }
+        samples
+    }
+);
