@@ -123,6 +123,7 @@ mod profiles;
 #[cfg(unix)]
 mod service_bootstrap;
 mod settings;
+mod spill;
 #[cfg(target_os = "linux")]
 mod ssh_targets;
 #[cfg(unix)]
@@ -540,14 +541,6 @@ impl RunningRsi {
         )
     }
 
-    /// Clones the read-only completed Process output capability.
-    pub fn output_cache(&self) -> Result<std::sync::Arc<dyn rsi_process::ProcessOutputCache>> {
-        required_local::<rsi_process::ProcessOutputCacheContract>(
-            &self.host,
-            "Process output cache",
-        )
-    }
-
     /// Clones the registered Settings inspection and versioned edit capability.
     pub fn settings_access(
         &self,
@@ -744,8 +737,10 @@ mod tests {
             let temporary = tempfile::tempdir().unwrap();
             let paths = HostPaths::new(
                 temporary.path().join("config"),
+                temporary.path().join("data"),
                 temporary.path().join("state"),
                 temporary.path().join("cache"),
+                temporary.path().join("tmp"),
             )
             .unwrap();
             let mut builder = HostBuilder::new(paths.clone());
@@ -882,8 +877,10 @@ mod tests {
                 let temporary = tempfile::tempdir().unwrap();
                 let paths = HostPaths::new(
                     temporary.path().join("config"),
+                    temporary.path().join("data"),
                     temporary.path().join("state"),
                     temporary.path().join("cache"),
+                    temporary.path().join("tmp"),
                 )
                 .unwrap();
                 let mut builder = HostBuilder::new(paths.clone());
@@ -1001,8 +998,10 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let paths = HostPaths::new(
             temporary.path().join("config"),
+            temporary.path().join("data"),
             temporary.path().join("state"),
             temporary.path().join("cache"),
+            temporary.path().join("tmp"),
         )
         .unwrap();
         let composition = StandardComposition::new(
@@ -1046,12 +1045,16 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "opt-in native Known Folder lookup; no directories are created"]
-    fn windows_known_folders_resolve_without_home_or_xdg() {
+    #[ignore = "opt-in native user-home lookup; no directories are created"]
+    fn windows_home_defaults_ignore_unrelated_home_and_missing_xdg() {
         const CHILD: &str = "RSI_KNOWN_FOLDER_PROBE";
         if std::env::var_os(CHILD).is_some() {
-            let paths = standard_paths().expect("native Known Folders");
-            assert!(paths.config().is_absolute());
+            let paths = standard_paths().expect("native user home");
+            let home = dirs::home_dir().unwrap();
+            assert_eq!(paths.config(), home.join(".config/rsiversi"));
+            assert_eq!(paths.data(), home.join(".local/share/rsiversi"));
+            assert_eq!(paths.state(), home.join(".local/state/rsiversi"));
+            assert_eq!(paths.cache(), home.join(".cache/rsiversi"));
             assert!(paths.state().is_absolute());
             assert!(paths.cache().is_absolute());
             assert_eq!(
@@ -1070,12 +1073,13 @@ mod tests {
             command
                 .args([
                     "--exact",
-                    "tests::windows_known_folders_resolve_without_home_or_xdg",
+                    "tests::windows_home_defaults_ignore_unrelated_home_and_missing_xdg",
                     "--ignored",
                 ])
                 .env(CHILD, "yes")
                 .env_remove("HOME")
                 .env_remove("XDG_CONFIG_HOME")
+                .env_remove("XDG_DATA_HOME")
                 .env_remove("XDG_STATE_HOME")
                 .env_remove("XDG_CACHE_HOME");
             if let Some(home) = home {

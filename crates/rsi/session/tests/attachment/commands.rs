@@ -134,6 +134,10 @@ struct Fixture {
 }
 
 impl Fixture {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The command fixture binds its contributions, Kernel and Service in one lifetime."
+    )]
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let runtime = rsi_meta::Runtime::default();
@@ -168,8 +172,16 @@ impl Fixture {
                     id.clone(),
                     0,
                     ContributionKind::Command(SessionCommandRegistration::new(
-                        SessionCommandDescriptor::new(id, "toggle", "Toggle draft state", true)
-                            .unwrap(),
+                        SessionCommandDescriptor::new(
+                            id,
+                            "toggle",
+                            "Toggle draft state",
+                            true,
+                            Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                                hint: "Arguments".into(),
+                            }),
+                        )
+                        .unwrap(),
                         callback.clone(),
                     )),
                 ),

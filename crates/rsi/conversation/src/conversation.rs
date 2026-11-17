@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[derive(schemars::JsonSchema)]
 pub enum ConversationIdentity {
     /// Durable native Agent Session.
     Native(SessionId),

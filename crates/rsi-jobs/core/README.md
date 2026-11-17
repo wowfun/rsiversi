@@ -83,3 +83,7 @@ Scope finalization also reports a monotonic `outcome_unknown` bit. It includes
 uncertain unpublished starts and already reported or evicted jobs, so dropping
 a submit waiter or collecting output cannot erase uncertainty. The bit lives
 with the exact scope generation and adds no provider-wide identity tombstones.
+
+Complete-output references use the validated Spill reference type. Jobs preserves
+that reference and exact raw byte length while retaining only its bounded tail;
+format validation belongs to Spill, not each in-process Jobs read.

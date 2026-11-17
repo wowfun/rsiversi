@@ -36,7 +36,7 @@ pub struct ServiceHostConnection {
     mode: ServiceHostConnectionMode,
     api: Arc<dyn rsi_api_protocol::ApiClient>,
     application: Arc<dyn SessionService>,
-    output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    spill_reader: Arc<dyn rsi_spill::SpillReader>,
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
@@ -73,7 +73,7 @@ impl ServiceHostConnection {
                     &host,
                     "remote Session",
                 )?,
-                output_cache: crate::required_local::<rsi_process::ProcessOutputCacheContract>(
+                spill_reader: crate::required_local::<rsi_spill::SpillReaderContract>(
                     &host,
                     "remote Output",
                 )?,
@@ -154,9 +154,9 @@ impl ServiceHostConnection {
         self.model_catalog.clone()
     }
 
-    /// Clones the connected read-only completed Process output capability.
-    pub fn output_cache(&self) -> Arc<dyn rsi_process::ProcessOutputCache> {
-        self.output_cache.clone()
+    /// Clones the connected read-only retained text and Process output capability.
+    pub fn spill_reader(&self) -> Arc<dyn rsi_spill::SpillReader> {
+        self.spill_reader.clone()
     }
 
     /// Deterministically shuts down an embedded owner; remote connections simply detach.
@@ -289,10 +289,13 @@ async fn connect_local_service_host(
                                 host_profile.id
                             )));
                         }
-                        let remote = tokio::time::timeout_at(
-                            deadline,
-                            crate::client_composition::connect(&metadata, parent, &composition),
-                        )
+                        let remote = tokio::time::timeout_at(deadline, async {
+                            ServiceHostConnection::from_remote(
+                                crate::client_composition::connect(&metadata, parent, &composition)
+                                    .await?,
+                            )
+                            .await
+                        })
                         .await;
                         let remote = match remote {
                             Ok(Ok(remote)) => remote,
@@ -313,7 +316,7 @@ async fn connect_local_service_host(
                                 )));
                             }
                         };
-                        return ServiceHostConnection::from_remote(remote).await;
+                        return Ok(remote);
                     }
                     HostOwnerMode::Embedded => {
                         if tokio::time::Instant::now() >= deadline {
@@ -380,7 +383,7 @@ async fn boot_embedded(
         mode: ServiceHostConnectionMode::Embedded,
         api: booted.api.clone(),
         application: Arc::clone(&booted.application),
-        output_cache: booted.output_cache.clone(),
+        spill_reader: booted.spill_reader.clone(),
         model_catalog: booted.model_catalog.clone(),
         workspace: booted.workspace.clone(),
         media: booted.media.clone(),
@@ -402,7 +405,7 @@ struct BootedServiceHost {
     running: Arc<RunningRsi>,
     broker: Arc<ApprovalBroker>,
     application: Arc<dyn SessionService>,
-    output_cache: Arc<dyn rsi_process::ProcessOutputCache>,
+    spill_reader: Arc<dyn rsi_spill::SpillReader>,
     model_catalog: Arc<dyn rsi_ai_protocol::LanguageModels>,
     workspace: Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
     media: Arc<dyn rsi_media_protocol::Media>,
@@ -432,13 +435,13 @@ impl BootedServiceHost {
         let running = Arc::new(running);
         let result = (|| {
             let api = crate::local_api_client::client(&running)?;
-            let output_cache = Arc::new(rsi_process_output_api::OutputClient::new(api.clone()));
+            let spill_reader = Arc::new(rsi_spill_api::OutputClient::new(api.clone()));
             Ok(Self {
                 api,
                 description: running.connection_description()?,
                 broker: running.approval_broker()?,
                 application: running.session_service()?,
-                output_cache,
+                spill_reader,
                 model_catalog: running.language_models()?,
                 workspace: running.workspace_registry()?,
                 media: running.media_service()?,

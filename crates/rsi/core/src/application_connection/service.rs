@@ -380,7 +380,7 @@ impl crate::application_services::LocalBrowserAdministration for Service {
             self.execution.spawn(self.launches.track_future(async move {
                 launch_once(&device, async move {
                     let _running = running;
-                    let snapshot = configuration.snapshot().await?;
+                    let snapshot = configuration.snapshot()?;
                     authorize_browser(administration.as_ref(), move |id| async move {
                         configuration
                             .set_grant(&CallOrigin::Local, id, &snapshot.revision, true)?
@@ -461,7 +461,7 @@ struct BrowserAuthority {
 impl crate::application_services::LocalBrowserAdministration for BrowserAuthority {
     async fn launch(&self) -> rsi_api_protocol::Result<RegisteredDevice> {
         launch_once(&self.device, async {
-            let snapshot = self.configuration.snapshot().await?;
+            let snapshot = self.configuration.snapshot()?;
             authorize_browser(self.administration.as_ref(), |id| async move {
                 self.configuration
                     .set_grant(&CallOrigin::Local, id, &snapshot.revision, true)?

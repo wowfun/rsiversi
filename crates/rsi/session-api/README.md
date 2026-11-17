@@ -1,8 +1,9 @@
 # rsi-session-api
 
-Interface version 25 adds the committing append's Fact cursor to `observe` v10
-controls, preserving historical generation-to-intent correlation. It retains
-projection rebuild status and Session format 38.
+Interface version 26 carries Session format 39 and typed Spill references.
+`purge` v2 and `purge-status` v2 report independent Store, Navigation and Spill
+cleanup outcomes. `observe` v10 controls carry the committing append's Fact
+cursor, preserving historical generation-to-intent correlation.
 `projections` v3 exposes transient rebuild activity without changing its durable cursor.
 It carries `read-summary` v1 and `recent` v11 summaries with the
 Header, activity time and Fact/control watermarks from each Store metadata snapshot.

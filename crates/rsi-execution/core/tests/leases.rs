@@ -495,6 +495,7 @@ fn provider(
 }
 fn batch(process: PreparedProcess) -> ProcessSpec<PreparedProcess> {
     ProcessSpec {
+        capture: None,
         process,
         stdin: vec![],
         environment: vec![],

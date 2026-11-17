@@ -60,6 +60,70 @@ fn image_history() -> Vec<SessionFact> {
 }
 
 #[test]
+fn maximum_image_result_keeps_every_image_and_spill_notice_after_restore() {
+    let media = MediaRef {
+        id: MediaId::new("a".repeat(64)).unwrap(),
+        mime: "image/png".into(),
+        bytes: 120,
+        width: 2,
+        height: 3,
+    };
+    let mut result = ToolResult::new(
+        json!({}),
+        vec![ToolContent::Image { media }; rsi_tools_protocol::MAXIMUM_TOOL_CONTENT_ITEMS],
+        false,
+    )
+    .unwrap();
+    let reference = rsi_spill::SpillRef {
+        locator: rsi_spill::SpillLocator::new(
+            &rsi_spill::SpillScope::new("session", "images"),
+            [1; 16],
+        ),
+        bytes: 100,
+    };
+    result.spills.push(reference.clone());
+    result.validate().unwrap();
+    let source: Vec<_> = tool_result_facts(result)
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let mut state = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header(""),
+        ContextLimits::default(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    state.ingest(ContextPage::Canonical(&source)).unwrap();
+    let restored = state.restored(&state.checkpoint().unwrap()).unwrap();
+    let profile = profile(ImageToolResultCapability::Yes(
+        ImageToolResultMode::FunctionOutput,
+    ));
+    for state in [&state, &restored] {
+        let request = state
+            .build(LanguageRequestOptions::default(), &profile)
+            .unwrap();
+        let content = request
+            .messages()
+            .iter()
+            .flat_map(rsi_ai_protocol::Message::content)
+            .find_map(|block| match block {
+                MessageContent::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            content
+                .iter()
+                .filter(|b| matches!(b, MessageContent::Image { .. }))
+                .count(),
+            256
+        );
+        assert!(content.iter().any(|b| matches!(b, MessageContent::Text {text} if text.contains(reference.locator.as_str()))));
+    }
+}
+
+#[test]
 fn tool_images_follow_each_target_without_changing_facts_checkpoint_or_fork() {
     let source = image_history();
     let original = serde_json::to_vec(&source).unwrap();

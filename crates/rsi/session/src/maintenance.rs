@@ -3,7 +3,7 @@ use super::{LocalSessionService, Result, SessionError, map_store_error, map_turn
 use rsi_agent_store_protocol::{
     PurgeBlocker, PurgePreview, PurgeReceipt, PurgeRequest, StoreMaintenance,
 };
-use rsi_session_protocol::{MaintenanceKind, NavigationCleanup, SessionPurgeReceipt};
+use rsi_session_protocol::{CleanupStatus, MaintenanceKind, SessionPurgeReceipt};
 #[derive(Clone)]
 pub(super) struct ActivePurge {
     request: PurgeRequest,
@@ -50,6 +50,7 @@ impl LocalSessionService {
             .await
             .map_err(|_| SessionError::Capacity)?;
         if binding.is_some() {
+            self.fence_spill(admission.sessions.iter());
             for closing in &admission.closing {
                 closing.retiring();
             }
@@ -65,23 +66,68 @@ impl LocalSessionService {
     }
     async fn product_receipt(&self, store: PurgeReceipt, cleanup: bool) -> SessionPurgeReceipt {
         let navigation = if !store.complete {
-            NavigationCleanup::Pending
+            CleanupStatus::Pending
         } else if let Some(owner) = self.purge_cleanup.as_ref().and_then(|lookup| lookup()) {
             if cleanup {
                 match owner.cleanup(store.operation_id.as_str()).await {
-                    Ok(()) => NavigationCleanup::Complete,
-                    Err(_) => NavigationCleanup::Failed,
+                    Ok(()) => CleanupStatus::Complete,
+                    Err(_) => CleanupStatus::Failed,
                 }
             } else {
                 owner
                     .status(store.operation_id.as_str())
                     .await
-                    .unwrap_or(NavigationCleanup::Failed)
+                    .unwrap_or(CleanupStatus::Failed)
             }
         } else {
-            NavigationCleanup::Unavailable
+            CleanupStatus::Unavailable
         };
-        SessionPurgeReceipt { store, navigation }
+        let spill = self.spill_receipt(&store, cleanup).await;
+        SessionPurgeReceipt {
+            store,
+            navigation,
+            spill,
+        }
+    }
+    fn fence_spill<'a>(
+        &self,
+        sessions: impl IntoIterator<Item = &'a rsi_agent_session_protocol::SessionId>,
+    ) {
+        if let Some(store) = self.spill.as_ref().and_then(|lookup| lookup()) {
+            for session in sessions {
+                store.fence(&rsi_spill::SpillScope::new("session", session.as_str()));
+            }
+        }
+    }
+    async fn spill_receipt(&self, receipt: &PurgeReceipt, cleanup: bool) -> CleanupStatus {
+        if !receipt.complete {
+            return CleanupStatus::Pending;
+        }
+        let Some(spill) = self.spill.as_ref().and_then(|lookup| lookup()) else {
+            return CleanupStatus::Unavailable;
+        };
+        let Ok(store) = self.maintenance_store() else {
+            return CleanupStatus::Failed;
+        };
+        let Ok(Some((request, _))) = store.purge_binding(receipt.operation_id.as_str()).await
+        else {
+            return CleanupStatus::Failed;
+        };
+        let mut status = CleanupStatus::Complete;
+        for target in &request.targets {
+            let scope = rsi_spill::SpillScope::new("session", target.session_id.as_str());
+            let result = if cleanup {
+                spill.cleanup(&scope).await.map(|()| true)
+            } else {
+                spill.is_clean(&scope).await
+            };
+            match result {
+                Ok(false) if status != CleanupStatus::Failed => status = CleanupStatus::Pending,
+                Ok(_) => {}
+                Err(_) => status = CleanupStatus::Failed,
+            }
+        }
+        status
     }
     pub(super) fn local_maintenance_store(&self) -> Result<&dyn StoreMaintenance> {
         if !matches!(self.origin, rsi_api_protocol::CallOrigin::Local) {
@@ -359,6 +405,7 @@ impl LocalSessionService {
                     "purge identity reused with a different selection".into(),
                 ));
             }
+            self.fence_spill(original.targets.iter().map(|target| &target.session_id));
             let receipt = store
                 .purge_batch(request.operation_id.as_str())
                 .await
@@ -425,6 +472,7 @@ impl LocalSessionService {
                 return Err(error);
             }
         };
+        self.fence_spill(ids.iter());
         for owner in &closing {
             owner.retiring();
         }

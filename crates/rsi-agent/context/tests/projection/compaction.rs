@@ -192,6 +192,10 @@ fn incomplete_usage_and_explicit_reserve_drive_pressure_across_checkpoint_and_re
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The test follows one source through pruning, compaction and summary replay."
+)]
 fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation() {
     let mut state = cursor();
     let mut history = Vec::new();
@@ -201,6 +205,14 @@ fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation(
         panic!()
     };
     *result = ToolResult::new(json!({"value": original_text}), vec![], false).unwrap();
+    let reference = rsi_spill::SpillRef {
+        locator: rsi_spill::SpillLocator::new(
+            &rsi_spill::SpillScope::new("session", "source"),
+            [7; 16],
+        ),
+        bytes: original_text.len() as u64,
+    };
+    result.spills.push(reference.clone());
     let mut second = bodies.last().unwrap().clone();
     let SessionFactBody::ToolResult {
         identity,
@@ -231,6 +243,7 @@ fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation(
     );
     let pruned = wire(&state);
     assert!(pruned.contains("middle pruned"));
+    assert!(pruned.contains(reference.locator.as_str()));
     assert!(pruned.len() < unpruned.len() / 2);
     assert_eq!(
         wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
@@ -273,6 +286,11 @@ fn pruned_tool_views_preserve_raw_facts_and_replay_through_summary_installation(
         serde_json::to_string(planned.request.messages())
             .unwrap()
             .contains("middle pruned")
+    );
+    assert!(
+        serde_json::to_string(planned.request.messages())
+            .unwrap()
+            .contains(reference.locator.as_str())
     );
     append(
         &mut state,

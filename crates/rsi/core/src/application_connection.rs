@@ -130,7 +130,7 @@ impl PluginFactory for ConnectionFactory {
         let external = Arc::new(rsi_acp_api::Client::new(api.clone()));
         let workspace = connection.workspace_registry();
         let models = connection.language_models();
-        let output = connection.output_cache();
+        let output = connection.spill_reader();
         let media = connection.media_service();
         let files = connection.session_files();
         let settings = connection.settings_access();
@@ -162,7 +162,7 @@ impl PluginFactory for ConnectionFactory {
             context
                 .provide_local::<rsi_workspace_protocol::WorkspaceRegistryContract>(workspace)?,
             context.provide_local::<rsi_ai_protocol::LanguageModelsContract>(models)?,
-            context.provide_local::<rsi_process::ProcessOutputCacheContract>(output)?,
+            context.provide_local::<rsi_spill::SpillReaderContract>(output)?,
             context.provide_local::<rsi_media_protocol::MediaContract>(media)?,
             context.provide_local::<rsi_client::ConnectionLifetimeContract>(Arc::new(lifetime))?,
         ];
@@ -379,7 +379,7 @@ fn register_contracts(builder: &mut crate::StandardAddonBuilder) -> crate::Resul
         .register_local_contract_at::<rsi_ai_protocol::LanguageModelsContract>(scope)
         .map_err(boot)?;
     builder
-        .register_local_contract_at::<rsi_process::ProcessOutputCacheContract>(scope)
+        .register_local_contract_at::<rsi_spill::SpillReaderContract>(scope)
         .map_err(boot)?;
     builder
         .register_local_contract_at::<rsi_media_protocol::MediaContract>(scope)

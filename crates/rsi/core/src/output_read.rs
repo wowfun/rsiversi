@@ -1,10 +1,9 @@
-//! Standard model presentation over read-only completed Process output.
+//! Standard model presentation over read-only completed Spill output.
 
 use async_trait::async_trait;
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
-use rsi_process::{
-    DEFAULT_OUTPUT_READ_BYTES, MAXIMUM_OUTPUT_READ_BYTES, ProcessOutputCache,
-    ProcessOutputCacheContract,
+use rsi_spill::{
+    DEFAULT_SPILL_READ_BYTES, MAXIMUM_SPILL_READ_BYTES, SpillReader, SpillReaderContract,
 };
 use rsi_tools_protocol::{
     ToolContent, ToolDefinition, ToolError, ToolExecution, ToolExecutor, ToolRegistrarContract,
@@ -26,19 +25,19 @@ impl PluginFactory for OutputReadToolFactory {
             ));
         }
         Ok(PreparedActivation::with_state(Value::Null, (), 0)
-            .requiring_local::<ProcessOutputCacheContract>()
+            .requiring_local::<SpillReaderContract>()
             .requiring_local::<ToolRegistrarContract>())
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (): () = plan.take_state()?;
-        let cache = plan.local::<ProcessOutputCacheContract>()?;
+        let cache = plan.local::<SpillReaderContract>()?;
         let definition = ToolDefinition::new("output_read",
-            "Read a page of a completed command's full output using its full_output identity. Offsets count raw bytes. Cache entries can expire; this tool cannot read arbitrary paths.",
+            "Read a page of a completed text or command output using its opaque locator. Offsets count raw bytes. Cache entries can expire; this tool cannot read arbitrary paths.",
             json!({"type":"object","properties":{
-                "id":{"type":"string","pattern":"^[0-9a-f]{32}$","minLength":32,"maxLength":32},
+                "id":{"type":"string","pattern":"^[0-9a-f]{64}-[0-9a-f]{32}$","minLength":97,"maxLength":97},
                 "offset":{"type":"integer","minimum":0},
-                "limit":{"type":"integer","minimum":1,"maximum":MAXIMUM_OUTPUT_READ_BYTES}
+                "limit":{"type":"integer","minimum":1,"maximum":MAXIMUM_SPILL_READ_BYTES}
             },"required":["id"],"additionalProperties":false}))
             .map_err(|error| MetaError::Activation(error.to_string()))?
             .with_scheduling(ToolScheduling::ParallelSafe)
@@ -64,12 +63,12 @@ impl PluginFactory for OutputReadToolFactory {
 }
 
 #[derive(Debug)]
-struct OutputReadTool(Arc<dyn ProcessOutputCache>);
+struct OutputReadTool(Arc<dyn SpillReader>);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arguments {
-    id: String,
+    id: rsi_spill::SpillLocator,
     #[serde(default)]
     offset: u64,
     #[serde(default = "default_limit")]
@@ -77,7 +76,7 @@ struct Arguments {
 }
 
 const fn default_limit() -> usize {
-    DEFAULT_OUTPUT_READ_BYTES
+    DEFAULT_SPILL_READ_BYTES
 }
 
 #[async_trait]
@@ -94,26 +93,24 @@ impl ToolExecutor for OutputReadTool {
                 () = execution.cancellation.cancelled() => return Err(ToolError::Cancelled),
                 result = self.0.read(&arguments.id, arguments.offset, arguments.limit) => result,
             },
-            Err(error) => Err(rsi_process::ProcessError::InvalidInput(error.to_string())),
+            Err(error) => Err(rsi_spill::SpillError::Invalid(error.to_string())),
         };
         match result {
             Ok(page) => {
                 let text = safe_text(&page.bytes);
-                let bytes_hex = hex::encode(&page.bytes);
+                let mut value = json!({"id":page.locator,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":text});
                 let mut rendered = format!(
                     "{text}\n[output: {}; bytes: {}..{} of {}]",
-                    page.id, page.offset, page.next_offset, page.total_bytes
+                    page.locator, page.offset, page.next_offset, page.total_bytes
                 );
                 if text.as_bytes() != page.bytes {
                     use std::fmt::Write as _;
+                    let bytes_hex = hex::encode(&page.bytes);
                     write!(rendered, "\n[raw bytes hex: {bytes_hex}]")
                         .expect("writing a String cannot fail");
+                    value["bytes_hex"] = bytes_hex.into();
                 }
-                ToolResult::new(
-                    json!({"id":page.id,"offset":page.offset,"next_offset":page.next_offset,"total_bytes":page.total_bytes,"text":text,"bytes_hex":bytes_hex}),
-                    vec![ToolContent::Text { text: rendered }],
-                    false,
-                )
+                ToolResult::new(value, vec![ToolContent::Text { text: rendered }], false)
             }
             Err(error) => ToolResult::new(
                 json!({"code":"output_unavailable","message":error.to_string()}),
@@ -139,3 +136,7 @@ pub(crate) fn safe_text(bytes: &[u8]) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "output_read_tests.rs"]
+mod tests;

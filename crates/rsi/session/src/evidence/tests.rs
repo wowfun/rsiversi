@@ -630,6 +630,14 @@ async fn byte_capacity_is_reclaimed_only_from_idle_selected_sources() {
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 impl SessionStore for Store {
+    async fn read_domain_admission(
+        &self,
+        id: &SessionId,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreDomainAdmissionSnapshot>
+    {
+        unreachable!()
+    }
+
     async fn session_summary(
         &self,
         _: &SessionId,

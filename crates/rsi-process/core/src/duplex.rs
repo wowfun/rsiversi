@@ -49,6 +49,7 @@ impl DuplexProcessSpec {
     /// Shares only mechanical request validation/admission with batch execution.
     pub fn into_process_spec(self) -> ProcessSpec {
         ProcessSpec {
+            capture: None,
             process: self.process,
             stdin: vec![],
             environment: self.environment,

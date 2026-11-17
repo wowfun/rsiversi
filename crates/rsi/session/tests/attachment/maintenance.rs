@@ -180,11 +180,57 @@ async fn uncertain_purge_with_commit_reconciles_retirement_and_resumes() {
 async fn purge_timeout_retry_observes_inflight_work_without_readmitting_it() {
     purge_scenario(4).await;
 }
+#[tokio::test]
+async fn spill_cleanup_failure_keeps_the_store_receipt_and_retries_after_cache_restart() {
+    purge_scenario(5).await;
+}
+#[derive(Debug)]
+struct FailCleanupOnce {
+    inner: Arc<rsi_spill_local::LocalSpillStore>,
+    fail: std::sync::atomic::AtomicBool,
+    fences: AtomicUsize,
+}
+#[async_trait]
+impl rsi_spill::SpillReader for FailCleanupOnce {
+    async fn read(
+        &self,
+        locator: &rsi_spill::SpillLocator,
+        offset: u64,
+        limit: usize,
+    ) -> rsi_spill::Result<rsi_spill::SpillPage> {
+        rsi_spill::SpillReader::read(self.inner.as_ref(), locator, offset, limit).await
+    }
+}
+#[async_trait]
+impl rsi_spill::SpillStore for FailCleanupOnce {
+    fn scope(&self, scope: rsi_spill::SpillScope) -> Arc<dyn rsi_spill::CaptureSink> {
+        self.inner.scope(scope)
+    }
+    fn generation_scope(&self) -> rsi_spill::SpillScope {
+        self.inner.generation_scope()
+    }
+    fn fence(&self, scope: &rsi_spill::SpillScope) {
+        self.fences.fetch_add(1, Ordering::SeqCst);
+        self.inner.fence(scope);
+    }
+    async fn cleanup(&self, scope: &rsi_spill::SpillScope) -> rsi_spill::Result<()> {
+        if self.fail.swap(false, Ordering::SeqCst) {
+            return Err(rsi_spill::SpillError::Unavailable(
+                "injected cleanup failure".into(),
+            ));
+        }
+        self.inner.cleanup(scope).await
+    }
+    async fn is_clean(&self, scope: &rsi_spill::SpillScope) -> rsi_spill::Result<bool> {
+        self.inner.is_clean(scope).await
+    }
+}
 #[expect(
     clippy::too_many_lines,
     reason = "One retirement scenario covers read drain, durable commit and old-handle fencing."
 )]
 async fn purge_scenario(scenario: u8) {
+    use rsi_spill::{SpillReader as _, SpillStore as _};
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
         rsi_agent_store_sqlite::SqliteStore::open(directory.path().join("store")).unwrap(),
@@ -282,6 +328,41 @@ async fn purge_scenario(scenario: u8) {
         Arc::new(UnavailableMedia),
         Arc::new(NoApprovalControl),
     ));
+    let spill = if scenario == 5 {
+        let mut config = rsi_spill_local::SpillLocalConfig::new(directory.path().join("spill"));
+        config.minimum_free_bytes = 0;
+        let inner = rsi_spill_local::LocalSpillStore::open(config.clone())
+            .await
+            .unwrap();
+        let scope = rsi_spill::SpillScope::new("session", header.session_id().as_str());
+        let reference = inner
+            .save_text(scope.clone(), "complete text")
+            .await
+            .unwrap();
+        let pending = inner.scope(scope.clone()).capture().unwrap();
+        assert!(pending.write(b"not yet complete").await);
+        let flaky = Arc::new(FailCleanupOnce {
+            inner,
+            fail: std::sync::atomic::AtomicBool::new(true),
+            fences: AtomicUsize::new(0),
+        });
+        let selected: Arc<std::sync::Mutex<Arc<dyn rsi_spill::SpillStore>>> =
+            Arc::new(std::sync::Mutex::new(flaky.clone()));
+        Some((config, scope, reference, pending, flaky, selected))
+    } else {
+        None
+    };
+    let service = if let Some((_, _, _, _, _, selected)) = &spill {
+        let selected = selected.clone();
+        Arc::new(
+            service
+                .as_ref()
+                .clone()
+                .with_spill(move || Some(selected.lock().unwrap().clone())),
+        )
+    } else {
+        service
+    };
     let device = service.scoped(rsi_api_protocol::CallOrigin::Device(
         rsi_api_protocol::AuthenticatedDevice {
             id: rsi_api_protocol::DeviceId::from_bytes([7; 16]),
@@ -484,7 +565,7 @@ async fn purge_scenario(scenario: u8) {
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(31)).await;
     }
-    let receipt = if let Some((entered, pause)) = pause {
+    let mut receipt = if let Some((entered, pause)) = pause {
         drop(read);
         entered.await.unwrap();
         tokio::time::pause();
@@ -520,7 +601,7 @@ async fn purge_scenario(scenario: u8) {
         })
         .await
         .unwrap()
-    } else if scenario == 0 {
+    } else if matches!(scenario, 0 | 5) {
         drop(read);
         purging.await.unwrap().unwrap().unwrap()
     } else {
@@ -584,10 +665,44 @@ async fn purge_scenario(scenario: u8) {
         }
         service.purge(request.clone()).await.unwrap().unwrap()
     };
+    let reopened = if let Some((config, scope, reference, pending, flaky, selected)) = &spill {
+        assert!(receipt.store.complete);
+        assert_eq!(receipt.spill, rsi_session_protocol::CleanupStatus::Failed);
+        assert!(flaky.fences.load(Ordering::SeqCst) > 0);
+        assert!(pending.finish().await.is_none());
+        assert!(flaky.read(&reference.locator, 0, 20).await.is_err());
+        assert!(!flaky.is_clean(scope).await.unwrap());
+        assert_eq!(
+            service
+                .purge_status("service-purge")
+                .await
+                .unwrap()
+                .unwrap()
+                .spill,
+            rsi_session_protocol::CleanupStatus::Pending
+        );
+        // Completed Store binding survives an absent cache cleanup intent and cache restart.
+        flaky.inner.shutdown().await;
+        let reopened = rsi_spill_local::LocalSpillStore::open(config.clone())
+            .await
+            .unwrap();
+        *selected.lock().unwrap() = reopened.clone();
+        assert!(!reopened.is_clean(scope).await.unwrap());
+        receipt = service.purge(request.clone()).await.unwrap().unwrap();
+        assert_eq!(receipt.spill, rsi_session_protocol::CleanupStatus::Complete);
+        assert!(reopened.is_clean(scope).await.unwrap());
+        Some(reopened)
+    } else {
+        assert_eq!(
+            receipt.spill,
+            rsi_session_protocol::CleanupStatus::Unavailable
+        );
+        None
+    };
     assert!(receipt.store.complete);
     assert_eq!(
         receipt.navigation,
-        rsi_session_protocol::NavigationCleanup::Unavailable
+        rsi_session_protocol::CleanupStatus::Unavailable
     );
     assert!(service.attach(header.session_id()).await.is_err());
     assert_eq!(
@@ -596,4 +711,7 @@ async fn purge_scenario(scenario: u8) {
     );
     assert_eq!(service.purge(request).await.unwrap().unwrap(), receipt);
     service.stop().await.unwrap();
+    if let Some(reopened) = reopened {
+        reopened.shutdown().await;
+    }
 }

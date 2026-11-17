@@ -676,6 +676,47 @@ async fn workspace_read_lease_holds_actual_draft_only_until_finite_read_ends() {
 }
 
 #[tokio::test]
+async fn idle_read_fence_allows_immediate_draft_release_without_waiting_for_expiry() {
+    use rsi_session_protocol::{
+        DraftRelease, SessionDraftControl as _, SessionReads as _, SessionTarget,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let service = service(directory.path(), Preparation::new(false));
+    let handle = service
+        .create(request(directory.path(), "idle-fence"))
+        .await
+        .unwrap();
+    let header = handle.header().await.unwrap();
+    let target = SessionTarget {
+        session_id: header.session_id().clone(),
+        header_key: header.fingerprint().unwrap(),
+    };
+    let read = service
+        .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+        .await
+        .unwrap();
+    let fence = read.fence();
+    assert_eq!(
+        service.release_draft(&target.session_id),
+        DraftRelease::Busy
+    );
+    drop(read);
+    assert!(!fence.is_retiring());
+    assert_eq!(
+        service.release_draft(&target.session_id),
+        DraftRelease::Released
+    );
+    assert!(
+        service
+            .acquire(rsi_api_protocol::CallOrigin::Local, &target)
+            .await
+            .is_err()
+    );
+    drop(fence);
+    service.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn workspace_read_binding_rejects_wrong_header_and_service_retirement_cancels_lease() {
     use rsi_session_protocol::{SessionReads as _, SessionTarget};
     let directory = tempfile::tempdir().unwrap();

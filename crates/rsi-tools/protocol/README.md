@@ -31,7 +31,13 @@ Execution-policy paths use the bounded
 Native process and sandbox providers retain actual filesystem validation.
 
 This package owns bounded process-local tool definitions, schemas, calls,
-results, and catalog interfaces. Canonical JSON values are distinct
+results, and catalog interfaces. Results additionally retain up to
+`MAXIMUM_TOOL_CONTENT_ITEMS` typed `spills` (one bounded locator per potential
+content item). They are evictable cache references, separate from durable Media.
+Canonical program values are unchanged by retention. The orchestrator's
+`ToolExecutionSession` extension supplies a Session-owned Spill scope; the
+existing invocation identity identifies the execution. Neither comes from model arguments.
+ Canonical JSON values are distinct
 from ordered model-facing text and Media references. Every typed JSON value is
 bounded by encoded bytes, nesting depth, and node count; callers importing a
 Tool definition into a narrower capability must revalidate that capability's
@@ -120,8 +126,8 @@ true settlement, and an outcome produced after catalog withdrawal is
 discarded. Starting above the provider-wide admission bound returns
 `ToolError::Capacity`; starts after shutdown begins return
 `ToolError::ShuttingDown`. Human interaction requires `exclusive_final`
-scheduling; interaction and deadline are independent as specified above. The current
-pre-release result shape is exactly `{ value, content, is_error, enforcement }`; image
+scheduling; interaction and deadline are independent as specified above. The current result includes canonical value, presentation content, outcome and
+execution evidence plus optional typed cache references and context; image
 content contains a durable `MediaRef`, not an inline blob or status envelope.
 Model-facing text rejects C0 terminal controls other than tab and line breaks.
 `safe_tool_text` decodes UTF-8 lossily and replaces exactly those disallowed
@@ -133,7 +139,8 @@ has no migration reader.
 
 ## Portable contributions
 
-`portable` owns the version-3 `rsi.tools.portable` duplex byte protocol. The linked
+`portable` owns the version-4 `rsi.tools.portable` duplex byte protocol, including
+typed Spill references on results. The linked
 bridge requires one explicitly named Portable supply and the exact Local
 ToolRegistrar. Describe returns a nonempty atomic batch of at most 64 bounded
 definitions with owner-declared finite timeout of 1..=600,000 milliseconds

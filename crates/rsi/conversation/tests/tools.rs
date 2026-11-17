@@ -23,7 +23,7 @@ fn fact(seq: u64, kind: &str, owner: &str) -> SessionFact {
             rejection: ToolRejection::PolicyDenied { contribution_id: ContributionId::new("fixture.policy").unwrap(), reason: "denied".into() },
         },
         "result" => SessionFactBody::ToolResult {
-            turn_id, effect_id, identity, result: ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":"a".repeat(32)},"stderr":{"full_output":"x".repeat(1024*1024)}}), vec![], false).unwrap(),
+            turn_id, effect_id, identity, result: ToolResult::new(json!({"exit_code":7,"stdout":{"full_output":format!("{}-{}", "0".repeat(64), "a".repeat(32))},"stderr":{"full_output":"x".repeat(1024*1024)}}), vec![], false).unwrap(),
             conclusion: None,
         },
         _ => unreachable!(),
@@ -49,7 +49,10 @@ fn partial_tool_lifecycle_preserves_exact_pairing_and_repairs_only_missing_inten
     assert!(!suffix.intent_present);
     assert!(suffix.name.is_none());
     assert!(suffix.arguments.is_none());
-    assert_eq!(suffix.outputs[0].as_ref().unwrap().as_str(), "a".repeat(32));
+    assert_eq!(
+        suffix.outputs[0].as_ref().unwrap().as_str(),
+        format!("{}-{}", "0".repeat(64), "a".repeat(32))
+    );
     assert!(
         suffix.outputs[1].is_none(),
         "invalid large output ID is never retained"

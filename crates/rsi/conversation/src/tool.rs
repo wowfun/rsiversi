@@ -5,15 +5,20 @@ use serde::Serialize;
 /// An issued completed-output identity, validated before retaining its bytes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct OutputRef(String);
+pub struct OutputRef(rsi_spill::SpillLocator);
 impl OutputRef {
-    /// Rejects arbitrary JSON strings that do not satisfy the Process reader contract.
+    /// Rejects arbitrary JSON strings that do not satisfy the Spill reader contract.
     pub fn parse(value: &str) -> Option<Self> {
-        rsi_process::validate_output_read(value, 1).ok()?;
-        Some(Self(value.into()))
+        rsi_spill::SpillLocator::parse(value.to_owned())
+            .ok()
+            .map(Self)
     }
     /// Supplies the validated ID to an independently authorized output reader.
     pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+    /// Borrows the admitted locator without reparsing it.
+    pub const fn locator(&self) -> &rsi_spill::SpillLocator {
         &self.0
     }
 }
@@ -53,6 +58,8 @@ pub struct ToolState {
     pub rejection: Option<SourceRef>,
     /// Independently validated stdout/stderr cache references.
     pub outputs: [Option<OutputRef>; 2],
+    /// Generic typed text references carried by the settled Fact.
+    pub spills: Vec<OutputRef>,
     /// Latest durable phase.
     pub phase: ToolPhase,
     #[serde(skip)]
@@ -81,6 +88,7 @@ impl ToolState {
             result: None,
             rejection: None,
             outputs: [None, None],
+            spills: Vec::new(),
             phase: ToolPhase::Prepared,
             phase_seq: 0,
             named_seq: 0,
@@ -153,6 +161,11 @@ impl ToolState {
                         seq,
                         field: FactField::ToolValue,
                     });
+                    self.spills = result
+                        .spills
+                        .iter()
+                        .map(|reference| OutputRef(reference.locator.clone()))
+                        .collect();
                     self.outputs = ["stdout", "stderr"].map(|stream| {
                         OutputRef::parse(result.value.get(stream)?.get("full_output")?.as_str()?)
                     });
@@ -237,11 +250,13 @@ impl ToolState {
             + self.external_candidate.as_ref().map_or(0, String::capacity)
             + self.name.as_ref().map_or(0, String::capacity)
             + self.argument_summary.as_ref().map_or(0, String::capacity)
+            + self.spills.capacity() * std::mem::size_of::<OutputRef>()
             + self
                 .outputs
                 .iter()
                 .flatten()
-                .map(|output| output.0.capacity())
+                .chain(self.spills.iter())
+                .map(|output| output.as_str().len())
                 .sum::<usize>()
     }
 }

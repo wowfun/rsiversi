@@ -7,6 +7,55 @@ use rsi_tools_protocol::{
 use serde_json::json;
 
 #[test]
+fn paged_tool_result_envelope_preserves_component_limits_and_escaping() {
+    use rsi_tools_protocol::MAXIMUM_TOOL_TEXT_BYTES;
+    let valid = json!({
+        "value": "v".repeat(MAXIMUM_TOOL_JSON_BYTES - 2),
+        "metadata": {"x": "m".repeat(MAXIMUM_TOOL_JSON_BYTES - 8)},
+        "content": [{"type":"text", "text":"\n".repeat(MAXIMUM_TOOL_TEXT_BYTES)}],
+        "is_error": false, "enforcement": []
+    });
+    let wire = serde_json::to_vec(&valid).unwrap();
+    assert!(wire.len() > 16 * 1024 * 1024);
+    assert!(wire.len() < 17 * 1024 * 1024);
+    let decoded: ToolResult = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["content"],
+        valid["content"]
+    );
+    drop((valid, wire));
+    for (field, value, diagnostic) in [
+        (
+            "value",
+            json!("v".repeat(MAXIMUM_TOOL_JSON_BYTES - 1)),
+            "tool canonical result",
+        ),
+        (
+            "metadata",
+            json!({"x":"m".repeat(MAXIMUM_TOOL_JSON_BYTES - 7)}),
+            "tool metadata",
+        ),
+        (
+            "content",
+            json!([
+                {"type":"text", "text":"\n".repeat(MAXIMUM_TOOL_TEXT_BYTES / 2)},
+                {"type":"text", "text":"\n".repeat(MAXIMUM_TOOL_TEXT_BYTES / 2 + 1)}
+            ]),
+            "tool result text",
+        ),
+    ] {
+        let mut invalid = json!({"value":null,"content":[],"is_error":false,"enforcement":[]});
+        invalid[field] = value;
+        let wire = serde_json::to_vec(&invalid).unwrap();
+        assert!(wire.len() < 17 * 1024 * 1024);
+        let error = serde_json::from_slice::<ToolResult>(&wire)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
 fn full_access_requirement_is_trusted_registration_data_not_model_wire() {
     let definition = ToolDefinition::new("manage", "manage", true.into())
         .unwrap()
@@ -90,9 +139,15 @@ fn durable_tool_result_deserialization_revalidates_text() {
     let value = json!({
         "value": null,
         "content": [{"type": "text", "text": "bad\u{0}"}],
-        "is_error": false
+        "is_error": false,
+        "enforcement": []
     });
-    assert!(serde_json::from_value::<ToolResult>(value).is_err());
+    assert!(
+        serde_json::from_value::<ToolResult>(value)
+            .unwrap_err()
+            .to_string()
+            .contains("tool result text")
+    );
 }
 
 #[test]
@@ -127,9 +182,15 @@ fn model_facing_tool_text_rejects_terminal_escape_controls() {
     let value = json!({
         "value": null,
         "content": [{"type": "text", "text": "safe\u{1b}[31munsafe"}],
-        "is_error": false
+        "is_error": false,
+        "enforcement": []
     });
-    assert!(serde_json::from_value::<ToolResult>(value).is_err());
+    assert!(
+        serde_json::from_value::<ToolResult>(value)
+            .unwrap_err()
+            .to_string()
+            .contains("tool result text")
+    );
 }
 
 #[test]

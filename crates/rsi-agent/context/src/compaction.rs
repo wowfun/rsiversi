@@ -718,6 +718,9 @@ impl ContextFold {
                     .map_or(turn.messages.as_slice(), |replacement| {
                         replacement.messages.as_slice()
                     }),
+                replacements
+                    .get(&turn.id)
+                    .map_or(&turn.batches, |replacement| &replacement.batches),
             )
         }))?;
         let view = assemble_view(
@@ -764,7 +767,7 @@ impl ContextFold {
         crate::pruning::project(
             self.turns
                 .iter()
-                .map(|turn| (&turn.id, turn.messages.as_slice())),
+                .map(|turn| (&turn.id, turn.messages.as_slice(), &turn.batches)),
         )
     }
 
@@ -1332,6 +1335,7 @@ mod view_tests {
         .unwrap()
         .unwrap();
         *batch.calls.get_mut("call").unwrap() = crate::outcomes::Call {
+            spills: Vec::new(),
             effect: Some(EffectId::new("tool-effect").unwrap()),
             identity: Some(
                 rsi_tools_protocol::ToolResultIdentity::new(

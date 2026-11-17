@@ -331,7 +331,13 @@ fn job_read_result(read: &JobRead, wait_timed_out: bool) -> rsi_tools_protocol::
         exit_code.map_or_else(|| "none".into(), |code| code.to_string()),
         signal.map_or_else(|| "none".into(), |signal| signal.to_string()),
     );
-    result_with_text(value, text, false)
+    let mut result = result_with_text(value, text, false)?;
+    result.spills.extend(
+        [stdout.full_output.clone(), stderr.full_output.clone()]
+            .into_iter()
+            .flatten(),
+    );
+    Ok(result)
 }
 
 fn project_stream(read: &JobOutputRead) -> JobOutputRead {
@@ -360,7 +366,7 @@ fn job_stream_value(read: &JobOutputRead) -> Value {
         "next_offset":read.next_offset,
         "truncated":read.lossy,
         "utf8_lossy":utf8_lossy,
-        "full_output":read.full_output
+        "full_output":read.full_output.as_ref().map(|reference| reference.locator.as_str())
     })
 }
 
@@ -383,7 +389,9 @@ fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
             "[{kind} truncated; showing bytes {}..{}]\n{text}\n[full {kind}: {}]",
             read.oldest_offset,
             read.next_offset,
-            read.full_output.as_deref().unwrap_or("unavailable")
+            read.full_output
+                .as_ref()
+                .map_or("unavailable", |reference| reference.locator.as_str())
         )
     } else {
         text.to_owned()

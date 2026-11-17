@@ -144,6 +144,7 @@ pub(super) async fn exchange(
     let environment = plan.environment().to_vec();
     let process = execution
         .spawn(ProcessSpec {
+            capture: None,
             process: plan,
             stdin,
             environment,

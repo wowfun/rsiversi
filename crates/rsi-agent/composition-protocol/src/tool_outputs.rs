@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 /// Exact-name output declarations frozen when the generation was composed.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct ToolOutputCatalog(BTreeMap<String, ToolOutputDeclaration>);
 
 impl<'de> Deserialize<'de> for ToolOutputCatalog {
@@ -105,3 +106,19 @@ impl ToolOutputCatalog {
         Ok(())
     }
 }
+
+#[cfg(test)]
+rsi_persistence_testkit::payload_contract!(
+    persistence_tool_outputs,
+    ToolOutputCatalog,
+    ToolOutputCatalog::identity().version(),
+    format!(
+        "tests/fixtures/persistence/tool_outputs-v{}.json",
+        ToolOutputCatalog::identity().version()
+    ),
+    {
+        let samples: Vec<ToolOutputCatalog> = vec![ToolOutputCatalog::new(BTreeMap::new()).unwrap(),ToolOutputCatalog::new([("fixture".into(),rsi_tools_protocol::ToolOutputDeclaration::new("fixture",1,serde_json::json!({"type":"object","properties":{"z":{"type":"integer"},"a":{"type":"string"}},"required":["z"]})).unwrap())].into()).unwrap()];
+
+        samples
+    }
+);

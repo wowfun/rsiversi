@@ -69,7 +69,6 @@ plugin = "rsi.agent.repeat-tool-reminder"
 kind = "plugin"
 id = "output-read"
 plugin = "rsi.output.read"
-enabled_rhai = "defines.standard_output_cache"
 
 [[steps]]
 kind = "plugin"
@@ -141,3 +140,9 @@ kind = "plugin"
 id = "program"
 plugin = "rsi.agent.program.tools"
 enabled = false
+
+[[steps]]
+kind = "plugin"
+id = "spill-policy"
+plugin = "rsi.spill.policy"
+config = { max_inline_tokens = 12500 }

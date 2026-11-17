@@ -16,7 +16,7 @@ pub fn domain_clients(platform: &str) -> rsi_host::Result<(HostBuilder, Vec<Prof
     builder.register_local_contract::<rsi_session_files::SessionFilesContract>()?;
     builder.register_local_contract::<rsi_workspace_protocol::WorkspaceRegistryContract>()?;
     builder.register_local_contract::<rsi_ai_protocol::LanguageModelsContract>()?;
-    builder.register_local_contract::<rsi_process::ProcessOutputCacheContract>()?;
+    builder.register_local_contract::<rsi_spill::SpillReaderContract>()?;
     builder.register_local_contract::<rsi_settings_protocol::SettingsAccessContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaContract>()?;
     builder.register_local_contract::<rsi_media_protocol::MediaReadContract>()?;
@@ -50,7 +50,7 @@ pub fn domain_clients(platform: &str) -> rsi_host::Result<(HostBuilder, Vec<Prof
         ),
         (
             "rsi.output.client",
-            Arc::new(rsi_process_output_api::OutputClientFactory),
+            Arc::new(rsi_spill_api::OutputClientFactory),
         ),
         (
             "rsi.settings.client",

@@ -187,8 +187,7 @@ async fn command_discovery_and_status_reject_invalid_bounded_values() {
         json!({"revision":invocation.expected_revision,"commands":[]}),
     ));
     assert!(handle.commands().await.unwrap().commands().is_empty());
-    let descriptor =
-        json!({"id":"fixture.plan","name":"plan","description":"plan help","draft_safe":true});
+    let descriptor = json!({"id":"fixture.plan","name":"plan","description":"plan help","draft_safe":true,"composer_input":{"kind":"text","hint":"Arguments"}});
     remote.reply(&envelope(
         json!({"revision":invocation.expected_revision,"commands":[descriptor.clone(),descriptor]}),
     ));

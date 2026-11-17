@@ -88,7 +88,7 @@ impl HttpFactory {
             facet!(rsi_session_files::SessionFilesContract),
             facet!(rsi_workspace_protocol::WorkspaceRegistryContract),
             facet!(rsi_ai_protocol::LanguageModelsContract),
-            facet!(rsi_process::ProcessOutputCacheContract),
+            facet!(rsi_spill::SpillReaderContract),
             facet!(rsi_settings_protocol::SettingsAccessContract),
             facet!(rsi_media_protocol::MediaContract),
             plan.context()

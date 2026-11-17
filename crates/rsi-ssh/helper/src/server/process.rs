@@ -142,6 +142,7 @@ impl Server {
                         .capabilities
                         .process
                         .spawn(ProcessSpec {
+                            capture: None,
                             process,
                             environment,
                             stdin,

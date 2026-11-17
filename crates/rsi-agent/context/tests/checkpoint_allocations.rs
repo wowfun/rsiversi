@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v20_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v21_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -157,22 +157,22 @@ fn full_builder_preserves_v20_payload_and_v6_envelope_without_a_third_full_copy(
 }
 
 fn assert_checkpoint_contract(bytes: &[u8]) {
-    // v20 binds each projected Turn to its source Session and keeps pending
+    // v21 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions,
     // plus entered context timestamps per producer and retained Turn;
-    // the v6 outer envelope, Session 38 and builder 2.16.0 bind the cache.
+    // the v6 outer envelope, Session 39 and builder 2.17.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
         serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
-    assert_eq!(metadata["builder"]["semantic_version"], "2.16.0");
+    assert_eq!(metadata["builder"]["semantic_version"], "2.17.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v20\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v21\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 20);
+    assert_eq!(decoded["version"], 21);
     assert_eq!(
         decoded["step_prompt"],
         serde_json::json!({"mode":"append_to_header", "sections":[]})
@@ -201,7 +201,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "34f3f72554db2b042b962a50a899b4d8262c714753393249d99364c781b30993"
+        "3eed7fa7ae7c702caf8d5d553b46ffebb6f5427b57c77eedd90379b3432f3354"
     );
 }
 

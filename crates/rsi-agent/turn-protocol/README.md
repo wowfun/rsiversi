@@ -1,5 +1,15 @@
 # rsi-agent-turn-protocol
 
+`open_fork_history` and `open_checkpoint_fork_history` return operation-owned
+readers over authenticated inherited intervals. Their source Headers are ordered
+oldest first and own each interval's terminal cut; bounded pages return progress
+within that cut. Readers retain immutable proof pins and weak Kernel authority.
+An idle reader does not extend the Kernel or Store lifetime. Once the Kernel
+owner is released, later reads fail with ShuttingDown. An admitted read retains its owner until I/O
+finishes. Scope readers to one reconstruction. Checkpoint admission checks the
+claimed Turn's durable terminal and absence of speculative state before and after
+each page, including the last page; a stale admission declines that page.
+
 `prepare_composition` is admitted only between settled request series. An unchanged
 selection returns no candidate without reading Domain payloads. A candidate retains
 a validated mutation lease and current-state cut until dropped or committed.
@@ -188,8 +198,9 @@ generation, job ID and durable Tool effect. Kernel revalidates the live source
 after sampling. Each stream is at most 32 KiB; their combined raw budget is
 40 KiB so base64 plus bounded identity metadata fits a 60 KiB page and a 64 KiB
 Session API reply, including its target envelope.
-Kernel validates raw stream lengths, offsets and output references before
-encoding each stream once. Typed local relays trust that result; the Session API
+Kernel validates raw stream lengths and offsets before encoding each stream once.
+Completed-output references retain their typed SpillLocator from Jobs; external
+wire decoding admits that identity once. Typed local relays trust that result; the Session API
 client validates decoded wire pages before admitting them for presentation.
 Missing retained output is `None`, never scope reacquisition or execution.
 

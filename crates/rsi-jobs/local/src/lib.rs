@@ -519,10 +519,6 @@ impl Jobs for Service {
         for (read, limit) in [(&stdout, limits[0]), (&stderr, limits[1])] {
             if read.bytes.len() > limit
                 || read.oldest_offset.checked_add(read.bytes.len() as u64) != Some(read.next_offset)
-                || read
-                    .full_output
-                    .as_ref()
-                    .is_some_and(|value| value.len() > 256)
             {
                 return Err(JobsError::Execution("invalid job preview".into()));
             }
@@ -1191,15 +1187,6 @@ fn contained_read(
 ) -> Result<JobOutputRead> {
     let read = std::panic::catch_unwind(AssertUnwindSafe(|| control.read(stream, offset)))
         .map_err(|_| JobsError::Execution("job control read panicked".into()))??;
-    if read
-        .full_output
-        .as_ref()
-        .is_some_and(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
-    {
-        return Err(JobsError::Execution(
-            "invalid producer output reference".into(),
-        ));
-    }
     Ok(read)
 }
 

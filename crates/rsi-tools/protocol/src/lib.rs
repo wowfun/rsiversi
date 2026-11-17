@@ -75,7 +75,7 @@ pub fn safe_tool_text(bytes: &[u8]) -> String {
 }
 
 /// Provider-neutral tool declaration shared by Tools, AI, and Agent.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
     name: String,
@@ -212,7 +212,9 @@ impl ToolDefinition {
 }
 
 /// Trusted program-dispatch role, recorded by Agent for cold provenance validation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolProgramRole {
     /// Cannot participate in internal program dispatch.
@@ -240,7 +242,7 @@ pub enum ToolScheduling {
 }
 
 /// Bounded provider-neutral freeform grammar attached to one tool.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FreeformToolDefinition {
     format: FreeformFormat,
@@ -265,7 +267,7 @@ impl<'de> Deserialize<'de> for FreeformToolDefinition {
 }
 
 /// Closed freeform grammar families understood by provider adapters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreeformFormat {
     /// Lark grammar used by Responses custom tools.
@@ -297,7 +299,7 @@ impl FreeformToolDefinition {
 }
 
 /// Exact sandbox inputs pinned by the orchestrator before Tool execution.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolExecutionPolicy {
     /// Exact resolved sandbox mode.
@@ -642,7 +644,7 @@ impl ToolEnforcement {
 }
 
 /// Model-facing ordered content.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolContent {
     /// UTF-8 text.
@@ -658,9 +660,12 @@ pub enum ToolContent {
 }
 
 /// Complete bounded tool outcome suitable for durable Agent Facts.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResult {
+    /// Best-effort complete text references, independent of Media lifetime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spills: Vec<rsi_spill::SpillRef>,
     /// Canonical JSON value for programmatic consumers.
     pub value: Value,
     /// Ordered model-facing content.
@@ -681,7 +686,7 @@ pub struct ToolResult {
 }
 
 /// One plugin-authored message. Metadata describes its source without granting input authority.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolContextMessage {
     /// Source message identity.
@@ -738,6 +743,9 @@ impl ToolContextMessage {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolOutput {
+    /// Optional completed text references, admitted at this external boundary.
+    #[serde(default)]
+    pub spills: Vec<rsi_spill::SpillRef>,
     /// Canonical result value.
     pub value: Value,
     /// Model-visible tool response.
@@ -758,6 +766,7 @@ impl ToolOutput {
     /// Validates the output and constructs a result with no process enforcement stamps.
     pub fn into_result(self) -> Result<ToolResult> {
         let result = ToolResult {
+            spills: self.spills,
             value: self.value,
             content: self.content,
             is_error: self.is_error,
@@ -779,6 +788,8 @@ impl<'de> Deserialize<'de> for ToolResult {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct WireResult {
+            #[serde(default)]
+            spills: Vec<rsi_spill::SpillRef>,
             value: Value,
             content: Vec<ToolContent>,
             is_error: bool,
@@ -793,6 +804,7 @@ impl<'de> Deserialize<'de> for ToolResult {
 
         let wire = WireResult::deserialize(deserializer)?;
         let result = Self {
+            spills: wire.spills,
             value: wire.value,
             content: wire.content,
             is_error: wire.is_error,
@@ -812,6 +824,7 @@ impl ToolResult {
     /// Creates and validates a complete Tool result.
     pub fn new(value: Value, content: Vec<ToolContent>, is_error: bool) -> Result<Self> {
         let result = Self {
+            spills: Vec::new(),
             value,
             content,
             is_error,
@@ -840,6 +853,11 @@ impl ToolResult {
                 ));
             }
             validate_json("tool metadata", metadata)?;
+        }
+        if self.spills.len() > MAXIMUM_TOOL_CONTENT_ITEMS {
+            return Err(ToolError::InvalidInput(
+                "tool result contains too many spill references".into(),
+            ));
         }
         if self.content.len() > MAXIMUM_TOOL_CONTENT_ITEMS {
             return Err(ToolError::InvalidInput(
@@ -1062,7 +1080,7 @@ impl fmt::Debug for ToolRegistration {
 }
 
 /// One model-produced tool call.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
     /// Exact call identity.
@@ -1113,7 +1131,7 @@ impl ToolCall {
 }
 
 /// Exact retained-result identity frozen before Tool execution starts.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResultIdentity {
     owner_id: String,
@@ -1804,4 +1822,11 @@ fn execution_error(error: rsi_process::ProcessError) -> ToolError {
         rsi_process::ProcessError::Sandbox(cause) => ToolError::Sandbox(cause),
         _ => ToolError::Execution("execution provider or admission is unavailable".into()),
     }
+}
+
+/// Trusted Session namespace selected by the orchestrator, never a model argument.
+#[derive(Clone, Debug)]
+pub struct ToolExecutionSession {
+    /// Scope fenced by the Session owner before canonical retirement.
+    pub scope: rsi_spill::SpillScope,
 }

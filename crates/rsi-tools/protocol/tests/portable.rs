@@ -65,5 +65,5 @@ fn program_eligibility_is_local_and_cannot_be_injected_through_definition_wire()
     let mut forged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     forged["program_role"] = json!("callable");
     assert!(portable::decode::<ToolDefinition>(&portable::encode(&forged).unwrap()).is_err());
-    assert_eq!(portable::VERSION, 3);
+    assert_eq!(portable::VERSION, 4);
 }

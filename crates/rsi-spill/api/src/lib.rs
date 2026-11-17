@@ -14,8 +14,8 @@ use rsi_api_protocol::{
     ApiRegistration, ApiResponseCapacity, ByteBudget, OperationClass, OperationEffect, OperationId,
     OperationSpec, RequestEncoding, RetainedBytes,
 };
-use rsi_process::{
-    MAXIMUM_OUTPUT_READ_BYTES, OutputPage, ProcessError, ProcessOutputCache, validate_output_read,
+use rsi_spill::{
+    MAXIMUM_SPILL_READ_BYTES, SpillError, SpillPage, SpillReader, validate_read_limit,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -29,20 +29,20 @@ fn operation() -> OperationSpec {
         access: rsi_api_protocol::OperationAccess::Authenticated,
         encoding: RequestEncoding::Json,
         maximum_request_bytes: 256,
-        maximum_response_bytes: MAXIMUM_OUTPUT_READ_BYTES + 1024,
+        maximum_response_bytes: MAXIMUM_SPILL_READ_BYTES + 1024,
     }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
-    id: String,
+    id: rsi_spill::SpillLocator,
     offset: u64,
     limit: usize,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Metadata {
-    id: String,
+    id: rsi_spill::SpillLocator,
     offset: u64,
     next_offset: u64,
     total_bytes: u64,
@@ -58,7 +58,7 @@ enum Failure {
 
 #[derive(Debug)]
 struct OutputHandler {
-    output: Arc<dyn ProcessOutputCache>,
+    output: Arc<dyn SpillReader>,
     scratch: ByteBudget,
 }
 #[async_trait]
@@ -71,7 +71,7 @@ impl ApiHandler for OutputHandler {
     ) -> rsi_api_protocol::Result<ApiOutput> {
         let request: Request = serde_json::from_slice(input.as_bytes())
             .map_err(|_| ApiError::Invalid("invalid output request".into()))?;
-        validate_output_read(&request.id, request.limit)
+        validate_read_limit(request.limit)
             .map_err(|_| ApiError::Invalid("invalid output request".into()))?;
         let mut capacity = capacity.into_finite()?;
         let _scratch = self.scratch.reserve(request.limit)?;
@@ -81,12 +81,12 @@ impl ApiHandler for OutputHandler {
             .await
         {
             Ok(page) => page,
-            Err(ProcessError::Api(error)) => return Err(error),
+            Err(SpillError::Api(error)) => return Err(error),
             Err(error) => {
                 let failure = match error {
-                    ProcessError::InvalidInput(_) => Failure::Invalid,
-                    ProcessError::Capacity => Failure::Capacity,
-                    ProcessError::ShuttingDown => Failure::ShuttingDown,
+                    SpillError::Invalid(_) => Failure::Invalid,
+                    SpillError::Capacity => Failure::Capacity,
+                    SpillError::Closed => Failure::ShuttingDown,
                     _ => Failure::Unavailable,
                 };
                 return Err(ApiError::Domain(capacity.encode(&failure)?));
@@ -96,7 +96,7 @@ impl ApiHandler for OutputHandler {
             .map_err(|_| ApiError::Backend("invalid provider output page".into()))?;
         let binary = capacity.split(page.bytes.len())?.copy(&page.bytes)?;
         let metadata = Metadata {
-            id: page.id,
+            id: page.locator,
             offset: page.offset,
             next_offset: page.next_offset,
             total_bytes: page.total_bytes,
@@ -111,7 +111,7 @@ impl ApiHandler for OutputHandler {
 /// Registers the completed-output read without granting process execution authority.
 pub fn register_output(
     registrar: &dyn ApiRegistrar,
-    output: Arc<dyn ProcessOutputCache>,
+    output: Arc<dyn SpillReader>,
 ) -> rsi_api_protocol::Result<ApiRegistration> {
     registrar.register(
         operation(),
@@ -134,33 +134,38 @@ impl OutputClient {
     }
 }
 #[async_trait]
-impl ProcessOutputCache for OutputClient {
-    async fn read(&self, id: &str, offset: u64, limit: usize) -> rsi_process::Result<OutputPage> {
-        validate_output_read(id, limit)?;
+impl SpillReader for OutputClient {
+    async fn read(
+        &self,
+        id: &rsi_spill::SpillLocator,
+        offset: u64,
+        limit: usize,
+    ) -> rsi_spill::Result<SpillPage> {
+        validate_read_limit(limit)?;
         let operation = operation();
         let input = self
             .api
             .input_budget(operation.class)
             .encode(
                 &Request {
-                    id: id.into(),
+                    id: id.clone(),
                     offset,
                     limit,
                 },
                 operation.maximum_request_bytes,
             )
-            .map_err(ProcessError::Api)?;
+            .map_err(SpillError::Api)?;
         let message = match self.api.call(&operation, input).await {
             Ok(ApiOutput::Reply(message)) => message,
             Ok(ApiOutput::Stream(_)) => return Err(malformed()),
             Err(ApiError::Domain(bytes)) => return Err(decode_failure(&bytes)?),
-            Err(error) => return Err(ProcessError::Api(error)),
+            Err(error) => return Err(SpillError::Api(error)),
         };
         let metadata: Metadata =
             serde_json::from_slice(message.json.as_bytes()).map_err(|_| malformed())?;
         let bytes = message.binary.ok_or_else(malformed)?.into_bytes();
-        let page = OutputPage {
-            id: metadata.id,
+        let page = SpillPage {
+            locator: metadata.id,
             offset: metadata.offset,
             next_offset: metadata.next_offset,
             total_bytes: metadata.total_bytes,
@@ -171,16 +176,18 @@ impl ProcessOutputCache for OutputClient {
         Ok(page)
     }
 }
-fn malformed() -> ProcessError {
-    ProcessError::Api(ApiError::Invalid("invalid remote output page".into()))
+fn malformed() -> SpillError {
+    SpillError::Api(ApiError::Invalid("invalid remote output page".into()))
 }
-fn decode_failure(bytes: &RetainedBytes) -> rsi_process::Result<ProcessError> {
+fn decode_failure(bytes: &RetainedBytes) -> rsi_spill::Result<SpillError> {
     let failure: Failure = serde_json::from_slice(bytes.as_bytes()).map_err(|_| malformed())?;
     Ok(match failure {
-        Failure::Invalid => ProcessError::InvalidInput("remote output rejected input".into()),
-        Failure::Capacity => ProcessError::Capacity,
-        Failure::ShuttingDown => ProcessError::ShuttingDown,
-        Failure::Unavailable => ProcessError::Io("remote completed output unavailable".into()),
+        Failure::Invalid => SpillError::Invalid("remote output rejected input".into()),
+        Failure::Capacity => SpillError::Capacity,
+        Failure::ShuttingDown => SpillError::Closed,
+        Failure::Unavailable => {
+            SpillError::Unavailable("remote completed output unavailable".into())
+        }
     })
 }
 

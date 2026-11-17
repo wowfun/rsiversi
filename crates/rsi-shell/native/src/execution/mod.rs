@@ -36,6 +36,9 @@ pub(super) fn activate_tool(
     let jobs = plan.local::<JobsContract>()?;
     let process = plan.local::<ProcessContract>()?;
     let services = Arc::new(ShellServices {
+        spill: plan
+            .context()
+            .lookup_local::<rsi_spill::SpillStoreContract>(),
         kind: factory.kind,
         program: factory.program.clone(),
         environment: factory.environment.clone(),
@@ -58,6 +61,7 @@ pub(super) fn activate_tool(
 
 #[derive(Debug)]
 struct ShellServices {
+    spill: Option<Arc<dyn rsi_spill::SpillStore>>,
     kind: ShellKind,
     program: PathBuf,
     environment: Arc<[(OsString, OsString)]>,

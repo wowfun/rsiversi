@@ -39,7 +39,7 @@ changes must revalidate the captured domain baseline against the selected catalo
 Purge response waits have a 60-second deadline and report the original operation
 identity as an unknown outcome on expiry. Actual Store work retains its maintenance
 permit and lifecycle fences until completion; a timeout cannot prove that native
-I/O stopped. Navigation cleanup runs after releasing that Store permit. A competing
+I/O stopped. Navigation and Spill cleanup run after releasing that Store permit. A competing
 request from the same principal with the exact same operation and selection reads
 the existing receipt without reacquiring that permit; absent acknowledgement is
 still OutcomeUnknown. It never starts a second mutation. Different operations
@@ -392,3 +392,12 @@ or unauthorized reads hide their identities. Product protection tokens and
 execution admissions stay retained through the final projection, with protection
 and Device revocation rechecked before output. Store begin_purge still performs
 its own atomic immutable-header and durable-cursor recheck.
+
+After durable retirement admission and before the first canonical deletion batch,
+Session fences the selected Spill scopes. A refused admission leaves capture live;
+uncertain admission retains lifecycle ownership until the Store binding is known.
+Resume fences the original selection again, including after restart. Navigation
+and Spill have independent cleanup receipts. Cache cleanup failures cannot undo
+canonical retirement; an explicit retry uses the retained Store selection even
+when the Session payload is already gone. Status only observes cleanup. Spill's
+local incomplete-cleanup markers recover interrupted filesystem work on restart.

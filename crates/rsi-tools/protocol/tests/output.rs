@@ -118,7 +118,7 @@ fn author_helper_uses_one_value_and_rejects_mismatches_without_leaking_it() {
 }
 
 #[test]
-fn portable_v3_roundtrips_declarations_and_preserves_result_shape() {
+fn portable_v4_roundtrips_declarations_and_spill_references() {
     use rsi_tools_protocol::{
         ToolDefinition,
         portable::{self, Definition, Response, Scheduling},
@@ -139,7 +139,7 @@ fn portable_v3_roundtrips_declarations_and_preserves_result_shape() {
         panic!()
     };
     assert_eq!(tools[0].output.as_ref(), Some(&output));
-    assert_eq!(portable::VERSION, 3);
+    assert_eq!(portable::VERSION, 4);
     assert!(tools[0].requires_full_access);
     assert!(!tools[0].definition.requires_full_access());
     assert!(
@@ -149,9 +149,25 @@ fn portable_v3_roundtrips_declarations_and_preserves_result_shape() {
             .is_none()
     );
     let result = rsi_tools_protocol::ToolResult::new(json!("ok"), vec![], false).unwrap();
-    let wire = serde_json::to_value(result).unwrap();
+    let wire = serde_json::to_value(&result).unwrap();
     assert_eq!(wire.as_object().unwrap().len(), 4);
     assert!(wire.get("output").is_none());
+    let mut result = result;
+    result.spills.push(rsi_spill::SpillRef {
+        locator: rsi_spill::SpillLocator::new(
+            &rsi_spill::SpillScope::new("session", "portable"),
+            [7; 16],
+        ),
+        bytes: 100_000,
+    });
+    let expected = result.clone();
+    let Response::Result { result } =
+        portable::decode::<Response>(&portable::encode(&Response::Result { result }).unwrap())
+            .unwrap()
+    else {
+        panic!("result frame")
+    };
+    assert_eq!(result, expected);
 }
 
 #[test]

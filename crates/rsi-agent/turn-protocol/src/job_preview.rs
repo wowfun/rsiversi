@@ -53,7 +53,7 @@ pub struct JobPreviewStream {
     /// Whether the preview omits an earlier prefix.
     pub truncated: bool,
     /// Optional best-effort completed-output reference.
-    pub full_output: Option<String>,
+    pub full_output: Option<rsi_spill::SpillLocator>,
 }
 impl JobPreviewStream {
     /// Validates a raw producer tail before encoding it once.
@@ -62,10 +62,6 @@ impl JobPreviewStream {
             || read.bytes.len() > maximum
             || read.oldest_offset.checked_add(read.bytes.len() as u64) != Some(read.next_offset)
             || read.lossy != (read.oldest_offset > 0)
-            || read
-                .full_output
-                .as_ref()
-                .is_some_and(|id| id.len() > 256 || id.chars().any(char::is_control))
         {
             return Err(invalid("invalid raw job preview stream"));
         }
@@ -74,7 +70,7 @@ impl JobPreviewStream {
             start: read.oldest_offset,
             end: read.next_offset,
             truncated: read.lossy,
-            full_output: read.full_output,
+            full_output: read.full_output.map(|reference| reference.locator),
         })
     }
     /// Decodes and checks coordinates and exact canonical encoding.
@@ -82,12 +78,7 @@ impl JobPreviewStream {
         if !(1..=32 * 1024).contains(&maximum) {
             return Err(invalid("invalid preview decode bound"));
         }
-        if self.base64.len() > 4 * maximum.div_ceil(3)
-            || self
-                .full_output
-                .as_ref()
-                .is_some_and(|id| id.len() > 256 || id.chars().any(char::is_control))
-        {
+        if self.base64.len() > 4 * maximum.div_ceil(3) {
             return Err(invalid("job preview stream exceeds bounds"));
         }
         let bytes = STANDARD.decode(&self.base64).map_err(invalid)?;
@@ -167,6 +158,25 @@ mod tests {
         };
         let stream = JobPreviewStream::from_read(read(), 1).unwrap();
         assert_eq!(stream.bytes(1).unwrap(), b"f");
+        let reference = rsi_spill::SpillLocator::new(
+            &rsi_spill::SpillScope::new("session", "preview"),
+            [7; 16],
+        );
+        let mut retained = read();
+        retained.full_output = Some(rsi_spill::SpillRef {
+            locator: reference.clone(),
+            bytes: 1,
+        });
+        let retained = JobPreviewStream::from_read(retained, 1).unwrap();
+        assert_eq!(retained.full_output.as_ref(), Some(&reference));
+        let mut wire = serde_json::to_value(&retained).unwrap();
+        assert_eq!(wire["full_output"], reference.as_str());
+        assert_eq!(
+            serde_json::from_value::<JobPreviewStream>(wire.clone()).unwrap(),
+            retained
+        );
+        wire["full_output"] = serde_json::json!("arbitrary-former-id");
+        assert!(serde_json::from_value::<JobPreviewStream>(wire).is_err());
         for base64 in ["Zh==", "Zg", "Zg=", "Zg===", "Zg==\n"] {
             let mut invalid = stream.clone();
             invalid.base64 = base64.into();
@@ -175,13 +185,11 @@ mod tests {
                 "{base64:?} must not be accepted as canonical base64"
             );
         }
-        for case in 0..5 {
+        for case in 0..3 {
             let mut invalid = read();
             match case {
                 0 => invalid.next_offset = 2,
                 1 => invalid.lossy = true,
-                2 => invalid.full_output = Some("bad\nreference".into()),
-                3 => invalid.full_output = Some("x".repeat(257)),
                 _ => invalid.bytes.push(0),
             }
             assert!(JobPreviewStream::from_read(invalid, 1).is_err());
@@ -206,7 +214,13 @@ mod tests {
                     oldest_offset: 1,
                     next_offset: bytes as u64 + 1,
                     lossy: true,
-                    full_output: Some("a".repeat(32)),
+                    full_output: Some(rsi_spill::SpillRef {
+                        locator: rsi_spill::SpillLocator::new(
+                            &rsi_spill::SpillScope::new("test", "preview"),
+                            [0xaa; 16],
+                        ),
+                        bytes: bytes as u64 + 1,
+                    }),
                 },
                 32 * 1024,
             )

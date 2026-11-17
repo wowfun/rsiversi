@@ -35,7 +35,7 @@ pub(super) fn foreground_output(
     stderr: &ProcessRead,
     outcome: &ProcessOutcome,
 ) -> rsi_tools_protocol::Result<ToolResult> {
-    result_with_text(
+    let mut result = result_with_text(
         json!({
             "status":status,
             "exit_code":outcome.exit_code,
@@ -54,7 +54,13 @@ pub(super) fn foreground_output(
                 .map_or_else(|| "none".into(), |signal| signal.to_string()),
         ),
         false,
-    )
+    )?;
+    result.spills.extend(
+        [stdout.full_output.clone(), stderr.full_output.clone()]
+            .into_iter()
+            .flatten(),
+    );
+    Ok(result)
 }
 
 fn process_stream_value(read: &ProcessRead) -> Value {
@@ -66,7 +72,7 @@ fn process_stream_value(read: &ProcessRead) -> Value {
         "next_offset":read.next_offset,
         "truncated":read.lossy,
         "utf8_lossy":utf8_lossy
-        ,"full_output":read.full_output
+        ,"full_output":read.full_output.as_ref().map(|reference| reference.locator.as_str())
     })
 }
 
@@ -79,7 +85,10 @@ fn render_stream_text(stdout: &ProcessRead, stderr: &ProcessRead, fallback: &str
         let _ = write!(
             stdout_text,
             "\n[full stdout: {}]",
-            stdout.full_output.as_deref().unwrap_or("unavailable")
+            stdout
+                .full_output
+                .as_ref()
+                .map_or("unavailable", |reference| reference.locator.as_str())
         );
     }
     if stderr.lossy {
@@ -87,7 +96,10 @@ fn render_stream_text(stdout: &ProcessRead, stderr: &ProcessRead, fallback: &str
         let _ = write!(
             stderr_text,
             "\n[full stderr: {}]",
-            stderr.full_output.as_deref().unwrap_or("unavailable")
+            stderr
+                .full_output
+                .as_ref()
+                .map_or("unavailable", |reference| reference.locator.as_str())
         );
     }
     let stdout = stdout_text;

@@ -9,10 +9,10 @@ use rsi_meta::{ActivationPlan, PreparedActivation};
 use rsi_meta::{PluginFactory, ResolvedFactory, Runtime, UpdateMode};
 #[cfg(unix)]
 use rsi_process::ProcessContract;
-use rsi_process::{ProcessError, ProcessOutputCache, ProcessOutputCacheContract};
+use rsi_spill::{SpillError, SpillLocator, SpillReader, SpillReaderContract, SpillScope};
 #[cfg(unix)]
-use rsi_process_output_api::OutputApiFactory;
-use rsi_process_output_api::{OutputClient, OutputClientFactory};
+use rsi_spill_api::OutputApiFactory;
+use rsi_spill_api::{OutputClient, OutputClientFactory};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -71,6 +71,9 @@ impl PluginFactory for ConnectionFactory {
 fn linked(name: &str, factory: Arc<dyn PluginFactory>) -> ResolvedFactory {
     ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory)
 }
+fn locator(byte: u8) -> SpillLocator {
+    SpillLocator::new(&SpillScope::new("test", "api"), [byte; 16])
+}
 fn description() -> ConnectionDescription {
     ConnectionDescription {
         wire_version: rsi_api_protocol::API_WIRE_VERSION,
@@ -99,7 +102,7 @@ async fn client_runtime(api: Arc<dyn ApiClient>) -> Runtime {
 #[cfg(unix)]
 async fn local_capture(
     path: &std::path::Path,
-) -> (Runtime, rsi_meta::FiberHandle, String, Vec<u8>) {
+) -> (Runtime, rsi_meta::FiberHandle, SpillLocator, Vec<u8>) {
     use rsi_sandbox::{
         ConfinedProcess, EnforcementStamp, SandboxBackend, SandboxFileSystem, SandboxMode,
         SandboxNetwork, SandboxScratch,
@@ -108,9 +111,14 @@ async fn local_capture(
     let mut api = None;
     for (name, factory, config) in [
         (
+            "spill",
+            Arc::new(rsi_spill_local::SpillLocalFactory) as Arc<dyn PluginFactory>,
+            json!({"directory":path.canonicalize().unwrap().join("output"),"minimum_free_bytes":0}),
+        ),
+        (
             "process",
             Arc::new(rsi_process_local::ProcessLocalFactory) as Arc<dyn PluginFactory>,
-            json!({"output_cache":{"directory":path.canonicalize().unwrap().join("output")}}),
+            json!({"capture_output":true}),
         ),
         ("api", Arc::new(rsi_api::ApiFactory), Value::Null),
         ("output-api", Arc::new(OutputApiFactory), Value::Null),
@@ -129,6 +137,7 @@ async fn local_capture(
     source[..8].copy_from_slice(&[0, 255, 27, b'[', b'3', b'1', b'm', 128]);
     let managed = process
         .spawn(rsi_process::ProcessSpec {
+            capture: None,
             process: ConfinedProcess {
                 owner: None,
                 stdio: rsi_sandbox::ProcessStdio::Pipes,
@@ -155,7 +164,12 @@ async fn local_capture(
     assert_eq!(managed.wait().await.unwrap().exit_code, Some(0));
     let tail = managed.stdout().read_from(0).unwrap();
     assert!(tail.lossy);
-    (runtime, api.unwrap(), tail.full_output.unwrap(), source)
+    (
+        runtime,
+        api.unwrap(),
+        tail.full_output.unwrap().locator,
+        source,
+    )
 }
 
 #[tokio::test]
@@ -171,10 +185,7 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
     });
     let client = client_runtime(api.clone()).await;
     assert!(client.root().lookup_local::<ProcessContract>().is_none());
-    let output = client
-        .root()
-        .lookup_local::<ProcessOutputCacheContract>()
-        .unwrap();
+    let output = client.root().lookup_local::<SpillReaderContract>().unwrap();
     let first = output.read(&id, 0, 65_536).await.unwrap();
     assert_eq!(first.bytes.as_ref(), &source[..65_536]);
     let second = output.read(&id, first.next_offset, 65_536).await.unwrap();
@@ -184,11 +195,11 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
     assert_eq!(eof.total_bytes, source.len() as u64);
     assert!(matches!(
         output.read(&id, u64::MAX, 1).await,
-        Err(ProcessError::InvalidInput(_))
+        Err(SpillError::Invalid(_))
     ));
     assert!(matches!(
-        output.read(&"f".repeat(32), 0, 1).await,
-        Err(ProcessError::Io(_))
+        output.read(&locator(0xff), 0, 1).await,
+        Err(SpillError::Unavailable(_))
     ));
     let operation = &api.operations[0];
     let invocation = dispatch
@@ -205,15 +216,12 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
         invocation.invoke(input).await,
         Err(ApiError::Invalid(_))
     ));
-    let cache = server
-        .root()
-        .lookup_local::<ProcessOutputCacheContract>()
-        .unwrap();
+    let cache = server.root().lookup_local::<SpillReaderContract>().unwrap();
     assert!(registration.dispose().await.is_clean());
     assert!(api.operations().await.unwrap().operations().is_empty());
     assert!(matches!(
         output.read(&id, 0, 1).await,
-        Err(ProcessError::Api(ApiError::UnknownOperation))
+        Err(SpillError::Api(ApiError::UnknownOperation))
     ));
     server
         .root()
@@ -225,10 +233,7 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
         .unwrap();
     assert!(Arc::ptr_eq(
         &cache,
-        &server
-            .root()
-            .lookup_local::<ProcessOutputCacheContract>()
-            .unwrap()
+        &server.root().lookup_local::<SpillReaderContract>().unwrap()
     ));
     assert_eq!(
         output.read(&id, 0, 65_536).await.unwrap().bytes.as_ref(),
@@ -238,7 +243,7 @@ async fn real_process_cache_pages_cross_independent_plugins_without_spawn_author
     assert!(
         client
             .root()
-            .lookup_local::<ProcessOutputCacheContract>()
+            .lookup_local::<SpillReaderContract>()
             .is_none()
     );
     assert!(server.shutdown().await.is_clean());
@@ -282,13 +287,13 @@ async fn read_spec() -> OperationSpec {
     #[derive(Debug)]
     struct Unused;
     #[async_trait]
-    impl ProcessOutputCache for Unused {
+    impl SpillReader for Unused {
         async fn read(
             &self,
-            _: &str,
+            _: &SpillLocator,
             _: u64,
             _: usize,
-        ) -> rsi_process::Result<rsi_process::OutputPage> {
+        ) -> rsi_spill::Result<rsi_spill::SpillPage> {
             panic!("only registration metadata needed");
         }
     }
@@ -302,8 +307,7 @@ async fn read_spec() -> OperationSpec {
         .root()
         .lookup_local::<rsi_api_protocol::ApiRegistrarContract>()
         .unwrap();
-    let lease =
-        rsi_process_output_api::register_output(registrar.as_ref(), Arc::new(Unused)).unwrap();
+    let lease = rsi_spill_api::register_output(registrar.as_ref(), Arc::new(Unused)).unwrap();
     let spec = runtime
         .root()
         .lookup_local::<ApiDispatchContract>()
@@ -342,21 +346,21 @@ async fn absent_cache_is_discovered_per_call_and_local_policy_does_not_gate_cons
     let runtime = client_runtime(Arc::new(NoCache(description()))).await;
     let output = runtime
         .root()
-        .lookup_local::<ProcessOutputCacheContract>()
+        .lookup_local::<SpillReaderContract>()
         .unwrap();
     assert!(matches!(
-        output.read(&"a".repeat(32), 0, 1).await,
-        Err(ProcessError::Api(ApiError::UnknownOperation))
+        output.read(&locator(0xaa), 0, 1).await,
+        Err(SpillError::Api(ApiError::UnknownOperation))
     ));
     assert!(matches!(
-        output.read("invalid", 0, 1).await,
-        Err(ProcessError::InvalidInput(_))
+        output.read(&locator(0xaa), 0, 0).await,
+        Err(SpillError::Invalid(_))
     ));
     assert!(runtime.shutdown().await.is_clean());
     assert!(
         runtime
             .root()
-            .lookup_local::<ProcessOutputCacheContract>()
+            .lookup_local::<SpillReaderContract>()
             .is_none()
     );
 
@@ -365,13 +369,13 @@ async fn absent_cache_is_discovered_per_call_and_local_policy_does_not_gate_cons
     let client = OutputClient::new(Arc::new(Peer {
         description: description(),
         operations: vec![incompatible],
-        metadata: json!({"id":"a".repeat(32),"offset":0,"next_offset":4,"total_bytes":4}),
+        metadata: json!({"id":locator(0xaa),"offset":0,"next_offset":4,"total_bytes":4}),
         binary: true,
         budget: ByteBudget::default(),
     }));
     assert_eq!(
         client
-            .read(&"a".repeat(32), 0, 4)
+            .read(&locator(0xaa), 0, 4)
             .await
             .unwrap()
             .bytes
@@ -383,7 +387,7 @@ async fn absent_cache_is_discovered_per_call_and_local_policy_does_not_gate_cons
 #[tokio::test]
 async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
     let operation = read_spec().await;
-    let id = "a".repeat(32);
+    let id = locator(0xaa);
     let valid = json!({"id":id,"offset":0,"next_offset":4,"total_bytes":4});
     let budget = ByteBudget::new(2048).unwrap();
     let peer = |metadata, binary| {
@@ -407,7 +411,7 @@ async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
     drop(clone);
     assert_eq!(budget.used(), 0);
     for (key, value) in [
-        ("id", json!("b".repeat(32))),
+        ("id", json!(locator(0xbb))),
         ("offset", json!(1)),
         ("next_offset", json!(3)),
         ("total_bytes", json!(3)),
@@ -419,7 +423,7 @@ async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
         let client = OutputClient::new(peer(metadata, true));
         assert!(matches!(
             client.read(&id, 0, 4).await,
-            Err(ProcessError::Api(ApiError::Invalid(_)))
+            Err(SpillError::Api(ApiError::Invalid(_)))
         ));
         assert_eq!(budget.used(), 0);
     }
@@ -428,7 +432,7 @@ async fn byte_slices_keep_receive_admission_and_malformed_pages_never_escape() {
     assert_eq!(budget.used(), 0);
     assert!(matches!(
         client.read(&id, 0, 3).await,
-        Err(ProcessError::Api(ApiError::Invalid(_)))
+        Err(SpillError::Api(ApiError::Invalid(_)))
     ));
     assert_eq!(budget.used(), 0);
 }

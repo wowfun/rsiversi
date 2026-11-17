@@ -824,8 +824,10 @@ async fn refreshed_compiler_allowlist_is_checked_before_a_possible_cache_hit() {
     let old = service.pin(&id, None).await.unwrap();
     let environment = ProfileEnvironment::new(
         temp.path().join("config"),
+        temp.path().join("data"),
         temp.path().join("state"),
         temp.path().join("cache"),
+        temp.path().join("tmp"),
         "test",
         BTreeMap::new(),
     )

@@ -10,14 +10,14 @@ use std::path::PathBuf;
 /// Exact Portable contract name; service keys are selected by composition.
 pub const CONTRACT: &str = "rsi.tools.portable";
 /// Contract version.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// Maximum encoded bytes of one request or response frame.
 pub const MAXIMUM_FRAME_BYTES: usize = 256 * 1024;
 /// Maximum process-plan requests during one Tool execution.
 pub const MAXIMUM_CONFINE_REQUESTS: usize = 256;
 
 /// Owner-declared execution overlap; never taken from model arguments.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scheduling {
     /// Runs alone.
@@ -29,7 +29,7 @@ pub enum Scheduling {
 }
 
 /// One declaration in the atomic Describe batch.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     /// Bounded model-visible declaration.
@@ -45,7 +45,7 @@ pub struct Definition {
 }
 
 /// Host-to-provider messages, in the exact phase order described by the contract.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     /// Reads one immutable batch without granting execution authority.
@@ -65,7 +65,7 @@ pub enum Request {
 }
 
 /// Provider-to-host messages. Result must be followed by clean terminal.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
     /// Complete atomic Describe result.
@@ -88,7 +88,7 @@ pub enum Response {
 }
 
 /// Lossless same-platform OS string for a native process plan.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "platform",
     content = "units",
@@ -141,7 +141,7 @@ impl OsValue {
 }
 
 /// Actual host-confined invocation; policy and enforcement remain host-owned.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessPlan {
     /// Program selected by Sandbox.

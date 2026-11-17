@@ -36,20 +36,15 @@ mod windows;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
 #[cfg(unix)]
-mod output_cache;
-#[cfg(unix)]
-pub use output_cache::OutputCacheConfig;
-#[cfg(unix)]
 const POST_KILL_GROUP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for one local Process provider generation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessLocalConfig {
-    /// Optional best-effort completed-output cache.
-    #[cfg(unix)]
+    /// Use the shared Spill generation scope for batch calls without a supplied sink.
     #[serde(default)]
-    pub output_cache: Option<OutputCacheConfig>,
+    pub capture_output: bool,
     /// Maximum simultaneously unsettled direct children.
     #[serde(default = "default_maximum_active_processes")]
     pub maximum_active_processes: usize,
@@ -76,8 +71,7 @@ const fn default_shutdown_timeout_ms() -> u64 {
 impl Default for ProcessLocalConfig {
     fn default() -> Self {
         Self {
-            #[cfg(unix)]
-            output_cache: None,
+            capture_output: false,
             maximum_active_processes: default_maximum_active_processes(),
             maximum_capture_bytes: default_maximum_capture_bytes(),
             shutdown_timeout_ms: default_shutdown_timeout_ms(),
@@ -87,10 +81,6 @@ impl Default for ProcessLocalConfig {
 
 impl ProcessLocalConfig {
     fn validate(&self) -> Result<()> {
-        #[cfg(unix)]
-        if let Some(config) = &self.output_cache {
-            config.validate()?;
-        }
         if self.maximum_active_processes == 0
             || self.maximum_active_processes > MAXIMUM_ACTIVE_PROCESSES
         {
@@ -119,9 +109,7 @@ struct Service {
     #[cfg(windows)]
     windows: Arc<windows::Service>,
     #[cfg(unix)]
-    cache: Option<Arc<output_cache::Cache>>,
-    #[cfg(unix)]
-    cache_failure: Option<ProcessError>,
+    default_capture: Option<Arc<dyn rsi_spill::CaptureSink>>,
     #[cfg(unix)]
     config: ProcessLocalConfig,
     #[cfg(unix)]
@@ -160,7 +148,7 @@ impl Registry {
 #[cfg(unix)]
 #[derive(Debug)]
 struct Tail {
-    capture: Option<output_cache::Capture>,
+    capture: Option<Arc<dyn rsi_spill::SpillCapture>>,
     maximum: usize,
     inner: Mutex<TailInner>,
     _reservation: Arc<CaptureReservation>,
@@ -223,6 +211,9 @@ impl Tail {
     }
 
     fn push(&self, chunk: &[u8]) -> Result<()> {
+        if let Some(capture) = &self.capture {
+            capture.push(chunk);
+        }
         let mut inner = self
             .inner
             .lock()
@@ -243,9 +234,6 @@ impl Tail {
         inner.bytes[start..start + first].copy_from_slice(&suffix[..first]);
         inner.bytes[..suffix.len() - first].copy_from_slice(&suffix[first..]);
         inner.length += suffix.len();
-        if let Some(capture) = &self.capture {
-            capture.push(chunk);
-        }
         Ok(())
     }
 }
@@ -271,7 +259,7 @@ impl ProcessOutput for Tail {
             full_output: self
                 .capture
                 .as_ref()
-                .and_then(output_cache::Capture::reference),
+                .and_then(|capture| capture.reference()),
         })
     }
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
@@ -297,7 +285,7 @@ impl ProcessOutput for Tail {
             full_output: self
                 .capture
                 .as_ref()
-                .and_then(output_cache::Capture::reference),
+                .and_then(|capture| capture.reference()),
         })
     }
 }
@@ -504,20 +492,6 @@ impl ProcessControl for ManagedControl {
     }
 }
 
-#[cfg(unix)]
-#[async_trait]
-impl rsi_process::ProcessOutputCache for Service {
-    async fn read(&self, id: &str, offset: u64, limit: usize) -> Result<rsi_process::OutputPage> {
-        rsi_process::validate_output_read(id, limit)?;
-        let cache = self.cache.as_ref().ok_or_else(|| {
-            self.cache_failure
-                .clone()
-                .unwrap_or_else(|| ProcessError::Io("completed output cache is unavailable".into()))
-        })?;
-        cache.read(id, offset, limit).await
-    }
-}
-
 #[async_trait::async_trait]
 
 impl Process for Service {
@@ -550,8 +524,7 @@ impl Service {
     #[cfg(unix)]
     fn with_groups(config: ProcessLocalConfig, groups: Arc<dyn ProcessGroups>) -> Self {
         Self {
-            cache: None,
-            cache_failure: None,
+            default_capture: None,
             config,
             state: Arc::new(ServiceState {
                 inner: Mutex::new(Registry::accepting()),
@@ -574,9 +547,9 @@ impl Service {
         });
         let mut stdout = Tail::new(spec.stdout_max_bytes, Arc::clone(&reservation));
         let mut stderr = Tail::new(spec.stderr_max_bytes, reservation);
-        if let Some(cache) = &self.cache {
-            stdout.capture = cache.capture();
-            stderr.capture = cache.capture();
+        if let Some(sink) = spec.capture.as_ref().or(self.default_capture.as_ref()) {
+            stdout.capture = sink.capture();
+            stderr.capture = sink.capture();
         }
         let stdout = Arc::new(stdout);
         let stderr = Arc::new(stderr);
@@ -731,7 +704,6 @@ impl Service {
             process.terminate();
         }
         let state = Arc::clone(&self.state);
-        let cache = self.cache.clone();
         let mut cleanup = tokio::spawn(async move {
             let _state = state;
             let mut failure = None;
@@ -739,11 +711,6 @@ impl Service {
                 if let Err(error) = process.wait_settlement().await {
                     failure.get_or_insert(error);
                 }
-            }
-            if let Some(cache) = cache
-                && let Err(error) = cache.shutdown().await
-            {
-                failure.get_or_insert(error);
             }
             failure.map_or(Ok(()), Err)
         });
@@ -967,38 +934,41 @@ impl PluginFactory for ProcessLocalFactory {
         config
             .validate()
             .map_err(|error| MetaError::InvalidInput(error.to_string()))?;
-        Ok(PreparedActivation::with_state(
-            serde_json::to_value(&config)
+        let capture_output = config.capture_output;
+        let prepared = PreparedActivation::with_state(
+            serde_json::to_value(config)
                 .map_err(|error| MetaError::InvalidInput(error.to_string()))?,
             config,
             std::mem::size_of::<ProcessLocalConfig>(),
-        ))
+        );
+        Ok(if capture_output {
+            prepared.requiring_local::<rsi_spill::SpillStoreContract>()
+        } else {
+            prepared
+        })
     }
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let config = plan.take_state::<ProcessLocalConfig>()?;
+        let default_capture = if config.capture_output {
+            let store = plan.local::<rsi_spill::SpillStoreContract>()?;
+            Some(store.scope(store.generation_scope()))
+        } else {
+            None
+        };
         #[cfg(unix)]
         let service = {
-            let config = plan.take_state::<ProcessLocalConfig>()?;
-            let cache_config = config.output_cache.clone();
-            let cache = tokio::task::spawn_blocking(move || {
-                cache_config.map(output_cache::Cache::open).transpose()
-            })
-            .await
-            .map_err(|error| MetaError::Activation(error.to_string()))?;
             let mut service = Service::new(config);
-            match cache {
-                Ok(cache) => service.cache = cache,
-                Err(error) => service.cache_failure = Some(error),
-            }
+            service.default_capture = default_capture;
             Arc::new(service)
         };
         #[cfg(windows)]
         let service = Arc::new(Service {
-            windows: windows::Service::new(plan.take_state::<ProcessLocalConfig>()?),
+            windows: windows::Service::with_capture(config, default_capture),
         });
         #[cfg(not(any(unix, windows)))]
         let service = {
-            let _: ProcessLocalConfig = plan.take_state()?;
+            let _ = (config, default_capture);
             Arc::new(Service {})
         };
         let process: Arc<dyn Process> = service.clone();
@@ -1011,16 +981,6 @@ impl PluginFactory for ProcessLocalFactory {
         let pty_supply = plan
             .context()
             .provide_local::<rsi_process::PtyProcessContract>(pty)?;
-        #[cfg(unix)]
-        let cache_supply = if service.config.output_cache.is_some() {
-            let cache: Arc<dyn rsi_process::ProcessOutputCache> = service.clone();
-            Some(
-                plan.context()
-                    .provide_local::<rsi_process::ProcessOutputCacheContract>(cache)?,
-            )
-        } else {
-            None
-        };
         plan.defer(
             "shutdown local Process provider",
             Box::new(move || {
@@ -1039,8 +999,6 @@ impl PluginFactory for ProcessLocalFactory {
                     drop(supply);
                     drop(duplex_supply);
                     drop(pty_supply);
-                    #[cfg(unix)]
-                    drop(cache_supply);
                     result
                 })
             }),
@@ -1243,6 +1201,7 @@ mod tests {
     pub(super) fn immediate_process() -> ProcessSpec {
         let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
         ProcessSpec {
+            capture: None,
             process: ConfinedProcess {
                 owner: None,
                 stdio: rsi_sandbox::ProcessStdio::Pipes,

@@ -87,23 +87,32 @@ fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec<UnitShape>
     Ok(result)
 }
 
-pub(crate) fn project<'a>(
-    turns: impl IntoIterator<Item = (&'a TurnKey, &'a [Message])>,
+pub(crate) fn project<'a, 'b>(
+    turns: impl IntoIterator<Item = (&'a TurnKey, &'a [Message], &'b crate::outcomes::Batches)>,
 ) -> Result<ProjectedTurns<'a>> {
     let mut all_units = Vec::new();
     let mut projected = BTreeMap::new();
-    for (id, messages) in turns {
-        all_units.extend(shapes(messages, true)?.into_iter().map(|shape| (id, shape)));
+    for (id, messages, batches) in turns {
+        all_units.extend(
+            shapes(messages, true)?
+                .into_iter()
+                .map(|shape| (id, shape, batches)),
+        );
         projected.insert(id.clone(), Cow::Borrowed(messages));
     }
-    let latest = all_units.iter().rposition(|(_, unit)| unit.complete);
-    for (index, (turn, unit)) in all_units.iter().enumerate() {
-        if !unit.complete || Some(index) == latest {
-            continue;
-        }
+    let latest = all_units.iter().rposition(|(_, unit, _)| unit.complete);
+    for (index, (turn, unit, batches)) in all_units.iter().enumerate() {
+        let prune = unit.complete && Some(index) != latest;
         let messages = projected.get_mut(turn).expect("captured Turn");
         for index in unit.first..unit.first + unit.count {
-            if let Some(pruned) = prune_message(&messages[index])? {
+            let spills = match messages[index].content() {
+                [MessageContent::ToolResult { call_id, .. }] => batches
+                    .get(&unit.first)
+                    .and_then(|batch| batch.calls.get(call_id))
+                    .map_or(&[][..], |call| call.spills.as_slice()),
+                _ => &[],
+            };
+            if let Some(pruned) = prune_message(&messages[index], spills, prune)? {
                 messages.to_mut()[index] = pruned;
             }
         }
@@ -111,7 +120,11 @@ pub(crate) fn project<'a>(
     Ok(projected)
 }
 
-fn prune_message(message: &Message) -> Result<Option<Message>> {
+fn prune_message(
+    message: &Message,
+    spills: &[rsi_spill::SpillRef],
+    prune: bool,
+) -> Result<Option<Message>> {
     let [
         MessageContent::ToolResult {
             call_id,
@@ -122,16 +135,26 @@ fn prune_message(message: &Message) -> Result<Option<Message>> {
     else {
         return Ok(None);
     };
+    if !prune && spills.is_empty() {
+        return Ok(None);
+    }
     let lengths: Vec<_> = content
         .iter()
         .map(|block| match block {
-            MessageContent::Text { text } => text.chars().count(),
+            MessageContent::Text { text } if prune => text.chars().count(),
             _ => 0,
         })
         .collect();
     let length: usize = lengths.iter().sum();
     if length <= THRESHOLD {
-        return Ok(None);
+        if spills.is_empty() {
+            return Ok(None);
+        }
+        let mut blocks = content.clone();
+        append_spill_notices(&mut blocks, spills);
+        return Message::tool_result(call_id, blocks, *is_error)
+            .map(Some)
+            .map_err(|error| ContextError::Invalid(error.to_string()));
     }
     let tail_start = length - TAIL;
     let mut position = 0;
@@ -165,15 +188,113 @@ fn prune_message(message: &Message) -> Result<Option<Message>> {
             blocks.push(MessageContent::Text { text: retained });
         }
     }
+    append_spill_notices(&mut blocks, spills);
     Message::tool_result(call_id, blocks, *is_error)
         .map(Some)
         .map_err(|error| ContextError::Invalid(error.to_string()))
+}
+
+pub(super) fn append_spill_notices(
+    content: &mut Vec<MessageContent>,
+    spills: &[rsi_spill::SpillRef],
+) {
+    for reference in spills {
+        let notice = rsi_spill::retrieval_notice(reference);
+        if content
+            .iter()
+            .any(|block| matches!(block, MessageContent::Text { text } if text.contains(&notice)))
+        {
+            continue;
+        }
+        match content.last_mut() {
+            Some(MessageContent::Text { text }) => {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&notice);
+            }
+            _ => content.push(MessageContent::Text { text: notice }),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rsi_ai_protocol::{ToolCall, ToolCallKind};
+
+    fn project<'a>(
+        turns: impl IntoIterator<Item = (&'a TurnKey, &'a [Message])>,
+    ) -> Result<ProjectedTurns<'a>> {
+        let batches = crate::outcomes::Batches::new();
+        super::project(
+            turns
+                .into_iter()
+                .map(|(id, messages)| (id, messages, &batches)),
+        )
+    }
+    fn prune_message(message: &Message) -> Result<Option<Message>> {
+        super::prune_message(message, &[], true)
+    }
+
+    #[test]
+    fn pruning_redraws_all_typed_locators_even_when_the_footer_exceeds_the_tail_window() {
+        let references: Vec<_> = (0..12)
+            .map(|i| rsi_spill::SpillRef {
+                locator: rsi_spill::SpillLocator::new(
+                    &rsi_spill::SpillScope::new("session", "fixture"),
+                    [i; 16],
+                ),
+                bytes: 100_000,
+            })
+            .collect();
+        let tail = "Z".repeat(TAIL);
+        let mut result = rsi_tools_protocol::ToolResult::new(
+            serde_json::json!({}),
+            vec![rsi_tools_protocol::ToolContent::Text {
+                text: format!("{}{}", "界🦀".repeat(10_000), tail),
+            }],
+            false,
+        )
+        .unwrap();
+        result.spills = references.clone();
+        let original = crate::tool_message("call", &result).unwrap();
+        let full = super::prune_message(&original, &references, false)
+            .unwrap()
+            .unwrap();
+        let encoded_full = serde_json::to_string(full.content()).unwrap();
+        assert!(!encoded_full.contains(MARKER));
+        assert_eq!(
+            encoded_full.matches("[Full output:").count(),
+            references.len()
+        );
+        assert!(encoded_full.contains(&"界🦀".repeat(10_000)));
+        let mut empty = vec![MessageContent::Text {
+            text: String::new(),
+        }];
+        append_spill_notices(&mut empty, &references[..1]);
+        assert_eq!(
+            empty,
+            vec![MessageContent::Text {
+                text: rsi_spill::retrieval_notice(&references[0])
+            }]
+        );
+        let pruned = super::prune_message(&original, &references, true)
+            .unwrap()
+            .unwrap();
+        let [MessageContent::ToolResult { content, .. }] = pruned.content() else {
+            panic!("tool result");
+        };
+        let rendered = serde_json::to_string(content).unwrap();
+        assert!(
+            rendered.contains(&tail),
+            "retrieval notices must not consume the output tail"
+        );
+        assert_eq!(rendered.matches("[Full output:").count(), references.len());
+        for reference in references {
+            assert!(rendered.contains(reference.locator.as_str()));
+        }
+    }
 
     fn batch(text: String) -> Vec<Message> {
         vec![

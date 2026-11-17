@@ -55,6 +55,8 @@ use rsi_session_protocol::{
 type PurgeCleanupLookup =
     dyn Fn() -> Option<Arc<dyn rsi_session_protocol::SessionPurgeCleanup>> + Send + Sync;
 
+type SpillLookup = dyn Fn() -> Option<Arc<dyn rsi_spill::SpillStore>> + Send + Sync;
+
 type FileLookup = Arc<dyn Fn() -> Option<Arc<dyn rsi_media_protocol::FileRead>> + Send + Sync>;
 
 /// Process-local adapter over the Agent Kernel and mechanical Store.
@@ -65,6 +67,7 @@ pub struct LocalSessionService {
     active_purge: Arc<std::sync::Mutex<Option<maintenance::ActivePurge>>>,
     pending_purge: Arc<tokio::sync::Mutex<Option<maintenance::PendingAdmission>>>,
     purge_cleanup: Option<Arc<PurgeCleanupLookup>>,
+    spill: Option<Arc<SpillLookup>>,
     origin: rsi_api_protocol::CallOrigin,
     recent_cursors: Arc<std::sync::Mutex<access::RecentCursors>>,
     protection: Option<Arc<dyn rsi_session_protocol::SessionProtection>>,
@@ -118,6 +121,15 @@ impl fmt::Debug for LocalSessionService {
 }
 
 impl LocalSessionService {
+    /// Resolves the optional current-generation cache owner for retirement and cleanup.
+    #[must_use]
+    pub fn with_spill(
+        mut self,
+        lookup: impl Fn() -> Option<Arc<dyn rsi_spill::SpillStore>> + Send + Sync + 'static,
+    ) -> Self {
+        self.spill = Some(Arc::new(lookup));
+        self
+    }
     /// Supplies late-bound metadata cleanup without retaining its composition owner.
     #[must_use]
     pub fn with_purge_cleanup(
@@ -247,6 +259,7 @@ impl LocalSessionService {
             active_purge: Arc::default(),
             pending_purge: Arc::default(),
             purge_cleanup: None,
+            spill: None,
             protection: None,
             frozen: None,
             workflow: None,

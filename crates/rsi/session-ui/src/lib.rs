@@ -210,6 +210,11 @@ impl PluginFactory for SessionUiFactory {
                             target: TargetKind::Surface,
                             handler: Arc::new(output::ReadOutput),
                         },
+                        ActionContribution {
+                            name: "outputs".into(),
+                            target: TargetKind::Surface,
+                            handler: Arc::new(output::ReadReferences),
+                        },
                     ],
                     renderers: vec![
                         BlockRendererContribution {

@@ -146,7 +146,14 @@ impl ToolExecutor for ShellTool {
         }
         let process = execution.take_prepared_process()?;
         let environment = process.environment().to_vec();
+        let capture = self.services.spill.as_ref().map(|store| {
+            let scope = execution
+                .extension::<rsi_tools_protocol::ToolExecutionSession>()
+                .map_or_else(|| store.generation_scope(), |session| session.scope.clone());
+            store.scope(scope)
+        });
         let spec = ProcessSpec {
+            capture,
             process,
             stdin: Vec::new(),
             environment,

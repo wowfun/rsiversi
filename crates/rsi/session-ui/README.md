@@ -18,6 +18,9 @@ intent completeness, phase and exact argument/result/rejection actions. Source
 reads use the existing controller-owned exact Fact reader and closed `SourceRef`.
 The plugin owns a 16 KiB raw UTF-8 page preference within the conversation window
 ceiling; neither the card nor paging payload retains a Fact.
+Tool output references use pages of 32 links. Continuations carry only the exact
+ToolResult source and offset, re-read that Fact under the current Session target,
+and preserve access to every reference without exceeding the view element bound.
 
 Completed `apply_patch` blocks additionally bind an inline Presentation. The
 source captures only their exact ToolValue reference. Its owned asynchronous
@@ -48,8 +51,9 @@ Jobs reads [finite current-Turn status pages](../session-protocol/README.md); co
 never acquire, wait, read output, report or kill. Terminal diagnostic previews are
 bounded and marked when shortened. Closed/finished scopes are shown unavailable.
 
-Tool cards expose independently issued stdout/stderr references when the target
-has the read-only Process output-cache capability. Output actions validate the
+Tool cards expose stdout/stderr and generic typed text references when the target
+has the read-only Spill capability. A locator already exposed by a stream has no
+duplicate generic action. Output actions validate the
 closed cache identity and decimal-string offset before I/O, capture that target's
 reader and cancel on detail/target retirement. They read 16 KiB per page, within
 the Process hard limit, and display safe text or exact hex with source byte

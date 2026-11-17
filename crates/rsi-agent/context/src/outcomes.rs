@@ -104,6 +104,8 @@ pub(super) struct Batch {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Call {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spills: Vec<rsi_spill::SpillRef>,
     pub effect: Option<EffectId>,
     pub identity: Option<ToolResultIdentity>,
     pub started: bool,
@@ -215,7 +217,9 @@ pub(super) fn validate(batches: &Batches, messages: &[Message]) -> Result<()> {
             || ids.len() != batch.calls.len()
             || ids.iter().any(|id| !batch.calls.contains_key(*id))
             || batch.calls.values().any(|call| {
-                (call.started && call.effect.is_none())
+                call.spills.len() > rsi_tools_protocol::MAXIMUM_TOOL_CONTENT_ITEMS
+                    || (!call.settled && !call.spills.is_empty())
+                    || (call.started && call.effect.is_none())
                     || (call.superseded && (call.effect.is_some() || call.settled))
             })
         {
@@ -359,6 +363,7 @@ impl ContextFold {
         call_id: &str,
         effect: Option<&EffectId>,
         message: Message,
+        spills: &[rsi_spill::SpillRef],
     ) -> Result<()> {
         let turn = self.turn_mut(turn_id)?;
         let (index, call) = turn
@@ -391,13 +396,15 @@ impl ContextFold {
         }
         self.push_turn_message_with(turn_id, message, |turn| {
             // The validated live Turn cannot be evicted by message admission.
-            turn.batches
+            let call = turn
+                .batches
                 .get_mut(index)
                 .expect("validated batch")
                 .calls
                 .get_mut(call_id)
-                .expect("validated call")
-                .settled = true;
+                .expect("validated call");
+            call.settled = true;
+            call.spills = spills.to_vec();
         })
     }
 
@@ -623,7 +630,7 @@ impl ContextFold {
                     return Err(invalid());
                 }
                 let message = rejected_tool_message(identity.call_id(), rejection)?;
-                self.settle_tool_call(turn_id, identity.call_id(), None, message)?;
+                self.settle_tool_call(turn_id, identity.call_id(), None, message, &[])?;
             }
             SessionFactBody::ToolResult {
                 turn_id,
@@ -645,7 +652,13 @@ impl ContextFold {
                     return Err(invalid());
                 }
                 let message = tool_message(identity.call_id(), result)?;
-                self.settle_tool_call(turn_id, identity.call_id(), Some(effect_id), message)?;
+                self.settle_tool_call(
+                    turn_id,
+                    identity.call_id(),
+                    Some(effect_id),
+                    message,
+                    &result.spills,
+                )?;
             }
             _ => unreachable!("caller selected a Tool outcome Fact"),
         }
@@ -942,7 +955,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fold.settle_tool_call(&turn, "call", None, result),
+            fold.settle_tool_call(&turn, "call", None, result, &[]),
             Err(ContextError::TooLarge)
         );
         let turn = fold.turn_mut(&turn).unwrap();
@@ -1125,10 +1138,10 @@ mod tests {
             )
             .unwrap()
         };
-        fold.settle_tool_call(&turn_id, "b", None, result("b"))
+        fold.settle_tool_call(&turn_id, "b", None, result("b"), &[])
             .unwrap();
         assert!(
-            fold.settle_tool_call(&turn_id, "a", None, result("a"))
+            fold.settle_tool_call(&turn_id, "a", None, result("a"), &[])
                 .is_err()
         );
         let turn = fold.turn_mut(&turn_id).unwrap();

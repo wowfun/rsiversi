@@ -7,6 +7,7 @@ use rsi_sandbox::{
     ConfinedProcess, EnforcementStamp, SandboxBackend, SandboxFileSystem, SandboxMode,
     SandboxNetwork, SandboxScratch,
 };
+use rsi_spill::{SpillError, SpillLocator, SpillScope};
 use serde_json::json;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ fn unconfined_shell(script: &str) -> ConfinedProcess {
 
 fn spec(script: &str, capture: usize) -> ProcessSpec {
     ProcessSpec {
+        capture: None,
         process: unconfined_shell(script),
         stdin: Vec::new(),
         environment: Vec::new(),
@@ -59,6 +61,44 @@ async fn activated(config: serde_json::Value) -> (rsi_meta::FiberHandle, Arc<dyn
         .unwrap();
     let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
     (fiber, process)
+}
+
+async fn spill(runtime: &Runtime, directory: &std::path::Path) {
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "spill",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_spill_local::SpillLocalFactory),
+            ),
+            json!({"directory":directory,"minimum_free_bytes":0}),
+        )
+        .await
+        .unwrap();
+}
+async fn activated_with_spill(
+    config: serde_json::Value,
+    directory: &std::path::Path,
+) -> (Runtime, rsi_meta::FiberHandle, Arc<dyn Process>) {
+    let runtime = Runtime::default();
+    spill(&runtime, directory).await;
+    let fiber = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "rsi.process.local",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(ProcessLocalFactory),
+            ),
+            config,
+        )
+        .await
+        .unwrap();
+    let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
+    (runtime, fiber, process)
 }
 
 #[tokio::test]
@@ -91,6 +131,11 @@ async fn raw_tail_reads_use_global_offsets_and_report_an_expired_cursor() {
 async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_outcomes() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
+    spill(
+        &runtime,
+        &temporary.path().canonicalize().unwrap().join("output"),
+    )
+    .await;
     let fiber = runtime
         .root()
         .apply(
@@ -100,18 +145,18 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
                 UpdateMode::Replayable,
                 Arc::new(ProcessLocalFactory),
             ),
-            json!({"output_cache":{"directory":temporary.path().canonicalize().unwrap().join("output")}}),
+            json!({"capture_output":true}),
         )
         .await
         .unwrap();
     let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
     let cache = runtime
         .root()
-        .lookup_local::<rsi_process::ProcessOutputCacheContract>()
+        .lookup_local::<rsi_spill::SpillReaderContract>()
         .unwrap();
     let managed = process
         .spawn(spec(
-            "printf prefix; head -c 100000 /dev/zero; printf suffix; printf warning >&2; exit 7",
+            "printf prefix; head -c 5242880 /dev/zero; printf suffix; printf warning >&2; exit 7",
             32,
         ))
         .await
@@ -121,19 +166,30 @@ async fn complete_cache_keeps_bytes_before_the_tail_without_changing_process_out
     assert!(read.lossy);
     assert_eq!(read.bytes.len(), 32);
     let id = read.full_output.unwrap();
-    let page = cache.read(&id, 0, 16).await.unwrap();
+    let page = cache.read(&id.locator, 0, 16).await.unwrap();
     assert_eq!(&page.bytes[..6], b"prefix");
-    assert_eq!(page.total_bytes, 100_012);
+    assert_eq!(page.total_bytes, 5_242_892);
     assert_eq!(
-        cache.read(&id, 100_006, 16).await.unwrap().bytes.as_ref(),
+        cache
+            .read(&id.locator, page.total_bytes - 6, 16)
+            .await
+            .unwrap()
+            .bytes
+            .as_ref(),
         b"suffix"
     );
     let stderr_id = managed.stderr().read_from(0).unwrap().full_output.unwrap();
     assert_eq!(
-        cache.read(&stderr_id, 0, 16).await.unwrap().bytes.as_ref(),
+        cache
+            .read(&stderr_id.locator, 0, 16)
+            .await
+            .unwrap()
+            .bytes
+            .as_ref(),
         b"warning"
     );
     assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -305,12 +361,10 @@ async fn escaped_stdin_reader_cannot_block_settlement_forever() {
 #[tokio::test]
 async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     let temporary = tempfile::tempdir().unwrap();
-    let (fiber, process) = activated(json!({"output_cache": {
-        "directory": temporary.path().canonicalize().unwrap().join("output"),
-        "maximum_stream_bytes": 64,
-        "maximum_total_bytes": 128,
-        "maximum_files": 2
-    }}))
+    let (runtime, fiber, process) = activated_with_spill(
+        json!({"capture_output":true}),
+        &temporary.path().canonicalize().unwrap().join("output"),
+    )
     .await;
     let marker = temporary.path().join("escaped-pipe-pgid");
     let script = format!(
@@ -345,7 +399,7 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     );
     assert!(managed.stdout().read_from(0).unwrap().full_output.is_none());
     assert!(managed.stderr().read_from(0).unwrap().full_output.is_none());
-    // Retaining the failed process must not retain its disk capture quota.
+    // Retaining a failed process must not keep either abandoned capture publishable.
     let next = process.spawn(spec("printf recovered", 32)).await.unwrap();
     next.wait().await.unwrap();
     assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
@@ -354,6 +408,7 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     drop(managed);
     drop(process);
     assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -434,10 +489,12 @@ async fn provider_retirement_escalates_term_to_kill_and_waits_for_reaping() {
 #[cfg(target_os = "linux")]
 async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping() {
     let temporary = tempfile::tempdir().unwrap();
-    let config = json!({"shutdown_timeout_ms":1, "output_cache": {
-        "directory": temporary.path().canonicalize().unwrap().join("output")
-    }});
-    let (fiber, process) = activated(config.clone()).await;
+    let config = json!({"shutdown_timeout_ms":1,"capture_output":true});
+    let (runtime, fiber, process) = activated_with_spill(
+        config,
+        &temporary.path().canonicalize().unwrap().join("output"),
+    )
+    .await;
     let mut request = spec(
         "trap '' TERM; printf ready; while :; do /bin/sleep 1; done",
         1024,
@@ -470,27 +527,22 @@ async fn timed_out_provider_retirement_keeps_escalation_ownership_until_reaping(
         .unwrap();
     assert_eq!(outcome.signal, Some(9));
     assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
-    let lease = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(temporary.path().join("output/owner.lock"))
+    // Process cleanup settles its sinks; the independent Spill owner remains readable.
+    let reference = managed.stdout().read_from(0).unwrap().full_output.unwrap();
+    let reader = runtime
+        .root()
+        .lookup_local::<rsi_spill::SpillReaderContract>()
         .unwrap();
-    // Keep the old ManagedProcess alive while the detached cleanup releases the cache.
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while lease.try_lock().is_err() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("detached process cleanup retained the output cache lease");
-    lease.unlock().unwrap();
-    let mut replacement_config = config;
-    replacement_config["shutdown_timeout_ms"] = json!(1000);
-    let (replacement, process) = activated(replacement_config).await;
-    let next = process.spawn(spec("printf replacement", 32)).await.unwrap();
-    next.wait().await.unwrap();
-    assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
-    assert!(replacement.dispose().await.is_clean());
+    assert_eq!(
+        reader
+            .read(&reference.locator, 0, 32)
+            .await
+            .unwrap()
+            .bytes
+            .as_ref(),
+        b"ready"
+    );
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -540,6 +592,7 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
         .join("not-a-directory");
     std::fs::write(&directory, b"keep this file").unwrap();
     let runtime = Runtime::default();
+    spill(&runtime, &directory).await;
     let fiber = runtime
         .root()
         .apply(
@@ -549,14 +602,14 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
                 UpdateMode::Replayable,
                 Arc::new(ProcessLocalFactory),
             ),
-            json!({"output_cache":{"directory":directory}}),
+            json!({"capture_output":true}),
         )
         .await
         .unwrap();
     let process = runtime.root().lookup_local::<ProcessContract>().unwrap();
     let cache = runtime
         .root()
-        .lookup_local::<rsi_process::ProcessOutputCacheContract>()
+        .lookup_local::<rsi_spill::SpillReaderContract>()
         .unwrap();
     let managed = process
         .spawn(spec("printf command-still-runs; exit 7", 32))
@@ -567,16 +620,19 @@ async fn unavailable_cache_directory_preserves_command_execution_and_read_capabi
     assert_eq!(output.bytes, b"command-still-runs");
     assert!(output.full_output.is_none());
     assert!(matches!(
-        cache.read("0123456789abcdef0123456789abcdef", 0, 16).await,
-        Err(ProcessError::Io(message)) if message.to_ascii_lowercase().contains("not a directory")
-    ));
-    assert!(matches!(
-        cache.read("../arbitrary", 0, 16).await,
-        Err(ProcessError::InvalidInput(_))
+        cache
+            .read(
+                &SpillLocator::new(&SpillScope::new("test", "unavailable"), [0; 16]),
+                0,
+                16
+            )
+            .await,
+        Err(SpillError::Unavailable(_))
     ));
     assert_eq!(std::fs::read(directory).unwrap(), b"keep this file");
     drop((cache, process, managed));
     assert!(fiber.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[path = "process/duplex.rs"]

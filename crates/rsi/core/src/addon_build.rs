@@ -109,7 +109,7 @@ impl NativeAddonBuildManager {
             .register_local_contract::<ProcessContract>()
             .map_err(boot)?;
         builder
-            .register_local_contract::<rsi_process::ProcessOutputCacheContract>()
+            .register_local_contract::<rsi_spill::SpillReaderContract>()
             .map_err(boot)?;
         builder
             .register_local_contract::<SandboxContract>()
@@ -336,6 +336,7 @@ async fn run_owned(
     let enforcement = confined.stamp.clone();
     let managed = process
         .spawn(ProcessSpec {
+            capture: None,
             process: confined,
             stdin: Vec::new(),
             environment,

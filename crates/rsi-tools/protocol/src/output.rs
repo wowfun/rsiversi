@@ -12,7 +12,8 @@ pub const MAXIMUM_TOOL_OUTPUT_DECLARATION_BYTES: usize = 64 * 1024;
 pub const MAXIMUM_TOOL_OUTPUT_CATALOG_BYTES: usize = 256 * 1024;
 
 /// Immutable successful-output contract. Construction and decoding validate it.
-#[derive(Clone)]
+#[derive(schemars::JsonSchema, Clone)]
+#[schemars(with = "WireDeclaration")]
 pub struct ToolOutputDeclaration(Arc<Declaration>);
 
 struct Declaration {
@@ -21,7 +22,7 @@ struct Declaration {
     encoded_len: usize,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireDeclaration {
     contract_id: String,

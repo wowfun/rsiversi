@@ -10,8 +10,8 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v20 and
-builder 2.16.0 bind explicit prompt ownership and retained runtime-context positions.
+unprepared claims separately from entered model history. Fold checkpoint v21 and
+builder 2.17.0 bind explicit prompt ownership and retained runtime-context positions.
 Earlier projection caches are incompatible.
 
 Each retained Turn records the last entered PluginContext Fact timestamp per
@@ -65,7 +65,7 @@ exposes that same tagged value for Executor equality; new Steps and terminal Tur
 reset it. Context never calls native prompt providers or repeats interpolation.
 Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v20, so recovery cannot retain an exited Plan's old instructions.
+checkpoint v21, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -88,7 +88,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.16.0, Session format 38, the v20 fold
+The allocation golden binds builder 2.17.0, Session format 39, the v21 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -157,7 +157,7 @@ reuses retained per-Turn totals and serializes only synthesized outcomes.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
-LanguageProfile along with frozen Language request options. Builder 2.16.0 emits
+LanguageProfile along with frozen Language request options. Builder 2.17.0 emits
 nested ToolResult images only when that profile positively declares image Tool
 results. No or Unknown uses deterministic descriptor text in the same block
 position, without reading Media or changing call IDs and error status. Ordinary
@@ -444,3 +444,11 @@ or a complete replacement after a summary is actually installed. Conversation
 settlement updates only its Turn and the variable-length usage projection. Identity and
 installed-summary weights remain cached separately; full recount remains the
 restore/summary path and the deterministic accounting oracle.
+
+Tool batch metadata retains typed spill references beside each settled call.
+Notices are absent from the retained raw messages and their pruning budgets.
+Projection renders their retrieval notice, and pruning redraws that notice from
+the typed references after selecting text. It does not infer protected cache
+identities from arbitrary Tool text. Checkpoint v21 carries this metadata; older
+checkpoints rebuild from canonical Facts. Semantic compaction preserves the
+original Fact coordinates for source retrieval.

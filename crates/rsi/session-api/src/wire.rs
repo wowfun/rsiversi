@@ -246,6 +246,8 @@ impl Operation {
             | Self::Cancel
             | Self::Projections => 3,
             Self::ModelObserve
+            | Self::Purge
+            | Self::PurgeStatus
             | Self::ListWorkflows
             | Self::Interactions
             | Self::Questions

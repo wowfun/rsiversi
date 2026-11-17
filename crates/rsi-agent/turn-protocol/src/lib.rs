@@ -1261,8 +1261,23 @@ pub struct ForkFactPage {
     pub facts: Vec<Arc<SessionFact>>,
     /// Highest parent sequence examined through the immutable fork boundary.
     pub through_parent_seq: u64,
-    /// Exact immutable terminal sequence of the inherited interval.
-    pub terminal_parent_seq: u64,
+}
+
+/// Operation-owned authenticated inherited history for one execution claim.
+#[async_trait]
+pub trait ForkHistoryReader: fmt::Debug + Send + Sync {
+    /// Immutable source Headers in replay order, oldest first; each origin owns
+    /// its interval's terminal cut.
+    fn sources(&self) -> &[SessionHeader];
+    /// Reads a bounded page within one captured source interval.
+    /// Checkpoint admission is checked before and after the read, including the
+    /// final page; readers return `None` when maintenance authority becomes stale.
+    async fn read_facts(
+        &self,
+        source: &SessionId,
+        after_parent_seq: u64,
+        limit: usize,
+    ) -> Result<Option<ForkFactPage>>;
 }
 
 /// Unforgeable caller identity injected into trusted Agent control Tools.
@@ -1465,17 +1480,8 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
             "this executor does not expose Tool caller authority".into(),
         ))
     }
-    /// Captures the immutable fork source Headers, oldest first. `All` includes
-    /// the parent's prior selection; `Last` and `None` stop that chain.
-    async fn read_fork_sources(&self, claim: &TurnClaim) -> Result<Vec<SessionHeader>>;
-    /// Reads one bounded page from an exact Header in the authorized fork chain.
-    async fn read_fork_facts(
-        &self,
-        claim: &TurnClaim,
-        source: &SessionId,
-        after_parent_seq: u64,
-        limit: usize,
-    ) -> Result<Option<ForkFactPage>>;
+    /// Authenticates and retains the inherited intervals for one reconstruction.
+    async fn open_fork_history(&self, claim: &TurnClaim) -> Result<Arc<dyn ForkHistoryReader>>;
     /// Atomically enters every pending next-Step message at one safe model boundary.
     async fn claim_pending_step_messages(&self, claim: &TurnClaim) -> Result<usize>;
     /// Reads current bounded domains for an exact started Tool, including after cancellation.
@@ -1572,25 +1578,12 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (claim, after_seq, limit);
         Ok(None)
     }
-    /// Captures source Headers for terminal-turn checkpoint maintenance.
-    async fn read_checkpoint_fork_sources(
+    /// Opens inherited history for a durably terminal, stable checkpoint claim.
+    async fn open_checkpoint_fork_history(
         &self,
         claim: &TurnClaim,
-    ) -> Result<Option<Vec<SessionHeader>>> {
+    ) -> Result<Option<Arc<dyn ForkHistoryReader>>> {
         let _ = claim;
-        Ok(None)
-    }
-    /// Reads inherited parent history for terminal-turn checkpoint maintenance.
-    /// The implementation must authorize the immutable child Header and reject
-    /// any session with a speculative local suffix.
-    async fn read_checkpoint_fork_facts(
-        &self,
-        claim: &TurnClaim,
-        source: &SessionId,
-        after_parent_seq: u64,
-        limit: usize,
-    ) -> Result<Option<ForkFactPage>> {
-        let _ = (claim, source, after_parent_seq, limit);
         Ok(None)
     }
     /// Reads one optional Context checkpoint cache.

@@ -101,6 +101,9 @@ impl PluginFactory for SessionFactory {
         let service = service.with_purge_cleanup(move || {
             context.lookup_local::<rsi_session_protocol::SessionPurgeCleanupContract>()
         });
+        let context = plan.context().clone();
+        let service =
+            service.with_spill(move || context.lookup_local::<rsi_spill::SpillStoreContract>());
         let service = Arc::new(service);
         let frozen_supply = plan
             .context()

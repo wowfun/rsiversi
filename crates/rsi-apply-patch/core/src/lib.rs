@@ -386,6 +386,7 @@ mod linux {
                 .min(patch_engine::evidence::MAXIMUM_EVIDENCE_BYTES);
             let stdin = helper_input(&arguments.patch, evidence_bytes)?;
             let spec = ProcessSpec {
+                capture: None,
                 process: confined,
                 stdin,
                 environment,

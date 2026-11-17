@@ -83,6 +83,7 @@ impl ToolProcess {
             Plan::Native(plan) => {
                 native
                     .spawn(ProcessSpec {
+                        capture: spec.capture,
                         process: plan,
                         stdin: spec.stdin,
                         environment: spec.environment,
@@ -95,6 +96,7 @@ impl ToolProcess {
             Plan::Target(plan) => {
                 plan.lease()
                     .spawn(ProcessSpec {
+                        capture: spec.capture,
                         process: plan,
                         stdin: spec.stdin,
                         environment: spec.environment,

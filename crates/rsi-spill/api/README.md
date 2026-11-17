@@ -1,9 +1,9 @@
-# rsi-process-output-api
+# rsi-spill-api
 
-The [Process contract](../core/README.md) owns the shared domain types and semantics.
+The [Spill contract](../core/README.md) owns the shared domain types and semantics.
 
 Ordinary endpoint and client plugins expose `output/read/1` using only the
-read-only Process output-cache contract. Requests carry an output identity,
+read-only Spill contract. Requests carry an output identity,
 raw offset and 1–65,536 byte limit; responses carry closed cursor metadata
 and a separate binary payload. The client validates identity, offset, exact
 length, total bound and forward progress before exposing a page.

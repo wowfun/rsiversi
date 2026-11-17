@@ -217,7 +217,7 @@ fn factories() -> Vec<(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>
         ),
         (
             "rsi.output.api",
-            std::sync::Arc::new(rsi_process_output_api::OutputApiFactory),
+            std::sync::Arc::new(rsi_spill_api::OutputApiFactory),
         ),
         (
             "rsi.session.api",

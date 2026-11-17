@@ -188,6 +188,7 @@ async fn source_reader_lease_keeps_tmp_ancestors_visible_and_read_only() {
     let child = fixture
         .lease
         .spawn(ProcessSpec {
+            capture: None,
             process: plan,
             stdin: vec![],
             environment,
@@ -235,6 +236,7 @@ async fn program_capture_preserves_alias_dispatch_and_admits_files_only_at_prepa
     let child = fixture
         .lease
         .spawn(ProcessSpec {
+            capture: None,
             process,
             environment,
             stdin: vec![],
@@ -300,6 +302,7 @@ async fn native_batch_and_files_use_the_fixed_directory_environment_without_reta
     let process = fixture
         .lease
         .spawn(ProcessSpec {
+            capture: None,
             process: plan,
             environment,
             stdin: vec![],
@@ -503,6 +506,7 @@ async fn equal_program_paths_preserve_distinct_selected_environments_without_amb
         let process = fixture
             .lease
             .spawn(ProcessSpec {
+                capture: None,
                 process: plan,
                 environment,
                 stdin: vec![],
@@ -549,6 +553,7 @@ async fn explicit_local_program_keeps_contribution_environment_and_exact_lease()
     let process = fixture
         .lease
         .spawn(ProcessSpec {
+            capture: None,
             process: plan,
             environment,
             stdin: vec![],

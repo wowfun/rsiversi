@@ -135,6 +135,7 @@ impl Fixture {
         let process = self
             .lease
             .spawn(ProcessSpec {
+                capture: None,
                 process: plan,
                 environment,
                 stdin: Vec::new(),

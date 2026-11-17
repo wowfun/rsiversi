@@ -40,12 +40,11 @@ impl rsi_session_protocol::SessionReads for LocalSessionService {
         let owner_retiring = self.projection_stopped.clone();
         let session_retiring = lifecycle.retiring().clone();
         let retiring_task = retiring.clone();
-        let guard = retiring.clone().drop_guard();
         drop(self.execution.spawn(async move {tokio::select!{()=retiring_task.cancelled()=>{},()=owner_retiring.cancelled()=>retiring_task.cancel(),()=session_retiring.cancelled()=>retiring_task.cancel()}}));
         Ok(rsi_session_protocol::SessionReadLease::new(
             (*header).clone(),
             retiring,
-            (activity, admission, guard),
+            (activity, admission),
             lifecycle,
         ))
     }

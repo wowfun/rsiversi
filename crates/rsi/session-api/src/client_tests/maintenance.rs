@@ -3,7 +3,7 @@ use rsi_agent_store_protocol::{
     CasGcReceipt, CasGcRequest, CasGcTarget, CasObjectRef, MaintenanceOperationId, PurgeBlocker,
     PurgePreview, PurgeReceipt, PurgeRequest, PurgeTarget,
 };
-use rsi_session_protocol::{NavigationCleanup, SessionIngress, SessionPurgeReceipt};
+use rsi_session_protocol::{CleanupStatus, SessionIngress, SessionPurgeReceipt};
 fn target() -> CasGcTarget {
     CasGcTarget {
         object: CasObjectRef {
@@ -34,8 +34,18 @@ fn receipt() -> SessionPurgeReceipt {
             free_pages: 2,
             retained_cas_objects: 1,
         },
-        navigation: NavigationCleanup::Complete,
+        navigation: CleanupStatus::Complete,
+        spill: CleanupStatus::Complete,
     }
+}
+#[test]
+fn purge_wire_requires_independent_spill_cleanup_evidence() {
+    assert_eq!(crate::wire::Operation::Purge.spec().id.version(), 2);
+    assert_eq!(crate::wire::Operation::PurgeStatus.spec().id.version(), 2);
+    let mut value = serde_json::to_value(receipt()).unwrap();
+    assert!(serde_json::from_value::<SessionPurgeReceipt>(value.clone()).is_ok());
+    value.as_object_mut().unwrap().remove("spill");
+    assert!(serde_json::from_value::<SessionPurgeReceipt>(value).is_err());
 }
 #[tokio::test]
 async fn maintenance_failure_requires_the_original_operation_kind_and_identity() {

@@ -20,6 +20,7 @@ use rsi_process_native as native;
 
 #[derive(Debug)]
 pub(super) struct Service {
+    default_capture: Option<Arc<dyn rsi_spill::CaptureSink>>,
     accepting: AtomicBool,
     serial: AtomicU64,
     active: Arc<Semaphore>,
@@ -31,12 +32,16 @@ pub(super) struct Service {
     timeout: Duration,
 }
 impl Service {
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "The factory transfers its owned configuration into this generation."
-    )]
+    #[cfg(test)]
     pub(super) fn new(config: ProcessLocalConfig) -> Arc<Self> {
+        Self::with_capture(config, None)
+    }
+    pub(super) fn with_capture(
+        config: ProcessLocalConfig,
+        default_capture: Option<Arc<dyn rsi_spill::CaptureSink>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            default_capture,
             accepting: AtomicBool::new(true),
             serial: AtomicU64::new(1),
             active: Arc::new(Semaphore::new(config.maximum_active_processes)),
@@ -134,15 +139,23 @@ impl Service {
             return Err(spawn_error(error));
         }
         let id = self.serial.fetch_add(1, Ordering::Relaxed);
-        let stdout = Arc::new(Tail::new(
+        let sink = capture_stdout
+            .then(|| spec.capture.as_ref().or(self.default_capture.as_ref()))
+            .flatten();
+        let stdout = Arc::new(Tail::with_capture(
             if capture_stdout {
                 spec.stdout_max_bytes
             } else {
                 0
             },
             reservation.clone(),
+            sink.and_then(|sink| sink.capture()),
         ));
-        let stderr = Arc::new(Tail::new(spec.stderr_max_bytes, reservation));
+        let stderr = Arc::new(Tail::with_capture(
+            spec.stderr_max_bytes,
+            reservation,
+            sink.and_then(|sink| sink.capture()),
+        ));
         let child = Arc::new(Child {
             pid,
             job,
@@ -199,6 +212,27 @@ impl Service {
             input_task.abort();
             let _ = input_task.await;
             let pipes = settle_pipes(out_task, err_task, grace).await;
+            if pipes.is_ok() {
+                tokio::join!(
+                    async {
+                        if let Some(capture) = &state.stdout.capture {
+                            capture.finish().await;
+                        }
+                    },
+                    async {
+                        if let Some(capture) = &state.stderr.capture {
+                            capture.finish().await;
+                        }
+                    }
+                );
+            } else {
+                for capture in [&state.stdout.capture, &state.stderr.capture]
+                    .into_iter()
+                    .flatten()
+                {
+                    capture.abandon();
+                }
+            }
             let resources_settled = status.is_ok() && settlement.is_ok() && pipes.is_ok();
             let outcome = status.and_then(|status| {
                 settlement.and(pipes).map(|()| ProcessOutcome {
@@ -358,19 +392,28 @@ impl ProcessControl for Child {
 }
 #[derive(Debug)]
 struct Tail {
+    capture: Option<Arc<dyn rsi_spill::SpillCapture>>,
     maximum: usize,
     data: Mutex<(VecDeque<u8>, u64)>,
     reservation: Arc<OwnedSemaphorePermit>,
 }
 impl Tail {
-    fn new(maximum: usize, reservation: Arc<OwnedSemaphorePermit>) -> Self {
+    fn with_capture(
+        maximum: usize,
+        reservation: Arc<OwnedSemaphorePermit>,
+        capture: Option<Arc<dyn rsi_spill::SpillCapture>>,
+    ) -> Self {
         Self {
+            capture,
             maximum,
             data: Mutex::new((VecDeque::with_capacity(maximum), 0)),
             reservation,
         }
     }
     fn push(&self, bytes: &[u8]) {
+        if let Some(capture) = &self.capture {
+            capture.push(bytes);
+        }
         let mut data = self.data.lock().expect("Windows process tail");
         data.1 = data.1.saturating_add(bytes.len() as u64);
         let remove = data
@@ -410,7 +453,10 @@ impl ProcessOutput for Tail {
             oldest_offset: oldest,
             next_offset: data.1,
             lossy: offset < oldest,
-            full_output: None,
+            full_output: self
+                .capture
+                .as_ref()
+                .and_then(|capture| capture.reference()),
         })
     }
     fn peek_tail(&self, maximum: usize) -> Result<ProcessRead> {
@@ -424,7 +470,10 @@ impl ProcessOutput for Tail {
             oldest_offset: data.1 - (data.0.len() - start) as u64,
             next_offset: data.1,
             lossy: data.1 > (data.0.len() - start) as u64,
-            full_output: None,
+            full_output: self
+                .capture
+                .as_ref()
+                .and_then(|capture| capture.reference()),
         })
     }
 }
@@ -492,6 +541,7 @@ mod tests {
         arguments: &[&str],
     ) -> ProcessSpec {
         ProcessSpec {
+            capture: None,
             process: ConfinedProcess {
                 owner: None,
                 stdio: ProcessStdio::Pipes,
@@ -611,5 +661,70 @@ mod tests {
         service.shutdown().await.unwrap();
         assert!(process.wait().await.unwrap().exit_code.is_some());
         assert!(service.children.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn native_spill_captures_before_tail_truncation_and_overflow_keeps_real_exit() {
+        use rsi_spill::{SpillReader as _, SpillStore as _};
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = rsi_spill_local::SpillLocalConfig::new(temporary.path().join("spill"));
+        config.minimum_free_bytes = 0;
+        let store = rsi_spill_local::LocalSpillStore::open(config)
+            .await
+            .unwrap();
+        let service = Service::with_capture(
+            ProcessLocalConfig::default(),
+            Some(store.scope(store.generation_scope())),
+        );
+        // The native pipe writes binary bytes, without shell text decoding or newline conversion.
+        for (blocks, complete) in [(80, true), (1025, false)] {
+            let script = format!(
+                "$o=[Console]::OpenStandardOutput();$b=[byte[]]::new(65536);for($i=0;$i -lt {blocks};$i++){{$o.Write($b,0,$b.Length)}};$o.Flush();[Console]::Error.Write('warning');exit 7"
+            );
+            let mut request = specification(
+                temporary.path(),
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+            );
+            request.environment =
+                vec![("SystemRoot".into(), std::env::var_os("SystemRoot").unwrap())];
+            request.stdout_max_bytes = 32_768;
+            let managed = service.spawn(request).await.unwrap();
+            let outcome = tokio::time::timeout(Duration::from_secs(30), managed.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(outcome.exit_code, Some(7));
+            let output = managed.stdout().read_from(0).unwrap();
+            assert_eq!(output.next_offset, blocks * 65_536);
+            assert_eq!(output.bytes, vec![0; 32_768]);
+            assert!(output.lossy);
+            assert_eq!(output.full_output.is_some(), complete);
+            if let Some(reference) = output.full_output {
+                assert_eq!(reference.bytes, output.next_offset);
+                let mut cursor = 0;
+                while cursor < reference.bytes {
+                    let page = store
+                        .read(&reference.locator, cursor, 65_536)
+                        .await
+                        .unwrap();
+                    page.validate_for(&reference.locator, cursor, 65_536)
+                        .unwrap();
+                    assert!(page.bytes.iter().all(|byte| *byte == 0));
+                    cursor = page.next_offset;
+                }
+            }
+            let warning = managed.stderr().read_from(0).unwrap().full_output.unwrap();
+            assert_eq!(
+                store
+                    .read(&warning.locator, 0, 100)
+                    .await
+                    .unwrap()
+                    .bytes
+                    .as_ref(),
+                b"warning"
+            );
+        }
+        service.shutdown().await.unwrap();
+        store.shutdown().await;
     }
 }

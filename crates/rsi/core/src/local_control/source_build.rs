@@ -297,6 +297,7 @@ impl Manager {
         let managed = self
             .process
             .spawn(ProcessSpec {
+                capture: None,
                 process: confined,
                 stdin: vec![],
                 environment: recipe
