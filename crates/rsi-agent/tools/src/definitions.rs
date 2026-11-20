@@ -176,7 +176,7 @@ impl MentionHistory {
                 return Err(error("invalid Agent mention history horizon"));
             }
             for fact in page.facts {
-                if fact.body().turn_id() != &context.turn_id {
+                if fact.body().turn_id() != Some(&context.turn_id) {
                     continue;
                 }
                 let texts: Vec<&str> = match fact.body() {

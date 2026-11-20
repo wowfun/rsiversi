@@ -430,7 +430,7 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
                FROM facts AS fact
                LEFT JOIN turns AS turn
                  ON turn.session_id = fact.session_id AND turn.turn_id = fact.turn_id
-               WHERE fact.session_id = ?1 AND (
+               WHERE fact.session_id = ?1 AND fact.fact_kind != 'command' AND (
                     turn.turn_id IS NULL
                     OR (fact.fact_kind = 'accepted' AND turn.accepted_seq != fact.seq)
                     OR (fact.fact_kind = 'terminal' AND turn.terminal_seq IS NOT fact.seq)
@@ -758,6 +758,7 @@ impl MailboxProjection {
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1070,6 +1071,7 @@ impl ActivationProjection {
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1164,6 +1166,7 @@ pub(super) fn validate_canonical_fact_prefix(
         .map_err(sql_error)?;
     let mut digest = EMPTY_FACT_PREFIX_DIGEST;
     let mut next_sequence = 1_u64;
+    let mut previous_command = None;
     let mut statement = connection
         .prepare(fact_rows!("?2", "WHERE f.session_id = ?1 ORDER BY f.seq"))
         .map_err(sql_error)?;
@@ -1182,19 +1185,46 @@ pub(super) fn validate_canonical_fact_prefix(
                 "session Fact sequence differs from its contiguous durable row".into(),
             ));
         }
+        previous_command = match fact.body() {
+            SessionFactBody::ManualCompaction {
+                command_id,
+                effect_id,
+                event,
+            } => {
+                let valid = match event {
+                    rsi_agent_session_protocol::ManualCompactionEvent::Prepared(prepared) => {
+                        &prepared.plan.session == session_id
+                    }
+                    _ => previous_command
+                        .as_ref()
+                        .is_some_and(|(command, effect, stage)| {
+                            command == command_id
+                                && effect == effect_id
+                                && Some(*stage) == event.predecessor()
+                        }),
+                };
+                if !valid {
+                    return Err(StoreError::Corrupt(
+                        "invalid standalone compaction boundary".into(),
+                    ));
+                }
+                Some((command_id.clone(), effect_id.clone(), event.stage()))
+            }
+            _ => None,
+        };
         observer.fact(session_id, &fact, encoded)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
         })?;
-        if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
+        if let SessionFactBody::TurnTerminal { turn_id, .. } = fact.body() {
             let terminal_digest = connection
                 .query_row(
                     "SELECT terminal_prefix_sha256 FROM turns
                      WHERE session_id = ?1 AND turn_id = ?2 AND terminal_seq = ?3",
                     params![
                         session_id.as_str(),
-                        fact.body().turn_id().as_str(),
+                        turn_id.as_str(),
                         sqlite_u64("turn terminal sequence", fact.seq())?,
                     ],
                     |row| optional_text(row, 0, 64),
@@ -1346,6 +1376,7 @@ impl ReadyProjection {
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1474,6 +1505,10 @@ fn validate_agent_indexes_observed(
             ));
         }
         previous_anchor = anchor;
+        if let AgentControlRecordBody::MessageFeedbackChanged { change } = record.body() {
+            super::feedback::validate_change(connection, selected, change, decoded - 1, anchor)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        }
         digest = advance_control_prefix_digest(digest, &record)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         if validate_terminal_control(connection, selected, &record, digest)? {

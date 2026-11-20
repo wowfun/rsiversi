@@ -202,6 +202,7 @@ pub(super) async fn capture(store: &SqliteStore, root: &Path) {
         outcome: TurnOutcome::Completed,
         result: None,
     });
+    let id = header.session_id().clone();
     let facts = bodies
         .into_iter()
         .enumerate()
@@ -218,4 +219,46 @@ pub(super) async fn capture(store: &SqliteStore, root: &Path) {
     )
     .await
     .unwrap();
+    feedback_change(store, &id, 11, None, Some("positive"))
+        .await
+        .unwrap();
+}
+
+pub(super) async fn feedback_change(
+    store: &dyn rsi_agent_store_protocol::SessionStore,
+    id: &SessionId,
+    target: u64,
+    predecessor: Option<u64>,
+    rating: Option<&str>,
+) -> rsi_agent_store_protocol::Result<u64> {
+    use rsi_agent_session_protocol::AgentControlRecordBody;
+    use rsi_agent_store_protocol::{AtomicAgentCommit, AtomicSessionAppend};
+    let cut = store.read_watermarks(id).await?;
+    let seq = cut.durable_control_seq + 1;
+    let change = serde_json::from_value(json!({
+        "message_seq":target, "if_version":predecessor,
+        "value":rating.map(|r|json!({"rating":r,"category":"other","note":"  多字节  "}))
+    }))
+    .unwrap();
+    let record = AgentControlRecord::new(
+        seq,
+        42,
+        AgentControlRecordBody::MessageFeedbackChanged { change },
+    )
+    .unwrap();
+    store
+        .commit_agent(AtomicAgentCommit {
+            sessions: vec![AtomicSessionAppend {
+                session_id: id.clone(),
+                expected_fact_seq: cut.durable_fact_seq,
+                expected_control_seq: cut.durable_control_seq,
+                header: None,
+                facts: vec![],
+                controls: vec![record],
+            }],
+            required_active_activations: vec![],
+            quiescent_descendants_of: None,
+        })
+        .await?;
+    Ok(seq)
 }

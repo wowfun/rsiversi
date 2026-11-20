@@ -13,6 +13,22 @@ Older schema corpora are retained shape evidence: their hashes are checked, but
 they are not serialized Session inputs and are not decoded as such. The Store
 corpus exercises runtime read/refusal using actual database and payload bytes.
 
+## Message feedback
+
+Feedback belongs to the Session that produced the finalized assistant message.
+Its target is the nonzero local Fact sequence of the settled answer. A
+`message_feedback_changed` control records one replacement or removal. Its
+control sequence identifies the saved version. The expected version identifies
+the prior live rating, with absence used for creation. Deleting an absent item
+and saving identical content at the observed version require no new record.
+Recreating a removed rating gets a fresh version.
+
+A rating is positive or negative. An optional UTF-8 note can contain up to
+8,192 bytes and must contain a non-whitespace character. The original spacing
+is preserved. The optional category uses the feedback vocabulary shared with
+the Web client. Feedback remains operator metadata throughout model input
+construction, compaction and forking.
+
 `SessionCommandDescriptor.composer_input` is explicit presentation metadata:
 `null` means a structured-only command, `{"kind":"none"}` permits immediate
 execution without arguments, and `{"kind":"text","hint":"..."}` enters text
@@ -66,7 +82,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 39 retains verbatim files as
+without repeating serialization. Session format 41 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -134,7 +150,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 39 admits this content under both pending and claimed command
+Session format 41 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-2 envelope for a trusted process
@@ -197,7 +213,11 @@ cancellation, before Step/Turn termination. A crash leaves no fabricated
 settlement. Intermediate retry attempts have `retain_context: false`; final
 partial text/reasoning is retained with an interruption marker and no tool
 authority. Request, source, usage and replay evidence are projected from this
-single canonical stream.
+single canonical stream. A retryable failure can carry one scheduled retry in
+the same settlement. It identifies the next effect, its one-based retry number
+and the selected delay in milliseconds. The terminal event supplies the cause.
+A later matching start proves dispatch. The scheduled retry grants no restart
+authority. Cancellation during its wait leaves the original decision visible.
 Invalid model terminal grammar becomes a typed Protocol failure before that
 terminal enters the evidence. The accepted prefix and usage settle normally;
 invalid terminal data grants neither Tool authority nor additional retry policy.
@@ -318,7 +338,7 @@ request identity, and a draft revision cannot appear in a durable command.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 39 is accepted; all other formats are unsupported. Header protection is
+format 41 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

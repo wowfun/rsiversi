@@ -525,7 +525,7 @@ pub struct PrepareFork {
     pub point: rsi_agent_session_protocol::ForkPoint,
     /// Local completed Turns selected at that cut.
     pub turns: rsi_agent_session_protocol::ForkTurnSelection,
-    /// Revocation or draft-owner cancellation.
+    /// Revocation or draft-owner cancellation interrupts preparation, including a pending preset pin.
     pub cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -703,9 +703,134 @@ pub trait SessionRetirement: fmt::Debug + Send + Sync {
     fn release_residency(&self);
 }
 
+/// Admission result for an argument-free command on a published session.
+#[derive(Debug)]
+pub enum ManualCompactionAdmission {
+    /// A turn, waking input or competing operation already owns admission.
+    Busy,
+    /// This command has already crossed the paid boundary.
+    Recorded(CompactionOutcome),
+    /// Exclusive ownership of one idle cut, released on drop.
+    Idle(Box<dyn IdleCompaction>),
+}
+
+/// An idle cut and its authority to publish paid summary stages.
+#[async_trait]
+pub trait IdleCompaction: fmt::Debug + Send + Sync {
+    /// Generation and session captured together under prompt admission.
+    fn composition(&self) -> &AgentCompositionPin;
+    /// Replays this cut using the selected builder and executor's resource limits.
+    async fn context(
+        &self,
+        limits: rsi_agent_context::ContextLimits,
+        budget: rsi_agent_context::ContextBudget,
+    ) -> Result<rsi_agent_context::ModelContextState>;
+    /// Stop requests and kernel shutdown interrupt this explicit command.
+    fn cancellation(&self) -> CancellationToken;
+    /// Commits the complete pre-dispatch prefix.
+    async fn start(
+        &mut self,
+        effect: &EffectId,
+        prepared: rsi_agent_session_protocol::PreparedManualCompaction,
+    ) -> Result<Vec<Arc<SessionFact>>>;
+    /// Commits the normalized stream and its actual installation decision atomically.
+    async fn settle(
+        self: Box<Self>,
+        attempt: rsi_agent_session_protocol::ModelAttemptLog,
+        fold: rsi_agent_context::ModelContextState,
+    ) -> Result<CompactionOutcome>;
+}
+
+/// Result of explicit maintenance. Only an installed summary changes context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOutcome {
+    /// A prompt, turn or command already owns the Session.
+    Busy,
+    /// All available history was protected or there was no history.
+    NoChange,
+    /// The summary passed source, completeness and shrink checks.
+    Compacted,
+    /// An actual provider attempt ended without an applicable summary.
+    Failed,
+    /// Stop won, or a previous start has no known settlement.
+    Interrupted,
+    /// A paid start is recorded and settlement has not been observed.
+    Started,
+}
+
+impl CompactionOutcome {
+    /// Reads the strongest outcome that the durable command stage proves.
+    pub fn recorded(fact: &SessionFact) -> Option<Self> {
+        use rsi_agent_session_protocol::ManualCompactionEvent;
+        let SessionFactBody::ManualCompaction { event, .. } = fact.body() else {
+            return None;
+        };
+        Some(match event {
+            ManualCompactionEvent::Settled { attempt } => match attempt.terminal() {
+                rsi_ai_protocol::LanguageEvent::Failed { error, .. }
+                    if error.kind() == rsi_ai_protocol::ErrorKind::Cancelled =>
+                {
+                    Self::Interrupted
+                }
+                _ => Self::Failed,
+            },
+            ManualCompactionEvent::Installed => Self::Compacted,
+            _ => Self::Started,
+        })
+    }
+
+    /// Shared human command feedback for interactive clients.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Busy => "Session is busy. Run /compact after the current work finishes.",
+            Self::NoChange => "No eligible history to compact.",
+            Self::Compacted => "Compacted conversation history.",
+            Self::Failed => "Compaction finished without installing a summary.",
+            Self::Interrupted => "Compaction interrupted. The previous context is available.",
+            Self::Started => "Compaction started. Its outcome has not been recorded.",
+        }
+    }
+}
+
+/// Executor-selected language route, context limits and summary dispatch.
+#[async_trait]
+pub trait ManualCompactor: fmt::Debug + Send + Sync {
+    /// Executes at most one paid summary under a live idle reservation.
+    async fn compact(
+        &self,
+        lease: Box<dyn IdleCompaction>,
+        model: rsi_agent_session_protocol::ModelSelection,
+    ) -> Result<CompactionOutcome>;
+}
+
+/// Current executor's manual compaction capability.
+#[derive(Debug)]
+pub struct ManualCompactorContract;
+impl LocalContract for ManualCompactorContract {
+    const KEY: &'static str = "rsi.agent.manual-compaction";
+    type Service = dyn ManualCompactor;
+}
+
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Serializes operator feedback for one finalized local assistant message.
+    async fn change_message_feedback(
+        &self,
+        _session: &SessionId,
+        _change: rsi_agent_session_protocol::MessageFeedbackChange,
+    ) -> Result<rsi_agent_session_protocol::MessageFeedbackOutcome> {
+        Err(TurnError::ExecutionUnavailable)
+    }
+    /// Atomically competes with ordinary prompt admission for an idle session.
+    async fn reserve_manual_compaction(
+        &self,
+        _id: &SessionId,
+        _command: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<ManualCompactionAdmission> {
+        Err(TurnError::Invalid("manual compaction unavailable".into()))
+    }
     /// Resident generation status; absent for a Session that is not loaded.
     async fn generation_status(
         &self,
@@ -1004,6 +1129,16 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
     /// Reads complete opaque domain states without requiring execution codecs.
     async fn domain_states(&self, session_id: &SessionId) -> Result<Vec<DomainStateView>> {
         let _ = session_id;
+        Err(TurnError::Invalid(
+            "domain state reads are unsupported".into(),
+        ))
+    }
+    /// Reads one current domain and the durable control sequence of the same observation.
+    async fn domain_state(
+        &self,
+        _session_id: &SessionId,
+        _domain: &str,
+    ) -> Result<Option<(u64, DomainStateView)>> {
         Err(TurnError::Invalid(
             "domain state reads are unsupported".into(),
         ))
@@ -1388,6 +1523,29 @@ pub struct ContextCheckpoint {
     pub fact_prefix_sha256: String,
     /// Versioned Context-owned bytes.
     pub bytes: rsi_api_protocol::RetainedBytes,
+}
+
+impl ContextCheckpoint {
+    /// Restore a matching durable prefix. Invalid caches fall back to replay,
+    /// while memory pressure is propagated to avoid a second materialization.
+    pub fn restore_for(
+        &self,
+        state: &rsi_agent_context::ModelContextState,
+    ) -> rsi_agent_context::Result<Option<rsi_agent_context::ModelContextState>> {
+        if state.header_fingerprint() != self.header_fingerprint {
+            return Ok(None);
+        }
+        match state.restored(&self.bytes) {
+            Ok(restored) => {
+                let position = restored.position();
+                Ok((position.through_seq == self.through_seq
+                    && position.fact_prefix_sha256() == self.fact_prefix_sha256)
+                    .then_some(restored))
+            }
+            Err(error @ rsi_agent_context::ContextError::Capacity) => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 /// Single-use human wait ownership, including both released execution permits.

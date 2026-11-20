@@ -381,6 +381,7 @@ async fn benchmark_metadata(sessions: usize) {
                             &rsi_agent_store_protocol::ExecutionLocations::all(),
                             after.as_ref(),
                             256,
+                            None,
                         )
                         .await
                         .unwrap();
@@ -454,7 +455,7 @@ async fn benchmark_metadata(sessions: usize) {
                     2,
                     terminal.timestamp_ms(),
                     AgentControlRecordBody::TurnBoundaryRecorded {
-                        turn_id: terminal.body().turn_id().clone(),
+                        turn_id: terminal.body().turn_id().expect("turn-owned fixture fact").clone(),
                         terminal_fact_seq: terminal.seq(),
                     },
                 )
@@ -473,7 +474,7 @@ async fn benchmark_metadata(sessions: usize) {
                 };
                 let locations = rsi_agent_store_protocol::ExecutionLocations::all();
                 let (read, write) = tokio::join!(
-                    store.list_recent_sessions(&locations, None, 256),
+                    store.list_recent_sessions(&locations, None, 256, None),
                     store.commit_agent(commit)
                 );
                 black_box(read.unwrap());

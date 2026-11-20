@@ -57,8 +57,37 @@ pub use window::{
     MAXIMUM_STORE_WINDOW_FACTS, StoreFactOmission, StoreFactWindow, validate_window_limits,
 };
 
+/// Current operator feedback and the Session cut at which it was observed.
+#[derive(Clone, Debug)]
+pub struct StoreMessageFeedback {
+    /// Coordinates for an atomic compare-and-append.
+    pub watermarks: StoreSessionWatermarks,
+    /// Last surviving rating at this cut.
+    pub current: Option<rsi_agent_session_protocol::SavedMessageFeedback>,
+}
+
+/// Checks a canonical feedback append. Existing ratings have already established the immutable
+/// target. Only the first put after absence needs the local Fact at this control's cut.
+pub fn validate_feedback_append(
+    change: &rsi_agent_session_protocol::MessageFeedbackChange,
+    head: Option<&rsi_agent_session_protocol::SavedMessageFeedback>,
+    valid_target: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    if change.decide(head) != rsi_agent_session_protocol::FeedbackDecision::Append {
+        return Err(StoreError::Invalid(
+            "feedback change requires its exact live predecessor and a changed value".into(),
+        ));
+    }
+    if head.is_none() && !valid_target()? {
+        return Err(StoreError::Invalid(
+            "feedback target must be a finalized local assistant message".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 51;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 54;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -156,14 +185,16 @@ impl StoreFactTurnRole {
 }
 
 /// Classifies one validated Fact body for mechanical turn indexing.
-pub const fn store_fact_turn_role(body: &SessionFactBody) -> StoreFactTurnRole {
-    match body {
+pub fn store_fact_turn_role(body: &SessionFactBody) -> Option<(StoreFactTurnRole, &TurnId)> {
+    let turn = body.turn_id()?;
+    let role = match body {
         SessionFactBody::TurnAccepted { .. }
         | SessionFactBody::MessageTurnAccepted { .. }
         | SessionFactBody::ImageRequested { .. } => StoreFactTurnRole::Acceptance,
         SessionFactBody::TurnTerminal { .. } => StoreFactTurnRole::Terminal,
         _ => StoreFactTurnRole::Event,
-    }
+    };
+    Some((role, turn))
 }
 
 /// Opaque bounded Context-owned checkpoint returned by the mechanical Store.
@@ -407,7 +438,7 @@ impl AtomicSessionAppend {
             (None, None) => Ok(()),
             (Some(fact), Some((index, turn_id, fact_seq)))
                 if index + 1 == self.controls.len()
-                    && turn_id == fact.body().turn_id()
+                    && Some(turn_id) == fact.body().turn_id()
                     && *fact_seq == fact.seq() =>
             {
                 Ok(())
@@ -1112,6 +1143,8 @@ pub struct StoreAgentMailboxSummary {
     pub inbox_paused: bool,
     /// Complete pending-message count at the Store snapshot.
     pub pending_count: usize,
+    /// Pending command inputs explicitly injected for the next Step.
+    pub injected_commands: usize,
     /// Source of the first pending next-Step input in acceptance order, if any.
     pub first_pending_step_source: Option<rsi_agent_session_protocol::AgentMessageSourceKind>,
     /// Pending promotable next-Step identities in acceptance order at the same snapshot.
@@ -1130,6 +1163,7 @@ impl StoreAgentMailboxSummary {
             .iter()
             .collect::<BTreeSet<_>>();
         if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
+            || self.injected_commands > self.pending_count
             || (self.pending_count == 0 && self.first_pending_step_source.is_some())
             || self.pending_promotable_message_ids.len() > self.pending_count
             || identities.len() != self.pending_promotable_message_ids.len()
@@ -1576,7 +1610,7 @@ impl StoreTurnFactPage {
                     "turn Fact page is not strictly ordered within its watermark".into(),
                 ));
             }
-            if fact.body().turn_id() != &self.turn_id {
+            if fact.body().turn_id() != Some(&self.turn_id) {
                 return Err(StoreError::Corrupt(
                     "turn Fact page contains a Fact for another turn".into(),
                 ));
@@ -1633,7 +1667,7 @@ impl StoreTurnBoundary {
             .validate()
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         if accepted.seq() > durable_seq
-            || accepted.body().turn_id() != &turn_id
+            || accepted.body().turn_id() != Some(&turn_id)
             || !matches!(
                 accepted.body(),
                 SessionFactBody::TurnAccepted { .. }
@@ -1651,7 +1685,7 @@ impl StoreTurnBoundary {
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             if terminal.seq() <= accepted.seq()
                 || terminal.seq() > durable_seq
-                || terminal.body().turn_id() != &turn_id
+                || terminal.body().turn_id() != Some(&turn_id)
                 || !matches!(terminal.body(), SessionFactBody::TurnTerminal { .. })
             {
                 return Err(StoreError::Corrupt(
@@ -1967,7 +2001,7 @@ pub struct SessionValidationLease {
 }
 
 impl SessionValidationLease {
-    /// Retains an adapter-owned proof and its resource owner without exposing either.
+    /// Retains an adapter-owned proof and its admission without exposing either.
     pub fn new(keepalive: impl Send + Sync + 'static) -> Self {
         Self {
             _keepalive: Box::new(keepalive),
@@ -2015,6 +2049,13 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Proof-retention capacity refuses with `ValidationBusy` rather than waiting
     /// for other leases that the same dependent operation may already hold.
     async fn prepare_session(&self, session_id: &SessionId) -> Result<SessionValidationLease>;
+    /// Looks up one local answer's current rating and both Session cursors from one cut.
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> Result<StoreMessageFeedback>;
+
     /// Reads both durable cursors from one metadata snapshot without replaying history.
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks>;
 
@@ -2195,6 +2236,66 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
         maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage>;
+    /// Returns the most recent earlier intent of the same purpose for request comparison.
+    async fn previous_model_intent(
+        &self,
+        session: &SessionId,
+        before: u64,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+    ) -> Result<Option<u64>> {
+        let mut cursor = before;
+        while cursor > 1 {
+            let page = self
+                .read_facts_before(session, cursor, 64, MAXIMUM_STORE_FACT_PAGE_BYTES)
+                .await?;
+            if let Some(fact) = page.facts.iter().rev().find(|fact| matches!(fact.body().language_attempt().map(|attempt| attempt.stage),
+                Some(rsi_agent_session_protocol::LanguageAttemptStage::Prepared(_, previous, _)) if previous == purpose)) {
+                return Ok(Some(fact.seq()));
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page
+                .facts
+                .first()
+                .ok_or_else(|| StoreError::Corrupt("empty backward fact page".into()))?
+                .seq();
+        }
+        Ok(None)
+    }
+
+    /// Returns the latest paid stage of this explicit command. Reopening a session
+    /// may report this evidence but cannot repeat provider dispatch.
+    async fn manual_compaction_fact(
+        &self,
+        session: &SessionId,
+        command: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<SessionFact>> {
+        let mut before = self
+            .session_summary(session)
+            .await?
+            .durable_fact_seq
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Corrupt("fact sequence exhausted".into()))?;
+        while before > 1 {
+            let page = self
+                .read_facts_before(session, before, 64, MAXIMUM_STORE_FACT_PAGE_BYTES)
+                .await?;
+            let next = page.facts.first().map(SessionFact::seq);
+            if let Some(latest) = page.facts.into_iter().rev().find(|fact| {
+                matches!(fact.body(),
+                SessionFactBody::ManualCompaction { command_id, .. } if command_id == command)
+            }) {
+                return Ok(Some(latest));
+            }
+            if !page.has_more {
+                break;
+            }
+            before = next.ok_or_else(|| StoreError::Corrupt("empty backward fact page".into()))?;
+        }
+        Ok(None)
+    }
+
     /// Tests one exact Turn's durable model-intent identity without retaining history.
     /// Indexed stores can answer directly; the default consumes bounded Fact pages.
     async fn contains_model_intent(
@@ -2274,13 +2375,57 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         after: Option<&SessionId>,
         limit: usize,
     ) -> Result<StoreSessionPage>;
+    /// Lists live Sessions with a current domain revision above one, including late introductions.
+    async fn list_edited_domain_sessions(
+        &self,
+        domain: &str,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<StoreSessionPage> {
+        validate_session_read_limit(limit)?;
+        let mut cursor = after.cloned();
+        let mut found = Vec::new();
+        loop {
+            let page = self.list_sessions(cursor.as_ref(), limit).await?;
+            page.validate()?;
+            for session in page.sessions {
+                let states = self
+                    .read_domain_states(&session, None, Some(domain))
+                    .await?;
+                if states
+                    .states
+                    .iter()
+                    .any(|state| state.head.revision.get() > 1)
+                {
+                    if found.len() == limit {
+                        return Ok(StoreSessionPage {
+                            after: after.cloned(),
+                            sessions: found,
+                            has_more: true,
+                        });
+                    }
+                    found.push(session.clone());
+                }
+                cursor = Some(session);
+            }
+            if !page.has_more {
+                return Ok(StoreSessionPage {
+                    after: after.cloned(),
+                    sessions: found,
+                    has_more: false,
+                });
+            }
+        }
+    }
     /// Lists at most `limit` sessions after an exclusive creation-time-descending cursor.
     /// Each row's Header, activity and watermarks share one validated read snapshot.
+    /// An edited domain selector requires its current head revision to exceed one.
     async fn list_recent_sessions(
         &self,
         locations: &ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> Result<StoreRecentSessionPage>;
     /// Lists at most `limit` sessions containing at least one open turn after
     /// an exclusive lexical cursor.
@@ -2769,14 +2914,18 @@ pub fn validate_session_read_limit(limit: usize) -> Result<()> {
 /// Mechanical uniqueness coordinate; ordering remains the Kernel's authority.
 pub fn store_fact_model_coordinate(
     body: &rsi_agent_session_protocol::SessionFactBody,
-) -> Option<(&rsi_agent_session_protocol::EffectId, &'static str)> {
+) -> Option<(&TurnId, &rsi_agent_session_protocol::EffectId, &'static str)> {
     use rsi_agent_session_protocol::SessionFactBody;
     match body {
-        SessionFactBody::ModelIntent { effect_id, .. } => Some((effect_id, "model_intent")),
-        SessionFactBody::ModelStarted { effect_id, .. } => Some((effect_id, "model_started")),
-        SessionFactBody::ModelAttemptSettled { effect_id, .. } => {
-            Some((effect_id, "model_attempt_settled"))
-        }
+        SessionFactBody::ModelIntent {
+            turn_id, effect_id, ..
+        } => Some((turn_id, effect_id, "model_intent")),
+        SessionFactBody::ModelStarted {
+            turn_id, effect_id, ..
+        } => Some((turn_id, effect_id, "model_started")),
+        SessionFactBody::ModelAttemptSettled {
+            turn_id, effect_id, ..
+        } => Some((turn_id, effect_id, "model_attempt_settled")),
         _ => None,
     }
 }

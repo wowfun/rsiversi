@@ -47,7 +47,21 @@ impl<'de> Deserialize<'de> for Chunk {
 struct StreamData {
     v: u8,
     retain_context: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scheduled_retry: Option<ScheduledModelRetry>,
     chunks: Vec<Chunk>,
+}
+
+/// Decision made by the executor before waiting for a provider retry.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledModelRetry {
+    /// Identity reserved for the next attempt, even if the wait is cancelled.
+    pub effect_id: crate::EffectId,
+    /// One-based retry number within this request's frozen policy.
+    pub number: u8,
+    /// Selected wait, including any admitted Retry-After value.
+    pub delay_ms: u64,
 }
 
 /// Validated complete attempt. Clones share immutable encoded blocks.
@@ -96,6 +110,14 @@ impl ModelAttemptLog {
             }
         }
         let terminal = terminal.ok_or_else(|| invalid("missing terminal event"))?;
+        if let Some(retry) = &data.scheduled_retry
+            && (data.retain_context
+                || !matches!(terminal, LanguageEvent::Failed { .. })
+                || !(1..=16).contains(&retry.number)
+                || retry.delay_ms > 60_000)
+        {
+            return Err(invalid("invalid scheduled retry for this settlement"));
+        }
         validator
             .finish()
             .map_err(|error| invalid(error.to_string()))?;
@@ -126,6 +148,11 @@ impl ModelAttemptLog {
     /// Whether safe partial content enters subsequent model requests.
     pub fn retain_context(&self) -> bool {
         self.data.retain_context
+    }
+
+    /// Retry scheduled at settlement, regardless of whether a later attempt ran.
+    pub fn scheduled_retry(&self) -> Option<&ScheduledModelRetry> {
+        self.data.scheduled_retry.as_ref()
     }
 
     /// Builds deterministic evidence from elapsed millisecond offsets.
@@ -436,13 +463,23 @@ impl ModelAttemptBuilder {
     }
 
     /// Seals and validates the complete grammar before durable publication.
-    pub fn finish(mut self, retain_context: bool) -> Result<ModelAttemptLog> {
+    pub fn finish(self, retain_context: bool) -> Result<ModelAttemptLog> {
+        self.finish_with_retry(retain_context, None)
+    }
+
+    /// Seals the terminal event and the executor's retry decision atomically.
+    pub fn finish_with_retry(
+        mut self,
+        retain_context: bool,
+        scheduled_retry: Option<ScheduledModelRetry>,
+    ) -> Result<ModelAttemptLog> {
         if !self.pending.is_empty() {
             self.seal();
         }
         ModelAttemptLog::validate_data(StreamData {
             v: 1,
             retain_context,
+            scheduled_retry,
             chunks: self.chunks,
         })
     }

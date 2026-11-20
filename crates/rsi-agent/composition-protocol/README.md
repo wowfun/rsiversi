@@ -492,3 +492,8 @@ inputs (at most 128 states and 2 MiB). The sealed active Domain catalog remains
 limited to 64 states and 1 MiB. Retained inputs override current defaults. Missing
 fresh integration inputs do not block owners that can restore their complete saved
 state; owners requiring a new input reject its absence at their own boundary.
+
+The owner of a recoverable reserve command may recognize its exact pending
+input in a later revision of the same domain. The Kernel verifies the original
+reserve receipt and the active composition before consulting that predicate.
+Without a predicate, recovery requires the original snapshot and revision.

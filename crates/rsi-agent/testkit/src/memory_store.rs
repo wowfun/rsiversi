@@ -16,6 +16,7 @@ use super::{
     async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_agent_session_protocol::AgentMessageSource;
+use rsi_agent_session_protocol::SessionFactBody;
 use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::admit_page_record;
 
@@ -37,8 +38,56 @@ async fn retention_checks_metadata_while_reads_authenticate_bytes() {
     crate::assert_metadata_only_cas_retention(&store, &object).await;
 }
 
+fn feedback_at(
+    session: &MemorySession,
+    message: std::num::NonZeroU64,
+    through: usize,
+) -> Option<rsi_agent_session_protocol::SavedMessageFeedback> {
+    let (version, value) =
+        session.controls[..through]
+            .iter()
+            .rev()
+            .find_map(|record| match record.body() {
+                AgentControlRecordBody::MessageFeedbackChanged { change }
+                    if change.message_seq == message =>
+                {
+                    Some((record.seq(), change.value.as_ref()))
+                }
+                _ => None,
+            })?;
+    value
+        .cloned()
+        .map(|value| rsi_agent_session_protocol::SavedMessageFeedback {
+            version: std::num::NonZeroU64::new(version).expect("validated control"),
+            value,
+        })
+}
+
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> Result<rsi_agent_store_protocol::StoreMessageFeedback> {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = state
+            .sessions
+            .get(id)
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+        Ok(rsi_agent_store_protocol::StoreMessageFeedback {
+            current: feedback_at(session, message, session.controls.len()),
+            watermarks: StoreSessionWatermarks {
+                session_id: id.clone(),
+                durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
+                durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
+            },
+        })
+    }
+
     async fn contains_model_intent(
         &self,
         session_id: &SessionId,
@@ -536,8 +585,13 @@ impl SessionStore for MemoryStore {
                     "existing session cannot replace its immutable header".into(),
                 ));
             }
-            let (turn_updates, fact_prefix_digest) =
-                index_appended_turns(&session.turns, &batch.facts, session.fact_prefix_digest)?;
+            let (turn_updates, fact_prefix_digest) = index_appended_turns(
+                &batch.session_id,
+                &session.facts,
+                &session.turns,
+                &batch.facts,
+                session.fact_prefix_digest,
+            )?;
             let model_coordinates =
                 index_model_coordinates(&session.model_coordinates, &batch.facts)?;
             let previous = session.last_activity_ms;
@@ -562,8 +616,13 @@ impl SessionStore for MemoryStore {
                 .header
                 .ok_or_else(|| StoreError::NotFound(batch.session_id.as_str().to_owned()))?;
             validate_memory_agent_node(&state, &header)?;
-            let (turns, fact_prefix_digest) =
-                index_appended_turns(&BTreeMap::new(), &batch.facts, EMPTY_FACT_PREFIX_DIGEST)?;
+            let (turns, fact_prefix_digest) = index_appended_turns(
+                &batch.session_id,
+                &[],
+                &BTreeMap::new(),
+                &batch.facts,
+                EMPTY_FACT_PREFIX_DIGEST,
+            )?;
             let model_coordinates = index_model_coordinates(&BTreeSet::new(), &batch.facts)?;
             state
                 .recent_sessions
@@ -1152,7 +1211,7 @@ impl SessionStore for MemoryStore {
         for fact in session
             .facts
             .iter()
-            .filter(|fact| fact.seq() > after_seq && fact.body().turn_id() == turn_id)
+            .filter(|fact| fact.seq() > after_seq && fact.body().turn_id() == Some(turn_id))
         {
             let projected = encoded_bytes
                 .checked_add(fact.encoded_len())
@@ -1304,7 +1363,7 @@ impl SessionStore for MemoryStore {
                 .filter(|fact| {
                     fact.seq() > resolved_after_seq && fact.seq() <= resolved_terminal_seq
                 })
-                .map(|fact| fact.body().turn_id())
+                .filter_map(|fact| fact.body().turn_id())
                 .collect::<BTreeSet<_>>();
             if interval_turns != selected_ids || interval_fact_turns != selected_ids {
                 return Err(StoreError::Invalid(
@@ -1432,6 +1491,7 @@ impl SessionStore for MemoryStore {
         locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> Result<StoreRecentSessionPage> {
         validate_session_read_limit(limit)?;
         let state = self
@@ -1448,15 +1508,22 @@ impl SessionStore for MemoryStore {
                 })
             })
             .filter(|(_, id)| {
-                locations.contains(
-                    state
-                        .sessions
-                        .get(id)
-                        .expect("indexed Session")
-                        .header
-                        .coordinates()
-                        .location(),
-                )
+                let session = state.sessions.get(id).expect("indexed Session");
+                locations.contains(session.header.coordinates().location())
+                    && edited_domain.is_none_or(|id| {
+                        session
+                            .domain_versions
+                            .get(id)
+                            .and_then(|v| v.last())
+                            .is_some_and(|head| {
+                                head.revision.get() > 1
+                                    && session
+                                        .domain_removals
+                                        .get(id)
+                                        .and_then(|cuts| cuts.last())
+                                        .is_none_or(|cut| *cut < head.control_seq)
+                            })
+                    })
             })
             .take(limit + 1)
             .map(|(_, session_id)| {
@@ -1825,6 +1892,7 @@ impl SessionStore for MemoryStore {
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         let mut pending_count = 0;
         let mut first_step: Option<&StoreAgentMessage> = None;
+        let mut injected_commands = 0;
         let mut promotable = Vec::new();
         for ((candidate, _), entry) in &state.agent_messages {
             if candidate != session_id || !matches!(entry.state, StoreAgentMessageState::Pending) {
@@ -1833,6 +1901,11 @@ impl SessionStore for MemoryStore {
             pending_count += 1;
             if entry.target != MessageTarget::NextStep {
                 continue;
+            }
+            if entry.delivery == rsi_agent_session_protocol::MessageDelivery::NextStep
+                && matches!(entry.message.source, AgentMessageSource::Command { .. })
+            {
+                injected_commands += 1;
             }
             if first_step
                 .is_none_or(|first| entry.accepted_control_seq < first.accepted_control_seq)
@@ -1847,6 +1920,7 @@ impl SessionStore for MemoryStore {
         let summary = StoreAgentMailboxSummary {
             inbox_paused: session.inbox_paused,
             first_pending_step_source: first_step.map(|entry| entry.message.source.kind()),
+            injected_commands,
             pending_count,
             pending_promotable_message_ids: promotable.into_iter().map(|(_, id)| id).collect(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
@@ -2344,8 +2418,13 @@ fn apply_atomic_memory_append(
                 actual: actual_control,
             });
         }
-        let (turn_updates, fact_digest) =
-            index_appended_turns(&session.turns, &append.facts, session.fact_prefix_digest)?;
+        let (turn_updates, fact_digest) = index_appended_turns(
+            &append.session_id,
+            &session.facts,
+            &session.turns,
+            &append.facts,
+            session.fact_prefix_digest,
+        )?;
         let model_coordinates = index_model_coordinates(&session.model_coordinates, &append.facts)?;
         let control_digest =
             append
@@ -2371,8 +2450,13 @@ fn apply_atomic_memory_append(
             .header
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
         validate_memory_agent_node(state, &header)?;
-        let (turns, fact_digest) =
-            index_appended_turns(&BTreeMap::new(), &append.facts, EMPTY_FACT_PREFIX_DIGEST)?;
+        let (turns, fact_digest) = index_appended_turns(
+            &append.session_id,
+            &[],
+            &BTreeMap::new(),
+            &append.facts,
+            EMPTY_FACT_PREFIX_DIGEST,
+        )?;
         let model_coordinates = index_model_coordinates(&BTreeSet::new(), &append.facts)?;
         let control_digest =
             append
@@ -2463,6 +2547,16 @@ fn apply_atomic_memory_append(
     apply_domain_updates(session, minimum_claimed_fact_seq, &append.controls)?;
     for record in &append.controls {
         match record.body() {
+            AgentControlRecordBody::MessageFeedbackChanged { change } => {
+                let previous = usize::try_from(record.seq() - 1).expect("in-memory control index");
+                let head = feedback_at(session, change.message_seq, previous);
+                rsi_agent_store_protocol::validate_feedback_append(change, head.as_ref(), || {
+                    Ok(usize::try_from(change.message_seq.get() - 1)
+                        .ok()
+                        .and_then(|i| session.facts.get(i))
+                        .is_some_and(|fact| fact.body().is_feedback_target()))
+                })?;
+            }
             AgentControlRecordBody::InboxPaused => session.inbox_paused = true,
             AgentControlRecordBody::InboxResumed => session.inbox_paused = false,
             _ => {}
@@ -2842,6 +2936,7 @@ fn apply_message_updates(
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -3128,6 +3223,7 @@ fn apply_activation_updates(
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -3240,6 +3336,7 @@ fn apply_ready_updates(
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -3248,16 +3345,42 @@ fn apply_ready_updates(
 }
 
 fn index_appended_turns(
+    session_id: &SessionId,
+    existing: &[Arc<SessionFact>],
     turns: &BTreeMap<TurnId, MemoryTurnBoundary>,
     facts: &[Arc<SessionFact>],
     mut prefix_digest: [u8; 32],
 ) -> Result<(BTreeMap<TurnId, MemoryTurnBoundary>, [u8; 32])> {
-    let mut updates = BTreeMap::new();
-    for fact in facts {
+    let mut updates: BTreeMap<TurnId, MemoryTurnBoundary> = BTreeMap::new();
+    for (index, fact) in facts.iter().enumerate() {
+        if let SessionFactBody::ManualCompaction {
+            command_id,
+            effect_id,
+            event,
+        } = fact.body()
+        {
+            let previous = facts[..index].last().or_else(|| existing.last());
+            let valid = if let Some(stage) = event.predecessor() {
+                previous.is_some_and(|f| matches!(f.body(), SessionFactBody::ManualCompaction { command_id: c, effect_id: e, event: prior }
+                    if c == command_id && e == effect_id && prior.stage() == stage))
+            } else {
+                matches!(event, rsi_agent_session_protocol::ManualCompactionEvent::Prepared(prepared) if &prepared.plan.session == session_id)
+                    && !turns.iter().any(|(id, turn)| updates.get(id).unwrap_or(turn).terminal_seq.is_none())
+                    && !updates.values().any(|turn| turn.terminal_seq.is_none())
+                    && !existing.iter().chain(&facts[..index]).any(|f| matches!(f.body(), SessionFactBody::ManualCompaction { command_id: id, .. } if id == command_id))
+            };
+            if !valid {
+                return Err(StoreError::Invalid(
+                    "invalid standalone compaction boundary".into(),
+                ));
+            }
+        }
         prefix_digest = advance_fact_prefix_digest(prefix_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        let role = rsi_agent_store_protocol::store_fact_turn_role(fact.body());
-        let turn_id = fact.body().turn_id();
+        let Some((role, turn_id)) = rsi_agent_store_protocol::store_fact_turn_role(fact.body())
+        else {
+            continue;
+        };
         match role {
             StoreFactTurnRole::Acceptance => {
                 if turns.contains_key(turn_id) || updates.contains_key(turn_id) {
@@ -3407,14 +3530,10 @@ fn index_model_coordinates(
 ) -> Result<BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>> {
     let mut added = BTreeSet::new();
     for fact in facts {
-        if let Some((effect, role)) =
+        if let Some((turn_id, effect, role)) =
             rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
         {
-            let coordinate = (
-                fact.body().turn_id().clone(),
-                effect.clone(),
-                role.to_owned(),
-            );
+            let coordinate = (turn_id.clone(), effect.clone(), role.to_owned());
             if existing.contains(&coordinate) || !added.insert(coordinate) {
                 return Err(StoreError::Invalid(
                     "duplicate model effect coordinate".into(),

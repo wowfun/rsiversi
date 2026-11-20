@@ -3,6 +3,164 @@
 use crate::{EffectId, Result, SessionError, SessionId, TurnId, validate_sha256};
 use serde::{Deserialize, Serialize};
 
+/// A paid compaction owned by an explicit command on an idle session.
+/// The session fact envelope supplies ordering and time for each transition.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManualCompactionEvent {
+    /// Exact source selection and prepared provider request, before dispatch.
+    Prepared(Box<PreparedManualCompaction>),
+    /// The paid call may have begun. A missing settlement carries no replay authority.
+    Started,
+    /// Normalized provider stream. Context derives installation from its actual output.
+    Settled {
+        /// Complete provider attempt, including failure and partial output.
+        attempt: crate::ModelAttemptLog,
+    },
+    /// The pinned context builder installed the preceding settlement as its summary.
+    Installed,
+}
+
+/// Frozen request and source selection for one idle summary.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+pub struct PreparedManualCompaction {
+    /// Exact executable composition that selected the context builder.
+    pub generation: crate::GenerationSelection,
+    /// Frozen real conversation sources and applicability checks.
+    pub plan: ContextCompactionPlan,
+    /// Prepared route, usage limits and request fingerprint.
+    pub snapshot: rsi_ai_protocol::PreparedCallSnapshot,
+    /// Tariff in force for this request.
+    pub price_quote: Option<crate::PriceQuote>,
+    /// Canonical request evidence, subject to the ordinary capture budget.
+    pub evidence: crate::RequestEvidence,
+}
+
+impl ManualCompactionEvent {
+    /// Physical stage name used by the durable command index.
+    pub const fn stage(&self) -> &'static str {
+        match self {
+            Self::Prepared(_) => "prepared",
+            Self::Started => "started",
+            Self::Settled { .. } => "settled",
+            Self::Installed => "installed",
+        }
+    }
+    /// The exact immediately preceding stage of the same paid effect.
+    pub const fn predecessor(&self) -> Option<&'static str> {
+        match self {
+            Self::Prepared(_) => None,
+            Self::Started => Some("prepared"),
+            Self::Settled { .. } => Some("started"),
+            Self::Installed => Some("settled"),
+        }
+    }
+}
+
+/// Borrowed projection of the common provider lifecycle for accounting and presentation.
+#[derive(Clone, Copy, Debug)]
+pub enum LanguageAttemptStage<'a> {
+    /// Prepared request and its configured tariff.
+    Prepared(
+        &'a rsi_ai_protocol::PreparedCallSnapshot,
+        ModelEventPurpose,
+        Option<&'a crate::PriceQuote>,
+    ),
+    /// Durable pre-dispatch boundary.
+    Started,
+    /// Original normalized stream and its purpose.
+    Settled(&'a crate::ModelAttemptLog, ModelEventPurpose),
+}
+
+/// Provider attempt with either a real conversation turn or a standalone command owner.
+#[derive(Clone, Copy, Debug)]
+pub struct LanguageAttemptFact<'a> {
+    /// Absent for explicit idle compaction.
+    pub turn: Option<&'a TurnId>,
+    /// Stable provider effect identity.
+    pub effect: &'a EffectId,
+    /// Immutable stage represented by this fact.
+    pub stage: LanguageAttemptStage<'a>,
+}
+
+impl crate::SessionFactBody {
+    /// Transfers the selected request's evidence without copying its sections.
+    pub fn into_request_evidence(self) -> Option<(ModelEventPurpose, crate::RequestEvidence)> {
+        match self {
+            Self::ModelIntent {
+                purpose, evidence, ..
+            } => Some((purpose.event_purpose(), evidence)),
+            Self::ManualCompaction {
+                event: ManualCompactionEvent::Prepared(prepared),
+                ..
+            } => Some((ModelEventPurpose::ContextCompaction, prepared.evidence)),
+            _ => None,
+        }
+    }
+    /// Evidence captured at a real prepared request of either owner.
+    pub fn request_evidence(&self) -> Option<&crate::RequestEvidence> {
+        match self {
+            Self::ModelIntent { evidence, .. } => Some(evidence),
+            Self::ManualCompaction {
+                event: ManualCompactionEvent::Prepared(prepared),
+                ..
+            } => Some(&prepared.evidence),
+            _ => None,
+        }
+    }
+    /// Reads either owner without converting a command into a conversation turn.
+    pub fn language_attempt(&self) -> Option<LanguageAttemptFact<'_>> {
+        use LanguageAttemptStage as Stage;
+        let (turn, effect, stage) = match self {
+            Self::ModelIntent {
+                turn_id,
+                effect_id,
+                snapshot,
+                purpose,
+                price_quote,
+                ..
+            } => (
+                Some(turn_id),
+                effect_id,
+                Stage::Prepared(snapshot, purpose.event_purpose(), price_quote.as_ref()),
+            ),
+            Self::ModelStarted { turn_id, effect_id } => (Some(turn_id), effect_id, Stage::Started),
+            Self::ModelAttemptSettled {
+                turn_id,
+                effect_id,
+                purpose,
+                attempt,
+            } => (Some(turn_id), effect_id, Stage::Settled(attempt, *purpose)),
+            Self::ManualCompaction {
+                effect_id, event, ..
+            } => (
+                None,
+                effect_id,
+                match event {
+                    ManualCompactionEvent::Prepared(prepared) => Stage::Prepared(
+                        &prepared.snapshot,
+                        ModelEventPurpose::ContextCompaction,
+                        prepared.price_quote.as_ref(),
+                    ),
+                    ManualCompactionEvent::Installed => return None,
+                    ManualCompactionEvent::Started => Stage::Started,
+                    ManualCompactionEvent::Settled { attempt } => {
+                        Stage::Settled(attempt, ModelEventPurpose::ContextCompaction)
+                    }
+                },
+            ),
+            _ => return None,
+        };
+        Some(LanguageAttemptFact {
+            turn,
+            effect,
+            stage,
+        })
+    }
+}
+
 /// Maximum compact JSON bytes for a frozen plan, including source bindings.
 pub const MAXIMUM_COMPACTION_PLAN_BYTES: usize = 256 * 1024;
 
@@ -116,6 +274,8 @@ pub struct CompactionPrior {
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionTrigger {
+    /// An explicit request to compact eligible history in an idle Session.
+    Manual,
     /// Last successful ordinary response reported this input Usage.
     Usage {
         /// Originating Session of this successful Conversation effect.

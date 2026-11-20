@@ -29,6 +29,11 @@ pub use step_input::{
     PreparedInputRole, StepInputDecision,
 };
 mod history;
+mod feedback;
+pub use feedback::{
+    FeedbackCategory, FeedbackDecision, FeedbackNote, FeedbackRating, MessageFeedback,
+    MessageFeedbackChange, MessageFeedbackOutcome, SavedMessageFeedback,
+};
 pub use application_tools::{ApplicationToolBinding, ApplicationToolView};
 use history::SessionOrigin;
 pub use history::{ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
@@ -37,11 +42,15 @@ mod queue;
 pub use model_attempt::{
     MAXIMUM_MODEL_ATTEMPT_BYTES, MODEL_ATTEMPT_CHUNK_BYTES, MODEL_ATTEMPT_TERMINAL_RESERVE,
     ModelAttemptBuilder, ModelAttemptLog, ModelAttemptPrefix, ModelEventCursor, ModelPrefixDecoder,
+    ScheduledModelRetry,
 };
 pub use queue::*;
 mod program;
 pub use program::*;
 mod compaction;
+pub use compaction::{
+    LanguageAttemptFact, LanguageAttemptStage, ManualCompactionEvent, PreparedManualCompaction,
+};
 mod structured;
 pub use structured::*;
 mod spawn_role;
@@ -116,7 +125,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 39;
+pub const SESSION_FORMAT_VERSION: u32 = 41;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1020,6 +1029,11 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// A version-checked operator judgment on a Session-owned assistant answer.
+    MessageFeedbackChanged {
+        /// Target, observed predecessor and desired value.
+        change: MessageFeedbackChange,
+    },
     /// Suspend pending inbox activation without removing or retargeting messages.
     InboxPaused,
     /// Restore pending inbox activation after an explicit waking operation.
@@ -1229,7 +1243,8 @@ impl AgentControlRecordBody {
                     "completion reservation must be within 1..={MAXIMUM_AGENT_MESSAGE_BYTES} bytes"
                 )))
             }
-            Self::InboxPaused
+            Self::MessageFeedbackChanged { .. }
+            | Self::InboxPaused
             | Self::InboxResumed
             | Self::MessageClaimed { .. }
             | Self::DomainStateCommitted { .. }
@@ -2188,6 +2203,15 @@ impl TurnOutcome {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(clippy::large_enum_variant)] // Fact pages bound both count and bytes; keep owned semantic payloads inline.
 pub enum SessionFactBody {
+    /// An explicit idle-session command owns this effect independently of any Turn.
+    ManualCompaction {
+        /// Idempotency identity of the operator's invocation.
+        command_id: DomainRequestId,
+        /// Identity of this paid effect.
+        effect_id: EffectId,
+        /// Exact stage reached.
+        event: ManualCompactionEvent,
+    },
     /// One user turn entered the session log.
     TurnAccepted {
         /// Exact turn identity.
@@ -2545,6 +2569,57 @@ impl SessionFactBody {
                 }
                 Ok(())
             }
+            Self::ManualCompaction { event, .. } => match event {
+                ManualCompactionEvent::Prepared(prepared) => {
+                    let PreparedManualCompaction {
+                        plan,
+                        snapshot,
+                        price_quote,
+                        evidence,
+                        ..
+                    } = prepared.as_ref();
+                    if !matches!(plan.trigger, CompactionTrigger::Manual)
+                        || seq.is_some_and(|seq| plan.through_seq.checked_add(1) != Some(seq))
+                    {
+                        return Err(SessionError::Invalid(
+                            "standalone compaction requires an explicit command".into(),
+                        ));
+                    }
+                    plan.validate()?;
+                    validate_snapshot_capability(
+                        snapshot,
+                        AiCapability::Language,
+                        "summary requires a language model",
+                    )?;
+                    evidence.validate(seq)?;
+                    if let Some(quote) = price_quote {
+                        quote.validate()?;
+                        if !quote.matches(snapshot) {
+                            return Err(SessionError::Invalid(
+                                "price quote differs from prepared route".into(),
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                ManualCompactionEvent::Started | ManualCompactionEvent::Installed => Ok(()),
+                ManualCompactionEvent::Settled { attempt } => {
+                    if attempt.scheduled_retry().is_some() {
+                        return Err(SessionError::Invalid(
+                            "manual compaction cannot schedule automatic retry".into(),
+                        ));
+                    }
+                    let actual = bounded_compact_json_len(self, MAXIMUM_MODEL_ATTEMPT_BYTES)?;
+                    if actual > MAXIMUM_MODEL_ATTEMPT_BYTES {
+                        return Err(SessionError::TooLarge {
+                            kind: "model attempt",
+                            maximum: MAXIMUM_MODEL_ATTEMPT_BYTES,
+                            actual,
+                        });
+                    }
+                    Ok(())
+                }
+            },
             Self::ModelIntent {
                 snapshot,
                 purpose,
@@ -2585,7 +2660,17 @@ impl SessionFactBody {
             | Self::ImageStarted { .. }
             | Self::ToolStarted { .. }
             | Self::ToolCallsSuperseded { .. } => Ok(()),
-            Self::ModelAttemptSettled { .. } => {
+            Self::ModelAttemptSettled {
+                effect_id, attempt, ..
+            } => {
+                if attempt
+                    .scheduled_retry()
+                    .is_some_and(|retry| &retry.effect_id == effect_id)
+                {
+                    return Err(SessionError::Invalid(
+                        "scheduled retry must start a distinct model effect".into(),
+                    ));
+                }
                 let actual = bounded_compact_json_len(self, MAXIMUM_MODEL_ATTEMPT_BYTES)?;
                 if actual > MAXIMUM_MODEL_ATTEMPT_BYTES {
                     return Err(SessionError::TooLarge {
@@ -2670,8 +2755,9 @@ impl SessionFactBody {
     }
 
     /// Returns the turn identity affected by this Fact.
-    pub const fn turn_id(&self) -> &TurnId {
+    pub const fn turn_id(&self) -> Option<&TurnId> {
         match self {
+            Self::ManualCompaction { .. } => None,
             Self::TurnAccepted { turn_id, .. }
             | Self::MessageTurnAccepted { turn_id, .. }
             | Self::StepStarted { turn_id, .. }
@@ -2694,7 +2780,7 @@ impl SessionFactBody {
             | Self::ToolRejected { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
             | Self::ToolResult { turn_id, .. }
-            | Self::TurnTerminal { turn_id, .. } => turn_id,
+            | Self::TurnTerminal { turn_id, .. } => Some(turn_id),
         }
     }
 }

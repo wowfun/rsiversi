@@ -159,6 +159,7 @@ pub fn native_control_references(record: &AgentControlRecord) -> Result<Referenc
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -224,6 +225,7 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
             | SessionFactBody::WorkspaceTouched { .. }
             | SessionFactBody::ImageRequested { .. }
             | SessionFactBody::CancelRequested { .. }
+            | SessionFactBody::ManualCompaction { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }

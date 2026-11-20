@@ -65,7 +65,7 @@ async fn sqlite_domains_preserve_atomic_revisions_receipts_and_history() {
         2,
         2,
         SessionFactBody::CancelRequested {
-            turn_id: accepted.body().turn_id().clone(),
+            turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
             reason: None,
         },
     )
@@ -104,7 +104,7 @@ async fn cold_domain_reads_and_offline_verify_reject_corrupted_canonical_indexes
             2,
             2,
             SessionFactBody::CancelRequested {
-                turn_id: accepted.body().turn_id().clone(),
+                turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
                 reason: None,
             },
         )
@@ -830,6 +830,7 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             &rsi_agent_store_protocol::ExecutionLocations::all(),
             None,
             2,
+            None,
         )
         .await
         .unwrap();
@@ -847,6 +848,7 @@ async fn append_pagination_conflict_and_reopen_match_the_store_contract() {
             &rsi_agent_store_protocol::ExecutionLocations::all(),
             Some(&recent.sessions[1].cursor()),
             2,
+            None,
         )
         .await
         .unwrap();
@@ -1143,7 +1145,7 @@ async fn oversized_fact_rows_are_rejected_by_sql_length_before_json_decode() {
         matches!(store.header(&session).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
     );
     assert!(
-        matches!(store.list_recent_sessions(&rsi_agent_store_protocol::ExecutionLocations::all(), None, 1).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
+        matches!(store.list_recent_sessions(&rsi_agent_store_protocol::ExecutionLocations::all(), None, 1, None).await, Err(StoreError::Corrupt(message)) if message.contains("exceeds") && message.contains("session header"))
     );
 }
 
@@ -1760,6 +1762,24 @@ fn verify_refuses_a_snapshot_with_an_uncheckpointed_wal() {
             if message.contains("nonempty WAL") && message.contains("cleanly closed")
     ));
     drop(live_store);
+}
+
+#[test]
+fn fresh_databases_use_small_pages_and_reopen_preserves_existing_geometry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    drop(store);
+    let path = root.path().join("sessions.sqlite3");
+    let page_size = |connection: &Connection| {
+        connection.pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0)).unwrap()
+    };
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(page_size(&db), 1024);
+    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=4096; VACUUM").unwrap();
+    assert_eq!(page_size(&db), 4096);
+    drop(db);
+    drop(SqliteStore::open(root.path()).unwrap());
+    assert_eq!(page_size(&Connection::open(&path).unwrap()), 4096);
 }
 
 #[test]

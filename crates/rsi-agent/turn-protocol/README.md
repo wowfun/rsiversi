@@ -1,5 +1,22 @@
 # rsi-agent-turn-protocol
 
+Message feedback uses Session submission admission to compare and append one
+operator rating without loading a cold Agent or starting a model turn. A
+version conflict returns the current rating to the caller.
+
+Host controllers can select one current domain by name. The Kernel reads its
+canonical snapshot and control sequence from one Store observation under the
+same bounded admission as a full domain read. An absent domain yields no value.
+
+A reserve callback can opt into recovery of its already accepted mailbox input.
+After loss of its live owner, the inbox waits for a newly armed Host lease.
+Claim requires the selected generation to declare that same recoverable
+command and verify the original reservation receipt and exact input. If the
+domain has advanced, its reserve callback must confirm the same input is still
+unsettled in the current state. An explicitly revoked live owner blocks claim.
+Ordinary waking input can still supersede the pending message. Recovery claims
+the existing message and spends no new round.
+
 `open_fork_history` and `open_checkpoint_fork_history` return operation-owned
 readers over authenticated inherited intervals. Their source Headers are ordered
 oldest first and own each interval's terminal cut; bounded pages return progress
@@ -232,7 +249,8 @@ lease; it cannot reserve or admit input. Each submitted input binds a canonical
 internal reservation receipt or the exact frozen first-publication baseline,
 plus the current domain revision. Ordinary command and message routes cannot
 claim this provenance. The ready scheduler and claim admission both check the
-live lease and current revision; a cold pending continuation is discarded.
+lease and reservation. On restart, a pending input without recoverable
+reservation evidence is discarded.
 Pending-only discard never falls through to cancellation of a claimed Turn.
 An explicit pause/cancel after restart may retain an already revoked settlement
 lease. It never grants scheduling authority. Draft arm freezes an uncharged
@@ -252,9 +270,10 @@ revision and complete typed states, then runs the callback outside framework
 locks. Preparation and callback execution share a 30-second deadline, with at
 most 64 concurrent distinct requests per Kernel. A changed invocation using the same request ID is
 a conflict; callbacks are never automatically retried after revision conflicts.
-After validation, the Kernel owns the state-only commit through reconciliation
-even if the caller disconnects. Commands do not create Turns, execution Facts,
-Workspace registrations or external effects.
+After validation, the Kernel reconciles the atomic publication of domain
+changes and any command inputs even if the caller disconnects. Injected inputs
+wait for a model step. Steering inputs can wake the idle Session or join its
+active Turn. The command callback itself performs no external work.
 
 `SessionProjections` independently captures disposable extension views. It selects
 the resident composition pin or a current cold read generation, waits for an
@@ -580,3 +599,5 @@ snapshot do not mix newer references into its reply. Live owners refresh their
 cached suffix; historical runs replay canonical records once per detail read.
 
 A directory observer may subscribe before reading a baseline. Kernel publication and confirmed Session retirement coalesce into a signal carrying no Session data. Subscription ends when the Kernel retires.
+
+A selected domain read returns its state and the durable control sequence from the same read. A controller proposing work from that state uses this sequence as its command precondition.

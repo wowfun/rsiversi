@@ -111,7 +111,7 @@ async fn completed_history(store: &SqliteStore, count: u64) -> (SessionId, TurnI
             index * 2 + 2,
             1,
             SessionFactBody::TurnTerminal {
-                turn_id: accepted.body().turn_id().clone(),
+                turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
                 outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
                 result: None,
             },
@@ -130,7 +130,7 @@ async fn completed_history(store: &SqliteStore, count: u64) -> (SessionId, TurnI
         .unwrap();
     }
     let invoking = test_fact(count * 2 + 1);
-    let turn = invoking.body().turn_id().clone();
+    let turn = invoking.body().turn_id().expect("turn-owned fixture fact").clone();
     store
         .append(AppendBatch {
             session_id: id.clone(),
@@ -493,7 +493,7 @@ async fn fork_boundaries_reuse_exact_identities_across_append_but_not_reopen() {
     );
     assert_eq!(store.inner.fork_resolutions.load(Ordering::Relaxed), 2);
     let next = test_fact(11);
-    let next_turn = next.body().turn_id().clone();
+    let next_turn = next.body().turn_id().expect("turn-owned fixture fact").clone();
     store
         .append(AppendBatch {
             session_id: id.clone(),
@@ -537,7 +537,7 @@ async fn fork_boundary_cache_is_bounded_evicts_and_does_not_hold_pins() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let (id, _) = completed_history(&store, 258).await;
-    let turn = |index: u64| test_fact(index * 2 + 1).body().turn_id().clone();
+    let turn = |index: u64| test_fact(index * 2 + 1).body().turn_id().expect("turn-owned fixture fact").clone();
     for index in 1..=257 {
         store
             .resolve_fork_boundary(

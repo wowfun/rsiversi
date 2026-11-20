@@ -58,12 +58,16 @@ pub async fn assert_mechanical_store_contract(
     terminal: SessionFact,
 ) {
     let session_id = header.session_id().clone();
-    let turn_id = accepted.body().turn_id().clone();
+    let turn_id = accepted
+        .body()
+        .turn_id()
+        .expect("turn-owned fixture fact")
+        .clone();
     assert_eq!(accepted.seq(), 1);
     assert_eq!(event.seq(), 2);
     assert_eq!(terminal.seq(), 3);
-    assert_eq!(event.body().turn_id(), &turn_id);
-    assert_eq!(terminal.body().turn_id(), &turn_id);
+    assert_eq!(event.body().turn_id(), Some(&turn_id));
+    assert_eq!(terminal.body().turn_id(), Some(&turn_id));
     assert_missing_session_atomic_append_is_not_found(store).await;
     assert!(matches!(
         store.active_activation(&session_id).await,
@@ -677,6 +681,7 @@ pub async fn assert_mechanical_store_contract(
             &rsi_agent_store_protocol::ExecutionLocations::all(),
             None,
             8,
+            None,
         )
         .await
         .unwrap();
@@ -687,7 +692,8 @@ pub async fn assert_mechanical_store_contract(
             .list_recent_sessions(
                 &rsi_agent_store_protocol::ExecutionLocations::all(),
                 Some(&recent.sessions[0].cursor()),
-                8
+                8,
+                None
             )
             .await
             .unwrap()
@@ -1154,7 +1160,12 @@ pub async fn assert_mechanical_store_contract(
     assert_eq!(all, last);
     assert_eq!((all.resolved_after_seq, all.resolved_terminal_seq), (0, 7));
     assert_eq!(all.effective_turns, 2);
-    let completed = message_facts.last().unwrap().body().turn_id();
+    let completed = message_facts
+        .last()
+        .unwrap()
+        .body()
+        .turn_id()
+        .expect("turn terminal");
     let through = store
         .resolve_fork_boundary(
             &session_id,
@@ -1954,6 +1965,7 @@ pub async fn assert_mechanical_store_contract(
             first_pending_step_source: Some(
                 rsi_agent_session_protocol::AgentMessageSourceKind::Completion
             ),
+            injected_commands: 0,
             pending_count: rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES,
             pending_promotable_message_ids: vec![MessageId::new("bounded-message-0").unwrap(),],
             durable_control_seq: full_control_seq,

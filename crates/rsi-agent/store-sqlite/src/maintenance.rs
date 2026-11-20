@@ -512,8 +512,9 @@ fn verify_selected(
 ) -> Result<()> {
     if stream == "fact" {
         let id = SessionId::new(session).map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        let (fact, encoded) = super::fact_storage::read(transaction, &id, seq)?;
-        return reference_index::verify_fact(transaction, &id, &fact, &encoded);
+        return super::fact_storage::read_with(transaction, &id, seq, |fact, encoded| {
+            reference_index::verify_fact(transaction, &id, &fact, encoded)
+        });
     }
     let (column, maximum) = match stream {
         "header" => (

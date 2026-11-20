@@ -21,15 +21,15 @@ pub(super) fn available(connection: &Connection, id: &SessionId) -> Result<()> {
         Ok(())
     }
 }
-fn digest(encoded: &str) -> String {
-    hex::encode(Sha256::digest(encoded.as_bytes()))
+fn digest(encoded: &str) -> [u8; 32] {
+    Sha256::digest(encoded.as_bytes()).into()
 }
 fn write(
     connection: &Connection,
     id: &SessionId,
     stream: &str,
     seq: u64,
-    hash: &str,
+    hash: &[u8; 32],
     refs: Result<ReferenceCollector>,
 ) -> Result<()> {
     let refs = refs?;
@@ -94,7 +94,7 @@ impl<'a> Writer<'a> {
             self.id,
             stream,
             seq,
-            &hex::encode(Sha256::digest(encoded.as_bytes())),
+            &digest(&encoded),
             refs,
         )?;
         Ok(encoded)
@@ -126,23 +126,24 @@ fn verify(
     id: &SessionId,
     stream: &str,
     seq: u64,
-    hash: &str,
+    hash: &[u8; 32],
     refs: &ReferenceCollector,
 ) -> Result<()> {
     let row = connection
         .query_row(
-            "SELECT sha256 FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
-            params![id.as_str(), stream, sqlite_u64("reference sequence", seq)?],
-            |row| bounded_text(row, 0, 64),
+            "SELECT CASE length(sha256) WHEN 32 THEN sha256=?4 ELSE 0 END
+             FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
+            params![id.as_str(), stream, sqlite_u64("reference sequence", seq)?, hash],
+            |row| row.get::<_, bool>(0),
         )
         .optional()
         .map_err(sql_error)?;
-    let Some(stored) = row else {
+    let Some(matches) = row else {
         return Err(StoreError::Corrupt(
             "missing canonical reference coverage".into(),
         ));
     };
-    if stored != hash {
+    if !matches {
         return Err(StoreError::Corrupt(
             "reference coverage digest differs from canonical record".into(),
         ));

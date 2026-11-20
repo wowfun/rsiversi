@@ -90,7 +90,7 @@ pub async fn initial_turn_input(
     loop {
         let page = execution.read_facts(claim, cursor, 128).await?;
         for fact in &page.facts {
-            if fact.body().turn_id() != claim.turn_id() {
+            if fact.body().turn_id() != Some(claim.turn_id()) {
                 continue;
             }
             if state.is_none() {

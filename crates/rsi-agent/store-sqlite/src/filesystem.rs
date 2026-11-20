@@ -24,9 +24,7 @@ pub(super) fn open_offline_store(path: &Path) -> Result<OfflineStore> {
     let root = existing_root(path)?;
     let writer_lock = acquire_existing_writer_lock(&root)?;
     #[cfg(windows)]
-    let namespace = rsi_files_native_fs::open_absolute_directory_no_follow(&root)
-        .and_then(|directory| directory.pin_namespace())
-        .map_err(io_error)?;
+    let namespace = pin_store_root(&root)?;
     reject_uncheckpointed_wal(&root)?;
     let database_path = root.join("sessions.sqlite3");
     let metadata = fs::symlink_metadata(&database_path).map_err(|error| {
@@ -58,6 +56,15 @@ pub(super) fn open_offline_store(path: &Path) -> Result<OfflineStore> {
         #[cfg(windows)]
         _namespace: namespace,
     })
+}
+
+const WRITER_LOCK: &str = ".writer.lock";
+
+#[cfg(windows)]
+pub(super) fn pin_store_root(root: &Path) -> Result<rsi_files_native_fs::NamespaceLease> {
+    rsi_files_native_fs::open_absolute_directory_no_follow(root)
+        .and_then(|directory| directory.pin_namespace_with_existing_child(Path::new(WRITER_LOCK)))
+        .map_err(io_error)
 }
 
 pub(super) fn prepare_root(path: &Path) -> Result<PathBuf> {
@@ -264,7 +271,7 @@ pub(super) fn acquire_existing_writer_lock(root: &Path) -> Result<WriterLease> {
 }
 
 pub(super) fn open_writer_lock(root: &Path, create: bool) -> Result<WriterLease> {
-    let path = root.join(".writer.lock");
+    let path = root.join(WRITER_LOCK);
     reject_symlink_if_present(&path, "Store writer lock")?;
     #[cfg(not(windows))]
     let file = OpenOptions::new()

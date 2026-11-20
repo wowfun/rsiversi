@@ -2,7 +2,11 @@
 
 use rusqlite::{Row, types::ValueRef};
 
-fn borrowed_text<'a>(row: &'a Row<'_>, index: usize, limit: usize) -> rusqlite::Result<&'a str> {
+pub(super) fn borrowed_text<'a>(
+    row: &'a Row<'_>,
+    index: usize,
+    limit: usize,
+) -> rusqlite::Result<&'a str> {
     let value = row.get_ref(index)?;
     let ValueRef::Text(bytes) = value else {
         return Err(rusqlite::Error::InvalidColumnType(

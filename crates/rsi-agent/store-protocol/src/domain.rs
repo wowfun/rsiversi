@@ -38,7 +38,7 @@ impl<'a> StoreDomainFactCheck<'a> {
     /// Adds one logical Fact without cloning the receipt, state or Fact body.
     pub fn push(&mut self, fact: &SessionFact) -> Result<()> {
         for request in &self.requests {
-            if !matches!(request.source(), DomainMutationSource::Turn { turn_id } if turn_id == fact.body().turn_id())
+            if !matches!(request.source(), DomainMutationSource::Turn { turn_id } if Some(turn_id) == fact.body().turn_id())
             {
                 return Err(StoreError::Invalid(
                     "domain request Facts changed the originating Turn".into(),

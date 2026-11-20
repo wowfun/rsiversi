@@ -158,7 +158,7 @@ async fn pending_requests(
             ));
         }
         for fact in page.facts {
-            if fact.body().turn_id() != &context.turn_id {
+            if fact.body().turn_id() != Some(&context.turn_id) {
                 continue;
             }
             match fact.body() {

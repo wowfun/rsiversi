@@ -685,7 +685,7 @@ impl DomainStateCommit {
             .into_iter()
             .take(crate::MAXIMUM_FACTS_PER_READ + 1)
             .collect::<Vec<_>>();
-        if facts.iter().any(|fact| fact.body().turn_id() != turn_id) {
+        if facts.iter().any(|fact| fact.body().turn_id() != Some(turn_id)) {
             return Err(SessionError::Invalid(
                 "domain request Facts changed the originating Turn".into(),
             ));

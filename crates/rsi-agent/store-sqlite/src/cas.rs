@@ -513,14 +513,6 @@ pub(super) fn decode_projected_json_with_source<T: serde::de::DeserializeOwned, 
     Ok((value, json))
 }
 
-pub(super) fn read_indexed_fact(
-    connection: &Connection,
-    session_id: &SessionId,
-    sequence: i64,
-) -> Result<SessionFact> {
-    Ok(super::fact_storage::read(connection, session_id, sequence)?.0)
-}
-
 pub(super) fn sqlite_u64(label: &str, value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::Invalid(format!("{label} exceeds SQLite INTEGER")))
 }
@@ -529,11 +521,12 @@ pub(super) fn decode_u64(label: &str, value: i64) -> Result<u64> {
     u64::try_from(value).map_err(|_| StoreError::Corrupt(format!("{label} is negative")))
 }
 
-pub(super) const fn fact_index_kind(body: &SessionFactBody) -> &'static str {
+pub(super) fn fact_index_kind(body: &SessionFactBody) -> &'static str {
     match rsi_agent_store_protocol::store_fact_turn_role(body) {
-        StoreFactTurnRole::Acceptance => "accepted",
-        StoreFactTurnRole::Terminal => "terminal",
-        StoreFactTurnRole::Event => "event",
+        Some((StoreFactTurnRole::Acceptance, _)) => "accepted",
+        Some((StoreFactTurnRole::Terminal, _)) => "terminal",
+        Some((StoreFactTurnRole::Event, _)) => "event",
+        None => "command",
     }
 }
 

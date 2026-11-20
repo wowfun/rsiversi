@@ -1,8 +1,15 @@
 # rsi-agent-store-protocol
 
+A per-answer feedback read returns its latest live value and both durable
+cursors from one snapshot. A feedback append compares the stored predecessor
+and requires a finalized local assistant answer within the control’s Fact cut.
+
 Domain reads return canonical state positions and optional generation metadata
 from the same Store snapshot. Named state reads do not decode unrelated generation
 payloads. A generation commit appends only changed snapshots and explicit removals.
+Recent Session reads may select one edited domain. The current domain head must
+have a revision above its initial revision. Location, deletion and keyset filters
+apply before the page limit. Listing summaries does not load any domain payload.
 Unchanged heads keep their canonical positions and revisions. Historical reads and
 forks resolve membership at their cut. See the
 [generation contract](../docs/subsystems/composition-generations.md).
@@ -187,6 +194,9 @@ still validates the original bytes at the durable boundary.
 Consumers retaining one selected source can transfer its owned String after
 the same binding check, releasing the other sections without copying that text.
 
+The current writer refuses older pre-release stores and preserves the original database for the operator.
+Request inspection can seek the preceding model intent of the same purpose
+before a selected sequence without materializing intervening tool or model output.
 Stores implement only the current `AGENT_STORE_SCHEMA_VERSION` defined in
 [src/lib.rs](src/lib.rs). The [SQLite contract](../store-sqlite/README.md)
 owns database preflight and file-preservation guarantees.
@@ -344,7 +354,8 @@ bounded query and atomic-update surfaces for ready messages, immutable
 parent-child lineage, terminal-prefix digests,
 a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
-mailbox summary returns the pending count, the bounded ordered identities of
+mailbox summary returns the pending count, the count of non-waking injected
+command inputs, the bounded ordered identities of
 pending promotable next-Step messages, and Fact/control tails for capacity and
 terminal-promotion decisions. Payload inspection reads all pending messages,
 optionally with one exact message status. Claim metadata selection separately
@@ -565,3 +576,9 @@ optional protection scope. Providers validate each full bounded Header before
 projection and release it before the next row. Per-item NotFound/Corrupt errors
 remain ordered; a batch failure describes the whole snapshot. This seam grants
 no access and does not validate historical Facts.
+
+Edited-domain discovery pages through live Session IDs in lexical order. It
+selects current heads with a revision greater than one and excludes retired
+Sessions and removed domains. A domain first introduced by a later generation
+can also have a revision greater than one. The read returns candidate identities.
+Its consumer selects eligible work from their current typed state.

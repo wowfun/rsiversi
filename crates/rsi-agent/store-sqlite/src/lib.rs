@@ -103,7 +103,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
         FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
     ) STRICT"),
     ("cas_deletions", "CREATE TABLE cas_deletions (operation_id TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL, byte_len INTEGER NOT NULL CHECK (byte_len > 0), generation INTEGER NOT NULL CHECK (generation > 0), state TEXT NOT NULL CHECK (state IN ('deleting', 'deleted')), UNIQUE (sha256, generation)) STRICT"),
-    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 TEXT NOT NULL, PRIMARY KEY (session_id, stream, seq)) STRICT"),
+    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 BLOB NOT NULL CHECK(length(sha256)=32), PRIMARY KEY (session_id, stream, seq)) STRICT, WITHOUT ROWID"),
     ("reference_edges", "CREATE TABLE reference_edges (session_id TEXT NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL, target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'cas')), target_id TEXT NOT NULL, target_bytes INTEGER NOT NULL CHECK (target_bytes >= 0), PRIMARY KEY (session_id, stream, seq, target_kind, target_id), FOREIGN KEY (session_id, stream, seq) REFERENCES reference_records(session_id, stream, seq) ON DELETE RESTRICT) STRICT"),
     ("purge_operations", "CREATE TABLE purge_operations (operation_id TEXT PRIMARY KEY NOT NULL, request_json TEXT NOT NULL, locations_json TEXT NOT NULL, locations_sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), deleted_records INTEGER NOT NULL CHECK (deleted_records >= 0), deleted_payload_bytes INTEGER NOT NULL CHECK (deleted_payload_bytes >= 0)) STRICT"),
     ("session_tombstones", "CREATE TABLE session_tombstones (session_id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL REFERENCES purge_operations(operation_id) ON DELETE RESTRICT, state TEXT NOT NULL CHECK (state IN ('retiring', 'purged'))) STRICT"),
@@ -218,13 +218,16 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
         "CREATE TABLE facts (
             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
             seq INTEGER NOT NULL CHECK (seq > 0),
-            turn_id TEXT NOT NULL,
+            turn_id TEXT,
             fact_kind TEXT NOT NULL
-                CHECK (fact_kind IN ('accepted', 'terminal', 'event')),
+                CHECK (fact_kind IN ('accepted', 'terminal', 'event', 'command')),
             fact_json TEXT NOT NULL,
+            intent_purpose TEXT CHECK(intent_purpose IN ('conversation', 'context_compaction')),
+            command_id TEXT GENERATED ALWAYS AS (CASE WHEN fact_kind='command' THEN json_extract(fact_json,'$.command_id') END) VIRTUAL,
             acceptance_control_seq INTEGER CHECK (acceptance_control_seq > 0),
             logical_bytes INTEGER CHECK (logical_bytes > 0),
             CHECK ((acceptance_control_seq IS NULL) = (logical_bytes IS NULL)),
+            CHECK ((turn_id IS NULL) = (fact_kind='command') AND (command_id IS NOT NULL) = (fact_kind='command')),
             PRIMARY KEY (session_id, seq)
          ) STRICT",
     ),
@@ -331,7 +334,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
          ) STRICT",
     ),
 ];
-const EXPECTED_INDEXES: [(&str, &str); 28] = [
+const EXPECTED_INDEXES: [(&str, &str); 31] = [
     (
         "domain_removals_by_control",
         "CREATE INDEX domain_removals_by_control ON domain_removals(session_id, control_seq, domain_id)",
@@ -359,6 +362,14 @@ const EXPECTED_INDEXES: [(&str, &str); 28] = [
     (
         "model_effect_coordinates",
         "CREATE UNIQUE INDEX model_effect_coordinates ON facts (session_id, turn_id, json_extract(fact_json, '$.effect_id'), json_extract(fact_json, '$.type')) WHERE json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')",
+    ),
+    (
+        "model_intents_by_purpose",
+        "CREATE INDEX model_intents_by_purpose ON facts(session_id, intent_purpose, seq) WHERE intent_purpose IS NOT NULL",
+    ),
+    (
+        "command_effect_stages",
+        "CREATE UNIQUE INDEX command_effect_stages ON facts(session_id, command_id, json_extract(fact_json,'$.event.stage')) WHERE fact_kind='command'",
     ),
     (
         "sessions_by_location_created",
@@ -389,8 +400,12 @@ const EXPECTED_INDEXES: [(&str, &str); 28] = [
         "CREATE INDEX agent_messages_by_slot ON agent_messages (session_id, queue_slot_id, accepted_control_seq DESC)",
     ),
     (
+        "message_feedback_by_answer",
+        "CREATE INDEX message_feedback_by_answer ON agent_controls(session_id,json_extract(control_json,'$.change.message_seq'),seq) WHERE json_extract(control_json,'$.type')='message_feedback_changed'",
+    ),
+    (
         "agent_controls_by_activation",
-        "CREATE INDEX agent_controls_by_activation ON agent_controls(session_id, json_extract(control_json,'$.type'), json_extract(control_json,'$.activation_id'))",
+        "CREATE INDEX agent_controls_by_activation ON agent_controls(session_id, json_extract(control_json,'$.type'), json_extract(control_json,'$.activation_id')) WHERE json_extract(control_json,'$.activation_id') IS NOT NULL",
     ),
     (
         "pending_program_notices",
@@ -724,9 +739,7 @@ impl SqliteStore {
         let root = prepare_root(root.as_ref())?;
         let writer_lock = acquire_writer_lock(&root)?;
         #[cfg(windows)]
-        let namespace = rsi_files_native_fs::open_absolute_directory_no_follow(&root)
-            .and_then(|directory| directory.pin_namespace())
-            .map_err(io_error)?;
+        let namespace = filesystem::pin_store_root(&root)?;
         let cas_dir = root.join("cas");
         let cas_staging_dir = cas_dir.join("staging");
         let database_path = root.join("sessions.sqlite3");
@@ -759,6 +772,12 @@ impl SqliteStore {
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(sql_error)?;
+        if may_initialize {
+            // SQLite fixes the page size when the new database enters WAL mode.
+            writer_connection
+                .pragma_update(None, "page_size", 1024)
+                .map_err(sql_error)?;
+        }
         configure_writer(&writer_connection)?;
         if may_initialize {
             initialize_or_validate_schema(&mut writer_connection, true)?;
@@ -1146,6 +1165,7 @@ impl SqliteStore {
 
 #[macro_use]
 mod fact_storage;
+mod feedback;
 mod activity;
 mod maintenance;
 mod offline_maintenance;
@@ -1187,9 +1207,10 @@ use append::{
 };
 use cas::{
     decode_context_checkpoint, decode_json, decode_projected_json, decode_sha256, decode_u64,
-    encode_json, fact_index_kind, install_cas, io_error, read_indexed_fact, sql_error, sqlite_u64,
+    encode_json, fact_index_kind, install_cas, io_error, sql_error, sqlite_u64,
     sync_directory, validate_sha256,
 };
+use fact_storage::read_indexed_fact;
 use filesystem::{
     acquire_writer_lock, configure_reader, configure_writer, prepare_cas_staging_directory,
     prepare_owned_directory, prepare_root, reject_symlink_if_present,

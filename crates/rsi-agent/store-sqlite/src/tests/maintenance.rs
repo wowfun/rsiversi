@@ -353,7 +353,7 @@ async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
         let result: Result<()> = store
             .with_writer(|connection| {
                 let tx = connection.transaction().map_err(sql_error)?;
-                tx.execute("UPDATE reference_records SET sha256='invalid'", [])
+                tx.execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
                     .map_err(sql_error)?;
                 Err(StoreError::Invalid("rollback after statements".into()))
             })
@@ -365,7 +365,7 @@ async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
     let result: Result<()> = store
         .with_writer(|connection| {
             connection
-                .execute("UPDATE reference_records SET sha256='invalid'", [])
+                .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
                 .map_err(sql_error)?;
             Err(StoreError::Io("acknowledgement lost".into()))
         })
@@ -389,7 +389,7 @@ async fn proof_stamp_cannot_skip_an_external_commit_between_entry_observations()
         reference_validation::check_cached(&store.inner, connection).unwrap();
         let external = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         external
-            .execute("UPDATE reference_records SET sha256='invalid'", [])
+            .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
             .unwrap();
         let _newer_observation =
             reference_validation::Stamp::read(&store.inner, connection).unwrap();
@@ -419,7 +419,7 @@ async fn reference_audit_is_not_reused_after_reopen_or_external_database_changes
         external
             .execute(
                 "UPDATE reference_records SET sha256=?1 WHERE session_id='external-change' AND stream='header'",
-                ["a".repeat(64)],
+                [[0xaa_u8; 32]],
             )
             .unwrap(),
         1
@@ -464,7 +464,7 @@ async fn reference_audit_is_shared_across_gc_and_strict_appends_but_not_untracke
     seed(&store, "typed-append", 1).await;
     assert!(store.preview_cas_gc(256).await.unwrap().is_empty());
     assert_eq!(store.inner.reference_audits.load(Ordering::Relaxed), 1);
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='typed-append' AND stream='header'", ["a".repeat(64)]).unwrap();
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='typed-append' AND stream='header'", [[0xaa_u8; 32]]).unwrap();
     assert!(matches!(
         store.preview_cas_gc(256).await,
         Err(StoreError::Corrupt(_))
@@ -949,7 +949,7 @@ async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_aft
         .as_ref()
         .unwrap()
         .execute(
-            "UPDATE reference_records SET sha256='invalid' WHERE session_id='unrelated-gc'",
+            "UPDATE reference_records SET sha256=zeroblob(32) WHERE session_id='unrelated-gc'",
             [],
         )
         .unwrap();
@@ -986,7 +986,7 @@ async fn interrupted_purge_revalidates_surviving_canonical_reference_records() {
         .await
         .unwrap();
     assert!(!receipt.complete);
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='retiring-corruption' AND stream='header'",["a".repeat(64)]).unwrap();
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='retiring-corruption' AND stream='header'",[[0xaa_u8; 32]]).unwrap();
     assert!(matches!(
         store.purge_batch(request.operation_id.as_str()).await,
         Err(StoreError::Corrupt(_))
@@ -1018,7 +1018,7 @@ async fn reference_rebuild_and_compact_are_explicit_and_exclusive() {
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute("UPDATE reference_records SET sha256='invalid'", [])
+        .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
         .unwrap();
     assert!(matches!(
         store.preview_purge(&request).await,
@@ -1242,7 +1242,7 @@ async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring
         before,
         "no live-history replay on a retiring batch"
     );
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES('selected','fact',999,?1)", ["a".repeat(64)]).unwrap();
+    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES('selected','fact',999,?1)", [[0xaa_u8; 32]]).unwrap();
     assert!(matches!(
         store.purge_batch(request.operation_id.as_str()).await,
         Err(StoreError::Corrupt(_))
@@ -1262,7 +1262,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-verification", 600).await;
-    let header_digest: String = store
+    let header_digest: [u8; 32] = store
         .inner
         .connections
         .writer
@@ -1285,7 +1285,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
         .as_ref()
         .unwrap()
         .execute(
-            "UPDATE reference_records SET sha256='invalid' WHERE stream='header'",
+            "UPDATE reference_records SET sha256=zeroblob(32) WHERE stream='header'",
             [],
         )
         .unwrap();
@@ -1317,7 +1317,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
         .unwrap()
         .execute(
             "UPDATE reference_records SET sha256=?1 WHERE stream='fact' AND seq=1200",
-            ["a".repeat(64)],
+            [[0xaa_u8; 32]],
         )
         .unwrap();
     // Only the selected rows may be decoded; later corruption fails its own batch.
@@ -1498,8 +1498,8 @@ async fn append_coverage_hashes_exact_persisted_header_fact_and_control_bytes() 
         let mut count = 0;
         while let Some(row) = rows.next().unwrap() {
             let encoded: String = row.get(0).unwrap();
-            let digest: String = row.get(1).unwrap();
-            assert_eq!(digest, hex::encode(Sha256::digest(encoded.as_bytes())));
+            let digest: [u8; 32] = row.get(1).unwrap();
+            assert_eq!(digest[..], Sha256::digest(encoded.as_bytes())[..]);
             count += 1;
         }
         assert!(count > 0);

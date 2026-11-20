@@ -263,6 +263,14 @@ pub trait SessionContinuations: fmt::Debug + Send + Sync + 'static {
         session: SubmitSession,
         binding: ContinuationBinding,
     ) -> Result<ContinuationLease>;
+    /// Rebinds an existing reservation and wakes its pending inbox scan.
+    async fn arm_for_recovery(
+        &self,
+        session: SubmitSession,
+        binding: ContinuationBinding,
+    ) -> Result<ContinuationLease> {
+        self.arm(session, binding).await
+    }
     /// Retains an already disarmed owner for explicit pause/cancel reconciliation.
     /// This lease can settle or discard; it can never allocate or admit input.
     async fn retain_for_settlement(

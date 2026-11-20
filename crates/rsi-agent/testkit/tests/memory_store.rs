@@ -91,7 +91,7 @@ async fn controls_retain_their_atomic_fact_cut_despite_clock_rollback() {
 #[tokio::test]
 async fn memory_domains_preserve_atomic_revisions_receipts_and_history() {
     let accepted = fact(1);
-    let event = model_delta(2, accepted.body().turn_id(), "event".into());
+    let event = model_delta(2, accepted.body().turn_id().expect("turn-owned fixture"), "event".into());
     rsi_agent_testkit::assert_domain_store_contract(&MemoryStore::new(), header(), accepted, event)
         .await;
 }
@@ -271,7 +271,7 @@ async fn append_retry_and_atomic_staging_retain_the_same_immutable_fact_allocati
     let accepted = Arc::new(fact(1));
     let payload = Arc::new(model_delta(
         2,
-        accepted.body().turn_id(),
+        accepted.body().turn_id().expect("turn-owned fixture"),
         "x".repeat(8 * 1024 * 1024),
     ));
     let payload_identity = Arc::downgrade(&payload);

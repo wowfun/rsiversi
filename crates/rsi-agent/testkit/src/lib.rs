@@ -309,13 +309,17 @@ pub async fn append_history_fixture(
     let mut pending = Vec::new();
     let mut facts = batch.facts.into_iter().peekable();
     while let Some(fact) = facts.next() {
-        let terminal = matches!(fact.body(), SessionFactBody::TurnTerminal { .. });
-        pending.push(Arc::clone(&fact));
-        if !terminal && facts.peek().is_some() && pending.len() < MAXIMUM_STORE_BATCH_FACTS {
+        let terminal_turn = match fact.body() {
+            SessionFactBody::TurnTerminal { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        };
+        let through_seq = fact.seq();
+        let timestamp_ms = fact.timestamp_ms();
+        pending.push(fact);
+        if terminal_turn.is_none() && facts.peek().is_some() && pending.len() < MAXIMUM_STORE_BATCH_FACTS {
             continue;
         }
-        let through_seq = fact.seq();
-        if terminal {
+        if let Some(turn_id) = terminal_turn {
             let expected_control_seq = if header.is_some() {
                 0
             } else {
@@ -329,15 +333,14 @@ pub async fn append_history_fixture(
                     .await?
                     .durable_seq
             };
-            let terminal = &fact;
             let marker = AgentControlRecord::new(
                 expected_control_seq.checked_add(1).ok_or_else(|| {
                     StoreError::Invalid("fixture control sequence exhausted".into())
                 })?,
-                terminal.timestamp_ms(),
+                timestamp_ms,
                 AgentControlRecordBody::TurnBoundaryRecorded {
-                    turn_id: terminal.body().turn_id().clone(),
-                    terminal_fact_seq: terminal.seq(),
+                    turn_id,
+                    terminal_fact_seq: through_seq,
                 },
             )
             .map_err(|error| StoreError::Invalid(error.to_string()))?;

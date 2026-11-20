@@ -14,7 +14,11 @@ Domain commit always anchors membership, including an empty name set. Replay
 checks that one baseline row as well as subsequent membership changes; later
 commits with unchanged membership create no row.
 
-Schema 51 stores Header format 39 with separate history provenance and Agent
+Message feedback is stored once in its canonical control. A partial index on
+Session, answer sequence and control sequence seeks the last change for one
+answer. Appends and replay check the predecessor and local Fact anchor.
+
+Schema 54 stores Header format 41 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -47,12 +51,14 @@ control routing and options are validated by canonical control replay; reading a
 Fact does not construct and count a second complete control value. Logical byte lengths govern page,
 window and suffix admission, and cold validation checks their indexed lengths
 against reconstructed Facts. Physical JSON lengths are bounded before allocation.
-Fact-page decoding borrows the bounded SQLite row text through validation and
-coverage hashing; it does not allocate a second physical JSON string. Logical
-Facts own their decoded contents. A selected-record lookup copies the physical
-text only when returning it beyond the SQLite statement's lifetime.
-Prefix fingerprints remain logical; reference coverage hashes the exact physical
-record and verifies the logical reference edges. Purge removes Facts before their
+Page and single-Fact reads borrow bounded physical JSON and indexed text from
+the current SQLite row through validation and coverage hashing. The returned
+logical Fact owns its decoded contents.
+Prefix fingerprints remain logical. Reference coverage stores the 32 SHA-256
+bytes of each physical record in the primary tree keyed by Session, stream and
+sequence. Verification compares this digest and the logical reference edges.
+The activation lookup indexes only controls carrying an activation identity.
+Purge removes Facts before their
 accepted controls. Unsupported schemas are rejected during
 read-only preflight; no automatic migration or reset is performed.
 The Session row projects inbox suspension from canonical controls. Ready queries
@@ -151,7 +157,8 @@ the Header and these scalars describe that same SQLite snapshot.
 The `model_effect_coordinates` unique expression index derives Session/Turn/effect/role
 directly from canonical Fact JSON for ModelIntent, ModelStarted and
 ModelAttemptSettled. It is schema-validated on open and enforced by both append
-paths; no separate mutable identity projection is trusted.
+paths. Inserting an existing coordinate returns an invalid append and rolls back
+the whole transaction. The writer uses the Fact insert itself to detect the conflict.
 The same index answers Kernel's pre-publication durable intent lookup.
 
 Public Store preparation and open require native filesystem protection on Unix
@@ -161,7 +168,10 @@ namespace pin through the Store and blocking I/O. CAS creation is atomically
 private; reads retain no-follow native files and publication failures propagate.
 CAS staging, immutable publication, cleanup and directory sync retain the same
 directory authorities through the operation, including if their pathnames change.
-On Windows, the persistent empty private `.rsi-namespace-pin` in CAS and staging
+On Windows, the Store root uses its existing private `.writer.lock` as the
+namespace anchor. Opening it for verification or refusing an older format
+preserves the directory entries written on other hosts.
+The persistent empty private `.rsi-namespace-pin` in CAS and staging
 is namespace protection state. CAS inspection recognizes it only after no-follow
 private-file validation and an empty-length check; invalid guards remain issues.
 Startup staging cleanup retains this guard and refuses invalid guard state.
@@ -476,6 +486,9 @@ and operation close. A live backup must still use SQLite's backup facilities or
 capture the database and WAL consistently. Open initializes only a missing or
 zero-length database; an existing nonempty database without the exact schema is
 rejected instead of being republished as an empty Store.
+
+New Session databases use 1 KiB pages to limit space reserved by sparse
+tables and indexes. Opening a compatible database preserves its page size.
 
 Schema validation compares SQLite's stored DDL exactly with the declarations
 used at creation. It never normalizes literals, whitespace, or punctuation.

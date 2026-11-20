@@ -210,6 +210,16 @@ pub(crate) fn initial_commit(
 /// A command stages typed replacements; the Session owner performs the commit.
 #[async_trait]
 pub trait SessionCommand: fmt::Debug + Send + Sync + 'static {
+    /// Whether a later revision still holds the exact unsettled input from this
+    /// recoverable reserve command. Called only after verifying its original receipt.
+    fn retains_pending_input(
+        &self,
+        _snapshot: &rsi_agent_session_protocol::DomainSnapshot,
+        _input: &rsi_agent_session_protocol::ContinuationInput,
+    ) -> bool {
+        false
+    }
+
     /// Validates its arguments and proposes one atomic state change outside framework locks.
     async fn execute(
         &self,
@@ -224,6 +234,8 @@ pub trait SessionCommand: fmt::Debug + Send + Sync + 'static {
 pub enum ContinuationCommand {
     /// Requires an armed lease and exactly one complete reserved input.
     Reserve,
+    /// Also permits cold claim of the exact pending input of a committed reserve.
+    RecoverableReserve,
     /// May reconcile with a retained revoked lease; cannot authorize input.
     Settle,
 }

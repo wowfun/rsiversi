@@ -252,9 +252,9 @@ fn read_rows(
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum Ordering {
+pub(super) enum Ordering<'a> {
     Activity,
-    Created,
+    Created { edited_domain: Option<&'a str> },
     Identity,
 }
 
@@ -262,13 +262,13 @@ pub(super) enum Ordering {
 pub(super) fn ordered_query(
     locations: &ExecutionLocations,
     key: Option<&str>,
-    ordering: Ordering,
+    ordering: Ordering<'_>,
     after: Option<(u64, &SessionId)>,
     limit: usize,
 ) -> Result<(String, Vec<rusqlite::types::Value>)> {
     let column = match ordering {
         Ordering::Activity => "last_activity_ms",
-        Ordering::Created => "created_at_ms",
+        Ordering::Created { .. } => "created_at_ms",
         Ordering::Identity => "session_id",
     };
     let order = if matches!(ordering, Ordering::Identity) {
@@ -286,6 +286,10 @@ pub(super) fn ordered_query(
         let (mut conditions, values) = selection(scope, key)?;
         conditions.push("session_id NOT IN (SELECT session_id FROM session_tombstones)".into());
         parameters.extend(values);
+        if let Ordering::Created { edited_domain: Some(domain) } = ordering {
+            conditions.push("session_id IN (SELECT session_id FROM domain_heads WHERE domain_id = ? AND revision > 1)".into());
+            parameters.push(domain.to_owned().into());
+        }
         if let Some((timestamp, id)) = after {
             conditions.push(format!("({column}, session_id) < (?, ?)"));
             parameters.push(sqlite_u64("page cursor", timestamp)?.into());
@@ -397,7 +401,7 @@ mod tests {
                 .unwrap();
         }
         let scope = ExecutionLocations::only(locations).unwrap();
-        for ordering in [Ordering::Activity, Ordering::Created] {
+        for ordering in [Ordering::Activity, Ordering::Created { edited_domain: None }] {
             let mut cursor: Option<(u64, SessionId)> = None;
             let mut seen = vec![];
             loop {
@@ -492,7 +496,7 @@ mod tests {
             "bounded membership seed took {steps} VM steps"
         );
 
-        for ordering in [Ordering::Activity, Ordering::Created] {
+        for ordering in [Ordering::Activity, Ordering::Created { edited_domain: None }] {
             for after in [None, Some((5000, &cursor))] {
                 let (sql, parameters) = ordered_query(&scope, None, ordering, after, 17).unwrap();
                 let mut statement = connection.prepare_cached(&sql).unwrap();

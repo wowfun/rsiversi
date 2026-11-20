@@ -75,7 +75,7 @@ pub async fn assert_program_store_contract(
     let descriptor = ProgramRunDescriptor {
         run_id: run.clone(),
         session_id: id.clone(),
-        creator_turn_id: accepted.body().turn_id().clone(),
+        creator_turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
         creator_effect_id: EffectId::new("workflow").unwrap(),
         parent_header_sha256: header.fingerprint().unwrap(),
         fork: ProgramForkBoundary {

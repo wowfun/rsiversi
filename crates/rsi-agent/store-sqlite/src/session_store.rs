@@ -73,9 +73,91 @@ impl SqliteStore {
     }
 }
 
+fn live_watermarks(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<StoreSessionWatermarks> {
+    let (fact, control) = connection
+                .query_row(
+                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                    [session_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+    Ok(StoreSessionWatermarks {
+        session_id,
+        durable_fact_seq: decode_u64("durable Fact sequence", fact)?,
+        durable_control_seq: decode_u64("durable control sequence", control)?,
+    })
+}
+
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> Result<rsi_agent_store_protocol::StoreMessageFeedback> {
+        let id = id.clone();
+        self.with_reader(move |connection| {
+            let tx = connection.transaction().map_err(sql_error)?;
+            let watermarks = live_watermarks(&tx, id)?;
+            let current = super::feedback::read(
+                &tx,
+                &watermarks.session_id,
+                message,
+                watermarks.durable_control_seq,
+            )?;
+            Ok(rsi_agent_store_protocol::StoreMessageFeedback {
+                watermarks,
+                current,
+            })
+        })
+        .await
+    }
+
+    async fn manual_compaction_fact(
+        &self,
+        session: &SessionId,
+        command: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<SessionFact>> {
+        let id = session.clone();
+        let command = command.clone();
+        self.with_reader(move |connection| {
+            let tx = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&tx, &id)?;
+            let seq = tx.query_row(
+                "SELECT max(seq) FROM facts WHERE session_id=?1 AND fact_kind='command' AND command_id=?2",
+                params![id.as_str(), command.as_str()],
+                |row| row.get::<_, Option<i64>>(0),
+            ).map_err(sql_error)?;
+            seq.map(|seq| read_indexed_fact(&tx, &id, seq)).transpose()
+        }).await
+    }
+
+    async fn previous_model_intent(
+        &self,
+        session_id: &SessionId,
+        before: u64,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+    ) -> Result<Option<u64>> {
+        use rsi_agent_session_protocol::ModelEventPurpose;
+        let kind = match purpose {
+            ModelEventPurpose::Conversation => "conversation",
+            ModelEventPurpose::ContextCompaction => "context_compaction",
+        };
+        self.ensure_session_validated(session_id).await?;
+        let id = session_id.clone();
+        self.with_reader(move |connection| {
+            let tx = connection.transaction().map_err(sql_error)?;
+            reference_index::available(&tx, &id)?;
+            tx.query_row("SELECT seq FROM facts WHERE session_id=?1 AND intent_purpose=?2 AND seq<?3 ORDER BY seq DESC LIMIT 1", params![id.as_str(), kind, sqlite_u64("intent cursor", before)?], |row| row.get::<_, i64>(0)).optional().map_err(sql_error)?
+                .map(|seq| decode_u64("model intent sequence", seq)).transpose()
+        }).await
+    }
     fn maintenance(&self) -> Option<&dyn rsi_agent_store_protocol::StoreMaintenance> {
         Some(self)
     }
@@ -236,20 +318,7 @@ impl SessionStore for SqliteStore {
     async fn read_watermarks(&self, session_id: &SessionId) -> Result<StoreSessionWatermarks> {
         let session_id = session_id.clone();
         self.with_reader_named(StoreOperation::Watermarks, move |connection| {
-            let (fact, control) = connection
-                .query_row(
-                    "SELECT durable_seq, control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
-                    [session_id.as_str()],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-            Ok(StoreSessionWatermarks {
-                session_id,
-                durable_fact_seq: decode_u64("durable Fact sequence", fact)?,
-                durable_control_seq: decode_u64("durable control sequence", control)?,
-            })
+            live_watermarks(connection, session_id)
         })
         .await
     }
@@ -1397,15 +1466,64 @@ impl SessionStore for SqliteStore {
         .await
     }
 
+    async fn list_edited_domain_sessions(
+        &self,
+        domain: &str,
+        after: Option<&SessionId>,
+        limit: usize,
+    ) -> Result<rsi_agent_store_protocol::StoreSessionPage> {
+        rsi_agent_store_protocol::validate_session_read_limit(limit)?;
+        let domain = domain.to_owned();
+        let after = after.cloned();
+        self.with_reader(move |connection| {
+            let sqlite_limit = i64::try_from(limit + 1)
+                .map_err(|_| StoreError::Invalid("session read limit exceeds SQLite".into()))?;
+            let mut stmt = connection
+                .prepare_cached(
+                    "SELECT session_id FROM domain_heads WHERE session_id > ?1 AND domain_id = ?2
+                 AND revision > 1 AND session_id NOT IN (SELECT session_id FROM session_tombstones)
+                 ORDER BY session_id LIMIT ?3",
+                )
+                .map_err(sql_error)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        after.as_ref().map_or("", SessionId::as_str),
+                        domain,
+                        sqlite_limit
+                    ],
+                    |row| bounded_text(row, 0, 256),
+                )
+                .map_err(sql_error)?;
+            let mut sessions = Vec::with_capacity(limit + 1);
+            for row in rows {
+                sessions.push(
+                    SessionId::new(row.map_err(sql_error)?)
+                        .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                );
+            }
+            let has_more = sessions.len() > limit;
+            sessions.truncate(limit);
+            Ok(rsi_agent_store_protocol::StoreSessionPage {
+                after,
+                sessions,
+                has_more,
+            })
+        })
+        .await
+    }
+
     async fn list_recent_sessions(
         &self,
         locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> Result<StoreRecentSessionPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
         let locations = locations.clone();
         let after = after.cloned();
+        let edited_domain = edited_domain.map(str::to_owned);
         let page = self
             .with_reader(move |connection| {
                 let transaction = connection
@@ -1414,7 +1532,7 @@ impl SessionStore for SqliteStore {
                 let (sql, parameters) = crate::activity::ordered_query(
                     &locations,
                     None,
-                    crate::activity::Ordering::Created,
+                    crate::activity::Ordering::Created { edited_domain: edited_domain.as_deref() },
                     after
                         .as_ref()
                         .map(|cursor| (cursor.created_at_ms, &cursor.session_id)),
@@ -1869,15 +1987,16 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let (durable_fact_seq, durable_control_seq, pending_count, inbox_paused, first_step_source) = transaction
+            let (durable_fact_seq, durable_control_seq, pending_count, inbox_paused, first_step_source, injected_commands) = transaction
                 .query_row(
-                    "SELECT durable_seq, control_seq,
-                            (SELECT COUNT(*) FROM agent_messages
-                             WHERE session_id = ?1 AND state = 'pending'), inbox_paused,
+                    "SELECT s.durable_seq, s.control_seq, COUNT(m.session_id), s.inbox_paused,
                             (SELECT message_source FROM agent_messages
                              WHERE session_id = ?1 AND state = 'pending' AND target = 'next_step'
-                             ORDER BY accepted_control_seq LIMIT 1)
-                     FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
+                             ORDER BY accepted_control_seq LIMIT 1),
+                            COUNT(*) FILTER (WHERE m.message_source = 'command' AND m.delivery = 'next_step' AND m.target = 'next_step')
+                     FROM sessions s LEFT JOIN agent_messages m ON m.session_id = s.session_id AND m.state = 'pending'
+                     WHERE s.session_id = ?1 AND s.session_id NOT IN (SELECT session_id FROM session_tombstones)
+                     GROUP BY s.session_id",
                     [session_id.as_str()],
                     |row| {
                         Ok((
@@ -1886,6 +2005,7 @@ impl SessionStore for SqliteStore {
                             row.get::<_, i64>(2)?,
                             row.get::<_, bool>(3)?,
                             optional_text(row, 4, 16)?,
+                            usize::from(row.get::<_, u16>(5)?),
                         ))
                     },
                 )
@@ -1920,6 +2040,7 @@ impl SessionStore for SqliteStore {
                 .collect::<Result<Vec<_>>>()?;
             let summary = StoreAgentMailboxSummary {
                 inbox_paused,
+                injected_commands,
                 first_pending_step_source: first_step_source.as_deref()
                     .map(|source| crate::append::decode_message_source(source.as_bytes()))
                     .transpose()?,

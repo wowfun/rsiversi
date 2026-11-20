@@ -77,7 +77,7 @@ async fn filtered_recent(
     let local_scope =
         ExecutionLocations::only(std::collections::BTreeSet::from([location.clone()])).unwrap();
     let recent = store
-        .list_recent_sessions(&local_scope, None, 1)
+        .list_recent_sessions(&local_scope, None, 1, None)
         .await
         .unwrap();
     assert_eq!(recent.sessions[0].header.session_id(), b);
@@ -86,7 +86,7 @@ async fn filtered_recent(
     assert_eq!(recent.sessions[0].durable_control_seq, 0);
     assert!(recent.has_more);
     let next = store
-        .list_recent_sessions(&local_scope, Some(&recent.sessions[0].cursor()), 1)
+        .list_recent_sessions(&local_scope, Some(&recent.sessions[0].cursor()), 1, None)
         .await
         .unwrap();
     assert_eq!(next.sessions[0].header.session_id(), a);
@@ -94,7 +94,7 @@ async fn filtered_recent(
     let empty_scope = ExecutionLocations::only(std::collections::BTreeSet::new()).unwrap();
     assert!(
         store
-            .list_recent_sessions(&empty_scope, None, 1)
+            .list_recent_sessions(&empty_scope, None, 1, None)
             .await
             .unwrap()
             .sessions
@@ -238,7 +238,7 @@ async fn exact_summaries(
 }
 async fn new_human(store: &dyn SessionStore, session: &SessionId) {
     let before = store
-        .list_recent_sessions(&ExecutionLocations::all(), None, 3)
+        .list_recent_sessions(&ExecutionLocations::all(), None, 3, None)
         .await
         .unwrap()
         .sessions
@@ -282,7 +282,7 @@ async fn new_human(store: &dyn SessionStore, session: &SessionId) {
         .await
         .unwrap();
     let after = store
-        .list_recent_sessions(&ExecutionLocations::all(), None, 3)
+        .list_recent_sessions(&ExecutionLocations::all(), None, 3, None)
         .await
         .unwrap()
         .sessions

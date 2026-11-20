@@ -651,7 +651,7 @@ impl Projection {
                         session,
                         sqlite_u64("domain Fact sequence", seq)?,
                     )?;
-                    if fact.body().turn_id() != turn_id {
+                    if fact.body().turn_id() != Some(turn_id) {
                         return Err(StoreError::Corrupt(
                             "domain request Fact span changed its originating Turn".into(),
                         ));

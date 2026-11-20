@@ -995,7 +995,7 @@ async fn repeated_recent_listing_does_not_validate_history() {
                 &rsi_agent_store_protocol::ExecutionLocations::all(),
                 None,
                 1
-            )
+            , None)
             .await
             .unwrap()
             .sessions
@@ -1009,7 +1009,7 @@ async fn repeated_recent_listing_does_not_validate_history() {
                 &rsi_agent_store_protocol::ExecutionLocations::all(),
                 None,
                 1
-            )
+            , None)
             .await
             .unwrap()
             .sessions
@@ -1825,6 +1825,7 @@ async fn metadata_catalog_larger_than_validation_cache_never_validates_history()
                     &rsi_agent_store_protocol::ExecutionLocations::all(),
                     cursor.as_ref(),
                     256,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2694,9 +2695,9 @@ async fn prepared_proofs_survive_churn_and_share_saturated_pin_capacity() {
     let lease = store.prepare_session(&ids[0]).await.unwrap();
     assert_eq!(store.inner.pins.lock().unwrap().len(), 1);
     drop(store);
-    assert!(SqliteStore::open(root.path()).is_err());
+    let reopened = SqliteStore::open(root.path()).unwrap();
     drop(lease);
-    drop(SqliteStore::open(root.path()).unwrap());
+    drop(reopened);
 }
 
 #[tokio::test]
@@ -3603,7 +3604,7 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
         2,
         2,
         SessionFactBody::CancelRequested {
-            turn_id: accepted.body().turn_id().clone(),
+            turn_id: accepted.body().turn_id().expect("turn-owned fixture").clone(),
             reason: None,
         },
     )
@@ -3675,7 +3676,7 @@ async fn domain_reads_batch_distinct_controls_and_reject_missing_canonical_rows(
     let header = test_header("domain-batch");
     let session = header.session_id().clone();
     let accepted = test_fact(1);
-    let turn = accepted.body().turn_id().clone();
+    let turn = accepted.body().turn_id().expect("turn-owned fixture").clone();
     let update = |id, revision, enabled| {
         DomainStateUpdate::new(
             DomainRevision::new(revision),
@@ -3829,6 +3830,7 @@ async fn recent_page_uses_one_bounded_header_query() {
             &rsi_agent_store_protocol::ExecutionLocations::all(),
             None,
             8,
+            None,
         )
         .await
         .unwrap();

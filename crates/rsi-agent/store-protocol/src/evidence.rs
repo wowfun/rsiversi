@@ -1,7 +1,7 @@
 //! Exact binding of references to immutable, original inline evidence.
 use crate::{SessionStore, StoreError};
 use rsi_agent_session_protocol::{
-    EvidencePart, EvidenceSection, SessionFact, SessionFactBody, SessionId,
+    EvidencePart, EvidenceSection, SessionFact, SessionId,
 };
 
 /// A failed Store lookup or an invalid original binding.
@@ -63,7 +63,7 @@ impl EvidenceOriginal {
                 "evidence reference target is unavailable in this Session",
             ),
         )?;
-        let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
+        let Some(evidence) = fact.body().request_evidence() else {
             return Err(EvidenceResolveError::Invalid(
                 "evidence reference target is not a ModelIntent",
             ));
@@ -88,7 +88,7 @@ impl EvidenceOriginal {
         bytes: u32,
     ) -> Result<&str, EvidenceResolveError> {
         self.digests.validate(section, sha256, bytes)?;
-        let SessionFactBody::ModelIntent { evidence, .. } = self.fact.body() else {
+        let Some(evidence) = self.fact.body().request_evidence() else {
             unreachable!("validated original")
         };
         let Some(EvidencePart::Inline { text, .. }) = evidence.part(section) else {
@@ -104,7 +104,7 @@ impl EvidenceOriginal {
         bytes: u32,
     ) -> Result<String, EvidenceResolveError> {
         self.digests.validate(section, sha256, bytes)?;
-        let SessionFactBody::ModelIntent { evidence, .. } = self.fact.into_body() else {
+        let Some((_, evidence)) = self.fact.into_body().into_request_evidence() else {
             unreachable!("validated original")
         };
         let Some(EvidencePart::Inline { text, .. }) = evidence.into_part(section) else {

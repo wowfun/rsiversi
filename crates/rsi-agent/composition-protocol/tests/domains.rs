@@ -409,7 +409,7 @@ fn a_draft_baseline_freezes_actual_initial_values_and_preserves_them_on_rejectio
     assert_eq!(baseline.commit().unwrap(), &frozen);
     assert!(catalog.validate_complete_states(&[]).is_err());
     catalog
-        .validate_complete_states(&[frozen.updates()[0].snapshot().clone()])
+        .validate_complete_states(frozen.updates().iter().map(|update| update.snapshot()))
         .unwrap();
 }
 
@@ -493,7 +493,11 @@ fn current_codec_validates_persisted_references_across_repeated_generations() {
 #[test]
 fn captured_baseline_rebind_preserves_state_and_resource_lifetime() {
     use rsi_agent_composition_protocol::{DomainBaseline, DomainReferencePolicy};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    static REBOUND_VALUES: AtomicUsize = AtomicUsize::new(0);
     let definition = DomainDefinition::new(
         DomainIdentity::new("captured", 1).unwrap(),
         &false,
@@ -516,12 +520,18 @@ fn captured_baseline_rebind_preserves_state_and_resource_lifetime() {
     let replacement = DomainDefinition::new(
         DomainIdentity::new("captured", 1).unwrap(),
         &false,
-        |_| Ok(()),
+        |value| {
+            if *value {
+                REBOUND_VALUES.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        },
         DomainReferencePolicy::None,
     )
     .unwrap();
     let catalog = DomainCatalog::new([replacement.registration()]).unwrap();
     let rebound = baseline.rebind(catalog.clone()).unwrap();
+    assert_eq!(REBOUND_VALUES.load(Ordering::Relaxed), 1);
     assert!(
         catalog
             .bind(&replacement)

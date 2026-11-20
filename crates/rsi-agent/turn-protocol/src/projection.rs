@@ -51,6 +51,13 @@ pub trait SessionProjections: fmt::Debug + Send + Sync + 'static {
     fn watch_activity(&self) -> crate::Result<Option<SessionProjectionChanges>> {
         Ok(None)
     }
+    /// Coalesced hints for edits above the baseline revision or Session retirement.
+    /// Subscribe before reading. Hints are Local and carry no caller visibility.
+    fn watch_edited_domain(&self, _domain: &str) -> crate::Result<SessionProjectionChanges> {
+        Err(crate::TurnError::Invalid(
+            "domain observation unavailable".into(),
+        ))
+    }
     /// Cheap durable-commit revision, without observers or pins; None disables caching.
     fn activity_revision(&self) -> Option<u64> {
         None

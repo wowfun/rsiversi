@@ -267,6 +267,74 @@ async fn capture_current_writer() {
 }
 
 #[tokio::test]
+async fn feedback_reopens_and_checks_local_answer_predecessors() {
+    use rsi_agent_session_protocol::FeedbackRating;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("feedback");
+    let store = SqliteStore::open(&path).unwrap();
+    execution::capture(&store, &path).await;
+    let id = header("model-tools").session_id().clone();
+    let message = 11.try_into().unwrap();
+    let saved = store.read_message_feedback(&id, message).await.unwrap();
+    let first = saved.current.unwrap().version.get();
+    for (target, predecessor, rating) in [
+        (11, None, Some("negative")),
+        (11, Some(first), Some("positive")),
+        (1, None, Some("positive")),
+        (99, None, Some("negative")),
+        (5, None, None),
+    ] {
+        assert!(matches!(
+            execution::feedback_change(&store, &id, target, predecessor, rating).await,
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    assert_eq!(
+        store
+            .read_watermarks(&id)
+            .await
+            .unwrap()
+            .durable_control_seq,
+        first
+    );
+    let second = execution::feedback_change(&store, &id, 11, Some(first), Some("negative"))
+        .await
+        .unwrap();
+    assert!(
+        execution::feedback_change(&store, &id, 11, Some(first), None)
+            .await
+            .is_err()
+    );
+    execution::feedback_change(&store, &id, 11, Some(second), None)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .read_message_feedback(&id, message)
+            .await
+            .unwrap()
+            .current
+            .is_none()
+    );
+    let third = execution::feedback_change(&store, &id, 11, None, Some("positive"))
+        .await
+        .unwrap();
+    assert!(third > second);
+    drop(store);
+    SqliteStore::verify(&path).unwrap();
+    let store = SqliteStore::open(&path).unwrap();
+    let reloaded = store.read_message_feedback(&id, message).await.unwrap();
+    let item = reloaded.current.unwrap();
+    assert_eq!(item.version.get(), third);
+    assert_eq!(item.value.rating, FeedbackRating::Positive);
+    assert_eq!(serde_json::to_value(item.value.note).unwrap(), "  多字节  ");
+    assert_eq!(
+        reloaded.watermarks.durable_fact_seq,
+        saved.watermarks.durable_fact_seq
+    );
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "Each retained corpus is checked for byte identity, public reads and fork boundaries."
@@ -373,7 +441,7 @@ async fn retained_writer_corpus() {
                             .resolve_fork_boundary(
                                 session,
                                 &rsi_agent_session_protocol::ForkPoint::through(
-                                    last.body().turn_id(),
+                                    last.body().turn_id().expect("turn-owned fixture"),
                                 ),
                                 rsi_agent_session_protocol::ForkTurnSelection::All,
                             )

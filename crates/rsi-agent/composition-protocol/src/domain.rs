@@ -422,11 +422,15 @@ impl DomainCatalog {
         Ok(())
     }
 
-    /// Validates the entire frozen set without importing defaults for missing state.
+    /// Validates a complete set of borrowed snapshots without importing defaults for missing state.
     ///
     /// # Errors
     /// Rejects missing/unsupported codecs, duplicate names, oversized sets or invalid typed values.
-    pub fn validate_complete_states(&self, states: &[DomainSnapshot]) -> Result<()> {
+    pub fn validate_complete_states<'a>(
+        &self,
+        states: impl IntoIterator<Item = &'a DomainSnapshot, IntoIter: ExactSizeIterator>,
+    ) -> Result<()> {
+        let states = states.into_iter();
         if states.len() > MAXIMUM_SESSION_DOMAINS {
             return Err(DomainError::Capacity);
         }
@@ -530,17 +534,19 @@ impl DomainBaseline {
         let mut states: BTreeMap<_, _> = catalog
             .baseline()
             .iter()
-            .map(|state| (state.identity().id().to_owned(), state.clone()))
+            .map(|state| (state.identity().id(), state))
             .collect();
-        for state in self.snapshots() {
-            catalog.validate_snapshot(&state)?;
-            states.insert(state.identity().id().to_owned(), state);
+        if let Some(commit) = &self.commit {
+            for update in commit.updates() {
+                let state = update.snapshot();
+                states.insert(state.identity().id(), state);
+            }
         }
-        let states: Vec<_> = states.into_values().collect();
-        catalog.validate_complete_states(&states)?;
+        catalog.validate_complete_states(states.values().copied())?;
+        let commit = baseline_commit(states.into_values().cloned().collect())?;
         Ok(Self {
             catalog,
-            commit: baseline_commit(states)?,
+            commit,
             retained: self.retained.clone(),
             sources: self.sources.clone(),
         })

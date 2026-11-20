@@ -24,7 +24,7 @@ async fn compare_referenced_and_inline_claim_storage() {
             db.execute("UPDATE facts SET fact_json=?1, acceptance_control_seq=NULL, logical_bytes=NULL WHERE seq=3", [&encoded]).unwrap();
             db.execute(
                 "UPDATE reference_records SET sha256=?1 WHERE stream='fact' AND seq=3",
-                [hex::encode(Sha256::digest(encoded.as_bytes()))],
+                [&Sha256::digest(encoded.as_bytes())[..]],
             )
             .unwrap();
         }

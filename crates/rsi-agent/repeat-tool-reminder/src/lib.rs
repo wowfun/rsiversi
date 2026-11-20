@@ -268,7 +268,7 @@ async fn captured_calls(
     let mut wanted = BTreeSet::new();
     let mut calls = BTreeMap::new();
     for fact in settled {
-        if fact.body().turn_id() != &context.turn_id || fact.seq() > context.horizon.fact_seq {
+        if fact.body().turn_id() != Some(&context.turn_id) || fact.seq() > context.horizon.fact_seq {
             return Err(invalid("settled Tool is outside the captured Turn"));
         }
         let key = key(fact)?;
@@ -301,7 +301,7 @@ async fn captured_calls(
             ));
         }
         for fact in &page.facts {
-            if fact.body().turn_id() != &context.turn_id {
+            if fact.body().turn_id() != Some(&context.turn_id) {
                 continue;
             }
             match fact.body() {

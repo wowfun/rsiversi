@@ -119,13 +119,8 @@ impl ToolExecutor for AskUser {
         let answer = answer.map_err(question_error)?;
         let value = serde_json::to_value(answer)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        ToolResult::new(
-            value.clone(),
-            vec![ToolContent::Text {
-                text: value.to_string(),
-            }],
-            false,
-        )
+        let text = value.to_string();
+        ToolResult::new(value, vec![ToolContent::Text { text }], false)
     }
 }
 

@@ -15,8 +15,8 @@ stays warm between preparation and payload admission.
 The [Store protocol](../../../../crates/rsi-agent/store-protocol/README.md) owns an
 opaque validation lease and scalar watermarks. SQLite keeps actual successful
 proofs separate from its eviction policy and shares bounded in-use pins by
-Session identity. A pin owns the Store lifetime; a cache proof does not, avoiding
-an owner cycle. Pin waiters retain their local successful proof without holding
+Session identity. A pin retains proof and admission capacity independently of the Store.
+Active I/O retains the Store separately; an idle proof cannot retain the writer lock. Pin waiters retain their local successful proof without holding
 the validation lane. Drop releases capacity before waking waiters and never
 reenters the registry mutex.
 

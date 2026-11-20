@@ -195,7 +195,7 @@ pub(super) fn apply_atomic_sqlite_append(
         }
         fact_digest = advance_fact_prefix_digest(fact_digest, fact)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        if matches!(fact.body(), SessionFactBody::TurnTerminal { .. }) {
+        if let SessionFactBody::TurnTerminal { turn_id, .. } = fact.body() {
             let changed = transaction
                 .execute(
                     "UPDATE turns SET terminal_prefix_sha256 = ?1
@@ -203,7 +203,7 @@ pub(super) fn apply_atomic_sqlite_append(
                     params![
                         hex::encode(fact_digest),
                         append.session_id.as_str(),
-                        fact.body().turn_id().as_str(),
+                        turn_id.as_str(),
                         sqlite_u64("turn terminal sequence", fact.seq())?,
                     ],
                 )
@@ -389,6 +389,9 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::MessageFeedbackChanged { change } => super::feedback::validate_change(
+                self.transaction, self.session_id, change, self.record.seq() - 1, self.after_fact_seq
+            ),
             AgentControlRecordBody::MessageSuccessor { predecessor_id, .. } => {
                 self.insert_message_discarded(predecessor_id, MessageDiscardReason::Replaced)
             }
@@ -1307,7 +1310,7 @@ pub(super) const MODEL_COORDINATE_LOOKUP: &str = "SELECT 1 FROM facts WHERE sess
              AND json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')";
 
 #[test]
-fn model_coordinate_precheck_uses_the_unique_expression_index() {
+fn model_coordinate_lookup_uses_the_unique_expression_index() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
@@ -1353,6 +1356,30 @@ pub(super) fn insert_fact(
     fact: &SessionFact,
     references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
+    if let SessionFactBody::ManualCompaction {
+        command_id,
+        effect_id,
+        event,
+    } = fact.body()
+    {
+        let valid = if let Some(stage) = event.predecessor() {
+            transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM facts WHERE session_id=?1 AND seq=?2
+                 AND fact_kind='command' AND command_id=?3 AND json_extract(fact_json,'$.effect_id')=?4
+                 AND json_extract(fact_json,'$.event.stage')=?5)",
+                params![session_id.as_str(), sqlite_u64("previous command sequence", fact.seq()-1)?, command_id.as_str(), effect_id.as_str(), stage],
+                |row| row.get::<_, bool>(0),
+            ).map_err(sql_error)?
+        } else {
+            matches!(event, rsi_agent_session_protocol::ManualCompactionEvent::Prepared(prepared) if &prepared.plan.session == session_id)
+                && !transaction.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=?1 AND terminal_seq IS NULL)", [session_id.as_str()], |row| row.get::<_, bool>(0)).map_err(sql_error)?
+        };
+        if !valid {
+            return Err(StoreError::Invalid(
+                "invalid standalone compaction boundary".into(),
+            ));
+        }
+    }
     insert_fact_row(transaction, session_id, fact, references, None)?;
     update_turn_index(transaction, session_id, fact)
 }
@@ -1364,43 +1391,31 @@ fn insert_fact_row(
     references: &super::reference_index::Writer<'_>,
     acceptance: Option<u64>,
 ) -> Result<()> {
-    if let Some((effect, role)) = rsi_agent_store_protocol::store_fact_model_coordinate(fact.body())
-    {
-        let exists = transaction
-            .query_row(
-                MODEL_COORDINATE_LOOKUP,
-                params![
-                    session_id.as_str(),
-                    effect.as_str(),
-                    role,
-                    fact.body().turn_id().as_str()
-                ],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(sql_error)?
-            .is_some();
-        if exists {
-            return Err(StoreError::Invalid(
-                "duplicate model effect coordinate".into(),
-            ));
-        }
-    }
-    transaction
-        .execute(
-            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                session_id.as_str(),
-                sqlite_u64("fact sequence", fact.seq())?,
-                fact.body().turn_id().as_str(),
-                fact_index_kind(fact.body()),
-                super::fact_storage::encode(fact, acceptance, references)?,
-                acceptance.map(|seq| sqlite_u64("claim acceptance", seq)).transpose()?,
-                acceptance.map(|_| i64::try_from(fact.encoded_len()).expect("bounded Fact length")),
-            ],
+    let inserted = transaction
+        .prepare_cached(
+            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes, intent_purpose)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id, turn_id, json_extract(fact_json, '$.effect_id'), json_extract(fact_json, '$.type'))
+             WHERE json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')
+             DO NOTHING",
         )
+        .map_err(sql_error)?
+        .execute(params![
+            session_id.as_str(),
+            sqlite_u64("fact sequence", fact.seq())?,
+            fact.body().turn_id().map(TurnId::as_str),
+            fact_index_kind(fact.body()),
+            super::fact_storage::encode(fact, acceptance, references)?,
+            acceptance.map(|seq| sqlite_u64("claim acceptance", seq)).transpose()?,
+            acceptance.map(|_| i64::try_from(fact.encoded_len()).expect("bounded Fact length")),
+            super::fact_storage::intent_purpose(fact.body()),
+        ])
         .map_err(sql_error)?;
+    if inserted == 0 {
+        return Err(StoreError::Invalid(
+            "duplicate model effect coordinate".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1409,7 +1424,9 @@ pub(super) fn update_turn_index(
     session_id: &SessionId,
     fact: &SessionFact,
 ) -> Result<()> {
-    let role = rsi_agent_store_protocol::store_fact_turn_role(fact.body());
+    let Some((role, turn_id)) = rsi_agent_store_protocol::store_fact_turn_role(fact.body()) else {
+        return Ok(());
+    };
     let changed = match role {
         StoreFactTurnRole::Acceptance => transaction
             .execute(
@@ -1418,7 +1435,7 @@ pub(super) fn update_turn_index(
                  VALUES (?1, ?2, ?3, NULL, NULL)",
                 params![
                     session_id.as_str(),
-                    fact.body().turn_id().as_str(),
+                    turn_id.as_str(),
                     sqlite_u64("turn acceptance sequence", fact.seq())?,
                 ],
             )
@@ -1430,7 +1447,7 @@ pub(super) fn update_turn_index(
                 params![
                     sqlite_u64("turn terminal sequence", fact.seq())?,
                     session_id.as_str(),
-                    fact.body().turn_id().as_str(),
+                    turn_id.as_str(),
                 ],
             )
             .map_err(sql_error)?,
@@ -1440,7 +1457,7 @@ pub(super) fn update_turn_index(
                    SELECT 1 FROM turns
                    WHERE session_id = ?1 AND turn_id = ?2 AND terminal_seq IS NULL
                  )",
-                params![session_id.as_str(), fact.body().turn_id().as_str()],
+                params![session_id.as_str(), turn_id.as_str()],
                 |row| row.get::<_, bool>(0),
             )
             .map(usize::from)

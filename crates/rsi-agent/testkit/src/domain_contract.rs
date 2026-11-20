@@ -172,7 +172,11 @@ pub async fn assert_generation_store_contract(
         },
         vec![update("a", 0, false), update("b", 0, true)],
     );
-    let turn_id = accepted.body().turn_id().clone();
+    let turn_id = accepted
+        .body()
+        .turn_id()
+        .expect("turn-owned fixture fact")
+        .clone();
     store
         .commit_agent(atomic(&header, 0, 0, true, vec![accepted], vec![initial]))
         .await
@@ -352,7 +356,11 @@ pub async fn assert_generation_store_contract(
         5,
         terminal.timestamp_ms(),
         AgentControlRecordBody::TurnBoundaryRecorded {
-            turn_id: terminal.body().turn_id().clone(),
+            turn_id: terminal
+                .body()
+                .turn_id()
+                .expect("turn-owned fixture fact")
+                .clone(),
             terminal_fact_seq: terminal.seq(),
         },
     )
@@ -447,8 +455,27 @@ pub async fn assert_domain_store_contract(
         .await
         .unwrap();
     let first = store.read_domain_states(session, None, None).await.unwrap();
+    let locations = rsi_agent_store_protocol::ExecutionLocations::all();
+    assert!(
+        store
+            .list_recent_sessions(&locations, None, 256, Some("a"))
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .all(|row| row.header.session_id() != session)
+    );
+    assert!(
+        !store
+            .list_edited_domain_sessions("a", None, 256)
+            .await
+            .unwrap()
+            .sessions
+            .contains(session),
+        "a seeded domain must not schedule startup work"
+    );
     let baseline_usage = store
-        .read_turn_domain_usage(session, accepted.body().turn_id())
+        .read_turn_domain_usage(session, accepted.body().turn_id().expect("turn acceptance"))
         .await
         .unwrap();
     assert_eq!((baseline_usage.records, baseline_usage.bytes), (0, 0));
@@ -488,7 +515,11 @@ pub async fn assert_domain_store_contract(
         &serde_json::Value::Bool(false)
     );
     let origin = DomainMutationSource::Turn {
-        turn_id: accepted.body().turn_id().clone(),
+        turn_id: accepted
+            .body()
+            .turn_id()
+            .expect("turn-owned fixture fact")
+            .clone(),
     };
     let wrong = bind_fact(
         &control(
@@ -551,7 +582,11 @@ pub async fn assert_domain_store_contract(
         event.seq(),
         event.timestamp_ms(),
         rsi_agent_session_protocol::SessionFactBody::CancelRequested {
-            turn_id: event.body().turn_id().clone(),
+            turn_id: event
+                .body()
+                .turn_id()
+                .expect("turn-owned fixture fact")
+                .clone(),
             reason: Some("changed request".into()),
         },
     )
@@ -585,8 +620,57 @@ pub async fn assert_domain_store_contract(
         .await
         .unwrap();
     let current = store.read_domain_states(session, None, None).await.unwrap();
+    let edited = store
+        .list_edited_domain_sessions("a", None, 256)
+        .await
+        .unwrap();
+    assert!(edited.sessions.contains(session));
+    let excluded = rsi_agent_store_protocol::ExecutionLocations::only(std::collections::BTreeSet::new()).unwrap();
+    assert!(
+        store
+            .list_recent_sessions(&excluded, None, 256, Some("a"))
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    let edited = store
+        .list_recent_sessions(&locations, None, 256, Some("a"))
+        .await
+        .unwrap();
+    let row = edited
+        .sessions
+        .iter()
+        .find(|row| row.header.session_id() == session)
+        .unwrap();
+    assert!(
+        !store
+            .list_recent_sessions(&locations, Some(&row.cursor()), 256, Some("a"))
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .any(|row| row.header.session_id() == session)
+    );
+    assert!(
+        store
+            .list_recent_sessions(&locations, None, 256, Some("missing-domain"))
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    assert!(
+        !store
+            .list_edited_domain_sessions("a", Some(session), 1)
+            .await
+            .unwrap()
+            .sessions
+            .contains(session),
+        "the discovery cursor is exclusive"
+    );
     let usage = store
-        .read_turn_domain_usage(session, accepted.body().turn_id())
+        .read_turn_domain_usage(session, accepted.body().turn_id().expect("turn acceptance"))
         .await
         .unwrap();
     assert_eq!((usage.durable_fact_seq, usage.durable_control_seq), (2, 2));

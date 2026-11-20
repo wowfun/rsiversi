@@ -13,18 +13,40 @@ macro_rules! fact_rows {
                     CASE WHEN length(CAST(f.fact_json AS BLOB)) <= ", $maximum, " THEN f.fact_json END,
                     f.acceptance_control_seq, coalesce(length(CAST(c.control_json AS BLOB)),0),
                     CASE WHEN length(CAST(c.control_json AS BLOB)) <= ", $maximum, " THEN c.control_json END,
-                    f.seq, f.turn_id, f.fact_kind, f.session_id
+                    f.seq, f.turn_id, f.fact_kind, f.session_id, f.intent_purpose
              FROM facts f LEFT JOIN agent_controls c
                ON c.session_id=f.session_id AND c.seq=f.acceptance_control_seq ", $tail
         )
     };
 }
 
-pub(super) fn read(
+pub(super) fn intent_purpose(body: &SessionFactBody) -> Option<&'static str> {
+    use rsi_agent_session_protocol::{LanguageAttemptStage, ModelEventPurpose};
+    match body.language_attempt()?.stage {
+        LanguageAttemptStage::Prepared(_, ModelEventPurpose::Conversation, _) => {
+            Some("conversation")
+        }
+        LanguageAttemptStage::Prepared(_, ModelEventPurpose::ContextCompaction, _) => {
+            Some("context_compaction")
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn read_indexed_fact(
     connection: &Connection,
     session_id: &SessionId,
     sequence: i64,
-) -> Result<(SessionFact, String)> {
+) -> Result<SessionFact> {
+    read_with(connection, session_id, sequence, |fact, _| Ok(fact))
+}
+
+pub(super) fn read_with<T>(
+    connection: &Connection,
+    session_id: &SessionId,
+    sequence: i64,
+    visit: impl FnOnce(SessionFact, &str) -> Result<T>,
+) -> Result<T> {
     let mut statement = connection
         .prepare(fact_rows!("?3", "WHERE f.session_id=?1 AND f.seq=?2"))
         .map_err(sql_error)?;
@@ -39,7 +61,8 @@ pub(super) fn read(
         .next()
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::Corrupt("absent canonical Fact".into()))?;
-    decode(row).map(|(fact, encoded)| (fact, encoded.to_owned()))
+    let (fact, encoded) = decode(row)?;
+    visit(fact, encoded)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,8 +194,12 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, &'a
     };
     if fact.encoded_len() != length
         || fact.seq() != decode_u64("Fact sequence", row.get(6).map_err(sql_error)?)?
-        || fact.body().turn_id().as_str() != bounded_text(row, 7, 256).map_err(sql_error)?
-        || fact_index_kind(fact.body()) != bounded_text(row, 8, 8).map_err(sql_error)?
+        || fact.body().turn_id().map(TurnId::as_str)
+            != super::text::optional_borrowed_text(row, 7, 256).map_err(sql_error)?
+        || intent_purpose(fact.body())
+            != super::text::optional_borrowed_text(row, 10, 32).map_err(sql_error)?
+        || fact_index_kind(fact.body())
+            != super::text::borrowed_text(row, 8, 8).map_err(sql_error)?
     {
         return Err(StoreError::Corrupt(
             "indexed Fact differs from its stored projection".into(),
@@ -201,7 +228,7 @@ mod tests {
         let decoded = db
             .query_row(
                 "SELECT length(CAST(?1 AS BLOB)), length(CAST(?1 AS BLOB)), ?1,
-                        NULL, 0, NULL, 1, 'turn', 'event', 'session'",
+                        NULL, 0, NULL, 1, 'turn', 'event', 'session', NULL AS intent_purpose",
                 [&json],
                 |row| {
                     let raw = row.get_ref(2)?.as_str().unwrap();

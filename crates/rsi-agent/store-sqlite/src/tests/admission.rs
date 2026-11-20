@@ -114,7 +114,7 @@ async fn first_record_capacity_refusal_materializes_no_fact_body() {
     );
     assert_eq!(
         store
-            .read_turn_facts(&id, fact.body().turn_id(), 0, 1, 1)
+            .read_turn_facts(&id, fact.body().turn_id().expect("turn-owned fixture"), 0, 1, 1)
             .await
             .unwrap_err(),
         expected
