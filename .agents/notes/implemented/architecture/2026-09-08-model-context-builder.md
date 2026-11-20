@@ -27,8 +27,20 @@ the existing distinction between claim-visible scans, canonical Facts and fork
 seed history. A generic bounded Context-owned envelope binds the immutable
 builder identity and config digest in addition to the existing Header, limits
 and Fact-prefix bindings. Cache incompatibility triggers replay without changing
-the authoritative Store format. The default provider wraps ContextFold without
-changing workspace context or adding ephemeral time input.
+the authoritative Store format. The default provider owns one internal semantic
+fold; the alternate public whole-Turn omission policy is retired. Keeping both
+policies solely for direct-fold consumers duplicates retention and replay rules
+without an in-repository production use. Embedders replace the builder/cursor
+contract instead. Only the private fold checkpoint advances to 22. Default projection semantics
+remain 2.17.0, preserving the builder identity carried by durable compaction
+Facts. Advancing that identity for an encoding-only change would unnecessarily
+make earlier summaries ineligible during replay. Old cache payloads are refused
+and rebuilt from Facts without changing Session storage.
+
+Ordinary preparation shares one call-local projection between optional planning
+and request emission. Official DSH similarly derives a request boundary and retains
+incremental context in its owning session; it does not justify a second RSI cache.
+Forced/manual compaction and request-only retries remain explicit operations.
 
 ## Alternatives considered
 

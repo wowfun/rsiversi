@@ -19,8 +19,9 @@ use turn_key::TurnKey;
 mod input;
 mod tool_context;
 pub use builder::{
-    ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ModelContextBuilder,
-    ModelContextBuilderContract, ModelContextCursor, ModelContextState, RawContextPressure,
+    ContextBuilderIdentity, ContextInit, ContextPage, ContextPosition, ContextPreparation,
+    ContextPreparationError, ModelContextBuilder, ModelContextBuilderContract, ModelContextCursor,
+    ModelContextState, RawContextPressure,
 };
 pub use default_provider::{DefaultContextBuilder, DefaultContextBuilderFactory};
 
@@ -28,9 +29,11 @@ use rsi_agent_session_protocol::{
     AgentMessageContent, EMPTY_FACT_PREFIX_DIGEST, EffectId, InputMessageSource, SessionFact,
     SessionFactBody, SessionHeader, StepPrompt, TurnId, advance_fact_prefix_digest,
 };
+#[cfg(test)]
+use rsi_ai_protocol::LanguageRequest;
 use rsi_ai_protocol::{
-    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequest,
-    LanguageRequestOptions, Message, MessageContent,
+    ContentBlock, LanguageAssembler, LanguageAssemblyError, LanguageRequestOptions, Message,
+    MessageContent,
 };
 use rsi_media_protocol::{MediaDescriptor, MediaKind};
 use rsi_tools_protocol::{ToolContent, ToolResult};
@@ -38,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, VecDeque};
+#[cfg(test)]
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -52,15 +56,15 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 21;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v21\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v21\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 22;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v22\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v22\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextLimits {
-    /// Maximum projected messages including system and omission notice.
+    /// Maximum projected messages including system guidance.
     pub max_messages: usize,
     /// Maximum canonical encoded message bytes.
     pub max_bytes: usize,
@@ -96,29 +100,28 @@ impl Default for ContextLimits {
 
 /// Complete bounded projection for one model call.
 #[derive(Debug)]
-pub struct ModelContext {
+#[cfg(test)]
+struct ModelContext {
     _credit: Arc<ContextCredit>,
     messages: Vec<Message>,
-    /// Number of complete oldest turns omitted as one unit.
-    pub omitted_turns: usize,
     /// Highest applied Fact sequence.
     pub through_seq: u64,
 }
 
 struct ProjectedMessages {
     messages: Vec<Message>,
-    omitted_turns: usize,
+    #[cfg(test)]
     encoded_bytes: usize,
 }
 
+#[cfg(test)]
 impl PartialEq for ModelContext {
     fn eq(&self, other: &Self) -> bool {
-        self.messages == other.messages
-            && self.omitted_turns == other.omitted_turns
-            && self.through_seq == other.through_seq
+        self.messages == other.messages && self.through_seq == other.through_seq
     }
 }
 
+#[cfg(test)]
 impl ModelContext {
     /// Borrows provider-neutral ordered messages without separating their admission.
     pub fn messages(&self) -> &[Message] {
@@ -136,7 +139,7 @@ enum AccountingImpact {
 
 /// Incremental fold over one immutable session header and its Facts.
 #[derive(Debug)]
-pub struct ContextFold {
+struct ContextFold {
     header: SessionHeader,
     budget: ContextBudget,
     credit: ContextCredit,
@@ -157,15 +160,13 @@ pub struct ContextFold {
     seed_sources: usize,
     fact_prefix_digest: [u8; 32],
     checkpointable_prefix: bool,
-    omitted_turns: usize,
-    retention_limits: Option<ContextLimits>,
+    retention_limits: ContextLimits,
     turns: VecDeque<ProjectedTurn>,
     base_ordinal: usize,
     turn_index: BTreeMap<TurnKey, usize>,
     assemblers: BTreeMap<EffectId, ActiveAssembler>,
     retained_messages: usize,
     retained_message_bytes: usize,
-    ingestion_failed: bool,
     ingesting_source: Option<rsi_agent_session_protocol::SessionId>,
     #[cfg(test)]
     metadata_recounts: std::cell::Cell<usize>,
@@ -192,7 +193,7 @@ struct ActiveAssembler {
     purpose: rsi_agent_session_protocol::ModelPurpose,
     eligible_summary: bool,
     model: rsi_ai_protocol::ModelRef,
-    turn_id: TurnId,
+    turn_id: Option<TurnId>,
     assembler: LanguageAssembler,
 }
 
@@ -204,10 +205,9 @@ struct ContextCheckpointPayload {
     header_fingerprint: String,
     through_seq: u64,
     fact_prefix_sha256: String,
-    omitted_turns: usize,
     retention_limits: ContextLimits,
     turns: Vec<CheckpointTurn>,
-    semantic: Option<compaction::SemanticState>,
+    semantic: compaction::SemanticState,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -232,10 +232,9 @@ struct ContextCheckpointPayloadRef<'a> {
     header_fingerprint: &'a str,
     through_seq: u64,
     fact_prefix_sha256: &'a str,
-    omitted_turns: usize,
     retention_limits: ContextLimits,
     turns: Vec<CheckpointTurnRef<'a>>,
-    semantic: Option<&'a compaction::SemanticState>,
+    semantic: &'a compaction::SemanticState,
 }
 
 #[derive(Debug, Serialize)]
@@ -305,19 +304,43 @@ impl ContextFold {
         )
     }
     /// Starts an empty projection for one immutable session.
-    pub fn new(header: SessionHeader, budget: ContextBudget) -> Result<Self> {
+    #[cfg(test)]
+    fn new(header: SessionHeader, budget: ContextBudget) -> Result<Self> {
+        Self::with_limits(header, ContextLimits::default(), budget)
+    }
+
+    fn for_builder(
+        header: SessionHeader,
+        limits: ContextLimits,
+        budget: ContextBudget,
+        identity: &ContextBuilderIdentity,
+    ) -> Result<Self> {
+        let mut fold = Self::with_semantic(
+            header,
+            limits,
+            budget,
+            compaction::SemanticState::new(identity),
+        )?;
+        fold.reaccount()?;
+        Ok(fold)
+    }
+
+    fn with_semantic(
+        header: SessionHeader,
+        limits: ContextLimits,
+        budget: ContextBudget,
+        semantic: compaction::SemanticState,
+    ) -> Result<Self> {
+        ContextLimits::new(limits.max_messages, limits.max_bytes)?;
         // Cursor Header and derived instruction/message copy; README defines the separate wrapper charge.
         let header_weight = budget::weight(&header)?;
         let credit = budget.reserve(header_weight.checked_mul(2).ok_or(ContextError::Capacity)?)?;
-        header
-            .validate()
-            .map_err(|error| ContextError::Invalid(error.to_string()))?;
         let (system_message, system_message_bytes) =
             assembled_system(&header, &StepPrompt::default())?;
         let seed_through_seq = header
             .history_origin()
             .map_or(0, |origin| origin.resolved_after_seq);
-        let mut state = Self {
+        Ok(Self {
             header,
             budget,
             credit,
@@ -327,7 +350,7 @@ impl ContextFold {
             global_metadata_bytes: 0,
             global_weights: [0; 3],
             accounting_impact: AccountingImpact::Turns,
-            semantic: None,
+            semantic: Some(semantic),
             system_message,
             system_message_bytes,
             step_prompt: StepPrompt::default(),
@@ -338,33 +361,32 @@ impl ContextFold {
             seed_sources: 0,
             fact_prefix_digest: EMPTY_FACT_PREFIX_DIGEST,
             checkpointable_prefix: true,
-            omitted_turns: 0,
-            retention_limits: None,
+            retention_limits: limits,
             turns: VecDeque::new(),
             base_ordinal: 0,
             turn_index: BTreeMap::new(),
             assemblers: BTreeMap::new(),
             retained_messages: 0,
             retained_message_bytes: 0,
-            ingestion_failed: false,
             ingesting_source: None,
             #[cfg(test)]
             metadata_recounts: std::cell::Cell::new(0),
-        };
-        state.reaccount()?;
-        Ok(state)
+        })
     }
 
-    /// Starts an incremental projection that discards complete old turns as it folds.
+    /// Starts the bounded semantic projection.
+    #[cfg(test)]
     pub fn with_limits(
         header: SessionHeader,
         limits: ContextLimits,
         budget: ContextBudget,
     ) -> Result<Self> {
-        ContextLimits::new(limits.max_messages, limits.max_bytes)?;
-        let mut fold = Self::new(header, budget)?;
-        fold.retention_limits = Some(limits);
-        Ok(fold)
+        Self::for_builder(
+            header,
+            limits,
+            budget,
+            DefaultContextBuilder::default().identity(),
+        )
     }
 
     fn retained_weight(&self) -> Result<usize> {
@@ -390,17 +412,12 @@ impl ContextFold {
     fn reaccount(&mut self) -> Result<()> {
         self.metadata_weights.clear();
         self.metadata_bytes = 0;
-        self.global_weights = self
-            .semantic
-            .as_ref()
-            .map_or(Ok([0; 3]), compaction::SemanticState::global_weights)?;
+        self.global_weights = self.semantic().global_weights()?;
         self.global_metadata_bytes = self.global_weight()?;
         #[cfg(test)]
         assert_eq!(
             self.global_metadata_bytes,
-            self.semantic
-                .as_ref()
-                .map_or(Ok(0), compaction::SemanticState::measured_global_weight)?
+            self.semantic().measured_global_weight()?
         );
         for turn in &self.turns {
             let bytes = self.turn_metadata_weight(turn)?;
@@ -413,9 +430,6 @@ impl ContextFold {
         self.credit.resize(self.retained_weight()?)
     }
     fn global_weight(&self) -> Result<usize> {
-        if self.semantic.is_none() {
-            return Ok(0);
-        }
         // JSON tuple framing: brackets plus two separators.
         self.global_weights.iter().try_fold(4usize, |sum, weight| {
             sum.checked_add(*weight).ok_or(ContextError::Capacity)
@@ -427,10 +441,7 @@ impl ContextFold {
         let identity = budget::weight(&turn.id)?
             .checked_mul(6)
             .ok_or(ContextError::Capacity)?;
-        let semantic = self
-            .semantic
-            .as_ref()
-            .map_or(Ok(0), |state| state.turn_weight(&turn.id))?;
+        let semantic = self.semantic().turn_weight(&turn.id)?;
         budget::weight(&(turn.terminal, usize::MAX, &turn.context_input_times))?
             .checked_add(turn.batches.weight()?)
             .and_then(|bytes| bytes.checked_add(turn.claimed_bytes))
@@ -445,15 +456,12 @@ impl ContextFold {
             return self.reaccount();
         }
         if self.accounting_impact == AccountingImpact::Usage {
-            self.global_weights[1] = self
-                .semantic
-                .as_ref()
-                .map_or(Ok(0), compaction::SemanticState::usage_weight)?;
+            self.global_weights[1] = self.semantic().usage_weight()?;
             self.global_metadata_bytes = self.global_weight()?;
         }
         let changed: std::collections::BTreeSet<_> = changed
             .into_iter()
-            .chain(std::iter::once(self.turn_key(fact.body().turn_id())))
+            .chain(fact.body().turn_id().map(|turn| self.turn_key(turn)))
             .collect();
         for id in changed {
             self.reaccount_turn(&id)?;
@@ -499,8 +507,14 @@ impl ContextFold {
                 .ok_or(ContextError::Capacity)?,
         )
     }
+    fn semantic(&self) -> &compaction::SemanticState {
+        self.semantic.as_ref().expect("usable semantic fold")
+    }
+    fn semantic_mut(&mut self) -> &mut compaction::SemanticState {
+        self.semantic.as_mut().expect("usable semantic fold")
+    }
     fn ensure_usable(&self) -> Result<()> {
-        if self.ingestion_failed {
+        if self.semantic.is_none() {
             return Err(ContextError::Invalid(
                 "Context cursor was invalidated by failed Fact ingestion; rebuild from authoritative Facts".into(),
             ));
@@ -525,7 +539,6 @@ impl ContextFold {
         if result.is_err() {
             // Mutations can precede a refusal. Drop their ownership before releasing
             // credit rather than pretending that the old prefix was rolled back.
-            self.ingestion_failed = true;
             self.checkpointable_prefix = false;
             self.turns.clear();
             self.turn_index.clear();
@@ -559,6 +572,7 @@ impl ContextFold {
     }
 
     /// Returns the immutable source header.
+    #[cfg(test)]
     pub const fn header(&self) -> &SessionHeader {
         &self.header
     }
@@ -576,9 +590,7 @@ impl ContextFold {
     /// Encodes a versioned checkpoint for an exact prefix without an active assembler.
     pub fn checkpoint_bytes(&self) -> Result<rsi_api_protocol::RetainedBytes> {
         self.ensure_usable()?;
-        let retention_limits = self.retention_limits.ok_or_else(|| {
-            ContextError::Invalid("checkpoint requires explicit retention limits".into())
-        })?;
+        let retention_limits = self.retention_limits;
         if self.through_seq == 0 || !self.checkpointable_prefix || !self.assemblers.is_empty() {
             return Err(ContextError::Invalid(
                 "checkpoint requires a nonempty exact prefix without an active assembler".into(),
@@ -592,11 +604,10 @@ impl ContextFold {
         let payload = ContextCheckpointPayloadRef {
             step_prompt: &self.step_prompt,
             version: CONTEXT_CHECKPOINT_VERSION,
-            semantic: self.semantic.as_ref(),
+            semantic: self.semantic(),
             header_fingerprint: &header_fingerprint,
             through_seq: self.through_seq,
             fact_prefix_sha256: &fact_prefix_sha256,
-            omitted_turns: self.omitted_turns,
             retention_limits,
             turns: self
                 .turns
@@ -645,9 +656,6 @@ impl ContextFold {
         budget: ContextBudget,
     ) -> Result<Self> {
         let _restore = budget.reserve(bytes.len().checked_mul(3).ok_or(ContextError::Capacity)?)?;
-        header
-            .validate()
-            .map_err(|error| ContextError::Invalid(error.to_string()))?;
         ContextLimits::new(limits.max_messages, limits.max_bytes)?;
         if bytes.is_empty() || bytes.len() > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
             return Err(ContextError::Invalid(
@@ -690,18 +698,15 @@ impl ContextFold {
                 "checkpoint version, header, cursor, or limits do not match".into(),
             ));
         }
-        let mut fold = Self::with_limits(header, limits, budget)?;
+        let mut fold = Self::with_semantic(header, limits, budget, checkpoint.semantic)?;
         checkpoint
             .step_prompt
             .validate()
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
         fold.set_step_prompt(&checkpoint.step_prompt)?;
-        fold.semantic = checkpoint.semantic;
         fold.through_seq = checkpoint.through_seq;
         fold.fact_prefix_digest = fact_prefix_digest;
         fold.checkpointable_prefix = true;
-        fold.omitted_turns = checkpoint.omitted_turns;
-        fold.base_ordinal = checkpoint.omitted_turns;
         fold.restore_checkpoint_turns(checkpoint.turns)?;
         fold.validate_semantic()?;
         fold.reaccount()?;
@@ -729,7 +734,7 @@ impl ContextFold {
                     .any(|pair| pair[0].seq() >= pair[1].seq())
                 || turn.claimed.iter().any(|fact| {
                     fact.claimed_input_count() == 0
-                        || fact.body().turn_id() != &turn.id.turn
+                        || fact.body().turn_id() != Some(&turn.id.turn)
                         || turn.id.session == *self.header.session_id()
                             && fact.seq() > self.through_seq
                 })
@@ -818,9 +823,6 @@ impl ContextFold {
     /// resolves the chain; this fold checks adjacent bindings and exact coverage.
     pub fn begin_seed_source(&mut self, source: &SessionHeader) -> Result<()> {
         self.ensure_usable()?;
-        source
-            .validate()
-            .map_err(|error| ContextError::Invalid(error.to_string()))?;
         let origin = source
             .history_origin()
             .ok_or_else(|| ContextError::Invalid("fork source has no inherited interval".into()))?;
@@ -1010,219 +1012,47 @@ impl ContextFold {
         Ok(())
     }
 
-    /// Projects bounded messages, dropping only complete oldest turns.
+    /// Projects the bounded semantic view.
+    #[cfg(test)]
     pub fn project(&self, limits: ContextLimits) -> Result<ModelContext> {
-        self.project_view(limits, false)
+        self.project_view(limits)
     }
 
-    fn project_view(&self, limits: ContextLimits, provider_view: bool) -> Result<ModelContext> {
+    #[cfg(test)]
+    fn project_view(&self, limits: ContextLimits) -> Result<ModelContext> {
         let mut credit = self.projection_credit(0)?;
-        let projected = self.projected_messages(limits, provider_view)?;
+        let projected = self.projected_messages(limits)?;
         credit.resize(projected.encoded_bytes)?;
         Ok(ModelContext {
             _credit: Arc::new(credit),
             messages: projected.messages,
-            omitted_turns: projected.omitted_turns,
             through_seq: self.through_seq,
         })
     }
 
-    fn projected_messages(
-        &self,
-        limits: ContextLimits,
-        provider_view: bool,
-    ) -> Result<ProjectedMessages> {
+    fn projected_messages(&self, limits: ContextLimits) -> Result<ProjectedMessages> {
         self.ensure_usable()?;
         // Private callers hold projection credit throughout materialization.
         ContextLimits::new(limits.max_messages, limits.max_bytes)?;
-        if self.semantic.is_some() {
-            return self.semantic_projection(limits);
-        }
-        let normalized = provider_view
-            .then(|| {
-                self.turns
-                    .iter()
-                    .map(|turn| {
-                        outcomes::normalize_with_size(
-                            &turn.messages,
-                            &turn.batches,
-                            turn.terminal,
-                            turn.message_bytes,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?;
-        let (retained_count, retained_bytes) = normalized.as_ref().map_or(
-            (self.retained_messages, self.retained_message_bytes),
-            |turns| {
-                turns
-                    .iter()
-                    .fold((0, 0), |(count, bytes), (messages, size)| {
-                        (count + messages.len(), bytes + size)
-                    })
-            },
-        );
-        let mut retained_messages = usize::from(self.system_message.is_some())
-            .checked_add(retained_count)
-            .ok_or_else(|| ContextError::Invalid("context message count overflowed".into()))?;
-        let mut retained_message_bytes = self
-            .system_message_bytes
-            .checked_add(retained_bytes)
-            .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
-        let mut omitted = self.omitted_turns;
-        let mut skipped_retained = 0_usize;
-        loop {
-            let notice = (omitted > 0)
-                .then(|| omission_message(omitted))
-                .transpose()?;
-            let notice_bytes = notice
-                .as_ref()
-                .map(encoded_message_bytes)
-                .transpose()?
-                .unwrap_or(0);
-            let message_count = retained_messages
-                .checked_add(usize::from(notice.is_some()))
-                .ok_or_else(|| ContextError::Invalid("context message count overflowed".into()))?;
-            let message_bytes = retained_message_bytes
-                .checked_add(notice_bytes)
-                .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
-            if message_count <= limits.max_messages
-                && encoded_array_bytes(message_count, message_bytes)? <= limits.max_bytes
-            {
-                let mut messages = Vec::with_capacity(message_count);
-                messages.extend(self.system_message.iter().cloned());
-                messages.extend(notice);
-                if let Some(turns) = &normalized {
-                    for (turn, _) in turns.iter().skip(skipped_retained) {
-                        messages.extend(turn.iter().map(|message| message.as_ref().clone()));
-                    }
-                } else {
-                    for turn in self.turns.iter().skip(skipped_retained) {
-                        messages.extend(turn.messages.iter().cloned());
-                    }
-                }
-                drop(normalized);
-                return Ok(ProjectedMessages {
-                    messages,
-                    omitted_turns: omitted,
-                    encoded_bytes: encoded_array_bytes(message_count, message_bytes)?,
-                });
-            }
-            let Some(turn) = self.turns.get(skipped_retained) else {
-                return Err(ContextError::TooLarge);
-            };
-            if !turn.terminal {
-                return Err(ContextError::TooLarge);
-            }
-            let (removed_messages, removed_bytes) = normalized
-                .as_ref()
-                .map_or((turn.messages.len(), turn.message_bytes), |turns| {
-                    (turns[skipped_retained].0.len(), turns[skipped_retained].1)
-                });
-            retained_messages = retained_messages
-                .checked_sub(removed_messages)
-                .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
-            retained_message_bytes = retained_message_bytes
-                .checked_sub(removed_bytes)
-                .ok_or_else(|| ContextError::Invalid("context byte count underflowed".into()))?;
-            omitted = omitted
-                .checked_add(1)
-                .ok_or_else(|| ContextError::Invalid("omitted turn count overflowed".into()))?;
-            skipped_retained = skipped_retained
-                .checked_add(1)
-                .ok_or_else(|| ContextError::Invalid("retained turn index overflowed".into()))?;
-        }
+        self.semantic_projection(limits)
     }
 
     fn compact_retained(&mut self) -> Result<()> {
-        if self.semantic.is_some() {
-            // Never evict source messages before semantic planning. The absolute
-            // materialization ceiling still bounds a cold or adversarial history.
-            if self.retained_messages > MAXIMUM_CONTEXT_MESSAGES
-                || self.retained_message_bytes > MAXIMUM_CONTEXT_BYTES
-            {
-                return Err(ContextError::TooLarge);
-            }
-            return Ok(());
+        if self.retained_messages > MAXIMUM_CONTEXT_MESSAGES
+            || self.retained_message_bytes > MAXIMUM_CONTEXT_BYTES
+        {
+            return Err(ContextError::TooLarge);
         }
-        let Some(limits) = self.retention_limits else {
-            return Ok(());
-        };
-        while self.retained_shape_exceeds(limits)? {
-            if self.turns.front().is_none_or(|turn| !turn.terminal) {
-                break;
-            }
-            self.remove_oldest_turn()?;
-        }
-        Ok(())
-    }
-
-    // Called only after observing a terminal front; no active Turn is truncated.
-    fn remove_oldest_turn(&mut self) -> Result<()> {
-        let removed = self
-            .turns
-            .pop_front()
-            .expect("terminal front was observed above");
-        self.retained_messages = self
-            .retained_messages
-            .checked_sub(removed.messages.len())
-            .ok_or_else(|| ContextError::Invalid("context message count underflowed".into()))?;
-        self.retained_message_bytes = self
-            .retained_message_bytes
-            .checked_sub(removed.message_bytes)
-            .ok_or_else(|| ContextError::Invalid("context byte count underflowed".into()))?;
-        self.omitted_turns = self
-            .omitted_turns
-            .checked_add(1)
-            .ok_or_else(|| ContextError::Invalid("omitted turn count overflowed".into()))?;
-        self.turn_index.remove(&removed.id);
-        if let Some(previous) = self.metadata_weights.remove(&removed.id) {
-            self.metadata_bytes = self
-                .metadata_bytes
-                .checked_sub(previous)
-                .ok_or(ContextError::Capacity)?;
-        }
-        self.base_ordinal = self
-            .base_ordinal
-            .checked_add(1)
-            .ok_or_else(|| ContextError::Invalid("turn ordinal overflowed".into()))?;
         Ok(())
     }
 
     fn admit_message(&mut self, bytes: usize) -> Result<()> {
-        while self.retained_messages >= MAXIMUM_CONTEXT_MESSAGES
+        if self.retained_messages >= MAXIMUM_CONTEXT_MESSAGES
             || bytes > MAXIMUM_CONTEXT_BYTES.saturating_sub(self.retained_message_bytes)
         {
-            if self.semantic.is_some()
-                || self.retention_limits.is_none()
-                || self.turns.front().is_none_or(|turn| !turn.terminal)
-            {
-                return Err(ContextError::TooLarge);
-            }
-            self.remove_oldest_turn()?;
+            return Err(ContextError::TooLarge);
         }
         Ok(())
-    }
-
-    fn retained_shape_exceeds(&self, limits: ContextLimits) -> Result<bool> {
-        let system_messages = usize::from(self.system_message.is_some());
-        let count = system_messages
-            .checked_add(usize::from(self.omitted_turns > 0))
-            .and_then(|count| count.checked_add(self.retained_messages))
-            .ok_or_else(|| ContextError::Invalid("context message count overflowed".into()))?;
-        let mut bytes = self.system_message_bytes;
-        if self.omitted_turns > 0 {
-            bytes = bytes
-                .checked_add(encoded_message_bytes(&omission_message(
-                    self.omitted_turns,
-                )?)?)
-                .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
-        }
-        bytes = bytes
-            .checked_add(self.retained_message_bytes)
-            .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))?;
-        Ok(count > limits.max_messages || encoded_array_bytes(count, bytes)? > limits.max_bytes)
     }
 
     /// Builds one provider-neutral Language request.
@@ -1230,6 +1060,7 @@ impl ContextFold {
     /// V1 keeps the complete provider-neutral prefix. A provider replay token is
     /// not eligible for prefix elision until the AI seam exposes an exact,
     /// provider-I/O-free route/config/credential identity before request construction.
+    #[cfg(test)]
     pub fn request(
         &self,
         limits: ContextLimits,
@@ -1250,7 +1081,7 @@ impl ContextFold {
         options: &LanguageRequestOptions,
     ) -> Result<Vec<Message>> {
         let limits = emission_limits(limits, options)?;
-        without_unscoped_provider_state(self.projected_messages(limits, true)?.messages)
+        without_unscoped_provider_state(self.projected_messages(limits)?.messages)
     }
 
     fn apply_body(&mut self, fact: &SessionFact) -> Result<()> {
@@ -1266,6 +1097,15 @@ impl ContextFold {
     fn apply_body_inner(&mut self, fact: &SessionFact) -> Result<()> {
         let body = fact.body();
         let seq = fact.seq();
+        if matches!(
+            body,
+            SessionFactBody::TurnAccepted { .. }
+                | SessionFactBody::MessageTurnAccepted { .. }
+                | SessionFactBody::ImageRequested { .. }
+        ) {
+            // Prompt admission can proceed only after an idle command has released its claim.
+            self.assemblers.retain(|_, active| active.turn_id.is_some());
+        }
         match body {
             SessionFactBody::StepPrepared {
                 prompt: Some(prompt),
@@ -1299,35 +1139,24 @@ impl ContextFold {
                     .map_err(|error| ContextError::Invalid(error.to_string()))?;
                 self.insert_turn(turn_id, message)?;
             }
+            SessionFactBody::ManualCompaction {
+                effect_id, event, ..
+            } => {
+                self.apply_manual_compaction(effect_id, event, seq)?;
+            }
             SessionFactBody::ModelIntent {
-                evidence: _,
-                price_quote: _,
                 turn_id,
                 effect_id,
                 purpose,
                 snapshot,
-            } => {
-                self.start_model(turn_id, effect_id, purpose, snapshot)?;
-            }
+                ..
+            } => self.start_model(Some(turn_id), effect_id, purpose.clone(), snapshot)?,
             SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
                 attempt,
                 purpose,
-            } => {
-                for item in attempt.events() {
-                    let (_, event) =
-                        item.map_err(|error| ContextError::Invalid(error.to_string()))?;
-                    self.apply_model_event(
-                        turn_id,
-                        effect_id,
-                        &event,
-                        *purpose,
-                        seq,
-                        attempt.retain_context(),
-                    )?;
-                }
-            }
+            } => self.apply_attempt(Some(turn_id), effect_id, *purpose, seq, attempt)?,
             SessionFactBody::ToolCallsSuperseded { .. }
             | SessionFactBody::ToolIntent { .. }
             | SessionFactBody::ToolStarted { .. }
@@ -1353,7 +1182,7 @@ impl ContextFold {
                 // remain visible as raw Facts but cannot poison the next cursor
                 // boundary or install an uncompleted internal summary.
                 self.assemblers
-                    .retain(|_, active| &active.turn_id != turn_id);
+                    .retain(|_, active| active.turn_id.as_ref() != Some(turn_id));
             }
             SessionFactBody::StepPrepared { prompt: None, .. }
             | SessionFactBody::CancelRequested { .. }
@@ -1379,13 +1208,15 @@ impl ContextFold {
 
     fn start_model(
         &mut self,
-        turn_id: &TurnId,
+        turn_id: Option<&TurnId>,
         effect_id: &EffectId,
-        purpose: &rsi_agent_session_protocol::ModelPurpose,
+        purpose: rsi_agent_session_protocol::ModelPurpose,
         snapshot: &rsi_ai_protocol::PreparedCallSnapshot,
     ) -> Result<()> {
-        self.require_live_turn(turn_id)?;
-        let eligible_summary = match purpose {
+        if let Some(turn) = turn_id {
+            self.require_live_turn(turn)?;
+        }
+        let eligible_summary = match &purpose {
             rsi_agent_session_protocol::ModelPurpose::Conversation => false,
             rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) => {
                 self.summary_eligible(plan)
@@ -1399,11 +1230,11 @@ impl ContextFold {
             .insert(
                 effect_id.clone(),
                 ActiveAssembler {
-                    binding_bytes: budget::weight(&(effect_id, purpose, &model, turn_id))?,
-                    purpose: purpose.clone(),
+                    binding_bytes: budget::weight(&(effect_id, &purpose, &model, turn_id))?,
+                    purpose,
                     eligible_summary,
                     model,
-                    turn_id: turn_id.clone(),
+                    turn_id: turn_id.cloned(),
                     assembler: LanguageAssembler::new(),
                 },
             )
@@ -1416,9 +1247,64 @@ impl ContextFold {
         Ok(())
     }
 
+    fn apply_manual_compaction(
+        &mut self,
+        effect_id: &EffectId,
+        event: &rsi_agent_session_protocol::ManualCompactionEvent,
+        seq: u64,
+    ) -> Result<()> {
+        match event {
+            rsi_agent_session_protocol::ManualCompactionEvent::Prepared(prepared) => {
+                self.assemblers.retain(|_, active| active.turn_id.is_some());
+                self.start_model(
+                    None,
+                    effect_id,
+                    rsi_agent_session_protocol::ModelPurpose::ContextCompaction(Box::new(
+                        prepared.plan.clone(),
+                    )),
+                    &prepared.snapshot,
+                )?;
+            }
+            rsi_agent_session_protocol::ManualCompactionEvent::Started
+            | rsi_agent_session_protocol::ManualCompactionEvent::Installed => {}
+            rsi_agent_session_protocol::ManualCompactionEvent::Settled { attempt } => {
+                self.apply_attempt(
+                    None,
+                    effect_id,
+                    rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
+                    seq,
+                    attempt,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_attempt(
+        &mut self,
+        turn_id: Option<&TurnId>,
+        effect_id: &EffectId,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        seq: u64,
+        attempt: &rsi_agent_session_protocol::ModelAttemptLog,
+    ) -> Result<()> {
+        for item in attempt.events() {
+            let (_, event) = item.map_err(|error| ContextError::Invalid(error.to_string()))?;
+            self.apply_model_event(
+                turn_id,
+                effect_id,
+                &event,
+                purpose,
+                seq,
+                attempt.retain_context(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn apply_model_event(
         &mut self,
-        turn_id: &TurnId,
+        turn_id: Option<&TurnId>,
         effect_id: &EffectId,
         event: &rsi_ai_protocol::LanguageEvent,
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
@@ -1434,7 +1320,7 @@ impl ContextFold {
             .assemblers
             .get_mut(effect_id)
             .ok_or_else(|| ContextError::Invalid("model event has no matching intent".into()))?;
-        if &active.turn_id != turn_id || active.purpose.event_purpose() != purpose {
+        if active.turn_id.as_ref() != turn_id || active.purpose.event_purpose() != purpose {
             return Err(ContextError::Invalid(
                 "model event changed its owning turn".into(),
             ));
@@ -1451,6 +1337,13 @@ impl ContextFold {
             .assemblers
             .remove(effect_id)
             .expect("assembler was observed above");
+        let partial_owner = turn_id.filter(|_| {
+            retain_partial
+                && matches!(
+                    active.purpose,
+                    rsi_agent_session_protocol::ModelPurpose::Conversation
+                )
+        });
         match active.assembler.finish() {
             Ok(output) => {
                 if output.finish_reason == rsi_ai_protocol::FinishReason::Cancelled {
@@ -1460,12 +1353,7 @@ impl ContextFold {
                         seq,
                         output.usage,
                     );
-                    if retain_partial
-                        && matches!(
-                            active.purpose,
-                            rsi_agent_session_protocol::ModelPurpose::Conversation
-                        )
-                    {
+                    if let Some(turn_id) = partial_owner {
                         self.push_partial(turn_id, output.content, "cancelled")?;
                     }
                     return Ok(());
@@ -1486,6 +1374,7 @@ impl ContextFold {
                 if internal {
                     return Ok(());
                 }
+                let turn_id = turn_id.expect("conversation model effects are turn-owned");
                 let message = assistant_message(output.content, output.replay.as_ref())?;
                 let turn = self.turn_mut(turn_id)?;
                 let index = turn.messages.len();
@@ -1499,23 +1388,13 @@ impl ContextFold {
             }
             Err(LanguageAssemblyError::Incomplete { partial }) => {
                 self.observe_conversation_usage(&active.purpose, active.model, seq, partial.usage);
-                if retain_partial
-                    && matches!(
-                        active.purpose,
-                        rsi_agent_session_protocol::ModelPurpose::Conversation
-                    )
-                {
+                if let Some(turn_id) = partial_owner {
                     self.push_partial(turn_id, partial.content, "max_tokens")?;
                 }
                 Ok(())
             }
             Err(LanguageAssemblyError::Provider { error, partial }) => {
-                if retain_partial
-                    && matches!(
-                        active.purpose,
-                        rsi_agent_session_protocol::ModelPurpose::Conversation
-                    )
-                {
+                if let Some(turn_id) = partial_owner {
                     self.push_partial(turn_id, partial.content, error.kind().code())?;
                 }
                 Ok(())
@@ -1630,7 +1509,7 @@ impl ContextFold {
     }
 
     // Validate provenance before entering this helper. Capacity admission may
-    // evict complete older Turns; the live target and its indices stay stable.
+    // admit the message while keeping the live target and its indices stable.
     fn push_turn_message_with(
         &mut self,
         turn_id: &TurnId,
@@ -1904,14 +1783,6 @@ fn encoded_message_bytes(message: &Message) -> Result<usize> {
     encoded_bytes(message)
 }
 
-fn encoded_array_bytes(items: usize, item_bytes: usize) -> Result<usize> {
-    let separators = items.saturating_sub(1);
-    item_bytes
-        .checked_add(separators)
-        .and_then(|bytes| bytes.checked_add(2))
-        .ok_or_else(|| ContextError::Invalid("context byte count overflowed".into()))
-}
-
 /// Closed context projection failure taxonomy.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ContextError {
@@ -1922,7 +1793,7 @@ pub enum ContextError {
     #[error("invalid Agent context: {0}")]
     Invalid(String),
     /// Current nonterminal context cannot fit without splitting an active turn.
-    #[error("Agent context exceeds its limits after all complete turns were compacted")]
+    #[error("Agent context exceeds its limits")]
     TooLarge,
 }
 
@@ -1946,13 +1817,6 @@ impl std::io::Write for CheckpointWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-fn omission_message(omitted: usize) -> Result<Message> {
-    Message::developer_text(format!(
-        "[Context omitted {omitted} complete earlier turn(s).]"
-    ))
-    .map_err(|error| ContextError::Invalid(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1980,12 +1844,12 @@ mod checkpoint_encoding_tests {
     }
 
     #[test]
-    fn restore_rejects_integrity_bound_invalid_semantic_positions_and_bounds() {
+    fn restore_rejects_integrity_bound_invalid_semantic_state_and_builder_binding() {
         let header = accounting_header();
         let limits = ContextLimits::default();
         let mut fold =
             ContextFold::with_limits(header.clone(), limits, ContextBudget::default()).unwrap();
-        fold.enable_semantic(DefaultContextBuilder::default().identity())
+        fold.validate_builder(DefaultContextBuilder::default().identity())
             .unwrap();
         fold.apply(&[SessionFact::new(
             1,
@@ -2003,7 +1867,8 @@ mod checkpoint_encoding_tests {
             .unwrap();
         let bytes = fold.checkpoint_bytes().unwrap();
         let payload = &bytes[CHECKPOINT_MAGIC.len() + 32..];
-        for mutation in 0..4 {
+        let builder = DefaultContextBuilder::default();
+        for mutation in 0..7 {
             let mut payload: serde_json::Value = serde_json::from_slice(payload).unwrap();
             match mutation {
                 0 => payload["semantic"]["last_human"]["missing-turn"] = serde_json::json!(0),
@@ -2016,12 +1881,15 @@ mod checkpoint_encoding_tests {
                     source["turn"] = serde_json::json!("missing-turn");
                     payload["semantic"]["sources"]["missing-turn"] = source;
                 }
-                _ => {
+                3 => {
                     let humans = payload["semantic"]["last_human"].as_object_mut().unwrap();
                     for index in 0..=MAXIMUM_CONTEXT_MESSAGES {
                         humans.insert(format!("extra-{index}"), serde_json::json!(0));
                     }
                 }
+                4 => payload["semantic"]["identity"]["id"] = "other".into(),
+                5 => payload["semantic"]["identity"]["semantic_version"] = "1.0.0".into(),
+                _ => payload["semantic"]["identity"]["config_sha256"] = "0".repeat(64).into(),
             }
             let payload = serde_json::to_vec(&payload).unwrap();
             let mut digest = Sha256::new();
@@ -2032,12 +1900,13 @@ mod checkpoint_encoding_tests {
             bytes.extend_from_slice(&payload);
             assert!(
                 matches!(
-                    ContextFold::from_checkpoint(
-                        header.clone(),
+                    builder.open(ContextInit {
+                        header: header.clone(),
                         limits,
-                        &bytes,
-                        ContextBudget::default()
-                    ),
+                        identity: builder.identity(),
+                        budget: ContextBudget::default(),
+                        checkpoint: Some(&bytes),
+                    }),
                     Err(ContextError::Invalid(_))
                 ),
                 "mutation {mutation} was accepted"
@@ -2057,7 +1926,7 @@ mod checkpoint_encoding_tests {
             ContextBudget::default(),
         )
         .unwrap();
-        fold.enable_semantic(DefaultContextBuilder::default().identity())
+        fold.validate_builder(DefaultContextBuilder::default().identity())
             .unwrap();
         let instructions = [
             InputMessageSource::AgentInstructions {
@@ -2073,7 +1942,11 @@ mod checkpoint_encoding_tests {
         let apply = |fold: &mut ContextFold, body| {
             let seq = fold.through_seq() + 1;
             let fact = SessionFact::new(seq, seq, body).unwrap();
-            let turn_id = fact.body().turn_id().clone();
+            let turn_id = fact
+                .body()
+                .turn_id()
+                .expect("turn-owned fixture fact")
+                .clone();
             let count = fact.claimed_input_count();
             fold.apply(&[fact]).unwrap();
             if count != 0 {
@@ -2254,7 +2127,7 @@ mod checkpoint_encoding_tests {
 
     fn settlement_history() -> ContextFold {
         let mut fold = ContextFold::new(accounting_header(), ContextBudget::default()).unwrap();
-        fold.enable_semantic(DefaultContextBuilder::default().identity())
+        fold.validate_builder(DefaultContextBuilder::default().identity())
             .unwrap();
         for n in 0..128 {
             let turn_id = TurnId::new(format!("history-{n}")).unwrap();
@@ -2369,3 +2242,9 @@ mod checkpoint_encoding_tests {
         assert_eq!(fold.credit.bytes(), retained);
     }
 }
+
+#[cfg(test)]
+extern crate self as rsi_agent_context;
+#[cfg(test)]
+#[path = "../tests/projection/mod.rs"]
+mod projection;

@@ -12,15 +12,10 @@ use rsi_sandbox::SandboxMode;
 use rsi_tools_protocol::{ToolResult, ToolResultIdentity};
 use serde_json::json;
 
-#[path = "projection/builders.rs"]
 mod builders;
-#[path = "projection/compaction.rs"]
 mod compaction;
-#[path = "projection/contributions.rs"]
 mod contributions;
-#[path = "projection/images.rs"]
 mod images;
-#[path = "projection/prepared_input.rs"]
 mod prepared_input;
 
 #[test]
@@ -554,7 +549,7 @@ fn entered_facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<Sess
         let seq = after_seq + u64::try_from(result.len()).unwrap() + 1;
         let fact = SessionFact::new(seq, seq, body).unwrap();
         let count = fact.claimed_input_count();
-        let turn_id = fact.body().turn_id().clone();
+        let turn_id = fact.body().turn_id().expect("turn-owned fixture fact").clone();
         let step_id = match fact.body() {
             SessionFactBody::InputMessageClaimed { step_id, .. }
             | SessionFactBody::ToolContextsClaimed { step_id, .. } => step_id.clone(),
@@ -1088,48 +1083,6 @@ fn nested_full_seed_keeps_ancestor_sources_and_last_refuses_the_ancestor_window(
 }
 
 #[test]
-fn compaction_drops_only_a_complete_oldest_turn_and_inserts_one_notice() {
-    let old = TurnId::new("turn-old").unwrap();
-    let current = TurnId::new("turn-current").unwrap();
-    let mut fold = ContextFold::new(
-        header("system"),
-        rsi_agent_context::ContextBudget::default(),
-    )
-    .unwrap();
-    fold.apply(&entered_facts(vec![
-        SessionFactBody::TurnAccepted {
-            reasoning_effort: None,
-            turn_id: old.clone(),
-            text: "old".repeat(200),
-            model: None,
-            sandbox: SandboxMode::WorkspaceWrite,
-            require_approval: false,
-        },
-        SessionFactBody::TurnTerminal {
-            turn_id: old,
-            outcome: TurnOutcome::Completed,
-            result: None,
-        },
-        SessionFactBody::TurnAccepted {
-            reasoning_effort: None,
-            turn_id: current,
-            text: "current".into(),
-            model: None,
-            sandbox: SandboxMode::WorkspaceWrite,
-            require_approval: false,
-        },
-    ]))
-    .unwrap();
-    let projected = fold.project(ContextLimits::new(3, 500).unwrap()).unwrap();
-    assert_eq!(projected.omitted_turns, 1);
-    assert_eq!(projected.messages().len(), 3);
-    let encoded = serde_json::to_string(projected.messages()).unwrap();
-    assert!(encoded.contains("omitted 1 complete earlier turn"));
-    assert!(encoded.contains("current"));
-    assert!(!encoded.contains(&"old".repeat(50)));
-}
-
-#[test]
 fn projection_uses_the_exact_canonical_json_byte_boundary() {
     let old = TurnId::new("turn-old").unwrap();
     let current = TurnId::new("turn-current").unwrap();
@@ -1166,17 +1119,13 @@ fn projection_uses_the_exact_canonical_json_byte_boundary() {
     let exact = serde_json::to_vec(complete.messages()).unwrap().len();
 
     assert_eq!(
-        fold.project(ContextLimits::new(8, exact).unwrap())
-            .unwrap()
-            .omitted_turns,
-        0
+        fold.project(ContextLimits::new(8, exact).unwrap()).unwrap(),
+        complete
     );
-    assert_eq!(
-        fold.project(ContextLimits::new(8, exact - 1).unwrap())
-            .unwrap()
-            .omitted_turns,
-        1
-    );
+    assert!(matches!(
+        fold.project(ContextLimits::new(8, exact - 1).unwrap()),
+        Err(ContextError::TooLarge)
+    ));
 }
 
 #[test]
@@ -1620,7 +1569,7 @@ fn active_oldest_turn_cannot_bypass_absolute_message_retention() {
             rsi_agent_context::MAXIMUM_CONTEXT_MESSAGES
         );
         assert!(matches!(fold.apply(&input), Err(ContextError::TooLarge)));
-        assert_eq!(fold.through_seq(), input[0].seq());
+        assert_eq!(fold.through_seq(), input[0].seq() - 1);
         assert!(matches!(fold.apply(&input), Err(ContextError::Invalid(_))));
         assert!(matches!(
             fold.project(ContextLimits::default()),
@@ -1754,6 +1703,7 @@ fn failed_fact_releases_workspace_and_fences_all_projection_entry_points() {
         assert_eq!(fold.through_seq(), prefix_seq);
         assert_eq!(fold.fact_prefix_sha256(), prefix_digest);
         let after_failure = budget.used();
+        assert!(!fold.summary_installed(&EffectId::new("missing-intent").unwrap()));
         assert_eq!(
             after_failure,
             serde_json::to_vec(fold.header()).unwrap().len()
@@ -1982,4 +1932,31 @@ fn fork_history_namespaces_equal_turn_ids_by_source_session() {
     let text = serde_json::to_string(&request).unwrap();
     assert!(text.contains("SOURCE_INPUT"));
     assert!(text.contains("LOCAL_INPUT"));
+}
+
+#[test]
+fn retired_fold_cache_version_is_refused() {
+    let mut fold =
+        ContextFold::new(header(""), rsi_agent_context::ContextBudget::default()).unwrap();
+    fold.apply(&entered_facts(vec![SessionFactBody::TurnAccepted {
+        turn_id: TurnId::new("old-cache").unwrap(),
+        text: "retained".into(),
+        model: None,
+        reasoning_effort: None,
+        sandbox: SandboxMode::ReadOnly,
+        require_approval: false,
+    }]))
+    .unwrap();
+    let mut bytes = fold.checkpoint_bytes().unwrap().to_vec();
+    let prefix = b"rsi-agent-context-checkpoint-v22";
+    bytes[prefix.len() - 1] = b'1';
+    assert!(matches!(
+        ContextFold::from_checkpoint(
+            header(""),
+            ContextLimits::default(),
+            &bytes,
+            rsi_agent_context::ContextBudget::default()
+        ),
+        Err(ContextError::Invalid(_))
+    ));
 }

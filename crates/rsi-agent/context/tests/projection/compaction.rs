@@ -68,6 +68,8 @@ fn runtime_context_is_remapped_or_removed_by_summary_and_checkpoint_replay() {
         );
         assert_eq!(state.runtime_context(), Some("runtime snapshot"));
         let frozen = plan(&state);
+        // A private cache encoding change must preserve durable summary eligibility.
+        assert_eq!(frozen.builder.semantic_version, "2.17.0");
         // A small recent tail retains the snapshot at index 1, which must move
         // to 0. A large tail makes both old messages eligible for summary.
         assert!(
@@ -419,6 +421,8 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
             );
             assert!(planned.request.tools().is_empty());
             assert_eq!(planned.request.tool_choice(), &ToolChoice::None);
+            let directive = planned.request.messages().last().unwrap();
+            assert!(matches!(directive.content(), [MessageContent::Text { text, .. }] if text.starts_with("Summarize the transcript above")));
             let effect = format!("summary-{count}");
             append(
                 &mut state,
@@ -1104,6 +1108,50 @@ fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64
 }
 
 #[test]
+fn manual_compaction_can_select_history_without_usage_and_skips_protected_input() {
+    let model = ModelRef::new("deployment", "model").unwrap();
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let profile = profile();
+    let (state, _, _) = history(None);
+    assert!(
+        state
+            .plan_compaction(&options, &model, &profile, None, false)
+            .unwrap()
+            .is_none()
+    );
+    let plan = state
+        .plan_compaction(
+            &options,
+            &model,
+            &profile,
+            Some(CompactionTrigger::Manual),
+            false,
+        )
+        .unwrap()
+        .unwrap()
+        .plan;
+    assert_eq!(plan.trigger, CompactionTrigger::Manual);
+    assert!(
+        plan.selections
+            .iter()
+            .all(|selection| selection.turn.as_str() == "old")
+    );
+    let fresh = cursor();
+    assert!(
+        fresh
+            .plan_compaction(
+                &options,
+                &model,
+                &profile,
+                Some(CompactionTrigger::Manual),
+                false
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn recovery_hint_capacity_triggers_canonical_compaction_without_usage() {
     let (_, mut facts, _) = history(None);
     let mut state = ModelContextState::open(
@@ -1778,9 +1826,9 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
 }
 
 #[test]
-fn both_fold_modes_reject_orphan_results_during_ingestion() {
+fn builder_and_fold_reject_orphan_results_during_ingestion() {
     let mut semantic = cursor();
-    let mut legacy = ContextFold::new(
+    let mut fold = ContextFold::new(
         header("instructions"),
         rsi_agent_context::ContextBudget::default(),
     )
@@ -1806,10 +1854,7 @@ fn both_fold_modes_reject_orphan_results_during_ingestion() {
         )
         .unwrap(),
     ];
-    assert!(matches!(
-        legacy.apply(&facts),
-        Err(ContextError::Invalid(_))
-    ));
+    assert!(matches!(fold.apply(&facts), Err(ContextError::Invalid(_))));
     let facts = facts.into_iter().map(Arc::new).collect::<Vec<_>>();
     assert!(matches!(
         semantic.ingest(ContextPage::Canonical(&facts)),
@@ -2360,50 +2405,6 @@ fn tool_outcome_transitions_reject_late_denial_superseded_results_and_wrong_effe
 }
 
 #[test]
-fn nonsemantic_request_budgets_synthesized_results_before_retaining_old_turns() {
-    let mut fold = ContextFold::new(
-        header("instructions"),
-        rsi_agent_context::ContextBudget::default(),
-    )
-    .unwrap();
-    let mut bodies = partial_tool_batch(None);
-    bodies.push(SessionFactBody::TurnTerminal {
-        turn_id: TurnId::new("interrupted").unwrap(),
-        outcome: TurnOutcome::Completed,
-        result: None,
-    });
-    bodies.push(accepted("current", "continue"));
-    fold.apply(&entered_facts(bodies)).unwrap();
-    // The raw five-message projection fits, but two missing tool results require
-    // eviction of the completed old Turn to preserve an adjacent provider view.
-    let raw_bytes = serde_json::to_vec(fold.project(ContextLimits::default()).unwrap().messages())
-        .unwrap()
-        .len();
-    for limits in [
-        ContextLimits::new(5, 16 * 1024).unwrap(),
-        ContextLimits::new(32, raw_bytes).unwrap(),
-    ] {
-        assert_eq!(fold.project(limits).unwrap().omitted_turns, 0);
-        let request = fold
-            .request(limits, rsi_ai_protocol::LanguageRequestOptions::default())
-            .unwrap();
-        assert!(
-            serde_json::to_string(&request)
-                .unwrap()
-                .contains("omitted 1 complete")
-        );
-        assert!(request.messages().len() <= limits.max_messages);
-        assert!(serde_json::to_vec(request.messages()).unwrap().len() <= limits.max_bytes);
-        assert!(!request.messages().iter().any(|message| {
-            message
-                .content()
-                .iter()
-                .any(|part| matches!(part, MessageContent::ToolCall(_)))
-        }));
-    }
-}
-
-#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "One history proves nested provenance across partial summary remapping, checkpoint and replay."
@@ -2591,59 +2592,6 @@ fn protected_input_that_fits_can_refuse_retained_partial_output() {
             &profile(),
             None,
             false,
-        ),
-        Err(ContextError::TooLarge)
-    ));
-}
-
-#[test]
-fn partial_output_reserves_capacity_before_omitting_complete_turns() {
-    let (_, mut history, _) = history(None);
-    let bodies = model_bodies(
-        "current",
-        "cut",
-        rsi_agent_session_protocol::ModelPurpose::Conversation,
-        "discarded",
-        None,
-        FinishReason::MaxTokens,
-    );
-    history.extend(
-        entered_facts_after(history.len() as u64, bodies)
-            .into_iter()
-            .map(std::sync::Arc::new),
-    );
-    let mut fold = ContextFold::new(
-        header("instructions"),
-        rsi_agent_context::ContextBudget::default(),
-    )
-    .unwrap();
-    fold.apply(&history).unwrap();
-    // Retained partial output requires removing the old complete Turn and
-    // admitting its omission notice before fitting the protected current Turn.
-    let request = fold
-        .request(
-            ContextLimits::new(4, 1024 * 1024).unwrap(),
-            rsi_ai_protocol::LanguageRequestOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(request.messages().len(), 4);
-    let wire = serde_json::to_string(&request).unwrap();
-    assert!(wire.contains("Interrupted model attempt: max_tokens"));
-    assert!(wire.contains("original task"));
-    assert!(!wire.contains("older private task"));
-    let bytes = serde_json::to_vec(request.messages()).unwrap().len();
-    assert_eq!(
-        fold.request(
-            ContextLimits::new(8, bytes).unwrap(),
-            rsi_ai_protocol::LanguageRequestOptions::default(),
-        )
-        .unwrap(),
-        request
-    );
-    assert!(matches!(
-        fold.request(
-            ContextLimits::new(8, bytes - 1).unwrap(),
-            rsi_ai_protocol::LanguageRequestOptions::default(),
         ),
         Err(ContextError::TooLarge)
     ));

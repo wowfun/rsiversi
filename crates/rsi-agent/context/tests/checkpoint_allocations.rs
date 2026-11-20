@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v21_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v22_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -130,7 +130,9 @@ fn full_builder_preserves_v21_payload_and_v6_envelope_without_a_third_full_copy(
         );
     }
     let facts: Vec<_> = facts.into_iter().map(Arc::new).collect();
-    state.ingest(ContextPage::Canonical(&facts)).unwrap();
+    state.ingest(ContextPage::Canonical(&facts[..12])).unwrap();
+    assert_preparation_allocations(&state);
+    state.ingest(ContextPage::Canonical(&facts[12..])).unwrap();
     drop(facts);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
@@ -157,7 +159,7 @@ fn full_builder_preserves_v21_payload_and_v6_envelope_without_a_third_full_copy(
 }
 
 fn assert_checkpoint_contract(bytes: &[u8]) {
-    // v21 binds each projected Turn to its source Session and keeps pending
+    // v22 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions,
     // plus entered context timestamps per producer and retained Turn;
     // the v6 outer envelope, Session 39 and builder 2.17.0 bind the cache.
@@ -168,11 +170,13 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     assert_eq!(metadata["builder"]["semantic_version"], "2.17.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v21\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v22\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 21);
+    assert_eq!(decoded["version"], 22);
+    assert!(decoded.get("omitted_turns").is_none());
+    assert!(decoded["semantic"].is_object());
     assert_eq!(
         decoded["step_prompt"],
         serde_json::json!({"mode":"append_to_header", "sections":[]})
@@ -201,7 +205,37 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "3eed7fa7ae7c702caf8d5d553b46ffebb6f5427b57c77eedd90379b3432f3354"
+        "fb0a4a11d975fa0b46ab2164a53c6ac22a825aec7760b5f325de9fdeb1cd86d4"
+    );
+}
+
+fn assert_preparation_allocations(state: &ModelContextState) {
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let model = ModelRef::new("fixture", "model").unwrap();
+    let profile = profile();
+    let start = ALLOCATED.load(Ordering::Relaxed);
+    assert!(
+        state
+            .plan_compaction(&options, &model, &profile, None, false)
+            .unwrap()
+            .is_none()
+    );
+    let separate = state.build(options.clone(), &profile).unwrap();
+    let separate_bytes = ALLOCATED.load(Ordering::Relaxed) - start;
+    let start = ALLOCATED.load(Ordering::Relaxed);
+    let rsi_agent_context::ContextPreparation::Request(prepared) =
+        state.prepare(options, &model, &profile).unwrap()
+    else {
+        panic!("unexpected compaction")
+    };
+    let prepared_bytes = ALLOCATED.load(Ordering::Relaxed) - start;
+    assert_eq!(prepared, separate);
+    assert!(
+        prepared_bytes < separate_bytes,
+        "preparation must avoid the second projection"
+    );
+    println!(
+        "preparation allocated_bytes={prepared_bytes} separate_plan_build_bytes={separate_bytes}"
     );
 }
 

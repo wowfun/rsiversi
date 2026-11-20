@@ -1,5 +1,9 @@
 # rsi-agent-context
 
+An explicit manual compaction uses the same complete, ordered source units as
+automatic compaction. It may select eligible history below the usage trigger.
+When all remaining input is protected, the planner returns no work.
+
 The cursor exposes the last retained, entered `RuntimeContext` snapshot for native
 request preparation. Each Turn retains its message position; text is borrowed
 from the existing message. Replay and checkpoints preserve this position, while
@@ -10,7 +14,7 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v21 and
+unprepared claims separately from entered model history. Fold checkpoint v22 and
 builder 2.17.0 bind explicit prompt ownership and retained runtime-context positions.
 Earlier projection caches are incompatible.
 
@@ -65,7 +69,7 @@ exposes that same tagged value for Executor equality; new Steps and terminal Tur
 reset it. Context never calls native prompt providers or repeats interpolation.
 Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v21, so recovery cannot retain an exited Plan's old instructions.
+checkpoint v22, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -88,7 +92,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.17.0, Session format 39, the v21 fold
+The allocation golden binds builder 2.17.0, Session format 39, the v22 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -142,7 +146,8 @@ further use: mutable projection, semantic state and assemblers are dropped,
 temporary credit is released, and only the immutable Header remains charged.
 Sequence and prefix-digest metadata retain the last successful prefix for diagnostics.
 Further ingestion, projection, planning and checkpoint creation reject that
-cursor; discard it and rebuild from authoritative Facts. Sequence/Fact-validation
+cursor. An installed-summary query returns false because the summary has been
+released. Discard the cursor and rebuild from authoritative Facts. Sequence/Fact-validation
 rejections and workspace admission refusals do not mutate the cursor. A failed
 Fact body cannot yield a cache claiming to represent the preceding prefix.
 
@@ -150,10 +155,7 @@ Provider requests retain actual results and add deterministic error explanations
 for missing results: superseded before execution, terminal before ToolStarted,
 or started with no durable outcome. These are views, never ToolResult Facts or
 permission to replay a Tool. Ordinary requests, pressure, view digests and
-summary shrink checks share that view. Non-semantic requests also budget the
-normalized view before deciding which completed turns to omit, so synthesized
-results cannot invalidate a raw-only retention decision. Their byte accounting
-reuses retained per-Turn totals and serializes only synthesized outcomes.
+summary shrink checks share that view.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
@@ -199,6 +201,9 @@ Summary planning still rejects an unfinished live interaction.
 Ordinary requests, summary input and selection budgets, view digests, replay
 eligibility and post-install shrink checks use the same pure projection. One planning
 call reuses a single projected history for pressure, selection and materialization.
+The summary route receives the selected transcript as quoted data followed by
+a final checkpoint instruction. The same request envelope is included in selection
+byte accounting.
 Forced, message-count and source-count pressure skip the separate byte-trigger
 pass; no-pressure attempts do not hash the view. Live outcome validation traverses
 without materializing messages. Remainder preflight and installation use the same
@@ -232,9 +237,9 @@ binding to the latest head would reject valid summaries of an active Turn.
 Transitive raw bindings are not copied into every descendant plan. Fully
 summarized completed Turns and their source metadata are released. The cold
 materialization bounds count projected messages (4,096 / 32 MiB), not Facts.
-Both fold modes admit messages against these absolute limits before retention,
-including when an active oldest Turn prevents eviction. Incremental non-semantic
-folds may first evict complete oldest Turns; active Turns are never truncated.
+The semantic fold admits messages against these absolute limits before retention.
+Source messages remain available until an admitted summary replaces them; whole
+Turns are never discarded merely to fit a request.
 Raw source metadata shares the 4,096 cold retention ceiling. At 1,024 retained
 sources, every subsequent planning opportunity requests compaction. Each plan
 selects at most 1,024 source Turns, oldest first. Selection stops before the
@@ -262,21 +267,33 @@ fork seed pages, and explicit seed completion as distinct inputs. They build
 provider-neutral requests from the Tool definitions supplied by the same Agent
 composition pin. Builders and cursors perform no external I/O or implicit clock
 sampling. The ordinary `DefaultContextBuilderFactory` provides semantic
-compaction over ContextFold and accepts only null configuration; selecting it is an
-explicit Agent Profile choice.
+compaction over an internal ContextFold and accepts only null configuration;
+selecting it is an explicit Agent Profile choice. Direct whole-Turn omission is
+not a supported projection policy. A usable fold always has semantic state;
+poisoning releases that state along with its other retained allocations.
+
+Cursor preparation returns either a request or a compaction plan. The default
+builder projects once per unchanged preparation, sharing the view and credit
+between optional planning and request emission. Preparation owns no persistent
+cache. Summary installation and new Facts require a new projection. Request-only
+retries and forced/manual compaction retain their distinct operations.
+Validated SessionHeader values are trusted at these in-process handoffs; durable
+Header decoding and checkpoint/builder admission retain their own validation.
 
 `ModelContextState` owns the selected builder, cursor, and version-6 cache
 envelope. The envelope binds the builder ID, semantic version and normalized
 configuration digest, Header fingerprint, exact limits, cursor and Fact prefix
 to the raw bounded provider payload. Restore validates this envelope before
 calling the builder and requires the restored cursor's position to agree.
+The private fold encoding version is independent of semantic builder identity;
+encoding-only changes preserve the identity used by durable compaction Facts.
 Rejected or mismatched caches are rebuilt from Facts; a failed restore leaves
 the current cursor intact. The Store's single Session cache slot does not change. The envelope writes metadata and raw payload once without
-deep-cloning projected messages. The default provider uses the version-10 fold
+deep-cloning projected messages. The default provider uses the version-22 fold
 encoding below as its opaque payload; other providers own their payload schema.
 
 Exact Fact prefixes with no active model assembler may be encoded as the
-version-10 Context checkpoint. Retained nonterminal turns are encoded with their
+version-22 Context checkpoint. Retained nonterminal turns are encoded with their
 lifecycle state, so accepted queued turns do not prevent a checkpoint. Context
 alone owns and validates that schema, recomputes all message accounting on
 restore, and binds the retained projection to the immutable header, exact
@@ -334,8 +351,7 @@ the final shared envelope. These allocation rules preserve the serialized format
 binding checks and optional-cache failure behavior.
 
 Both fold modes reject orphan Tool results during ingestion; request construction
-and compaction also reject misordered results. Legacy non-semantic projection
-does not apply builder 2.7.0's semantic pruning. Unit shape discovery performs no JSON byte accounting. Compaction
+and compaction also reject misordered results. Unit shape discovery performs no JSON byte accounting. Compaction
 measures the pruned messages only after shape validation.
 
 Compaction constructs one coordinate remap per affected turn from its ordered,
@@ -449,6 +465,6 @@ Tool batch metadata retains typed spill references beside each settled call.
 Notices are absent from the retained raw messages and their pruning budgets.
 Projection renders their retrieval notice, and pruning redraws that notice from
 the typed references after selecting text. It does not infer protected cache
-identities from arbitrary Tool text. Checkpoint v21 carries this metadata; older
+identities from arbitrary Tool text. Checkpoint v22 carries this metadata; older
 checkpoints rebuild from canonical Facts. Semantic compaction preserves the
 original Fact coordinates for source retrieval.

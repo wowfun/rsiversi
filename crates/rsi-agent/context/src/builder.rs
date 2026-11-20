@@ -174,6 +174,26 @@ impl RawContextPressure {
     }
 }
 
+/// One call-local preparation decision over a fixed context prefix.
+#[derive(Debug)]
+pub enum ContextPreparation {
+    /// The ordinary request is ready for execution.
+    Request(LanguageRequest),
+    /// Execute this summary before preparing the ordinary request again.
+    Compaction(Box<crate::PlannedCompaction>),
+}
+
+/// The preparation phase that refused an input.
+#[derive(Debug, thiserror::Error)]
+pub enum ContextPreparationError {
+    /// Ordinary request emission failed.
+    #[error("{0}")]
+    Request(ContextError),
+    /// Optional compaction planning failed.
+    #[error("{0}")]
+    Compaction(ContextError),
+}
+
 /// Exclusive incremental context state for one immutable Session Header.
 pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     /// Current ordered guidance from canonical Step instruction updates.
@@ -203,6 +223,24 @@ pub trait ModelContextCursor: fmt::Debug + Send + 'static {
         options: LanguageRequestOptions,
         profile: &LanguageProfile,
     ) -> Result<LanguageRequest>;
+    /// Prepares one ordinary attempt, optionally selecting semantic compaction.
+    fn prepare(
+        &self,
+        options: LanguageRequestOptions,
+        model: &rsi_ai_protocol::ModelRef,
+        profile: &LanguageProfile,
+    ) -> std::result::Result<ContextPreparation, ContextPreparationError> {
+        match self
+            .plan_compaction(&options, model, profile, None, false)
+            .map_err(ContextPreparationError::Compaction)?
+        {
+            Some(plan) => Ok(ContextPreparation::Compaction(Box::new(plan))),
+            None => self
+                .build(options, profile)
+                .map(ContextPreparation::Request)
+                .map_err(ContextPreparationError::Request),
+        }
+    }
     /// Plans internal compaction from exact cursor inputs; unsupported builders decline.
     fn plan_compaction(
         &self,
@@ -285,6 +323,11 @@ impl ModelContextState {
     pub const fn header(&self) -> &SessionHeader {
         &self.header
     }
+
+    /// Fingerprint computed when this state opened its immutable header.
+    pub fn header_fingerprint(&self) -> &str {
+        &self.header_fingerprint
+    }
     /// Returns the selected builder's independent raw-retention pressure.
     pub fn raw_pressure(&self) -> Option<RawContextPressure> {
         self.cursor.raw_pressure()
@@ -299,9 +342,6 @@ impl ModelContextState {
     ) -> Result<Self> {
         // Owns the wrapper Header independently of the cursor; README defines the 3H opening peak.
         let header_credit = budget.reserve(crate::budget::weight(&header)?)?;
-        header
-            .validate()
-            .map_err(|error| invalid(&error.to_string()))?;
         ContextLimits::new(limits.max_messages, limits.max_bytes)?;
         let identity = builder.identity().clone();
         let header_fingerprint = header
@@ -368,6 +408,15 @@ impl ModelContextState {
         profile: &LanguageProfile,
     ) -> Result<LanguageRequest> {
         self.cursor.build(options, profile)
+    }
+    /// Prepares an ordinary request or its required summary from one projection.
+    pub fn prepare(
+        &self,
+        options: LanguageRequestOptions,
+        model: &rsi_ai_protocol::ModelRef,
+        profile: &LanguageProfile,
+    ) -> std::result::Result<ContextPreparation, ContextPreparationError> {
+        self.cursor.prepare(options, model, profile)
     }
     /// Plans a bounded no-Tool summary using the selected pure cursor.
     pub fn plan_compaction(

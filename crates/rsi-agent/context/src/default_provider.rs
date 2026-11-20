@@ -1,7 +1,7 @@
 //! Ordinary provider preserving the existing `ContextFold` projection.
 
 use crate::{
-    ContextBuilderIdentity, ContextFold, ContextInit, ContextLimits, ContextPage, ContextPosition,
+    ContextBuilderIdentity, ContextFold, ContextInit, ContextPage, ContextPosition,
     ModelContextBuilder, ModelContextBuilderContract, ModelContextCursor, Result,
 };
 use async_trait::async_trait;
@@ -34,24 +34,22 @@ impl ModelContextBuilder for DefaultContextBuilder {
         &self.identity
     }
     fn open(&self, init: ContextInit<'_>) -> Result<Box<dyn ModelContextCursor>> {
-        let mut fold = match init.checkpoint {
+        let fold = match init.checkpoint {
             Some(bytes) => {
-                ContextFold::from_checkpoint(init.header, init.limits, bytes, init.budget)?
+                let fold =
+                    ContextFold::from_checkpoint(init.header, init.limits, bytes, init.budget)?;
+                fold.validate_builder(init.identity)?;
+                fold
             }
-            None => ContextFold::with_limits(init.header, init.limits, init.budget)?,
+            None => ContextFold::for_builder(init.header, init.limits, init.budget, init.identity)?,
         };
-        fold.enable_semantic(init.identity)?;
-        Ok(Box::new(DefaultCursor {
-            fold,
-            limits: init.limits,
-        }))
+        Ok(Box::new(DefaultCursor { fold }))
     }
 }
 
 #[derive(Debug)]
 struct DefaultCursor {
     fold: ContextFold,
-    limits: ContextLimits,
 }
 impl ModelContextCursor for DefaultCursor {
     fn step_prompt(&self) -> &rsi_agent_session_protocol::StepPrompt {
@@ -99,8 +97,15 @@ impl ModelContextCursor for DefaultCursor {
             .validate_output_cap(options.settings())
             .map_err(|error| crate::ContextError::Invalid(error.to_string()))?;
         let mut credit = self.fold.projection_credit(options.encoded_weight())?;
-        let request = self.fold.request_messages(self.limits, &options)?;
-        let request = crate::emission::project_tool_images(request, options, profile, self.limits)?;
+        let request = self
+            .fold
+            .request_messages(self.fold.retention_limits, &options)?;
+        let request = crate::emission::project_tool_images(
+            request,
+            options,
+            profile,
+            self.fold.retention_limits,
+        )?;
         credit.resize(request.encoded_weight())?;
         Ok(request.with_retention(credit))
     }
@@ -114,6 +119,14 @@ impl ModelContextCursor for DefaultCursor {
     ) -> Result<Option<crate::PlannedCompaction>> {
         self.fold
             .plan_compaction(options, model, profile, force, shrink)
+    }
+    fn prepare(
+        &self,
+        options: LanguageRequestOptions,
+        model: &rsi_ai_protocol::ModelRef,
+        profile: &LanguageProfile,
+    ) -> std::result::Result<crate::ContextPreparation, crate::ContextPreparationError> {
+        self.fold.prepare_request(options, model, profile)
     }
     fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         self.fold.summary_installed(effect)

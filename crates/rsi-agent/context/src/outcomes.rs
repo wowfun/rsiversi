@@ -272,28 +272,6 @@ pub(super) fn normalize<'a>(
     Ok(result)
 }
 
-/// Reuses retained byte totals and counts only newly synthesized outcomes.
-pub(super) fn normalize_with_size<'a>(
-    messages: &'a [Message],
-    batches: &Batches,
-    terminal: bool,
-    retained_bytes: usize,
-) -> Result<(Vec<Cow<'a, Message>>, usize)> {
-    let messages = normalize(messages, batches, terminal)?;
-    // Every raw message is retained exactly once; only synthesized outcomes add
-    // bytes to the already maintained per-Turn total.
-    let bytes = messages.iter().try_fold(retained_bytes, |bytes, message| {
-        if matches!(message, Cow::Owned(_)) {
-            bytes
-                .checked_add(crate::encoded_message_bytes(message)?)
-                .ok_or(ContextError::TooLarge)
-        } else {
-            Ok(bytes)
-        }
-    })?;
-    Ok((messages, bytes))
-}
-
 /// Enforces the provider-view outcome gate without allocating derived messages.
 pub(super) fn validate_view(messages: &[Message], batches: &Batches, terminal: bool) -> Result<()> {
     visit_view(messages, batches, terminal, |_| Ok(()))
@@ -531,7 +509,7 @@ impl ContextFold {
         reason = "Model Tool outcomes share one exact source and ordered settlement transition table."
     )]
     pub(super) fn apply_tool_outcome(&mut self, body: &SessionFactBody) -> Result<()> {
-        self.require_live_turn(body.turn_id())?;
+        self.require_live_turn(body.turn_id().ok_or_else(invalid)?)?;
         if self.apply_program_outcome(body)? {
             return Ok(());
         }
@@ -997,7 +975,7 @@ mod tests {
                     &turn,
                 ))
                 .unwrap(),
-                turn_id: turn.clone(),
+                turn_id: Some(turn.clone()),
                 model: ModelRef::new("test", "model").unwrap(),
                 eligible_summary: false,
                 purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,

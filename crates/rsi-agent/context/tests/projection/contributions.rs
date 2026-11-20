@@ -304,5 +304,12 @@ fn context_time_follows_selected_fork_history_and_retained_turn_lifetime() {
             }],
         ))
         .unwrap();
-    assert_eq!(child.previous_context_input_at_ms(&producer), None);
+    assert_eq!(
+        child.previous_context_input_at_ms(&producer),
+        Some(timestamp)
+    );
+    assert!(
+        matches!(child.project(limits), Err(ContextError::TooLarge)),
+        "emission pressure must preserve history until semantic compaction"
+    );
 }
