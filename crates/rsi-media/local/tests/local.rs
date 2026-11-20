@@ -75,6 +75,32 @@ async fn local_object_survives_reactivation_and_tampering_fails_closed() {
         .join(&reference.id.as_str()[..2])
         .join(format!("{}.rsi-media", reference.id));
     let mut bytes = fs::read(&path).unwrap();
+    let newline = bytes.iter().position(|&byte| byte == b'\n').unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes[..newline]).unwrap(),
+        json!({"mime":"image/png","width":1,"height":1})
+    );
+    // Older objects can carry identity claims. A conflicting one is corruption.
+    let mut declared = serde_json::to_value(&reference).unwrap();
+    for (key, value) in [
+        ("id", json!("0".repeat(64))),
+        ("bytes", json!(reference.bytes + 1)),
+    ] {
+        let original = declared[key].take();
+        declared[key] = value;
+        let mut envelope = serde_json::to_vec(&declared).unwrap();
+        envelope.extend_from_slice(&bytes[newline..]);
+        fs::write(&path, envelope).unwrap();
+        assert!(matches!(
+            media.read(&reference).await,
+            Err(MediaError::Corrupt(_))
+        ));
+        declared[key] = original;
+    }
+    let mut envelope = serde_json::to_vec(&declared).unwrap();
+    envelope.extend_from_slice(&bytes[newline..]);
+    fs::write(&path, envelope).unwrap();
+    assert_eq!(media.read(&reference).await.unwrap().reference, reference);
     *bytes.last_mut().unwrap() ^= 0xff;
     fs::write(path, bytes).unwrap();
     assert!(matches!(

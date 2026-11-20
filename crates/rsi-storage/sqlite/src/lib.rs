@@ -17,7 +17,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -350,56 +352,74 @@ fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
             "SQLite storage requires foreign-key enforcement".into(),
         ));
     }
-    let expected_objects = BTreeSet::from([
-        (
-            "index".to_owned(),
-            "sqlite_autoindex_rsi_storage_domains_1".to_owned(),
-        ),
-        (
-            "index".to_owned(),
-            "sqlite_autoindex_rsi_storage_records_1".to_owned(),
-        ),
-        ("table".to_owned(), "rsi_storage_domains".to_owned()),
-        ("table".to_owned(), "rsi_storage_records".to_owned()),
-    ]);
+    let mut missing = vec![
+        ("index", "sqlite_autoindex_rsi_storage_domains_1"),
+        ("index", "sqlite_autoindex_rsi_storage_records_1"),
+        ("table", "rsi_storage_domains"),
+        ("table", "rsi_storage_records"),
+    ];
     let mut statement = connection
         .prepare(
-            "SELECT type, name FROM sqlite_master
+            "SELECT CASE WHEN length(CAST(type AS BLOB)) <= ?1 THEN type END,
+                    CASE WHEN length(CAST(name AS BLOB)) <= ?2 THEN name END FROM sqlite_master
              WHERE name GLOB 'rsi_storage_*'
-                OR tbl_name IN ('rsi_storage_domains', 'rsi_storage_records')",
+                OR tbl_name IN ('rsi_storage_domains', 'rsi_storage_records') LIMIT ?3",
         )
         .map_err(|error| sqlite_io(&error))?;
-    let actual_objects = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|error| sqlite_io(&error))?
-        .collect::<std::result::Result<BTreeSet<_>, _>>()
+    let sql_bound = |n| i64::try_from(n).expect("writer schema bound fits SQLite integer");
+    let mut rows = statement
+        .query(params![
+            sql_bound(
+                missing
+                    .iter()
+                    .map(|(kind, _)| kind.len())
+                    .max()
+                    .unwrap_or(0)
+            ),
+            sql_bound(
+                missing
+                    .iter()
+                    .map(|(_, name)| name.len())
+                    .max()
+                    .unwrap_or(0)
+            ),
+            sql_bound(missing.len() + 1),
+        ])
         .map_err(|error| sqlite_io(&error))?;
-    if actual_objects != expected_objects {
-        return Err(StorageError::Corrupt(
-            "SQLite storage has an incompatible schema object set".into(),
-        ));
+    let incompatible =
+        || StorageError::Corrupt("SQLite storage has an incompatible schema object set".into());
+    while let Some(row) = rows.next().map_err(|error| sqlite_io(&error))? {
+        let text = |column| {
+            row.get_ref(column)
+                .map_err(|error| sqlite_io(&error))?
+                .as_str()
+                .map_err(|_| incompatible())
+        };
+        let entry = (text(0)?, text(1)?);
+        let index = missing
+            .iter()
+            .position(|&expected| expected == entry)
+            .ok_or_else(incompatible)?;
+        missing.swap_remove(index);
+    }
+    if !missing.is_empty() {
+        return Err(incompatible());
     }
     let domains_schema = domains_table_schema();
     for (object_type, name, expected) in [
         ("table", "rsi_storage_domains", domains_schema.as_str()),
         ("table", "rsi_storage_records", RECORDS_TABLE_SCHEMA),
     ] {
-        let actual = connection
+        // SQLite removes this fixed writer prefix when saving CREATE TABLE SQL.
+        let expected = expected.replacen("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE ", 1);
+        let matches = connection
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
-                params![object_type, name],
-                |row| row.get::<_, String>(0),
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2 AND sql=?3 COLLATE BINARY)",
+                params![object_type, name, expected],
+                |row| row.get::<_, bool>(0),
             )
-            .optional()
             .map_err(|error| sqlite_io(&error))?;
-        let Some(actual) = actual else {
-            return Err(StorageError::Corrupt(format!(
-                "SQLite storage schema is missing {object_type} `{name}`"
-            )));
-        };
-        if normalize_schema(&actual) != normalize_schema(expected) {
+        if !matches {
             return Err(StorageError::Corrupt(format!(
                 "SQLite storage {object_type} `{name}` has an incompatible schema"
             )));
@@ -411,9 +431,9 @@ fn validate_schema(connection: &Connection) -> Result<(), StorageError> {
 fn initialize_or_validate_schema(connection: &Connection) -> Result<(), StorageError> {
     let owned_objects = connection
         .query_row(
-            "SELECT count(*) FROM sqlite_master
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
              WHERE name GLOB 'rsi_storage_*'
-                OR tbl_name IN ('rsi_storage_domains', 'rsi_storage_records')",
+                 OR tbl_name IN ('rsi_storage_domains', 'rsi_storage_records'))",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -427,15 +447,6 @@ fn initialize_or_validate_schema(connection: &Connection) -> Result<(), StorageE
             .map_err(|error| sqlite_io(&error))?;
     }
     validate_schema(connection)
-}
-
-fn normalize_schema(schema: &str) -> String {
-    schema
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>()
-        .replace("ifnotexists", "")
 }
 
 fn domain_byte_bound(domain: &str) -> StorageError {
@@ -1536,6 +1547,139 @@ mod tests {
 #[cfg(test)]
 mod portable_sql_tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn activation_refuses_offline_orphans_without_changing_rows() {
+        for mixed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("private").join("state.sqlite3");
+            drop(SqliteBackend::open(&path).unwrap());
+            let offline = Connection::open(&path).unwrap();
+            offline.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+            if mixed {
+                offline
+                    .execute(
+                        "INSERT INTO rsi_storage_domains(domain,version) VALUES ('valid',1)",
+                        [],
+                    )
+                    .unwrap();
+            }
+            offline
+                .execute(
+                    "INSERT INTO rsi_storage_records VALUES ('orphan','rows','old',X'6e756c6c')",
+                    [],
+                )
+                .unwrap();
+            drop(offline);
+            assert!(matches!(
+                SqliteBackend::open(&path),
+                Err(StorageError::Corrupt(_))
+            ));
+            let offline = Connection::open(&path).unwrap();
+            let count: i64 = offline
+                .query_row("SELECT count(*) FROM rsi_storage_records", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+            let parents: i64 = offline
+                .query_row("SELECT count(*) FROM rsi_storage_domains", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(parents, i64::from(mixed));
+        }
+    }
+
+    #[test]
+    fn orphan_domains_are_refused_before_empty_reads_or_first_writes() {
+        for mixed in [false, true] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            initialize_or_validate_schema(&connection).unwrap();
+            if mixed {
+                connection
+                    .execute(
+                        "INSERT INTO rsi_storage_domains(domain,version) VALUES ('valid',1)",
+                        [],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                INSERT INTO rsi_storage_records VALUES ('orphan','rows','old',X'6e756c6c');
+                PRAGMA foreign_keys=ON;",
+                )
+                .unwrap();
+            validate_schema(&connection).unwrap();
+            assert!(matches!(
+                unit::validate_accounting(&connection),
+                Err(StorageError::Corrupt(_))
+            ));
+            let descriptor = rsi_storage::UnitDescriptor::new(
+                "orphan".into(),
+                1,
+                BTreeSet::new(),
+                BTreeMap::from([("rows".into(), rsi_storage::RecordPolicy::Reject)]),
+                false,
+                Layout::Single,
+            )
+            .unwrap();
+            assert!(matches!(
+                unit::load(&mut connection, &descriptor, || {}),
+                Err(StorageError::Corrupt(_))
+            ));
+            let before = connection.total_changes();
+            let transaction = connection.transaction().unwrap();
+            assert!(matches!(
+                unit::write(
+                    &transaction,
+                    &descriptor,
+                    vec![Mutation {
+                        address: rsi_storage::Address::record("rows", "new").unwrap(),
+                        value: Some(rsi_storage::EncodedValue::encode(&Value::Bool(true)).unwrap()),
+                    }]
+                ),
+                Err(StorageError::Corrupt(_))
+            ));
+            transaction.rollback().unwrap();
+            assert_eq!(connection.total_changes(), before);
+        }
+    }
+
+    #[test]
+    fn schema_literal_whitespace_and_oversized_owned_objects_are_refused() {
+        for ddl in [
+            RECORDS_TABLE_SCHEMA.replace(" OR ", " or "),
+            RECORDS_TABLE_SCHEMA.replace(
+                "table_name != '' OR key = ''",
+                "table_name != ' ' OR key = ' '",
+            ),
+            format!(
+                "{RECORDS_TABLE_SCHEMA}; CREATE INDEX rsi_storage_{} ON rsi_storage_records(key)",
+                "x".repeat(1024)
+            ),
+            format!("{RECORDS_TABLE_SCHEMA}; CREATE INDEX extra ON rsi_storage_records(key)"),
+            format!(
+                "{RECORDS_TABLE_SCHEMA}; CREATE TRIGGER extra AFTER INSERT ON rsi_storage_records BEGIN SELECT 1; END"
+            ),
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+            connection
+                .execute_batch(&format!("{}; {ddl};", domains_table_schema()))
+                .unwrap();
+            let before = connection.total_changes();
+            assert!(matches!(
+                initialize_or_validate_schema(&connection),
+                Err(StorageError::Corrupt(reason)) if reason.contains("incompatible schema")
+            ));
+            assert_eq!(connection.total_changes(), before);
+        }
+    }
 
     #[test]
     fn one_navigation_edit_touches_two_payload_rows_and_one_unit_header() {

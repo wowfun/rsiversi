@@ -178,6 +178,26 @@ fn namespace_pin_guards_root_reparse_and_rename_while_allowing_child_publication
 }
 
 #[test]
+fn namespace_pin_uses_an_existing_child_without_creating_a_guard() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("private");
+    let directory = create_absolute_directory_and_sync_no_follow(&path).unwrap();
+    let lock = Path::new("writer");
+    assert!(directory.pin_namespace_with_existing_child(lock).is_err());
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+    drop(create_relative_private_file_no_follow(&directory, lock).unwrap());
+    let lease = directory.pin_namespace_with_existing_child(lock).unwrap();
+    drop(directory);
+    let moved = temporary.path().join("moved");
+    assert!(fs::rename(&path, &moved).is_err());
+    assert!(fs::remove_file(path.join(lock)).is_err());
+    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+    drop(lease);
+    fs::remove_file(path.join(lock)).unwrap();
+    fs::rename(path, moved).unwrap();
+}
+
+#[test]
 fn retained_namespace_publishes_files_and_directories_with_explicit_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let root_path = temp.path().join("private");

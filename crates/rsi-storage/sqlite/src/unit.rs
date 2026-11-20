@@ -145,6 +145,7 @@ pub(super) fn validate_accounting(connection: &Connection) -> Result<(), Storage
             "SQLite domain count exceeds {MAXIMUM_SQLITE_DOMAINS}"
         )));
     }
+    validate_child_domains(&snapshot)?;
     let mut domains = snapshot.prepare("SELECT CASE WHEN length(CAST(domain AS BLOB)) <= ?1 THEN domain END,version,record_count,record_bytes FROM rsi_storage_domains ORDER BY domain LIMIT ?2")
         .map_err(|error| sqlite_io(&error))?;
     let mut rows = domains
@@ -197,7 +198,7 @@ fn header(
     connection: &Connection,
     domain: &str,
 ) -> Result<Option<(u32, RecordObjectSize)>, StorageError> {
-    connection
+    let stored = connection
         .query_row(
             "SELECT version,record_count,record_bytes FROM rsi_storage_domains WHERE domain=?1",
             [domain],
@@ -217,7 +218,62 @@ fn header(
                 checked_stored_size(domain, count, bytes)?,
             ))
         })
-        .transpose()
+        .transpose()?;
+    if stored.is_none()
+        && connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM rsi_storage_records WHERE domain=?1)",
+                [domain],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| sqlite_io(&error))?
+    {
+        return Err(corrupt("stored records have no domain header"));
+    }
+    Ok(stored)
+}
+
+fn validate_child_domains(connection: &Connection) -> Result<(), StorageError> {
+    let mut parent = connection
+        .prepare("SELECT EXISTS(SELECT 1 FROM rsi_storage_domains WHERE domain=?1)")
+        .map_err(|error| sqlite_io(&error))?;
+    let mut after: Option<String> = None;
+    for _ in 0..=MAXIMUM_SQLITE_DOMAINS {
+        // Separate first/next queries let SQLite seek past a whole domain in the
+        // primary-key index instead of scanning its records to find an orphan.
+        let sql = if after.is_some() {
+            "SELECT CASE WHEN length(CAST(domain AS BLOB)) <= ?1 THEN domain END
+             FROM rsi_storage_records WHERE domain > ?2 ORDER BY domain LIMIT 1"
+        } else {
+            "SELECT CASE WHEN length(CAST(domain AS BLOB)) <= ?1 THEN domain END
+             FROM rsi_storage_records ORDER BY domain LIMIT 1"
+        };
+        let mut statement = connection
+            .prepare_cached(sql)
+            .map_err(|error| sqlite_io(&error))?;
+        let bound = i64::try_from(MAXIMUM_STORAGE_IDENTIFIER_BYTES).expect("identifier bound");
+        let next = if let Some(previous) = &after {
+            statement.query_row(params![bound, previous], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+        } else {
+            statement.query_row([bound], |row| row.get::<_, Option<String>>(0))
+        }
+        .optional()
+        .map_err(|error| sqlite_io(&error))?;
+        let Some(domain) = next else { return Ok(()) };
+        let domain = domain.ok_or_else(|| corrupt("oversized stored domain"))?;
+        validate_identifier("domain", &domain).map_err(corrupt)?;
+        // The parent scan validates accounting once; this walk only checks membership.
+        if !parent
+            .query_row([&domain], |row| row.get::<_, bool>(0))
+            .map_err(|error| sqlite_io(&error))?
+        {
+            return Err(corrupt("stored records have no domain header"));
+        }
+        after = Some(domain);
+    }
+    Err(corrupt("stored child domains exceed the domain bound"))
 }
 
 fn address(row: &rusqlite::Row<'_>) -> Result<Address, StorageError> {

@@ -15,7 +15,7 @@ mod native;
 #[derive(Debug)]
 pub struct Directory(File);
 
-/// Native namespace pin; protects root identity and a permanent nonempty guard.
+/// Retains the directory identity and keeps it nonempty for the duration of the lease.
 #[derive(Debug)]
 pub struct NamespaceLease(std::sync::Arc<NamespacePin>);
 #[derive(Debug)]
@@ -151,6 +151,20 @@ impl Directory {
     pub fn verify_private(&self) -> io::Result<()> {
         native::verify_private_directory(&self.0)
     }
+
+    /// Pin the namespace using an owner's existing private regular child.
+    pub fn pin_namespace_with_existing_child(&self, name: &Path) -> io::Result<NamespaceLease> {
+        let child = native::private_file(&self.0, &single_name(name)?, false)?;
+        self.pin_with_anchor(child).map(NamespaceLease)
+    }
+
+    fn pin_with_anchor(&self, child: File) -> io::Result<std::sync::Arc<NamespacePin>> {
+        Ok(std::sync::Arc::new(NamespacePin {
+            directory: native::pin_namespace(&self.0)?,
+            _anchor: child,
+        }))
+    }
+
     /// Pin this same directory's namespace for path-based native consumers.
     pub fn pin_namespace(&self) -> io::Result<NamespaceLease> {
         native::verify_private_directory(&self.0)?;
@@ -179,10 +193,7 @@ impl Directory {
                 "namespace guard must be an empty private regular file",
             ));
         }
-        let file = std::sync::Arc::new(NamespacePin {
-            directory: native::pin_namespace(&self.0)?,
-            _anchor: anchor,
-        });
+        let file = self.pin_with_anchor(anchor)?;
         let mut pins = NAMESPACE_PINS
             .lock()
             .map_err(|_| io::Error::other("namespace pin registry is poisoned"))?;

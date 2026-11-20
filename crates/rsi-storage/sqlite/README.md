@@ -66,6 +66,10 @@ against bounded stored keys and BLOB lengths before mutations can use it, withou
 materializing BLOB bodies. Activation also rejects zero or out-of-range domain
 versions and invalid counters as `Corrupt`, retaining the database unchanged.
 Loads additionally validate JSON and compact encoding.
+Activation rejects child records without a domain header, including unopened
+domains. An indexed traversal visits distinct child domains within the domain
+ceiling; absent-header reads and writes also check for existing children before
+treating a domain as empty. Corruption never synthesizes headers or accounting.
 One database retains at most 1,024 distinct domains, including empty domains.
 Creating a new domain checks this ceiling after its row insertion inside the
 mutation transaction and
@@ -84,6 +88,11 @@ The exact schema includes
 The exact owned SQL shape is the runtime format discriminator; the retained
 writer corpus binds it to that version. Older layouts are rejected without
 payload mutation or automatic migration.
+Schema admission compares stored SQL byte for byte with the writer's expected
+text, including quoted literals. SQLite returns a match flag, so the backend
+never copies stored SQL into Rust. A different definition is an incompatible
+schema regardless of its length. Object names, types and counts are bounded by
+the expected object set.
 
 It is not the Agent session store and carries no session recovery semantics.
 

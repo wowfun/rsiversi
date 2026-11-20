@@ -31,7 +31,10 @@ and reports unavailable native capability as `MetaError::Activation`, the Meta
 category for plugin preparation and activation failure.
 
 This ordinary backend plugin owns one explicit local immutable CAS root. Each
-object is one bounded envelope below a digest-sharded directory. Publication
+object is one bounded envelope below a digest-sharded directory. Its JSON header
+records MIME type and pixel dimensions. The filename supplies the digest and
+the payload supplies the byte count. Reads verify SHA-256 and check any digest
+or length declared in a header against those same sources. Publication
 writes and syncs a private temporary file, closes its writable handle, atomically links that exact inode
 into place without replacement and removes the temporary name. Unix also syncs
 the shard and its `objects` parent before acknowledging publication, including

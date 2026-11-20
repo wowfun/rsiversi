@@ -13,6 +13,7 @@ use rsi_media_protocol::{
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
@@ -191,6 +192,30 @@ fn object_path(root: &Path, id: &MediaId) -> PathBuf {
         .join(format!("{}.rsi-media", id.as_str()))
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectHeader<'a> {
+    mime: Cow<'a, str>,
+    width: u32,
+    height: u32,
+    #[serde(skip_serializing)]
+    id: Option<MediaId>,
+    #[serde(skip_serializing)]
+    bytes: Option<u64>,
+}
+
+impl<'a> From<&'a MediaRef> for ObjectHeader<'a> {
+    fn from(reference: &'a MediaRef) -> Self {
+        Self {
+            mime: Cow::Borrowed(&reference.mime),
+            width: reference.width,
+            height: reference.height,
+            id: None,
+            bytes: None,
+        }
+    }
+}
+
 fn decode_object(bytes: RetainedBytes, expected_id: &MediaId) -> Result<StoredMedia> {
     let newline = bytes
         .as_bytes()
@@ -198,18 +223,26 @@ fn decode_object(bytes: RetainedBytes, expected_id: &MediaId) -> Result<StoredMe
         .take(MAXIMUM_HEADER_BYTES + 1)
         .position(|byte| *byte == b'\n')
         .ok_or_else(|| MediaError::Corrupt("object header terminator is missing".into()))?;
-    let reference: MediaRef = serde_json::from_slice(&bytes.as_bytes()[..newline])
+    let header: ObjectHeader<'_> = serde_json::from_slice(&bytes.as_bytes()[..newline])
         .map_err(|error| MediaError::Corrupt(error.to_string()))?;
-    if reference.id != *expected_id {
+    if header.id.as_ref().is_some_and(|id| id != expected_id) {
         return Err(MediaError::Corrupt(
             "object path identity does not match its header".into(),
         ));
     }
-    let media = StoredMedia {
-        reference,
-        bytes: bytes.into_bytes().slice(newline + 1..),
+    let bytes = bytes.into_bytes().slice(newline + 1..);
+    let reference = MediaRef {
+        id: header.id.unwrap_or_else(|| expected_id.clone()),
+        mime: header.mime.into_owned(),
+        width: header.width,
+        height: header.height,
+        bytes: header.bytes.unwrap_or(bytes.len() as u64),
     };
-    verify(&media)?;
+    let media = StoredMedia { reference, bytes };
+    verify(&media).map_err(|error| match error {
+        MediaError::InvalidInput(message) => MediaError::Corrupt(message),
+        other => other,
+    })?;
     Ok(media)
 }
 

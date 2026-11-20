@@ -1,6 +1,6 @@
 //! Shared descriptor-relative immutable object publication and reads.
 use super::{
-    ByteBudget, File, MAXIMUM_HEADER_BYTES, MediaError, MediaId, Ordering, Path, PathBuf, Result,
+    ByteBudget, File, MediaError, MediaId, ObjectHeader, Ordering, Path, PathBuf, Result,
     StoredMedia, TEMP_SEQUENCE, decode_object, publication_unknown, read_error, read_opened_file,
 };
 use rsi_files_native_fs as native;
@@ -106,13 +106,8 @@ impl Store {
             Err(MediaError::NotFound(_)) => {}
             Err(e) => return Err(e),
         }
-        let header =
-            serde_json::to_vec(&media.reference).map_err(|e| MediaError::Io(e.to_string()))?;
-        if header.len() > MAXIMUM_HEADER_BYTES {
-            return Err(MediaError::InvalidInput(
-                "object header is too large".into(),
-            ));
-        }
+        let header = serde_json::to_vec(&ObjectHeader::from(&media.reference))
+            .map_err(|e| MediaError::Io(e.to_string()))?;
         let (staging, mut file) = staging(&shard, id)?;
         let result = (|| {
             file.write_all(&header)

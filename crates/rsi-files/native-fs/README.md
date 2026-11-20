@@ -160,8 +160,9 @@ publication and non-replacing publication retain their ordinary rename semantics
 Windows directory creation does not mutate existing higher ancestors or reopen
 them for write access.
 `NamespaceLease` requires the exact private TokenUser policy and pins a writable
-directory handle without delete sharing. It also creates or admits the empty
-private `.rsi-namespace-pin` file and retains it without delete sharing. The
+directory handle and a private regular child without delete sharing. An owner
+with a required existing child can pin that child without creating any file.
+Otherwise the lease creates or admits the empty private `.rsi-namespace-pin`. The
 directory cannot become empty while the lease is live, so NTFS refuses conversion
 to a directory reparse point. Child publication can still obtain directory write
 access. The guard is persistent owner state, contains no data, and is never
@@ -174,7 +175,7 @@ name, regular-file or directory kind, and replacement policy. It checks both
 entries without following reparses and renames through the retained writable
 parent and exact source handle. Callers own mutation authorization and directory
 durability; the lease does not enforce a process sandbox.
-Pins of the same volume/FileID share one native owner within a process, so
+Default guard pins of the same volume/FileID share one native owner within a process, so
 independent connections retain the protection until their last actual I/O ends.
 The weak registry prunes expired owners and admits at most 4096 live pinned
 directories. Independent processes retain their own pins; consumer locks own
