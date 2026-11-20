@@ -66,6 +66,9 @@ pub(crate) enum Command {
     NewConversation {
         pane: crate::SurfaceId,
     },
+    DeleteScheduledTask {
+        task: rsi_session_protocol::ScheduledTaskId,
+    },
     ForkConversation {
         pane: crate::SurfaceId,
         generation: String,
@@ -132,7 +135,17 @@ pub(crate) enum Command {
     Refresh,
     WorkspacesNext,
     ModelsNext,
-    InitializeWorkspace,
+    ModelsFirst,
+    Presets,
+    SelectPreset {
+        pane: crate::SurfaceId,
+        generation: String,
+        header: String,
+        preset: rsi_agent_session_protocol::AgentPresetId,
+    },
+    InitializeWorkspace {
+        resume: Option<rsi_agent_session_protocol::SessionId>,
+    },
     RenameWorkspace {
         workspace: rsi_workspace_protocol::WorkspaceId,
         name: rsi_workspace_protocol::WorkspaceName,
@@ -151,6 +164,7 @@ pub(crate) enum Command {
     Create {
         pane: crate::SurfaceId,
         workspace: rsi_workspace_protocol::WorkspaceId,
+        agent_preset_id: Option<rsi_agent_session_protocol::AgentPresetId>,
         #[serde(default)]
         reuse: Option<crate::panes::ReuseDraft>,
     },
@@ -283,6 +297,7 @@ impl Command {
             | Self::ExternalControl { pane, .. }
             | Self::ExternalSource { pane, .. }
             | Self::Create { pane, .. }
+            | Self::SelectPreset { pane, .. }
             | Self::Model { pane, .. }
             | Self::ModelRefresh { pane, .. }
             | Self::Metrics { pane, .. }
@@ -295,7 +310,7 @@ impl Command {
             | Self::Live { pane, .. }
             | Self::Answer { pane, .. }
             | Self::Approve { pane, .. } => Some(*pane),
-            Self::InitializeWorkspace
+            Self::InitializeWorkspace { .. }
             | Self::RenameWorkspace { .. }
             | Self::DeleteWorkspace { .. }
             | Self::RegisterWorkspace { .. }
@@ -305,6 +320,7 @@ impl Command {
             | Self::UiSurface { .. }
             | Self::ReopenRemoteSurface { .. }
             | Self::NewConversation { .. }
+            | Self::DeleteScheduledTask { .. }
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
             | Self::Setup { .. }
@@ -319,6 +335,8 @@ impl Command {
             | Self::Refresh
             | Self::WorkspacesNext
             | Self::ModelsNext
+            | Self::ModelsFirst
+            | Self::Presets
             | Self::InspectImage { .. }
             | Self::InspectSource { .. }
             | Self::InspectBlock { .. }
@@ -338,12 +356,15 @@ impl Command {
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct Catalog {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presets: Option<rsi_configuration_api::agent_presets::AgentPresetList>,
     #[serde(serialize_with = "crate::catalog::serialize_workspaces")]
     pub workspaces: Vec<rsi_workspace_protocol::WorkspaceRecord>,
     pub workspaces_more: bool,
     pub workspace_order_seed: Option<rsi_workspace_protocol::WorkspaceOrderSeed>,
     pub models: Vec<rsi_ai_protocol::ModelRef>,
     pub models_more: bool,
+    pub models_at_start: bool,
     #[serde(skip)]
     pub workspace_cursor: Option<rsi_workspace_protocol::WorkspaceCursor>,
 }
@@ -453,7 +474,7 @@ pub struct GuiApplication {
     pub(crate) has_files: bool,
     pub(crate) catalog: PresentationState<Catalog>,
     pub(crate) catalog_work: tokio::sync::Mutex<()>,
-    pub(crate) details: PresentationState<crate::panel_registry::PanelRegistry>,
+    pub(crate) details: Arc<PresentationState<crate::panel_registry::PanelRegistry>>,
     pub(crate) notice: PresentationState<String>,
     pub(crate) execution: Execution,
     changed: watch::Sender<u64>,
@@ -467,6 +488,25 @@ pub struct GuiApplication {
     admission: Mutex<()>,
 }
 impl GuiApplication {
+    /// Shares one caller-scoped subscription while the catalog is visible.
+    pub fn scheduled_tasks(
+        &self,
+        stop: CancellationToken,
+    ) -> futures_util::stream::BoxStream<'static, Result<String>> {
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+        let session = self.session.clone();
+        let closed = self.stop.clone();
+        async_stream::try_stream! {
+            let mut updates = session.observe_scheduled_tasks().await.map_err(error)?;
+            while let Some(update) = updates.try_next().await.map_err(error)? {
+                yield serde_json::to_string(&update).map_err(error)?;
+            }
+        }
+        .take_until(async move {
+            tokio::select! { () = stop.cancelled() => {}, () = closed.cancelled() => {} }
+        })
+        .boxed()
+    }
     pub(crate) fn available(&self, specs: &[rsi_api_protocol::OperationSpec]) -> bool {
         self.capabilities
             .lock()
@@ -612,6 +652,18 @@ impl GuiApplication {
         Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     {
         self.try_admit_inner(report_error, affected_pane, true, &self.slots, operation)
+    }
+    pub(crate) fn admit_reply<T, F, Fut>(
+        self: &Arc<Self>,
+        operation: F,
+    ) -> BoxFuture<'static, Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
+        self.try_admit_inner(false, None, false, &self.slots, operation)
+            .unwrap_or_else(|error| Box::pin(async move { Err(error) }))
     }
     pub(crate) fn try_admit_inner<T, F, Fut>(
         self: &Arc<Self>,
@@ -834,11 +886,16 @@ impl GuiApplication {
     }
 
     /// Encodes one incremental presentation frame against the document's exact base.
-    /// An absent or mismatched base requests a full snapshot.
+    /// An absent or mismatched base requests a full snapshot. An unchanged view
+    /// only produces a frame when the document must acknowledge a new renderer offer.
     ///
     /// # Panics
     /// Panics if an earlier application panic poisoned its state.
-    pub fn next_frame(&self, base: Option<&str>) -> rsi_api_protocol::Result<RetainedBytes> {
+    pub fn next_frame(
+        &self,
+        base: Option<&str>,
+        renderer_changed: bool,
+    ) -> rsi_api_protocol::Result<Option<RetainedBytes>> {
         let mut stream = self.stream.lock().expect("Web frame stream poisoned");
         if self.stop.is_cancelled() {
             return Err(ApiError::ShuttingDown);
@@ -848,7 +905,7 @@ impl GuiApplication {
             crate::test_support::take_frame_measurement();
             std::time::Instant::now()
         };
-        let frame = stream.encode(self, &self.frames, base);
+        let frame = stream.encode(self, &self.frames, base, renderer_changed);
         #[cfg(feature = "test-support")]
         crate::test_support::update(|sample| sample.stream_lock_ns = started.elapsed().as_nanos());
         frame
@@ -934,6 +991,12 @@ impl GuiApplication {
                 start,
             } => self.external_source(pane, &generation, source, start).await,
             Command::NewConversation { pane } => self.new_conversation(pane).await,
+            Command::DeleteScheduledTask { task } => self
+                .session
+                .delete_scheduled_task(task)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
             Command::ForkConversation {
                 pane,
                 generation,
@@ -1013,13 +1076,22 @@ impl GuiApplication {
                 name,
                 input,
             } => self.ui_invoke(&ticket, name, input).await,
-            Command::Refresh | Command::WorkspacesNext | Command::ModelsNext => {
-                self.refresh(command).await
-            }
-            Command::InitializeWorkspace => {
+            Command::Refresh
+            | Command::WorkspacesNext
+            | Command::ModelsNext
+            | Command::ModelsFirst
+            | Command::Presets => self.refresh(command).await,
+            Command::InitializeWorkspace { resume } => {
                 if let Some(client) = &self.workspace_default {
                     client.initialize().await.map_err(error)?;
                     self.refresh(Command::Refresh).await?;
+                }
+                if let Some(session) = resume {
+                    self.pane_command(Command::Open {
+                        pane: crate::SurfaceId::MAIN,
+                        session,
+                    })
+                    .await?;
                 }
                 Ok(())
             }
@@ -1199,7 +1271,7 @@ impl PluginFactory for GuiApplicationFactory {
             has_files,
             catalog: PresentationState::new(Catalog::default()),
             catalog_work: tokio::sync::Mutex::new(()),
-            details: PresentationState::new(crate::panel_registry::PanelRegistry::default()),
+            details: Arc::default(),
             notice: PresentationState::new(notice),
             execution: plan.context().runtime().execution().clone(),
             changed,

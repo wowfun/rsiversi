@@ -93,11 +93,14 @@ impl SettingsAccess for DefaultSettings {
     }
     async fn replace(
         &self,
-        _: &str,
-        _: &SettingsVersion,
-        _: Value,
+        namespace: &str,
+        expected: &SettingsVersion,
+        value: Value,
     ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
-        unreachable!()
+        assert_eq!(namespace, "rsi.agent");
+        assert_eq!(expected, &self.read(namespace).await?.version());
+        *self.0.lock().unwrap() = value;
+        self.read(namespace).await
     }
     async fn clear(
         &self,
@@ -108,13 +111,13 @@ impl SettingsAccess for DefaultSettings {
     }
 }
 
-#[tokio::test]
-async fn setup_describes_default_model_before_a_session_and_clears_stale_capabilities() {
+fn model_with_optional_reasoning(
+    model: rsi_ai_protocol::ModelRef,
+) -> rsi_ai_protocol::LanguageModelDescription {
     use rsi_ai_protocol::{
-        ImageToolResultCapability, LanguageModelDescription, LanguageProfile, ModelRef,
-        ReasoningEffortId, ReasoningEffortProfile, ToolDialect,
+        ImageToolResultCapability, LanguageModelDescription, LanguageProfile, ReasoningEffortId,
+        ReasoningEffortProfile, ToolDialect,
     };
-    let model = ModelRef::new("custom", "exact-model").unwrap();
     let profile = LanguageProfile::new(
         10000,
         1000,
@@ -127,21 +130,22 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
     .unwrap()
     .with_reasoning_efforts(
         ReasoningEffortProfile::new(
-            vec![ReasoningEffortId::new("high").unwrap()],
-            Some(ReasoningEffortId::new("high").unwrap()),
+            vec![
+                ReasoningEffortId::new("off").unwrap(),
+                ReasoningEffortId::new("high").unwrap(),
+            ],
+            Some(ReasoningEffortId::new("off").unwrap()),
         )
         .unwrap(),
     );
-    let description = LanguageModelDescription::new(
-        model.clone(),
-        profile,
-        1,
-        "fixture",
-        "chat",
-        "https",
-        "fixture",
-    )
-    .unwrap();
+    LanguageModelDescription::new(model, profile, 1, "fixture", "chat", "https", "fixture").unwrap()
+}
+
+#[tokio::test]
+async fn setup_describes_default_model_before_a_session_and_clears_stale_capabilities() {
+    use rsi_ai_protocol::{ModelRef, ReasoningEffortId};
+    let model = ModelRef::new("custom", "exact-model").unwrap();
+    let description = model_with_optional_reasoning(model.clone());
     let remote = Arc::new(Remote {
         description: ConnectionDescription {
             wire_version: rsi_api_protocol::API_WIRE_VERSION,
@@ -158,7 +162,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         reads: 0.into(),
     });
     let settings = Arc::new(DefaultSettings(Mutex::new(
-        json!({"default_model":model,"reasoning_effort":"high"}),
+        json!({"default_model":model,"default_reasoning_effort":"high"}),
     )));
     let runtime = rsi_meta::Runtime::default();
     let feature = Arc::new(SetupFeature {
@@ -175,9 +179,10 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         feature.snapshot().default_model_description,
         Some(description.clone())
     );
+    assert_eq!(feature.view()["agent"]["default_reasoning_effort"], "high");
     assert_eq!(
         feature.view()["default_model_description"]["profile"]["reasoning_efforts"]["default"],
-        "high"
+        "off"
     );
     assert_eq!(remote.writes.load(Ordering::SeqCst), 0);
     *settings.0.lock().unwrap() =
@@ -192,10 +197,23 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
     *remote.result.lock().unwrap() = Some(Err(ApiError::Capacity));
     feature.command(SetupCommand::Refresh).await.unwrap();
     assert!(feature.snapshot().default_model_description.is_none());
-    *settings.0.lock().unwrap() = json!({});
+    *settings.0.lock().unwrap() = json!({"sandbox":"read-only"});
     feature.command(SetupCommand::Refresh).await.unwrap();
     assert_eq!(remote.reads.load(Ordering::SeqCst), 3);
     assert!(feature.snapshot().default_model_description.is_none());
+    let ticket = feature.snapshot().ticket;
+    let select = || SetupCommand::DefaultModel {
+        ticket: ticket.clone(),
+        model: model.clone(),
+        reasoning_effort: Some(ReasoningEffortId::new("high").unwrap()),
+    };
+    *remote.result.lock().unwrap() = Some(Ok(json!(description)));
+    feature.command(select()).await.unwrap();
+    assert_eq!(
+        *settings.0.lock().unwrap(),
+        json!({"default_model":model,"default_reasoning_effort":"high","sandbox":"read-only"})
+    );
+    assert!(feature.command(select()).await.is_err());
     feature.work.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }

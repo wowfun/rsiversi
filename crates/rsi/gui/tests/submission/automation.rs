@@ -123,11 +123,7 @@ async fn artifact_bytes_never_enter_the_incremental_frame_baseline() {
             .is_err()
     );
     assert_eq!(remote.calls.lock().unwrap().len(), 1);
-    assert!(
-        !std::str::from_utf8(app.next_frame(None).unwrap().as_bytes())
-            .unwrap()
-            .contains(&remote.png)
-    );
+    assert!(!super::frame(&app, None).to_string().contains(&remote.png));
     assert!(runtime.shutdown().await.is_clean());
     assert!(rejected, "artifact reads must use the finite response lane");
     assert!(!retained, "PNG bytes must never be projected into frames");

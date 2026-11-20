@@ -389,8 +389,7 @@ async fn composer_freezes_access_for_next_turn_and_rejects_steer_override() {
     for mode in ["read-only", "workspace-write", "danger-full-access"] {
         let (runtime, backend, app, generation) = fixture().await;
         backend.resolution.store(2, Ordering::SeqCst);
-        let frame: serde_json::Value =
-            serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+        let frame = super::frame(&app, None);
         app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
             .unwrap();
         let input = json!({"pane":"main","generation":generation,"text":"access test","sandbox":mode,"action":"queue","action_revision":frame["view"]["composer_actions"]["main"]["revision"]});
@@ -583,8 +582,7 @@ async fn stop_requires_an_acknowledged_exact_active_turn() {
         json!({"action":"cancel","pane":"main","generation":generation,"turn_id":turn_id})
             .to_string()
     };
-    let frame: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let frame = super::frame(&app, None);
     assert!(
         app.command(&command(turn.as_str())).await.is_err(),
         "unacknowledged Stop must not reach the backend"

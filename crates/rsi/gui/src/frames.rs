@@ -54,7 +54,8 @@ impl FrameState {
         app: &GuiApplication,
         budget: &ByteBudget,
         base: Option<&str>,
-    ) -> Result<RetainedBytes> {
+        renderer_changed: bool,
+    ) -> Result<Option<RetainedBytes>> {
         let ui = *app.ui.membership_changes().borrow();
         let surfaces = app.panes.lock().expect("GUI surfaces poisoned").clone();
         let stamps = surfaces
@@ -66,11 +67,14 @@ impl FrameState {
         let frame = self.capture_views(
             budget,
             base,
+            renderer_changed,
             &stamps,
             |previous| app.capture_sections(previous, &proposed),
             |key, previous| surfaces[&key].frame_view(&app.ui, previous),
         )?;
-        self.actions = proposed;
+        if frame.is_some() {
+            self.actions = proposed;
+        }
         Ok(frame)
     }
     #[cfg(test)]
@@ -85,6 +89,7 @@ impl FrameState {
         self.capture_views(
             budget,
             base,
+            true,
             stamps,
             |previous| {
                 let mut next = Sections::new();
@@ -98,6 +103,7 @@ impl FrameState {
             },
             |key, _| CachedPane::from_value(project(key)),
         )
+        .map(|frame| frame.expect("renderer offer requires a frame"))
     }
     #[expect(
         clippy::too_many_lines,
@@ -107,10 +113,11 @@ impl FrameState {
         &mut self,
         budget: &ByteBudget,
         base: Option<&str>,
+        renderer_changed: bool,
         stamps: &BTreeMap<crate::SurfaceId, PaneStamp>,
         sections: impl FnOnce(&Sections) -> Result<Sections>,
         mut project: impl FnMut(crate::SurfaceId, Option<&CachedPane>) -> Result<CachedPane>,
-    ) -> Result<RetainedBytes> {
+    ) -> Result<Option<RetainedBytes>> {
         let base = base.map(frame_id).transpose()?;
         let mut snapshot =
             self.id == 0 || base != Some(self.id) || !self.panes.keys().eq(stamps.keys());
@@ -174,16 +181,16 @@ impl FrameState {
                     )
                 })
                 .collect();
-            reservation.encode(&Snapshot {
+            Some(reservation.encode(&Snapshot {
                 kind: "snapshot",
                 frame_id: id.to_string(),
                 view: View {
                     sections: &sections,
                     surfaces,
                 },
-            })?
+            })?)
         } else {
-            let surfaces = replacements
+            let surfaces: Vec<_> = replacements
                 .iter()
                 .filter_map(|(key, replacement)| {
                     let old = &self.panes[key].value;
@@ -192,7 +199,7 @@ impl FrameState {
                 .collect();
             #[cfg(feature = "test-support")]
             let started = std::time::Instant::now();
-            let section_changes = sections
+            let section_changes: BTreeMap<_, _> = sections
                 .iter()
                 .filter_map(|(key, next)| {
                     let previous = self.sections.get(key);
@@ -214,17 +221,23 @@ impl FrameState {
                     .count();
                 sample.section_comparison_ns = started.elapsed().as_nanos();
             });
-            reservation.encode(&Patch {
-                kind: "patch",
-                frame_id: id.to_string(),
-                base_frame_id: self.id.to_string(),
-                sections: section_changes,
-                surfaces,
-            })?
+            if renderer_changed || !section_changes.is_empty() || !surfaces.is_empty() {
+                Some(reservation.encode(&Patch {
+                    kind: "patch",
+                    frame_id: id.to_string(),
+                    base_frame_id: self.id.to_string(),
+                    sections: section_changes,
+                    surfaces,
+                })?)
+            } else {
+                None
+            }
         };
         self.panes.retain(|key, _| stamps.contains_key(key));
         self.panes.extend(replacements);
-        self.id = id;
+        if frame.is_some() {
+            self.id = id;
+        }
         self.sections = sections;
         Ok(frame)
     }
@@ -470,6 +483,60 @@ mod tests {
         let value = serde_json::from_slice(bytes.as_bytes()).unwrap();
         drop(bytes);
         value
+    }
+    #[test]
+    fn equal_projection_refreshes_cache_without_consuming_a_frame_or_renderer_ack() {
+        let budget = ByteBudget::new(MAX_BYTES).unwrap();
+        let mut frames = FrameState::default();
+        let mut stamps = stamps();
+        drop(
+            frames
+                .capture(&budget, None, &stamps, || json!({"notice":"ready"}), pane)
+                .unwrap(),
+        );
+        stamps.get_mut(&crate::SurfaceId::MAIN).unwrap().pane = Arc::new(());
+        let ignored = frames
+            .capture_views(
+                &budget,
+                Some("1"),
+                false,
+                &stamps,
+                |previous| {
+                    let mut sections = Sections::new();
+                    capture_section(&mut sections, previous, "notice", (0, 7, 0), || {
+                        json!("ready")
+                    })?;
+                    Ok(sections)
+                },
+                |key, _| {
+                    assert_eq!(key, crate::SurfaceId::MAIN);
+                    CachedPane::from_value(pane(key))
+                },
+            )
+            .unwrap();
+        assert!(ignored.is_none());
+        assert_eq!(frames.id, 1);
+        let offer = frames
+            .capture_views(
+                &budget,
+                Some("1"),
+                true,
+                &stamps,
+                |previous| {
+                    let mut sections = Sections::new();
+                    capture_section(&mut sections, previous, "notice", (0, 7, 0), || {
+                        panic!("cached section")
+                    })?;
+                    Ok(sections)
+                },
+                |_, _| panic!("cached pane"),
+            )
+            .unwrap()
+            .expect("renderer offer");
+        assert_eq!(
+            decoded(offer),
+            json!({"kind":"patch","frame_id":"2","base_frame_id":"1","surfaces":[],"sections":{}})
+        );
     }
     #[test]
     #[allow(

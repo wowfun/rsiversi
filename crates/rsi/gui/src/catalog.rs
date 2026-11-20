@@ -7,12 +7,28 @@ use crate::application::{Command, GuiApplication, Result, error};
 impl GuiApplication {
     pub(crate) async fn refresh(&self, command: Command) -> Result<()> {
         let _work = self.catalog_work.lock().await;
+        if matches!(command, Command::Presets) {
+            let api = self
+                .api
+                .as_ref()
+                .ok_or("Agent preset catalog unavailable")?;
+            let presets =
+                rsi_configuration_api::agent_presets::AgentPresetsClient::new(api.clone())
+                    .list()
+                    .await
+                    .map_err(error)?;
+            self.catalog.lock().expect("Web catalog poisoned").presets = Some(presets);
+            return Ok(());
+        }
         if matches!(command, Command::Refresh)
             && let Some(api) = &self.api
         {
             let result = api.operations().await.map_err(error)?;
             *self.capabilities.lock().expect("GUI capabilities") =
                 crate::application::Capabilities::new(Some(result));
+        }
+        if matches!(command, Command::Refresh | Command::WorkspacesNext) {
+            self.refresh_attached_workspaces().await;
         }
         if matches!(command, Command::Refresh | Command::WorkspacesNext)
             && self.available(&[rsi_workspace_api::Operation::List.spec()])
@@ -37,8 +53,10 @@ impl GuiApplication {
             catalog.workspaces = page.records;
             catalog.workspace_order_seed = seed;
         }
-        if matches!(command, Command::Refresh | Command::ModelsNext)
-            && self.available(&[rsi_ai_models_api::operation()])
+        if matches!(
+            command,
+            Command::Refresh | Command::ModelsNext | Command::ModelsFirst
+        ) && self.available(&[rsi_ai_models_api::operation()])
         {
             let after = if matches!(command, Command::ModelsNext) {
                 self.catalog
@@ -57,6 +75,7 @@ impl GuiApplication {
                 .map_err(error)?;
             let mut catalog = self.catalog.lock().expect("Web catalog poisoned");
             catalog.models_more = page.has_more;
+            catalog.models_at_start = after.is_none();
             catalog.models = page.models;
         }
         if matches!(command, Command::Refresh) {
@@ -85,6 +104,7 @@ impl GuiApplication {
         if !self.available(&[rsi_ai_models_api::operation()]) {
             catalog.models.clear();
             catalog.models_more = false;
+            catalog.models_at_start = true;
         }
     }
 }

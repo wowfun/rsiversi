@@ -11,6 +11,7 @@ default = []
 test-support = []
 
 [dependencies]
+rsi-configuration-api = { path = "../configuration-api" }
 rsi-spill = { path = "../../rsi-spill/core" }
 rsi-settings-api = { path = "../../rsi-settings/api" }
 rsi-session-api = { path = "../session-api" }
@@ -66,7 +67,6 @@ tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
-rsi-configuration-api = { path = "../configuration-api" }
 base64.workspace = true
 rsi-goal = { path = "../goal" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }

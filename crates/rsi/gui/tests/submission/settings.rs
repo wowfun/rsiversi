@@ -13,6 +13,7 @@ pub(super) struct Fixture {
     writes: AtomicUsize,
     read_only: AtomicBool,
     changed_scope: AtomicBool,
+    defaults_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     snapshot: Mutex<SettingsSnapshot>,
 }
 impl Default for Fixture {
@@ -25,6 +26,7 @@ impl Default for Fixture {
             writes: AtomicUsize::new(0),
             read_only: AtomicBool::new(false),
             changed_scope: AtomicBool::new(false),
+            defaults_barrier: Mutex::default(),
             snapshot: Mutex::new(SettingsSnapshot {
                 scope_id: SettingsScopeId::parse("0".repeat(32)).unwrap(),
                 revision: 0,
@@ -32,6 +34,36 @@ impl Default for Fixture {
             }),
         }
     }
+}
+
+#[tokio::test]
+async fn reopening_history_uses_one_attachment_path_and_no_draft_defaults() {
+    let (runtime, backend, app) = fixture().await;
+    let current = view(&app)["surfaces"]["main"].clone();
+    let session = &current["session"];
+    let before = backend.settings.calls.load(Ordering::SeqCst);
+    let initial_attaches = backend.attaches.load(Ordering::Relaxed);
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    let history_attaches = backend.attaches.load(Ordering::Relaxed);
+    let opened = app
+        .restore_session(
+            &json!({"action":"open","pane":"main","session":session,"header":current["header"]})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&opened).unwrap()["status"],
+        "opened"
+    );
+    assert_eq!(
+        backend.attaches.load(Ordering::Relaxed) - history_attaches,
+        history_attaches - initial_attaches,
+    );
+    assert_eq!(backend.settings.calls.load(Ordering::SeqCst), before);
+    assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
@@ -48,7 +80,16 @@ async fn empty_draft_reuse_preserves_attachment_and_rejects_changed_defaults_or_
     obsolete["trust"] = json!(true);
     assert!(app.command(&obsolete.to_string()).await.is_err());
     assert_eq!(view(&app)["surfaces"]["main"]["session"], first["session"]);
-    app.command(&create(&first)).await.unwrap();
+    *backend.settings.defaults_barrier.lock().unwrap() =
+        Some(Arc::new(tokio::sync::Barrier::new(2)));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.command(&create(&first)),
+    )
+    .await
+    .expect("both independent default reads should reach the barrier")
+    .unwrap();
+    *backend.settings.defaults_barrier.lock().unwrap() = None;
     let reused = view(&app)["surfaces"]["main"].clone();
     assert_eq!(first["session"], reused["session"]);
     assert_eq!(first["generation"], reused["generation"]);
@@ -70,6 +111,51 @@ async fn empty_draft_reuse_preserves_attachment_and_rejects_changed_defaults_or_
     assert_ne!(
         view(&app)["surfaces"]["main"]["session"],
         changed["session"]
+    );
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn workspace_can_reopen_its_previous_blank_but_not_after_a_default_change() {
+    let (runtime, backend, app) = fixture().await;
+    backend.unpublished.store(true, Ordering::Release);
+    let original_header = backend.header.lock().unwrap().clone();
+    let original = view(&app)["surfaces"]["main"].clone();
+    let workspace = "a".repeat(64);
+    let create = json!({"action":"create","pane":"main","workspace":workspace});
+    let candidate = |surface: &serde_json::Value| {
+        json!({"action":"create","pane":"main","workspace":workspace,
+        "reuse":{"session":surface["session"],"generation":surface["generation"],"header":surface["header"]}})
+    };
+    app.command(&create.to_string()).await.unwrap();
+    *backend.header.lock().unwrap() = original_header.clone();
+    let count = backend.creations.lock().unwrap().len();
+    let previous_reads = backend.settings.calls.load(Ordering::SeqCst);
+    app.command(&candidate(&original).to_string())
+        .await
+        .unwrap();
+    let restored = view(&app)["surfaces"]["main"].clone();
+    assert_eq!(restored["session"], original["session"]);
+    assert_eq!(restored["creation"], original["creation"]);
+    assert_ne!(restored["generation"], original["generation"]);
+    assert_eq!(backend.creations.lock().unwrap().len(), count);
+    assert_eq!(
+        backend.settings.calls.load(Ordering::SeqCst) - previous_reads,
+        2
+    );
+
+    app.command(&create.to_string()).await.unwrap();
+    *backend.header.lock().unwrap() = original_header;
+    backend
+        .settings
+        .changed_scope
+        .store(true, Ordering::Release);
+    app.command(&candidate(&restored).to_string())
+        .await
+        .unwrap();
+    assert_ne!(
+        view(&app)["surfaces"]["main"]["session"],
+        original["session"]
     );
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -126,6 +212,12 @@ impl SettingsAccess for Fixture {
         })
     }
     async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        if matches!(namespace, "rsi.agent" | "rsi.agent-presets") {
+            let barrier = self.defaults_barrier.lock().unwrap().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+        }
         if namespace == rsi_client_preferences::NAMESPACE
             && !self.preference_enabled.load(Ordering::SeqCst)
         {
@@ -401,8 +493,7 @@ async fn preferences_apply_on_save_refresh_remote_changes_and_retain_valid_value
 #[tokio::test]
 async fn composer_actions_require_display_ack_and_reject_changed_preferences_without_mutation() {
     let (runtime, backend, app) = fixture().await;
-    let frame: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let frame = super::frame(&app, None);
     let shown = &frame["view"]["composer_actions"]["main"];
     let request = json!({"pane":"main","generation":frame["view"]["surfaces"]["main"]["generation"],
         "text":"retained draft","action_revision":shown["revision"],"action":shown["primary"]["id"]}).to_string();
@@ -420,8 +511,7 @@ async fn composer_actions_require_display_ack_and_reject_changed_preferences_wit
         backend.requests.lock().unwrap().is_empty(),
         "preparation is read-only"
     );
-    let next: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let next = super::frame(&app, None);
     assert_eq!(
         next["view"]["composer_actions"]["main"]["revision"], shown["revision"],
         "unrelated frames preserve the action"
@@ -449,8 +539,7 @@ async fn composer_actions_require_display_ack_and_reject_changed_preferences_wit
             .unwrap_err()
             .contains("refreshed action")
     );
-    let newer: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let newer = super::frame(&app, None);
     assert_ne!(
         newer["view"]["composer_actions"]["main"]["revision"],
         shown["revision"]

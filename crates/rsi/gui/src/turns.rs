@@ -4,6 +4,7 @@ use rsi_agent_session_protocol::{
     EffectId, ModelEventPurpose, SessionFact, SessionFactBody as Fact, TurnId, TurnOutcome,
 };
 use rsi_ai_protocol::{ContentStart, FinishReason, LanguageEvent, TokenUsage};
+use rsi_conversation::RetryState;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -19,6 +20,13 @@ pub(crate) struct Turn {
     pub process: Vec<String>,
     pub candidate: Vec<String>,
     pub answer: Vec<String>,
+    /// Positions in `blocks` of the last settled conversational response with visible prose.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub closing_prose: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback_message: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retries: Vec<RetryRow>,
     pub terminal: Option<String>,
     pub timestamps: BTreeMap<String, u64>,
     pub elapsed_ms: Option<u64>,
@@ -28,6 +36,17 @@ pub(crate) struct Turn {
     pub running: bool,
     pub foldable: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct RetryRow {
+    block: usize,
+    number: u8,
+    maximum: Option<u8>,
+    delay_ms: u64,
+    reason: &'static str,
+    explanation: Box<str>,
+    state: RetryState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Link {
     effect: Option<EffectId>,
@@ -38,6 +57,7 @@ struct Link {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Model {
     seq: u64,
+    started: bool,
     conversation: bool,
     tools: bool,
     finished: Option<(u64, bool)>,
@@ -108,7 +128,9 @@ impl Index {
         reason = "one Fact updates its model and Turn projection together"
     )]
     pub fn observe(&mut self, fact: &SessionFact, blocks: &VecDeque<Block>) {
-        let id = fact.body().turn_id().clone();
+        let Some(id) = fact.body().turn_id().cloned() else {
+            return;
+        };
         let state = self.states.entry(id.clone()).or_default();
         let mut changed = false;
         let effect = match fact.body() {
@@ -150,6 +172,14 @@ impl Index {
                 }
             }
             changed |= *model != previous;
+            if matches!(fact.body(), Fact::ModelStarted { .. }) && !model.started {
+                model.started = true;
+                changed |= self
+                    .view
+                    .entries
+                    .get(&id)
+                    .is_some_and(|turn| !turn.retries.is_empty());
+            }
         }
         match fact.body() {
             Fact::TurnAccepted { .. }
@@ -295,6 +325,63 @@ impl Index {
 }
 
 impl State {
+    fn closing_effect(&self, blocks: &VecDeque<Block>) -> Option<&EffectId> {
+        self.terminal.as_ref()?;
+        blocks.iter().rev().find_map(|block| {
+            let link = self.links.get(&block.key)?;
+            let effect = link.effect.as_ref()?;
+            (link.role == "assistant"
+                && !link.image
+                && self
+                    .models
+                    .get(effect)
+                    .is_some_and(|model| model.conversation)
+                && !block.text.trim().is_empty())
+            .then_some(effect)
+        })
+    }
+    fn project_retry<'a>(
+        &self,
+        block: &'a Block,
+        link: &Link,
+        turn: &mut Turn,
+        reservations: &mut BTreeMap<&'a EffectId, usize>,
+    ) {
+        let Some((retry, maximum)) = block
+            .request
+            .as_ref()
+            .and_then(rsi_conversation::RequestPresentation::scheduled_retry)
+        else {
+            return;
+        };
+        let decision = &retry.decision;
+        let state = RetryState::observed(
+            self.models
+                .get(&decision.effect_id)
+                .is_some_and(|model| model.started),
+            self.terminal.is_some(),
+        );
+        let previous = link
+            .effect
+            .as_ref()
+            .and_then(|effect| reservations.remove(effect));
+        let index = previous.unwrap_or(turn.retries.len());
+        let row = RetryRow {
+            block: previous.map_or(turn.blocks.len(), |i: usize| turn.retries[i].block),
+            number: decision.number,
+            maximum,
+            delay_ms: decision.delay_ms,
+            reason: retry.reason.code(),
+            explanation: retry.explanation.clone(),
+            state,
+        };
+        if let Some(i) = previous {
+            turn.retries[i] = row;
+        } else {
+            turn.retries.push(row);
+        }
+        reservations.insert(&decision.effect_id, index);
+    }
     fn project(&self, id: &TurnId, blocks: &VecDeque<Block>) -> Turn {
         let partial = !self.accepted || self.lost_start;
         let latest = self
@@ -311,12 +398,11 @@ impl State {
             process: vec![],
             candidate: vec![],
             answer: vec![],
+            closing_prose: vec![],
+            feedback_message: None,
+            retries: vec![],
             terminal: None,
-            timestamps: self
-                .links
-                .iter()
-                .filter_map(|(key, link)| link.timestamp_ms.map(|time| (key.clone(), time)))
-                .collect(),
+            timestamps: BTreeMap::new(),
             elapsed_ms: (!partial)
                 .then_some(self.started_ms.zip(self.ended_ms))
                 .flatten()
@@ -331,10 +417,27 @@ impl State {
                 .map_or("Running", |(_, _, label)| label)
                 .into(),
         };
+        let closing = self.closing_effect(blocks);
+        turn.feedback_message = closing
+            .and_then(|effect| self.models.get(effect)?.finished)
+            .filter(|(_, ok)| *ok)
+            .map(|(seq, _)| seq.to_string());
+        let mut reservations = BTreeMap::new();
         for block in blocks {
             let Some(link) = self.links.get(&block.key) else {
                 continue;
             };
+            if let Some(time) = link.timestamp_ms {
+                turn.timestamps.insert(block.key.clone(), time);
+            }
+            self.project_retry(block, link, &mut turn, &mut reservations);
+            if closing.is_some()
+                && link.effect.as_ref() == closing
+                && link.role == "assistant"
+                && !link.image
+            {
+                turn.closing_prose.push(turn.blocks.len());
+            }
             turn.blocks.push(block.key.clone());
             if self
                 .terminal
@@ -361,6 +464,9 @@ impl State {
                                 .is_some_and(|(seq, ok)| ok && seq > self.tool_seq)
                     }));
             if answer {
+                if link.image {
+                    turn.feedback_message = Some(block.first_seq.to_string());
+                }
                 turn.answer.push(block.key.clone());
             } else if candidate {
                 turn.candidate.push(block.key.clone());
@@ -370,8 +476,10 @@ impl State {
                 .as_ref()
                 .and_then(|effect| self.models.get(effect))
                 .is_some_and(|model| !model.conversation);
-            if matches!(link.role, "tool" | "reasoning" | "metadata" | "assistant")
-                && !answer
+            if matches!(
+                link.role,
+                "tool" | "reasoning" | "metadata" | "assistant" | "step-context"
+            ) && !answer
                 && !compaction
             {
                 turn.process.push(block.key.clone());
@@ -677,6 +785,89 @@ mod tests {
         transcript.turns.view.entries.values().next().unwrap()
     }
     #[test]
+    fn retry_chain_matches_reserved_effects_and_survives_reverse_history() {
+        use rsi_agent_session_protocol::{ModelAttemptBuilder, ScheduledModelRetry};
+        use rsi_ai_protocol::{AiError, DispatchStatus, ErrorKind, ErrorPhase};
+
+        let failed = |source: &str, next: &str, number| {
+            let mut attempt = ModelAttemptBuilder::new();
+            attempt
+                .push(
+                    0,
+                    &LanguageEvent::Failed {
+                        error: AiError::new(
+                            ErrorKind::RateLimited,
+                            ErrorPhase::Stream,
+                            DispatchStatus::Dispatched,
+                            "rate limited",
+                        )
+                        .unwrap(),
+                        replay: None,
+                    },
+                )
+                .unwrap();
+            Fact::ModelAttemptSettled {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new(source).unwrap(),
+                purpose: ModelEventPurpose::Conversation,
+                attempt: attempt
+                    .finish_with_retry(
+                        false,
+                        Some(ScheduledModelRetry {
+                            effect_id: EffectId::new(next).unwrap(),
+                            number,
+                            delay_ms: 6000,
+                        }),
+                    )
+                    .unwrap(),
+            }
+        };
+        let started = |effect| Fact::ModelStarted {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new(effect).unwrap(),
+        };
+        let facts: Vec<_> = [
+            accepted(),
+            failed("original", "first", 1),
+            started("unrelated"),
+            started("first"),
+            failed("first", "second", 2),
+            terminal(TurnOutcome::Cancelled),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, body)| SessionFact::new(i as u64 + 1, 1, body).unwrap())
+        .collect();
+        let mut live = Transcript::default();
+        for (i, fact) in facts.iter().enumerate() {
+            live.fact(fact);
+            if i == 0 {
+                continue;
+            }
+            let [row] = turn(&live).retries.as_slice() else {
+                panic!("expected one retry chain");
+            };
+            assert_eq!(row.number, if i < 4 { 1 } else { 2 });
+            assert_eq!(
+                row.state,
+                match i {
+                    3 => RetryState::Started,
+                    5 => RetryState::Cancelled,
+                    _ => RetryState::Scheduled,
+                }
+            );
+            assert_eq!(
+                turn(&live).blocks[row.block],
+                r#"["request","turn","original"]"#
+            );
+        }
+        let mut history = Transcript::default();
+        for fact in facts.iter().rev() {
+            history.fact(fact);
+        }
+        assert_eq!(turn(&history).retries, turn(&live).retries);
+    }
+    #[test]
     fn new_turns_and_backfill_only_reclassify_affected_entries() {
         let mut t = Transcript {
             inner: ActualTranscript {
@@ -732,6 +923,47 @@ mod tests {
         apply(&mut t, finish("effect-127", FinishReason::ToolCalls));
         assert!(turn(&t).candidate.is_empty());
         assert_eq!(t.turns.rebuilds - before, 1);
+    }
+    #[test]
+    fn closing_prose_survives_a_tool_only_follow_up_and_waits_for_settlement() {
+        let mut t = Transcript::default();
+        apply(&mut t, accepted());
+        apply(&mut t, text("first", "Earlier reply"));
+        apply(&mut t, finish("first", FinishReason::ToolCalls));
+        apply(&mut t, text("second", "Reading the workspace"));
+        apply(&mut t, finish("second", FinishReason::ToolCalls));
+        apply(&mut t, text("third", " "));
+        apply(&mut t, finish("third", FinishReason::ToolCalls));
+        assert!(turn(&t).closing_prose.is_empty());
+        assert!(turn(&t).feedback_message.is_none());
+        let seq = t
+            .turns
+            .states
+            .values()
+            .next()
+            .unwrap()
+            .models
+            .get(&EffectId::new("second").unwrap())
+            .unwrap()
+            .finished
+            .unwrap()
+            .0
+            .to_string();
+        apply(&mut t, terminal(TurnOutcome::Cancelled));
+        assert_eq!(turn(&t).feedback_message.as_ref(), Some(&seq));
+        let view = turn(&t);
+        assert!(view.answer.is_empty());
+        let [position] = view.closing_prose[..] else {
+            panic!("one closing prose block")
+        };
+        assert_eq!(
+            t.blocks
+                .iter()
+                .find(|block| block.key == view.blocks[position])
+                .unwrap()
+                .text,
+            "Reading the workspace"
+        );
     }
     #[test]
     fn tool_reclassification_and_completion_do_not_change_block_identity() {
@@ -1037,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_and_continuation_inputs_remain_outside_folded_process() {
+    fn attributed_inputs_distinguish_step_context_from_turn_triggers() {
         use rsi_agent_session_protocol::{
             ContinuationInput, ContinuationProvenance, ContinuationSource, DomainIdentity,
             DomainRequestId, DomainRevision, SessionId,
@@ -1048,7 +1280,43 @@ mod tests {
             message_id: MessageId::new("continuation").unwrap(),
             text: "continue".into(),
         };
+        let automatic = |domain| InputMessageSource::Continuation {
+            message_id: continuation.message_id.clone(),
+            source: ContinuationSource {
+                domain: DomainIdentity::new(domain, 1).unwrap(),
+                owner: continuation.owner.clone(),
+                round: 1,
+                reserved_revision: DomainRevision::new(1),
+                provenance: ContinuationProvenance::Baseline {
+                    snapshot_sha256: "a".repeat(64),
+                },
+                text_sha256: continuation.text_sha256(),
+            },
+        };
+        let change = rsi_agent_session_protocol::CommandMessageSource {
+            command: rsi_agent_session_protocol::ContributionId::new("rsi.schedule.delete")
+                .unwrap(),
+            request_id: DomainRequestId::new("delete").unwrap(),
+            invocation_sha256: "f".repeat(64),
+            ordinal: 0,
+            attribution: None,
+        };
         let inputs = [
+            (
+                InputMessageSource::Command {
+                    message_id: change.message_id().unwrap(),
+                    source: change,
+                },
+                "Recorded change",
+                "Automation task",
+                "step-context",
+            ),
+            (
+                InputMessageSource::RuntimeContext,
+                "Workspace location",
+                "Runtime context",
+                "context",
+            ),
             (
                 InputMessageSource::Agent {
                     message_id: MessageId::new("agent").unwrap(),
@@ -1056,28 +1324,30 @@ mod tests {
                 },
                 "Agent input",
                 "Message from sender",
+                "trigger-agent",
             ),
             (
-                InputMessageSource::Continuation {
-                    message_id: continuation.message_id.clone(),
-                    source: ContinuationSource {
-                        domain: DomainIdentity::new("goal", 1).unwrap(),
-                        owner: continuation.owner.clone(),
-                        round: 1,
-                        reserved_revision: DomainRevision::new(1),
-                        provenance: ContinuationProvenance::Baseline {
-                            snapshot_sha256: "a".repeat(64),
-                        },
-                        text_sha256: continuation.text_sha256(),
-                    },
-                },
+                automatic("rsi.goal"),
                 continuation.text.as_str(),
                 "Goal continuation",
+                "trigger-goal",
+            ),
+            (
+                automatic("rsi.schedule"),
+                continuation.text.as_str(),
+                "Automation task",
+                "trigger-schedule",
+            ),
+            (
+                automatic("example"),
+                continuation.text.as_str(),
+                "Automatic continuation",
+                "trigger-request",
             ),
         ];
         let mut t = Transcript::default();
         apply(&mut t, accepted());
-        for (source, text, title) in inputs {
+        for (source, text, title, role) in inputs {
             apply(
                 &mut t,
                 Fact::InputMessageClaimed {
@@ -1089,14 +1359,27 @@ mod tests {
             );
             let boundary = t.blocks.back().unwrap();
             assert_eq!(boundary.title, title);
-            assert_eq!(boundary.role, "status");
+            assert_eq!(boundary.role, role);
+            let wire = serde_json::to_value(boundary).unwrap();
+            if let Some(kind) = role.strip_prefix("trigger-") {
+                assert_eq!(wire["role"], "status");
+                assert_eq!(wire["trigger"], kind);
+            } else {
+                assert!(wire.get("trigger").is_none());
+                assert_eq!(wire["role"], "context");
+            }
         }
         apply(&mut t, text("model", "Answer"));
         apply(&mut t, finish("model", FinishReason::Stop));
         apply(&mut t, terminal(TurnOutcome::Completed));
-        for block in t.blocks.iter().filter(|block| block.role == "status") {
+        for block in t.blocks.iter().filter(|block| {
+            block.role.starts_with("trigger-") || matches!(block.role, "context" | "step-context")
+        }) {
             assert!(turn(&t).blocks.contains(&block.key));
-            assert!(!turn(&t).process.contains(&block.key));
+            assert_eq!(
+                turn(&t).process.contains(&block.key),
+                block.role == "step-context"
+            );
             assert!(!turn(&t).answer.contains(&block.key));
         }
     }

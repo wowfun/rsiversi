@@ -25,6 +25,7 @@ pub(crate) struct Block {
     pub clipped: bool,
     pub tool: Option<ToolState>,
     request: Option<rsi_conversation::RequestPresentation>,
+    compact: Option<(u64, rsi_agent_turn_protocol::CompactionOutcome)>,
     tool_start_seq: Option<u64>,
     tool_argument_bytes: usize,
     sources: SourceIndex,
@@ -37,7 +38,15 @@ pub(crate) struct Block {
 impl Serialize for Block {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let markdown = (self.role == "assistant")
+        let installed = self.compact.is_some_and(|(_, outcome)| {
+            outcome == rsi_agent_turn_protocol::CompactionOutcome::Compacted
+        });
+        let text = if self.compact.is_none() || installed {
+            self.text.as_str()
+        } else {
+            ""
+        };
+        let markdown = (self.role == "assistant" || installed && !text.is_empty())
             .then(|| {
                 self.markdown
                     .get_or_init(|| {
@@ -49,16 +58,44 @@ impl Serialize for Block {
                     .as_ref()
             })
             .flatten();
+        let request_seq = self
+            .request
+            .as_ref()
+            .and_then(rsi_conversation::RequestPresentation::intent_seq);
+        let scheduled_retry = self
+            .request
+            .as_ref()
+            .is_some_and(|request| request.scheduled_retry().is_some());
+        let schedule = self.tool.as_ref().and_then(ToolState::schedule_creation);
+        let trigger = self.role.strip_prefix("trigger-");
         let mut view = serializer.serialize_struct(
             "Block",
-            7 + usize::from(self.tool.is_some()) + usize::from(markdown.is_some()),
+            7 + usize::from(self.tool.is_some())
+                + usize::from(markdown.is_some())
+                + usize::from(request_seq.is_some())
+                + usize::from(schedule.is_some())
+                + usize::from(trigger.is_some())
+                + usize::from(scheduled_retry),
         )?;
         view.serialize_field("key", &self.key)?;
-        view.serialize_field("role", &self.role)?;
+        if let Some(kind) = trigger {
+            view.serialize_field("role", "status")?;
+            view.serialize_field("trigger", kind)?;
+        } else if self.role == "step-context" {
+            view.serialize_field("role", "context")?;
+        } else {
+            view.serialize_field("role", &self.role)?;
+        }
         view.serialize_field("title", &self.title)?;
-        view.serialize_field("text", &self.text)?;
+        view.serialize_field("text", text)?;
         view.serialize_field("clipped", &self.clipped)?;
         view.serialize_field("sources", &self.sources.len())?;
+        if let Some(seq) = request_seq {
+            view.serialize_field("request_intent_seq", &seq.to_string())?;
+        }
+        if scheduled_retry {
+            view.serialize_field("scheduled_retry", &true)?;
+        }
         view.serialize_field(
             "external",
             &self
@@ -68,6 +105,9 @@ impl Serialize for Block {
         )?;
         if let Some(tool) = &self.tool {
             view.serialize_field("tool", tool)?;
+        }
+        if let Some(task) = schedule {
+            view.serialize_field("created_schedule", task)?;
         }
         if let Some(markdown) = markdown {
             view.serialize_field("markdown", &markdown)?;
@@ -253,6 +293,7 @@ impl Transcript {
                 clipped: false,
                 tool: None,
                 request: None,
+                compact: None,
                 tool_start_seq: None,
                 tool_argument_bytes: 0,
                 sources: SourceIndex::default(),
@@ -299,40 +340,53 @@ impl Transcript {
         self.trim();
     }
     fn trim(&mut self) {
-        while self.blocks.len() > MAX_BLOCKS
-            || self
-                .blocks
-                .iter()
-                .map(|block| block.text.capacity())
-                .sum::<usize>()
-                > MAX_TEXT
-            || self.blocks.capacity() * std::mem::size_of::<Block>()
-                + self
-                    .blocks
-                    .iter()
-                    .map(|block| {
-                        block.key.capacity()
-                            + block.title.capacity()
-                            + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
-                            + block
-                                .request
-                                .as_ref()
-                                .map_or(0, rsi_conversation::RequestPresentation::owned_bytes)
-                            + block.sources.owned_bytes()
-                            + block.source_bytes.capacity() * std::mem::size_of::<usize>()
-                    })
-                    .sum::<usize>()
-                > MAX_METADATA
-        {
-            if self.blocks.pop_front().is_none() {
-                // Empty retained allocation must not keep the metadata loop over budget.
-                self.blocks.shrink_to_fit();
+        let allocation = self.blocks.capacity() * std::mem::size_of::<Block>();
+        let mut metadata = allocation;
+        let mut text = 0;
+        let mut keep = 0;
+        for block in self.blocks.iter().rev().take(MAX_BLOCKS) {
+            text += block.text.capacity();
+            metadata += block.key.capacity()
+                + block.title.capacity()
+                + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
+                + block
+                    .request
+                    .as_ref()
+                    .map_or(0, rsi_conversation::RequestPresentation::owned_bytes)
+                + block.sources.owned_bytes()
+                + block.source_bytes.capacity() * std::mem::size_of::<usize>();
+            if text > MAX_TEXT || metadata > MAX_METADATA {
                 break;
             }
+            keep += 1;
+        }
+        if keep < self.blocks.len() {
+            self.blocks.drain(..self.blocks.len() - keep);
             self.omitted = true;
         }
+        if allocation > MAX_METADATA {
+            self.blocks.shrink_to_fit();
+        }
     }
-    pub(crate) fn merge_entered(&mut self, seq: u64, inputs: Self) {
+    fn order_step_inputs(&mut self, seq: u64) {
+        // An earlier inbox acceptance may be claimed alongside the user who opened this exchange.
+        let inputs = self
+            .blocks
+            .iter()
+            .rev()
+            .take_while(|block| block.first_seq == seq);
+        if !inputs
+            .clone()
+            .is_sorted_by_key(|block| block.role != "step-context")
+        {
+            let start = self.blocks.len() - inputs.count();
+            self.blocks.make_contiguous()[start..]
+                .sort_by_key(|block| block.role == "step-context");
+        }
+    }
+
+    pub(crate) fn merge_entered(&mut self, seq: u64, mut inputs: Self) {
+        inputs.order_step_inputs(seq);
         self.blocks
             .retain(|block| block.first_seq != seq || !block.key.starts_with("prepared:"));
         self.blocks.extend(inputs.blocks);
@@ -343,26 +397,37 @@ impl Transcript {
         self.trim();
     }
 
-    pub(crate) async fn history_inputs(
+    fn finish_history_page(&mut self, first: Option<u64>, has_more: bool) -> (Option<u64>, bool) {
+        let oldest = if self.omitted && !self.blocks.is_empty() {
+            first.max(self.history_before())
+        } else {
+            first
+        };
+        let can_page = has_more || oldest > first;
+        self.omitted |= has_more;
+        (oldest, can_page)
+    }
+
+    pub(crate) async fn history_page(
         &mut self,
         handle: &dyn rsi_session_protocol::SessionHandle,
-        facts: &[SessionFact],
-    ) -> Result<(), rsi_session_protocol::SessionError> {
-        for fact in facts {
-            rsi_client::visit_prepared_inputs(handle, fact, facts, |row| self.entered(fact, row))
-                .await?;
+        page: &rsi_session_protocol::SessionHistoryPage,
+    ) -> Result<(Option<u64>, bool), rsi_session_protocol::SessionError> {
+        for fact in &page.facts {
+            rsi_client::visit_prepared_inputs(handle, fact, &page.facts, |row| {
+                self.entered(fact, row);
+            })
+            .await?;
+            if matches!(fact.body(), SessionFactBody::StepInputsPrepared { .. }) {
+                self.order_step_inputs(fact.seq());
+            }
             self.fact(fact);
         }
-        Ok(())
+        Ok(self.finish_history_page(page.facts.first().map(SessionFact::seq), page.has_more))
     }
 
     pub(crate) fn entered(&mut self, fact: &SessionFact, row: rsi_conversation::EnteredInput<'_>) {
-        let attribution = row.attribution();
-        let role = if attribution.is_some() {
-            "status"
-        } else {
-            "user"
-        };
+        let (role, attribution) = row.presentation();
         let title = attribution.as_deref().unwrap_or("You");
         let mut parts = row.parts().peekable();
         let seq = fact.seq();
@@ -547,6 +612,11 @@ impl Transcript {
                     self.status = "Running".into();
                 }
             }
+            SessionFactBody::ManualCompaction {
+                command_id, event, ..
+            } => {
+                self.project_compaction(command_id, event, fact);
+            }
             SessionFactBody::ImageOutput {
                 turn_id,
                 effect_id,
@@ -673,6 +743,65 @@ pub(crate) fn short(text: &str, maximum: usize) -> &str {
 }
 
 impl Transcript {
+    pub(crate) fn command_feedback(
+        &mut self,
+        command: &rsi_agent_session_protocol::DomainRequestId,
+        outcome: rsi_agent_turn_protocol::CompactionOutcome,
+    ) {
+        let key = rsi_conversation::compaction_key(command);
+        if !self.blocks.iter().any(|block| block.key == key) {
+            self.add(key, "compaction", outcome.message(), "", false);
+        }
+    }
+
+    fn project_compaction(
+        &mut self,
+        command: &rsi_agent_session_protocol::DomainRequestId,
+        event: &rsi_agent_session_protocol::ManualCompactionEvent,
+        fact: &SessionFact,
+    ) {
+        use rsi_agent_session_protocol::ManualCompactionEvent;
+        use rsi_agent_turn_protocol::CompactionOutcome;
+        let key = rsi_conversation::compaction_key(command);
+        if !self.blocks.iter().any(|block| block.key == key) {
+            self.add(key.clone(), "compaction", "", "", false);
+        }
+        let block = self
+            .blocks
+            .iter_mut()
+            .find(|block| block.key == key)
+            .expect("newest command row");
+        block.first_seq = if block.compact.is_some() {
+            block.first_seq.min(fact.seq())
+        } else {
+            fact.seq()
+        };
+        if block.compact.is_none_or(|(seq, _)| seq < fact.seq()) {
+            let outcome = CompactionOutcome::recorded(fact).expect("command fact");
+            block.title = match outcome {
+                CompactionOutcome::Started => "Compacting context…",
+                _ => outcome.message(),
+            }
+            .into();
+            block.compact = Some((fact.seq(), outcome));
+        }
+        if let ManualCompactionEvent::Settled { attempt } = event
+            && matches!(
+                attempt.terminal(),
+                rsi_ai_protocol::LanguageEvent::Finished { .. }
+            )
+        {
+            (block.text, block.clipped) =
+                rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
+            block.markdown.take();
+        }
+        block.revision = std::sync::Arc::new(());
+        self.blocks
+            .make_contiguous()
+            .sort_by_key(|block| block.first_seq);
+        self.trim();
+    }
+
     fn project_request(&mut self, fact: &SessionFact) {
         let (SessionFactBody::ModelIntent {
             turn_id: turn,
@@ -720,6 +849,80 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_discloses_only_installed_text_even_when_backfilled() {
+        use rsi_agent_session_protocol::{
+            DomainRequestId, EffectId, ManualCompactionEvent as Event, ModelAttemptBuilder,
+        };
+        use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent as E};
+        let mut events = ModelAttemptBuilder::new();
+        for event in [
+            E::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+            E::ContentStarted {
+                index: 1,
+                content: ContentStart::Text,
+            },
+            E::ContentDelta {
+                index: 1,
+                delta: ContentDelta::Text(" second".into()),
+            },
+            E::ContentDelta {
+                index: 0,
+                delta: ContentDelta::Text("first".into()),
+            },
+            E::ContentFinished { index: 0 },
+            E::ContentFinished { index: 1 },
+            E::Finished {
+                reason: FinishReason::Stop,
+                replay: None,
+            },
+        ] {
+            events.push(1, &event).unwrap();
+        }
+        let command = DomainRequestId::new("command").unwrap();
+        let fact = |seq, event| {
+            SessionFact::new(
+                seq,
+                1,
+                SessionFactBody::ManualCompaction {
+                    command_id: command.clone(),
+                    effect_id: EffectId::new("summary").unwrap(),
+                    event,
+                },
+            )
+            .unwrap()
+        };
+        let settled = fact(
+            3,
+            Event::Settled {
+                attempt: events.finish(true).unwrap(),
+            },
+        );
+        let installed = fact(4, Event::Installed);
+        let view = |t: &Transcript| serde_json::to_value(&t.blocks).unwrap();
+        let mut forward = Transcript::default();
+        forward.fact(&settled);
+        assert_eq!(view(&forward)[0]["text"], "");
+        let mut backward = Transcript::default();
+        backward.fact(&installed);
+        assert_eq!(view(&backward)[0]["text"], "");
+        forward.fact(&installed);
+        backward.fact(&settled);
+        backward.fact(&fact(2, Event::Started));
+        backward.command_feedback(
+            &command,
+            rsi_agent_turn_protocol::CompactionOutcome::Compacted,
+        );
+        assert_eq!(view(&forward), view(&backward));
+        let rows = view(&forward);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["text"], "first second");
+        assert_eq!(rows[0]["title"], "Compacted conversation history.");
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One fixture compares a complete live and durable lifecycle.
@@ -894,6 +1097,65 @@ mod tests {
         transcript.trim();
         assert!(transcript.blocks.is_empty());
         assert_eq!(transcript.blocks.capacity(), 0);
+    }
+
+    #[test]
+    fn step_context_follows_its_opening_input_on_live_merge_and_history() {
+        let add_inputs = |transcript: &mut Transcript| {
+            transcript.seq = 2;
+            for (key, role) in [
+                ("notice-1", "step-context"),
+                ("question", "user"),
+                ("notice-2", "step-context"),
+                ("attachment", "user"),
+            ] {
+                transcript.add(key.into(), role, key, key, false);
+            }
+        };
+        for live in [false, true] {
+            let mut transcript = Transcript::default();
+            transcript.seq = 1;
+            transcript.add("older".into(), "assistant", "Answer", "Answer", false);
+            if live {
+                let mut inputs = Transcript::default();
+                add_inputs(&mut inputs);
+                transcript.merge_entered(2, inputs);
+            } else {
+                add_inputs(&mut transcript);
+                transcript.order_step_inputs(2);
+            }
+            assert_eq!(
+                transcript
+                    .blocks
+                    .iter()
+                    .map(|block| block.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["older", "question", "attachment", "notice-1", "notice-2"]
+            );
+        }
+    }
+
+    #[test]
+    fn merged_transcript_retains_the_newest_suffix_that_fits() {
+        let mut live = Transcript::default();
+        let mut loaded = Transcript::default();
+        let text = "x".repeat(MAX_BLOCK_BYTES);
+        for seq in 1..=16 {
+            let transcript = if seq % 2 == 0 { &mut live } else { &mut loaded };
+            transcript.seq = seq;
+            transcript.add(seq.to_string(), "assistant", "Answer", &text, false);
+        }
+        live.merge_entered(0, loaded);
+        assert!(live.omitted);
+        assert_eq!(live.finish_history_page(Some(1), false), (Some(9), true));
+        assert_eq!(live.finish_history_page(Some(9), false), (Some(9), false));
+        assert_eq!(
+            live.blocks
+                .iter()
+                .map(|block| block.first_seq)
+                .collect::<Vec<_>>(),
+            (9..=16).collect::<Vec<_>>()
+        );
     }
 
     #[test]

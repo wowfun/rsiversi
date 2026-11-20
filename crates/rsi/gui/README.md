@@ -11,9 +11,22 @@ generation. Full, Last(n), and None create a fresh independent draft in the sour
 workspace and preset through the ordinary Session creation service. The document
 flushes its editor before switching, and first input remains the publication point.
 Forking resolves the source coordinates to the current registration at invocation;
-opening history does not require a registration. Pane `workspace_key` and catalog
-`key` identify coordinate-scoped history. Creation receipts retain registration
-IDs for draft reuse. Catalog keys are derived only during presentation serialization.
+opening history does not require a registration. Pane `workspace` contains the
+immutable execution coordinates and their key, plus the current registration
+or an explicit unregistered/unavailable state. Attachment and catalog refresh
+resolve that registration by coordinate key, independently of catalog paging;
+late observations cannot replace another attachment's presentation. Attachment
+resolves only its own registration after retiring the prior owner; catalog refresh
+resolves attached registrations before page reads so a failed page cannot hide a
+registry outage. Catalog
+`key` identifies the same coordinate-scoped history. Creation receipts retain
+registration IDs only for draft reuse.
+
+The model catalog retains one 64-item page shared by Settings and composers.
+The directory picker receives its result in the initiating call. Listing folders,
+checking location access and creating a child leave the workbench frame unchanged.
+Next and first-page actions replace that page without changing the selected model.
+Search applies to the current page; an off-page selected model remains visible.
 
 Composer preparation accepts an optional typed sandbox mode for a next-Turn
 message and freezes it with the request. Steering rejects sandbox overrides;
@@ -39,10 +52,19 @@ release a replacement owner's new capture, even when the Session ID is reused.
 An initial discovery failure leaves the application open with a diagnostic and
 an empty remote catalog; Refresh retries discovery. A composition without an API
 client uses its supplied local services directly.
-Explicit interaction inspection reads current pending questions/approvals from
-the Session, including when recovering an uncertain decision reply. Reinspection
+For the native composer the Worker projects one observed request with its pending
+identity. A plan review precedes an ordinary question, which precedes an approval.
+The last request of equal precedence in the observation takes the composer.
+A user recovering an uncertain decision can read the latest details for that
+request with one read from its owning service. Explicit resource inspection reads
+current pending questions and approvals from the Session. Reinspection
 reuses the panel for that exact attachment and interaction, advances its presentation
 revision, and removes it when the request is no longer pending.
+The pending field is null before the first successful interaction observation.
+An empty observed list confirms that every request has settled in this attachment.
+An accepted interaction snapshot also retires open details for requests that
+another client settled. Reconnecting or failing to observe the Session keeps
+the last confirmed controls and their decision locks.
 Capability refresh replaces the last successful catalog only after discovery
 succeeds. Frame visibility is derived once per catalog replacement. A temporary discovery failure leaves the previous feature visibility
 and data intact. `try_command` separates refusal before application admission
@@ -93,6 +115,14 @@ renders this panel in Linux Desktop.
 
 ## Turn presentation
 
+Chat shows one expandable retry row for a chain of model attempts. The row
+counts down while the latest decision is waiting and discloses the selected
+delay and failure reason. A start of the reserved effect in the same Turn
+marks it started. Closing that Turn while it is waiting marks it cancelled.
+Reopening the Session derives these states from the same recorded facts.
+The row represents those failed requests in compact and standard Chat.
+Verbose Chat and Trajectory retain each request and its original decision.
+
 Native pane frames identify their Session through `kind`, `session`, `header` and
 generation. Controls consume their owning command and contribution projections;
 native frames do not duplicate identity or capability summaries. External frames
@@ -140,6 +170,9 @@ omits process previews; Standard and Detailed show live detail and settled
 reasoning previews. Detailed keeps running process bodies open. Normal completion
 folds process in every mode except Verbose while preserving assistant replies.
 Failed and incomplete Turns remain expanded. Mode changes retain message nodes.
+For a settled Turn the projection identifies the displayed text blocks of its
+last conversational model response containing prose. These positions address
+the Turn's own bounded block list.
 
 Native panes expose Export and `/export`, sharing the terminal argument parser.
 Export bypasses model submission and is bound to the pane attachment generation.
@@ -261,6 +294,11 @@ open with no opener or referrer. Markdown does not grant script or media access.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses
 transcript source with a JavaScript Markdown parser. Code presentation may add
 bounded syntax tokens, language, wrap and copy controls without interpreting HTML.
+Rendered code and its Copy action omit the line ending that separates the body
+from the closing fence. Blank lines inside the code are preserved.
+Dollar-delimited inline and display equations carry their TeX source as a
+closed Markdown event. A fenced `math` block also carries display TeX. The
+document can show the source while streaming or when rendering is unavailable.
 Input composition suppresses keyboard submission until composition has ended.
 Composer Enter behavior comes from the ordinary [client preferences](../client-preferences/README.md)
 Settings contribution and is captured when the application connects.
@@ -272,17 +310,31 @@ capability. One non-queued upload is admitted per application, at most
 one canonical reference to the captured document record; it is durable independently
 of submission and is never automatically replayed after reply loss.
 
-Fresh Sessions created by Web use the default Agent preset. Their saved creation
-intent has `agent_preset_id: null`; the document validates this producer contract
+Fresh Sessions created by Web use the staged Agent preset when one was selected.
+Their saved creation intent records the explicit identity, or `agent_preset_id: null`
+when creation used the deployment default. The document validates this producer contract
 when admitting durable draft records.
+Choosing a different preset on an attached unpublished draft preserves the Session
+ID and its fork origin. The Session owner compares the current draft revision and
+returns the selected Header. The GUI reattaches its presentation controllers to
+that Header and rebuilds the completion catalog. References are bound to their
+original target Header and must be released before selecting another preset.
 
-Repeated new-conversation actions in a workspace may reuse only the selected application's owned,
-unpublished revision-zero draft with matching WorkspaceId/Header and unchanged
-agent/default-preset Settings versions. The document offers its exact binding only
+Repeated new-conversation actions in a workspace may reuse the pane's current
+empty draft or one it previously created and left untouched. Candidates must
+still be unpublished at revision zero with matching WorkspaceId/Header and unchanged
+agent/default-preset Settings versions. Only ordinary new-conversation drafts
+capture a defaults stamp for reuse. Each stamp reads the independent Agent and
+preset versions concurrently. New drafts capture matching stamps before and
+after creation. Reattaching an eligible blank compares its creation stamp to
+the current versions once. Recovery opens the handle whose Header was checked.
+The document offers its exact binding only
 after an empty text/image record has flushed and has no pending request or active
 submission/upload. Rust independently checks draft ownership and admission. A
-coalesced selection revision completes this UI operation without replacing the
-attachment generation or editor. Read uncertainty disables reuse; it never makes
+coalesced selection revision completes in-place reuse. Reopening a previous blank
+binds a fresh presentation generation to its original SessionId. Only its origin
+is retained with the pane's existing bounded submission records. The document
+checks device-local saved input before offering a previous blank. Read uncertainty disables reuse; it never makes
 Session creation invalid or reuses a historical/durable Session.
 
 Preview reads require a current exact-source detail ticket, obtained by inspecting
@@ -347,7 +399,10 @@ Each surface has its own model, transcript, history page and interactions. Compo
 records persist independently in the document. Replacing one attachment does not
 dispose the other. The Shell permits four surfaces to allow both old and replacement
 generations during simultaneous switches; each pane admits one switch at a time.
-History is a bounded separate page, preserving live observation. Workspace and
+History is a bounded separate page, preserving live observation. When projection
+limits evict the oldest visible Facts from a fetched page, the next read starts
+before the oldest retained Fact so those earlier Facts remain reachable. A
+single Fact retains its normal block and source-preview bounds. Workspace and
 model catalog next-page actions replace their bounded page; they do not accumulate
 an unbounded client catalog. Session navigation and native history-picker sources
 use the navigation projection. GUI refresh does not fetch a second recent-Session
@@ -421,7 +476,8 @@ close button and page controls visible across page replacement.
 
 Each transcript retains at most 128 blocks, 128 KiB per block, 1 MiB of owned
 text capacity and 512 KiB of metadata capacity;
-omission is visible. A history page has the same projection bounds. The view
+omission is visible. After a batch merge, one scan from the newest block selects
+the retained suffix within both capacities. A history page has the same projection bounds. The view
 uses shared [conversation semantics](../conversation/README.md) for Tool outcome
 classification and bounded JSON previews; it does not serialize complete large
 arguments or result values before truncating them. The view keeps a Tool's name and argument preview when its result arrives, with distinct
@@ -480,7 +536,10 @@ missing or mismatched base produce a complete snapshot. Each stream retains only
 its latest projected baseline, bounded to 32 MiB of serialized JSON; output uses
 the existing independent 32 MiB frame reservation. These are logical buffer
 bounds, not RSS limits. Unaffected pane revisions reuse their projection without
-re-encoding it. Domain cursors still advance when the Rust sink accepts updates.
+re-encoding it. An observation whose projected values equal the baseline refreshes
+its cached revisions without allocating a frame ID. An independently changed
+renderer offer still requires a frame and acknowledgement, even when the GUI
+patch is empty. Domain cursors advance when the Rust sink accepts updates.
 
 The document acknowledges the exact frame only after successful DOM rendering.
 A base mismatch requests a fresh snapshot. One pending frame and one acknowledgement
@@ -603,11 +662,24 @@ source workspace and original evidence are independently checked by their owner.
 GUI closed reviews show the exact request and send the selected stable action
 and binding through the [question protocol](../../rsi-user-questions/protocol/README.md).
 
-The pending-input view keeps one row per stable queue slot, including non-Human
+Automation task details identify the linked Session by its available navigation
+title or its Session ID. An archived target shows an explanation and disables
+the link until the Host reports that the Session is restored.
+
+The Web composer displays a single pending slot directly. Multiple slots share a
+count button and initially stay collapsed. Expanding the list applies to the
+current conversation until the queue empties. An editable single text block
+opens in its row. Enter saves, Shift+Enter inserts a line, and Escape cancels.
+Queue action buttons expose their names on focus and hover using the Web tooltip.
+Structured inputs open the block editor. File blocks display their stored
+filename and compact size. A claimed or replaced message retires
+its editor. Only the latest selected message opens. A read admitted by the
+acknowledged frame can finish during an unrelated frame update. The pending-input
+view keeps one row per stable queue slot, including non-Human
 sources without editing controls. Rust supplies current identity, delivery,
 editable status and the exact displayed Turn eligible for conversion. Selecting
 one row reads its complete immutable content on demand. Replace edits that
-content while retaining images and references; it does not consume the ordinary
+content while retaining files, images and references; it does not consume the ordinary
 composer draft. Withdraw is pending-only. Convert to Steer carries the displayed
 Turn identity. The existing frozen submission path also retains queue operation
 envelopes, binds them to the original Session/Header, and resolves unknown replies

@@ -89,8 +89,7 @@ async fn refresh_ignores_recent_session_outages_and_credential_reads_preserve_ca
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
     app.command(r#"{"action":"refresh"}"#).await.unwrap();
-    let frame: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let frame = super::frame(&app, None);
     assert!(frame["view"]["catalog"].get("sessions").is_none());
     assert!(frame["view"]["catalog"].get("sessions_more").is_none());
     app.acknowledge_frame(frame["frame_id"].as_str().unwrap())

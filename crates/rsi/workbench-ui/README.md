@@ -56,8 +56,9 @@ the shared UI view contract deliberately contains no secret input primitive.
 
 Configuration retains no secret in a view, receipt, draft or Profile. The client
 keeps credential writes, provider application and default selection independent.
-Settings selections use the exact snapshot retained under a fresh view ticket;
-stale forms fail before mutation. Configuration read failures do not discard a
+Setup retains each settings document once with its namespace version. A selection
+updates fields in the displayed document and submits that version for comparison.
+Stale form tickets fail before mutation. Configuration read failures do not discard a
 previous successful write receipt. Lost/unknown mutation replies require an
 explicit refresh; no write is replayed.
 Both setup commands and model saves publish their final failure in the typed view.
@@ -117,18 +118,23 @@ Navigation keeps at most 16 independently expanded group pages, each with at mos
 64 entries and its own opaque ticket/cursor. Group continuation replaces that
 bounded page; the view identifies continued pages so the document does not imply
 that earlier results are still present. Search/filter replacement releases group
-pages. Pinned rows are a separate complete bounded query. Mutation refreshes the
-pin section and invalidates retained groups under the new metadata revision.
+pages. Pinned rows are a separate complete bounded query.
 
 Unchanged metadata refreshes preserve continued workspace pages and their tickets.
 Newest pages may refresh to include newly durable Sessions; identical results
-keep their tickets. A metadata revision change invalidates group cursors without
-automatic re-expansion: each group shows an explicit refresh control before its
-rows or mutations are available again.
+keep their tickets. A metadata revision change retires old cursors and reloads
+the first page of each open, uncontinued group. A continued or previously failed
+group keeps its explicit refresh control so a change cannot silently reset its
+reading position. Its invalidated rows and mutation controls remain unavailable.
 
 Navigation replacements carry the metadata revision displayed when the edit
 began. Both the view owner and Store reject stale revisions; a rename cannot
 overwrite a pin or archive change that arrived while its form was open.
+For a visible row in complete, unsearched activity pages, a validated title or
+archive receipt updates the row in place or removes it from pages whose archive
+filter excludes it. These edits preserve activity order. The owner advances the
+metadata revision and renews page tickets. Changes in pin membership, searches,
+incomplete pages and manual order use a fresh read.
 
 A confirmed navigation replacement remains successful if its follow-up reads fail
 or race another revision. The view explicitly reports that the change was saved
@@ -140,7 +146,8 @@ No mutation is retried to repair a failed refresh.
 
 Automatic navigation and attention reads have a five-second deadline and yield
 to an admitted user action: cancellation releases their serialized read owner
-before that action runs. Background reads do not occupy the user-operation slot.
+before that action runs. An unchanged attention page or repeated failure leaves
+the presentation revision intact. Background reads do not occupy the user-operation slot.
 Cancelled refresh notifications remain pending. User mutations retain normal
 owned-work semantics and are never cancelled or replayed by this preemption.
 
@@ -149,8 +156,10 @@ view ticket. A later summary command may request only 64 distinct members of tha
 seed and retains their requested order. Document-side persistence owns the device
 order; Rust owns seed validity, metadata revision, exact coordinates and summary
 publication. A metadata change discards the presentation seed, never the device's
-saved order. Activity changes leave the seed valid. Background head observations
-mark newer activity without replacing a continued page or its controls.
+saved order. Activity changes leave the seed valid. A background head observation
+updates the first activity page and its open groups when the newest activity or
+metadata revision changes. Readers of a continued page keep their controls
+and can explicitly refresh.
 
 The SSH panel presents helper-unavailable rebuild guidance through its normal
 command error state, including the optional Linux TUI helper and restart step.

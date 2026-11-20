@@ -59,10 +59,36 @@ pub(crate) struct Pane {
 pub(crate) struct ReuseDraft {
     generation: String,
     header: String,
+    session: Option<SessionId>,
+}
+
+#[derive(Debug)]
+struct PreviousBlank {
+    generation: u64,
+    header: String,
+    workspace: rsi_workspace_protocol::WorkspaceId,
+    defaults: [rsi_settings_protocol::SettingsVersion; 2],
+}
+
+struct ReopenedBlank {
+    id: SessionId,
+    handle: Arc<dyn SessionHandle>,
+    header: rsi_agent_session_protocol::SessionHeader,
+}
+
+enum Open {
+    Existing(Option<Arc<dyn SessionHandle>>),
+    Create(rsi_session_protocol::CreateSession, Option<ReuseDraft>),
+    Preset {
+        generation: String,
+        header: String,
+        preset: rsi_agent_session_protocol::AgentPresetId,
+    },
 }
 
 #[derive(Debug)]
 pub(crate) struct SubmissionState {
+    previous_blank: Mutex<Option<PreviousBlank>>,
     model_command: rsi_client::CommandSubmission,
     receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     owned: Mutex<BTreeMap<MessageId, Option<u64>>>,
@@ -100,12 +126,24 @@ impl SubmissionState {
     }
     fn new() -> Self {
         Self {
+            previous_blank: Mutex::default(),
             model_command: rsi_client::CommandSubmission::default(),
             receipt: Mutex::new(None),
             owned: Mutex::new(BTreeMap::new()),
             submissions: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum WorkspaceRegistration {
+    Registered {
+        id: rsi_workspace_protocol::WorkspaceId,
+        name: Option<rsi_workspace_protocol::WorkspaceName>,
+    },
+    Unregistered,
+    Unavailable,
 }
 
 #[derive(Debug)]
@@ -128,8 +166,9 @@ struct Attachment {
     commands: Mutex<Option<rsi_agent_session_protocol::SessionCommandsView>>,
     generation: u64,
     id: SessionId,
-    path: String,
+    coordinates: rsi_workspace_protocol::ExecutionCoordinates,
     workspace_key: rsi_workspace_protocol::WorkspaceKey,
+    workspace_registration: Mutex<WorkspaceRegistration>,
     header: String,
     agent_preset: String,
     sandbox: rsi_sandbox::SandboxMode,
@@ -180,6 +219,25 @@ impl ResourcePreview {
     }
 }
 impl Attachment {
+    fn remember_blank(&self) {
+        let origin = self
+            .defaults
+            .as_ref()
+            .zip(self.creation.as_ref())
+            .filter(|_| !self.durable.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(defaults, request)| PreviousBlank {
+                generation: self.generation,
+                header: self.header.clone(),
+                workspace: request.workspace_id.clone(),
+                defaults: defaults.clone(),
+            });
+        *self
+            .submission
+            .previous_blank
+            .lock()
+            .expect("Web blank origin poisoned") = origin;
+    }
+
     async fn close(&self) -> Result<()> {
         self.export.close().await;
         let mut failure = self.detach_terminals().await.err();
@@ -325,7 +383,6 @@ impl Pane {
         let Some(current) = current else {
             return project(serde_json::Value::Null, None, None);
         };
-        let pending = current.renderer.pending();
         let state = current
             .renderer
             .state
@@ -352,7 +409,8 @@ impl Pane {
         let metadata = serde_json::json!({
             "kind":"native",
             "inline": inline::frames(&current, &state, ui),
-            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id, "path":current.path,"workspace_key":current.workspace_key,
+            "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id,
+            "workspace":{"key":current.workspace_key,"coordinates":current.coordinates,"registration":*current.workspace_registration.lock().expect("workspace registration")},
             "ui_surfaces": ui.surfaces(&current.ui_target).unwrap_or_default(),
             "ui_cards": ui.has_block_renderers(&current.ui_target),
             "ui_revision": ui.membership_changes().borrow().to_string(),
@@ -360,7 +418,8 @@ impl Pane {
             "completions":*current.completions.lock().expect("GUI completions poisoned"),
             "resource":resource, "resource_revision":resource_revision,
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
-            "protected":current.protected, "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
+            "protected":current.protected, "draft":!current.durable.load(std::sync::atomic::Ordering::Acquire),
+            "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
             "sandbox":current.sandbox,
@@ -370,7 +429,8 @@ impl Pane {
             "metrics":metrics,
             "queue":null,
             "transcript":null, "historical":state.history.is_some(),
-            "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(), "pending":pending,
+            "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(),
+            "pending":state.pending(!current.protected),
         });
         project(
             metadata,
@@ -391,6 +451,56 @@ async fn finish_retirement(
 }
 
 impl GuiApplication {
+    // The caller holds catalog_work. These bounded observations are presentation;
+    // the registry remains the authority for execution and registration changes.
+    pub(crate) async fn refresh_attached_workspaces(&self) {
+        let panes: Vec<_> = self
+            .panes
+            .lock()
+            .expect("Web panes poisoned")
+            .values()
+            .cloned()
+            .collect();
+        for pane in panes {
+            let Some(attached) = pane.current.lock().expect("Web pane poisoned").clone() else {
+                continue;
+            };
+            self.refresh_workspace_registration(&pane, &attached).await;
+        }
+    }
+
+    async fn refresh_workspace_registration(&self, pane: &Pane, attached: &Arc<Attachment>) {
+        let registration = if self.available(&[rsi_workspace_api::Operation::Find.spec()]) {
+            match self.workspace.find(&attached.workspace_key).await {
+                Ok(Some(record)) => WorkspaceRegistration::Registered {
+                    id: record.id,
+                    name: record.name,
+                },
+                Ok(None) => WorkspaceRegistration::Unregistered,
+                Err(error) => {
+                    *self.notice.lock().expect("Web notice poisoned") =
+                        format!("Workspace registration unavailable: {error}");
+                    WorkspaceRegistration::Unavailable
+                }
+            }
+        } else {
+            WorkspaceRegistration::Unavailable
+        };
+        if pane
+            .current
+            .lock()
+            .expect("Web pane poisoned")
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, attached))
+        {
+            *attached
+                .workspace_registration
+                .lock()
+                .expect("workspace registration") = registration;
+            pane.changed();
+        }
+    }
+
     pub(crate) async fn open_delegation(
         self: &Arc<Self>,
         index: crate::SurfaceId,
@@ -428,7 +538,7 @@ impl GuiApplication {
         position.validate().map_err(error)?;
         match &position.conversation {
             ConversationIdentity::Native(id) => {
-                self.open(index, id.clone(), None).await?;
+                self.open(index, id.clone(), Open::Existing(None)).await?;
                 if let Some(target) = target {
                     let Target::Native { request } = target else {
                         return Err("Attention backend changed".into());
@@ -562,7 +672,7 @@ impl GuiApplication {
             }),
         };
         self.pane(pane)?.attachment(generation)?;
-        self.open(pane, id, Some(request)).await
+        self.open(pane, id, Open::Create(request, None)).await
     }
 
     pub(crate) fn add_surface(&self, id: crate::SurfaceId) -> Result<()> {
@@ -660,7 +770,7 @@ impl GuiApplication {
                 if refresh || catalog.is_none() {
                     let (mut entries, notice) = attached
                         .controller
-                        .completion_catalog(&["export"])
+                        .completion_catalog(&["export", "compact"])
                         .await
                         .map_err(error)?;
                     entries.push(rsi_client::InputCompletion {
@@ -670,15 +780,23 @@ impl GuiApplication {
                         description: "Export Session: [filename] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]".into(),
                         resource: None,
                     });
+                    entries.push(rsi_client::InputCompletion {
+                        group: rsi_client::CompletionGroup::Command,
+                        composer_input: None,
+                        name: "compact".into(),
+                        replacement: "/compact".into(),
+                        description:
+                            "Summarize eligible conversation history when the session is idle"
+                                .into(),
+                        resource: None,
+                    });
                     *catalog = Some((entries, notice));
                 }
                 let (entries, notice) = catalog.as_ref().expect("loaded completion catalog");
                 let agents = query.starts_with('@');
-                let filtered: Vec<_> = entries
+                let filtered = entries
                     .iter()
-                    .filter(|entry| (entry.group == rsi_client::CompletionGroup::Agent) == agents)
-                    .cloned()
-                    .collect();
+                    .filter(|entry| (entry.group == rsi_client::CompletionGroup::Agent) == agents);
                 let filter = query.strip_prefix('@').unwrap_or(&query);
                 if attached
                     .completion_sequence
@@ -689,7 +807,7 @@ impl GuiApplication {
                         .completions
                         .lock()
                         .expect("GUI completions poisoned") = Some(
-                        serde_json::json!({"query":query,"sequence":sequence,"entries":rsi_client::rank_completions(&filtered, filter),"notice":notice}),
+                        serde_json::json!({"query":query,"sequence":sequence,"entries":rsi_client::rank_completions(filtered, filter),"notice":notice}),
                     );
                 }
                 Ok(())
@@ -721,14 +839,35 @@ impl GuiApplication {
                     .clear()?;
                 Ok(())
             }
-            Command::Open { pane, session } => self.open(pane, session, None).await,
+            Command::Open { pane, session } => self.open(pane, session, Open::Existing(None)).await,
+            Command::SelectPreset {
+                pane,
+                generation,
+                header,
+                preset,
+            } => {
+                let id = self.pane(pane)?.attachment(&generation)?.id.clone();
+                self.open(
+                    pane,
+                    id,
+                    Open::Preset {
+                        generation,
+                        header,
+                        preset,
+                    },
+                )
+                .await
+            }
             Command::Create {
                 pane,
                 workspace,
+                agent_preset_id,
                 reuse,
             } => {
-                if let Some(reuse) = reuse
-                    && self.reuse_draft(pane, &workspace, &reuse).await?
+                if agent_preset_id.is_none()
+                    && let Some(current) =
+                        reuse.as_ref().filter(|binding| binding.session.is_none())
+                    && self.reuse_draft(pane, &workspace, current).await?
                 {
                     return Ok(());
                 }
@@ -736,13 +875,15 @@ impl GuiApplication {
                 self.open(
                     pane,
                     id.clone(),
-                    Some(rsi_session_protocol::CreateSession {
-                        fork: None,
-                        session_id: id,
-                        workspace_id: workspace,
-                        // Saved Fresh intent follows the default-preset contract in ../README.md.
-                        agent_preset_id: None,
-                    }),
+                    Open::Create(
+                        rsi_session_protocol::CreateSession {
+                            fork: None,
+                            session_id: id,
+                            workspace_id: workspace,
+                            agent_preset_id,
+                        },
+                        reuse,
+                    ),
                 )
                 .await
             }
@@ -877,31 +1018,81 @@ impl GuiApplication {
         }
     }
     #[allow(clippy::too_many_lines)] // Keep surface acquisition, generation publication and old-owner retirement together.
-    async fn open(
-        &self,
-        index: crate::SurfaceId,
-        id: SessionId,
-        create: Option<rsi_session_protocol::CreateSession>,
-    ) -> Result<()> {
+    async fn open(&self, index: crate::SurfaceId, mut id: SessionId, source: Open) -> Result<()> {
         let pane = self.pane(index)?;
         let _switching = pane.switching.lock().await;
         if pane.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err("Surface is retiring".into());
         }
-        let draft = pane.submission(&id)?;
-        let reopening = create.is_none();
-        let before_defaults = if reopening {
-            None
-        } else {
+        let reopening = matches!(source, Open::Existing(_));
+        let before_defaults = if matches!(&source, Open::Create(request, _) if request.fork.is_none() && request.agent_preset_id.is_none())
+        {
             self.defaults_stamp().await
+        } else {
+            None
         };
-        let creation = create.clone();
-        let handle = match create {
-            Some(create) => self.session.create(create).await.map_err(error)?,
-            None => {
+        let previous = match (&source, &before_defaults) {
+            (Open::Create(request, Some(candidate)), Some(defaults)) => {
+                self.previous_blank(&pane, &request.workspace_id, candidate, defaults)
+                    .await
+            }
+            _ => None,
+        };
+        let reused = previous.is_some();
+        if let Some(previous) = &previous {
+            id = previous.id.clone();
+        }
+        let draft = pane.submission(&id)?;
+        let mut creation = None;
+        let mut selected_header = None;
+        let _preset_permit;
+        let handle = match source {
+            Open::Create(mut request, _) => {
+                let handle = if let Some(previous) = previous {
+                    request.session_id = id.clone();
+                    selected_header = Some(previous.header);
+                    previous.handle
+                } else {
+                    self.session.create(request.clone()).await.map_err(error)?
+                };
+                creation = Some(request);
+                handle
+            }
+            Open::Existing(Some(handle)) => handle,
+            Open::Existing(None) => {
                 rsi_client::read_with_capacity_retry(&self.execution, || self.session.attach(&id))
                     .await
                     .map_err(error)?
+            }
+            Open::Preset {
+                generation,
+                header,
+                preset,
+            } => {
+                let attached = pane.attachment(&generation)?;
+                _preset_permit = draft
+                    .submissions
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| "A submission is still awaiting its receipt")?;
+                let current = attached.handle.draft_snapshot().await.map_err(error)?;
+                if current.header.fingerprint().map_err(error)? != header {
+                    return Err("The draft preset changed; reopen the session".into());
+                }
+                let selected = attached
+                    .handle
+                    .select_preset(rsi_session_protocol::SelectDraftPreset {
+                        preset_id: preset.clone(),
+                        expected_revision: current.revision,
+                    })
+                    .await
+                    .map_err(error)?;
+                selected_header = Some(selected.header);
+                creation = attached.creation.clone();
+                if let Some(creation) = &mut creation {
+                    creation.agent_preset_id = Some(preset);
+                }
+                attached.handle.clone()
             }
         };
         let unpublished = if reopening {
@@ -913,7 +1104,7 @@ impl GuiApplication {
                 Err(reason) => return Err(error(reason)),
             }
         } else {
-            None
+            selected_header
         };
         let durable = reopening && unpublished.is_none();
         let header = match unpublished {
@@ -938,25 +1129,17 @@ impl GuiApplication {
             })
             .await
             .map_err(error)?;
-            transcript
-                .history_inputs(handle.as_ref(), &history.facts)
+            let (before, more) = transcript
+                .history_page(handle.as_ref(), &history)
                 .await
                 .map_err(error)?;
-            transcript.omitted |= history.has_more;
             transcript.queue.seed(inspection.pending);
             transcript.active = inspection.active_turn_id;
             let cursor = ObservationCursor {
                 fact_seq: inspection.durable_fact_seq,
                 control_seq: inspection.durable_control_seq,
             };
-            (
-                Some(cursor),
-                history
-                    .facts
-                    .first()
-                    .map(rsi_agent_session_protocol::SessionFact::seq),
-                history.has_more,
-            )
+            (Some(cursor), before, more)
         } else {
             (None, None, false)
         };
@@ -983,7 +1166,11 @@ impl GuiApplication {
         let ui_target = surface
             .lookup_local::<rsi_ui::UiTargetContract>()
             .ok_or("Surface UI target is unavailable")?;
-        renderer.bind_submission(draft.clone(), handle.clone());
+        renderer.bind_submission(
+            draft.clone(),
+            handle.clone(),
+            crate::panel_registry::InteractionPanels::new(&self.details, index, generation),
+        );
         renderer.seed(transcript, before, more);
         let attachment = Arc::new(Attachment {
             metrics: Mutex::new(None),
@@ -1003,7 +1190,8 @@ impl GuiApplication {
             resource: Mutex::new(ResourcePreview::default()),
             generation,
             id,
-            path: header.canonical_cwd().into(),
+            coordinates: header.coordinates().clone(),
+            workspace_registration: Mutex::new(WorkspaceRegistration::Unavailable),
             workspace_key: rsi_workspace_protocol::WorkspaceKey::from_coordinates(
                 header.coordinates(),
             ),
@@ -1012,9 +1200,12 @@ impl GuiApplication {
             sandbox: header.settings().sandbox(),
             protected: header.protection().is_some(),
             creation,
-            defaults: match (before_defaults, self.defaults_stamp().await) {
-                (Some(before), Some(after)) if before == after => Some(after),
-                _ => None,
+            defaults: if reused {
+                before_defaults
+            } else if let Some(before) = before_defaults {
+                self.defaults_stamp().await.filter(|after| *after == before)
+            } else {
+                None
             },
             surface: Mutex::new(Some(surface)),
             handle,
@@ -1037,12 +1228,13 @@ impl GuiApplication {
         let old = {
             let mut current = pane.current.lock().expect("Web pane poisoned");
             if let Some(old) = current.as_ref() {
+                old.remember_blank();
                 self.details
                     .lock()
                     .expect("Web details poisoned")
                     .detach(index, &old.generation.to_string());
             }
-            current.replace(attachment)
+            current.replace(attachment.clone())
         };
         pane.selection
             .fetch_update(
@@ -1060,17 +1252,71 @@ impl GuiApplication {
                 format!("Previous conversation cleanup failed: {error}");
             self.changed();
         }
+        {
+            let _work = self.catalog_work.lock().await;
+            self.refresh_workspace_registration(&pane, &attachment)
+                .await;
+        }
         Ok(())
     }
+    async fn previous_blank(
+        &self,
+        pane: &Pane,
+        workspace: &rsi_workspace_protocol::WorkspaceId,
+        candidate: &ReuseDraft,
+        defaults: &[rsi_settings_protocol::SettingsVersion; 2],
+    ) -> Option<ReopenedBlank> {
+        let session = candidate.session.as_ref()?;
+        let submission = pane
+            .submissions
+            .lock()
+            .expect("Web submissions poisoned")
+            .get(session)?
+            .clone();
+        let origin = submission
+            .previous_blank
+            .lock()
+            .expect("Web blank origin poisoned")
+            .take()?;
+        if origin.generation.to_string() != candidate.generation
+            || origin.header != candidate.header
+            || &origin.workspace != workspace
+            || &origin.defaults != defaults
+            || !submission
+                .owned
+                .lock()
+                .expect("Web pending identities poisoned")
+                .is_empty()
+        {
+            return None;
+        }
+        let _permit = submission.submissions.try_acquire().ok()?;
+        let model = submission.model_command.view();
+        if model.pending.is_some() || model.receipt.is_some() {
+            return None;
+        }
+        let handle = self.session.attach(session).await.ok()?;
+        let draft = handle.draft_snapshot().await.ok()?;
+        if draft.revision != 0 || draft.header.fingerprint().ok()? != origin.header {
+            return None;
+        }
+        Some(ReopenedBlank {
+            id: session.clone(),
+            handle,
+            header: draft.header,
+        })
+    }
+
     async fn defaults_stamp(&self) -> Option<[rsi_settings_protocol::SettingsVersion; 2]> {
-        Some([
-            self.settings.read("rsi.agent").await.ok()?.version(),
+        let version = |namespace| async move {
             self.settings
-                .read("rsi.agent-presets")
+                .read(namespace)
                 .await
-                .ok()?
-                .version(),
-        ])
+                .map(|snapshot| snapshot.version())
+        };
+        let (agent, presets) =
+            tokio::try_join!(version("rsi.agent"), version("rsi.agent-presets")).ok()?;
+        Some([agent, presets])
     }
     async fn reuse_draft(
         &self,
@@ -1165,11 +1411,10 @@ impl GuiApplication {
         .await
         .map_err(error)?;
         let mut transcript = Transcript::default();
-        transcript
-            .history_inputs(attachment.handle.as_ref(), &page.facts)
+        let (next, more) = transcript
+            .history_page(attachment.handle.as_ref(), &page)
             .await
             .map_err(error)?;
-        transcript.omitted |= page.has_more;
         let mut state = attachment
             .renderer
             .state
@@ -1178,15 +1423,131 @@ impl GuiApplication {
         if state.history_generation != history_generation {
             return Ok(());
         }
-        state.history_before = page
-            .facts
-            .first()
-            .map(rsi_agent_session_protocol::SessionFact::seq)
-            .or(before);
-        state.history_more = page.has_more;
+        state.history_before = next.or(before);
+        state.history_more = more;
         state.history = Some(transcript);
         Ok(())
     }
+    /// Reads or changes one displayed answer without retaining its note in a GUI frame.
+    pub fn message_feedback(
+        self: &Arc<Self>,
+        source: &str,
+    ) -> futures_util::future::BoxFuture<'static, Result<String>> {
+        use rsi_agent_session_protocol::{
+            MessageFeedback, MessageFeedbackChange, MessageFeedbackOutcome, SavedMessageFeedback,
+        };
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Action {
+            Read,
+            Change {
+                version: Option<String>,
+                value: Option<MessageFeedback>,
+            },
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            pane: crate::SurfaceId,
+            generation: String,
+            message: String,
+            action: Action,
+        }
+        if source.len() > 65536 {
+            return Box::pin(async { Err("Feedback request exceeds 64 KiB".into()) });
+        }
+        let request = serde_json::from_str::<Request>(source).map_err(error);
+        self.admit_reply(move |app| async move {
+            let request = request?;
+            let pane = app.pane(request.pane)?;
+            let attached = pane.attachment(&request.generation)?;
+            let message = request.message.parse().map_err(error)?;
+            let (conflict, current) = match request.action {
+                Action::Read => (
+                    false,
+                    attached
+                        .handle
+                        .message_feedback(message)
+                        .await
+                        .map_err(error)?,
+                ),
+                Action::Change { version, value } => {
+                    let change = MessageFeedbackChange {
+                        message_seq: message,
+                        if_version: version.map(|s| s.parse()).transpose().map_err(error)?,
+                        value,
+                    };
+                    match attached
+                        .handle
+                        .change_message_feedback(change)
+                        .await
+                        .map_err(error)?
+                    {
+                        MessageFeedbackOutcome::Saved { current } => (false, current),
+                        MessageFeedbackOutcome::Conflict { current } => (true, current),
+                    }
+                }
+            };
+            pane.attachment(&request.generation)?;
+            let current = current.map(|SavedMessageFeedback { version, value }| {
+                serde_json::json!({
+                    "version": version.to_string(), "rating": value.rating
+                })
+            });
+            Ok(serde_json::json!({ "conflict": conflict, "current": current }).to_string())
+        })
+    }
+
+    /// Rechecks one displayed interaction after a decision reply was lost.
+    pub fn read_pending_interaction(
+        self: &Arc<Self>,
+        source: &str,
+    ) -> futures_util::future::BoxFuture<'static, Result<String>> {
+        use crate::renderer::Interaction;
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            Approval,
+            Question,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Read {
+            kind: Kind,
+            pane: crate::SurfaceId,
+            generation: String,
+            owner: SessionId,
+            id: String,
+        }
+        if source.len() > 8192 {
+            return Box::pin(async { Err("Interaction read exceeds 8 KiB".into()) });
+        }
+        let read = serde_json::from_str::<Read>(source).map_err(error);
+        self.admit_reply(move |app| async move {
+            let read = read?;
+            let pane = app.pane(read.pane)?;
+            let attachment = pane.attachment(&read.generation)?;
+            let response = match read.kind {
+                Kind::Approval => {
+                    let requests = attachment.handle.pending_approvals().await.map_err(error)?;
+                    let found = requests.iter().find(|item| {
+                        item.id == read.id && item.subject.session_id() == read.owner.as_str()
+                    });
+                    serde_json::to_string(&found.map(Interaction::Approval))
+                }
+                Kind::Question => {
+                    let requests = attachment.handle.pending_questions().await.map_err(error)?;
+                    let found = requests
+                        .iter()
+                        .find(|item| item.id == read.id && item.session_id == read.owner.as_str());
+                    serde_json::to_string(&found.map(Interaction::Question))
+                }
+            };
+            pane.attachment(&read.generation)?;
+            response.map_err(error)
+        })
+    }
+
     async fn inspect_interaction(
         &self,
         index: crate::SurfaceId,

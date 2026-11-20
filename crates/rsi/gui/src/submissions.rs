@@ -84,6 +84,9 @@ struct Frozen {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Compact {
+        id: DomainRequestId,
+    },
     Queue {
         input: rsi_agent_session_protocol::QueueMutationRequest,
     },
@@ -203,13 +206,13 @@ impl GuiApplication {
                     if handle.header().await.map_err(error)?.fingerprint().map_err(error)? != header {
                         return Err("Saved Session Header changed; the draft was left untouched".into());
                     }
-                    app.open(pane, session.clone(), None).await?;
+                    app.open(pane, session.clone(), super::Open::Existing(Some(handle))).await?;
                     (session, Some(header))
                 }
                 Restore::Create { mut creation, .. } => {
                     creation.session_id = SessionId::new(rsi_ui::fresh_identity("web")?).map_err(error)?;
                     let id = creation.session_id.clone();
-                    app.open(pane, id.clone(), Some(creation)).await?;
+                    app.open(pane, id.clone(), super::Open::Create(creation, None)).await?;
                     (id, None)
                 }
             };
@@ -266,16 +269,25 @@ impl GuiApplication {
 
             let header = attached.handle.header().await.map_err(error)?.fingerprint().map_err(error)?;
             let mut command = None;
-            if input.images.is_empty() && input.references.is_empty() && let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
-                let commands = attached.controller.commands().await.map_err(error)?;
-                if commands.commands().iter().any(|command| command.name() == name) {
-                    let id = DomainRequestId::new(rsi_ui::fresh_identity("command")?).map_err(error)?;
-                    command = Some(rsi_client::command_invocation(&commands, name,
-                        CommandArguments::new(arguments.into()).map_err(error)?, id).map_err(error)?);
+            if let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
+                if name == "compact" {
+                    if !arguments.is_empty() || !input.images.is_empty() || !input.references.is_empty() {
+                        return Err("/compact takes no arguments or attachments".into());
+                    }
+                    let id = DomainRequestId::new(rsi_ui::fresh_identity("compact")?).map_err(error)?;
+                    command = Some((id.to_string(), Request::Compact { id }));
+                } else if input.images.is_empty() && input.references.is_empty() {
+                    let commands = attached.controller.commands().await.map_err(error)?;
+                    if commands.commands().iter().any(|command| command.name() == name) {
+                        let id = DomainRequestId::new(rsi_ui::fresh_identity("command")?).map_err(error)?;
+                        let invocation = rsi_client::command_invocation(&commands, name,
+                            CommandArguments::new(arguments.into()).map_err(error)?, id.clone()).map_err(error)?;
+                        command = Some((id.to_string(), Request::Command { invocation }));
+                    }
                 }
             }
-            let (kind, id, request, maximum) = if let Some(invocation) = command {
-                ("command", invocation.request_id.to_string(), Request::Command { invocation }, MAXIMUM_COMMAND)
+            let (kind, id, request, maximum) = if let Some((id, request)) = command {
+                ("command", id, request, MAXIMUM_COMMAND)
             } else {
                 let delivery = app.composer_delivery(input.pane, &input.generation,
                     input.action_revision.as_deref().ok_or("Missing displayed action revision")?,
@@ -334,6 +346,7 @@ impl GuiApplication {
                 return Err("Invalid frozen Header fingerprint".into());
             }
             match &frozen.request {
+                Request::Compact { .. } => {}
                 Request::Queue { input } => input.validate().map_err(error)?,
                 Request::Message { input } => {
                     if (input.delivery == MessageDelivery::Steer && input.sandbox.is_some())
@@ -560,6 +573,40 @@ impl GuiApplication {
         }
     }
 
+    async fn settle_compaction(
+        attached: &Attachment,
+        id: rsi_agent_session_protocol::DomainRequestId,
+        mode: Mode,
+    ) -> Settlement {
+        let result = if mode == Mode::Dispatch {
+            attached.handle.compact(id.clone()).await.map(Some)
+        } else {
+            attached.handle.compact_status(id.clone()).await
+        };
+        match result {
+            Ok(Some(outcome)) => {
+                attached
+                    .renderer
+                    .state
+                    .lock()
+                    .expect("GUI transcript")
+                    .transcript
+                    .command_feedback(&id, outcome);
+                attached.renderer.changed();
+                Settlement::Complete {
+                    receipt: serde_json::json!(outcome).to_string(),
+                    notice: None,
+                }
+            }
+            Ok(None) => Settlement::Unknown {
+                error: "No paid compaction is recorded for this request.".into(),
+            },
+            Err(reason) => Settlement::Unknown {
+                error: error(reason),
+            },
+        }
+    }
+
     async fn settle_submission(
         &self,
         attached: &Arc<Attachment>,
@@ -634,6 +681,7 @@ impl GuiApplication {
                 }
                 result.map(|receipt| serde_json::json!(receipt))
             }
+            Request::Compact { id } => return Self::settle_compaction(attached, id, mode).await,
             Request::Command { invocation } => {
                 let result = if mode == Mode::Dispatch {
                     attached.controller.execute_command(invocation).await

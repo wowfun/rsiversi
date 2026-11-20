@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rsi_agent_session_protocol::SessionId;
 use rsi_navigation_api::{
-    ActivityCursor, NavigationClient, NavigationCursor, NavigationEntry, NavigationFilter,
-    NavigationPage, OrderMembership, OrderScope, OrderSeed, PinnedEntry, SessionMetadata,
-    SummaryRequest, WorkspaceFilter,
+    ActivityCursor, MetadataReceipt, NavigationClient, NavigationCursor, NavigationEntry,
+    NavigationFilter, NavigationPage, OrderMembership, OrderScope, OrderSeed, PinnedEntry,
+    SessionMetadata, SummaryRequest, WorkspaceFilter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,7 +109,6 @@ struct View {
     newer_activity: bool,
     #[serde(skip)]
     newest: Option<ActivityCursor>,
-    #[serde(skip)]
     continued: bool,
     attention: Option<rsi_navigation_api::attention::Page>,
     attention_notice: Option<String>,
@@ -127,6 +126,57 @@ struct View {
 struct State {
     view: View,
     after: Option<NavigationCursor>,
+}
+impl View {
+    fn apply_metadata_receipt(&mut self, receipt: MetadataReceipt) -> Result<bool> {
+        if !self.filter.query.is_empty()
+            || self.order.is_some()
+            || self.continued
+            || self.more
+            || self
+                .groups
+                .values()
+                .any(|g| g.stale || g.continued || g.more)
+        {
+            return Ok(false);
+        }
+        let row = self
+            .entries
+            .iter_mut()
+            .chain(self.pins.iter_mut().filter_map(|pin| match pin {
+                PinnedEntry::Available { entry } => Some(entry),
+                PinnedEntry::Missing { .. } => None,
+            }))
+            .find(|row| row.session == receipt.session);
+        let Some(row) = row else { return Ok(false) };
+        if row.metadata.pinned != receipt.metadata.pinned {
+            return Ok(false);
+        }
+        let visible = self.filter.matches_archive(receipt.metadata.archived);
+        self.ticket = rsi_ui::fresh_identity("navigation")?;
+        for group in self.groups.values_mut() {
+            group.ticket = rsi_ui::fresh_identity("group")?;
+            if !visible {
+                group
+                    .entries
+                    .retain(|entry| entry.session != receipt.session);
+            } else if let Some(entry) = group
+                .entries
+                .iter_mut()
+                .find(|entry| entry.session == receipt.session)
+            {
+                entry.metadata.clone_from(&receipt.metadata);
+            }
+        }
+        if visible {
+            row.metadata = receipt.metadata;
+        } else {
+            self.entries
+                .retain(|entry| entry.session != receipt.session);
+        }
+        self.metadata_revision = receipt.revision;
+        Ok(true)
+    }
 }
 /// Navigation view owner for one application connection.
 #[derive(Debug)]
@@ -273,14 +323,31 @@ impl NavigationFeature {
         result
     }
     async fn observe_head(&self, filter: NavigationFilter) -> bool {
-        let Ok(page) = self.client.query(filter, None).await else {
+        let Ok(page) = self.client.query(filter.clone(), None).await else {
             return false;
         };
-        let mut state = self.state.lock().expect("navigation state");
-        let newer = state.view.newest != page.newest;
-        let changed = newer != state.view.newer_activity;
-        state.view.newer_activity = newer;
-        changed
+        {
+            let mut state = self.state.lock().expect("navigation state");
+            let view = &state.view;
+            let newer =
+                view.newest != page.newest || view.metadata_revision != page.metadata_revision;
+            if !newer || view.continued || view.groups.values().any(|group| group.continued) {
+                let changed = newer != view.newer_activity;
+                if changed {
+                    state.view.newer_activity = newer;
+                }
+                return changed;
+            }
+        }
+        let refreshed = async {
+            let (page, scanned) = self.finish_page(&filter, page).await?;
+            self.install_page(filter, page, scanned, false).await
+        }
+        .await;
+        if let Err(message) = refreshed {
+            self.state.lock().expect("navigation state").view.diagnostic = Some(message);
+        }
+        true
     }
     async fn order_summaries(&self, ticket: &str, sessions: Vec<SessionId>) -> Result<()> {
         let seed = self
@@ -338,21 +405,31 @@ impl NavigationFeature {
     async fn page(
         &self,
         filter: NavigationFilter,
-        mut after: Option<NavigationCursor>,
+        after: Option<NavigationCursor>,
     ) -> Result<(NavigationPage, u32)> {
-        let mut scanned = 0;
-        loop {
-            let page = self
+        let page = self
+            .client
+            .query(filter.clone(), after)
+            .await
+            .map_err(error)?;
+        self.finish_page(&filter, page).await
+    }
+    async fn finish_page(
+        &self,
+        filter: &NavigationFilter,
+        mut page: NavigationPage,
+    ) -> Result<(NavigationPage, u32)> {
+        let mut scanned = u32::from(page.scanned);
+        while page.entries.is_empty() && scanned < 4096 {
+            let Some(next) = page.next.take() else { break };
+            page = self
                 .client
-                .query(filter.clone(), after)
+                .query(filter.clone(), Some(next))
                 .await
                 .map_err(error)?;
             scanned += u32::from(page.scanned);
-            if !page.entries.is_empty() || page.next.is_none() || scanned >= 4096 {
-                return Ok((page, scanned));
-            }
-            after = page.next;
         }
+        Ok((page, scanned))
     }
     async fn group(&self, workspace: WorkspaceFilter, ticket: Option<String>) -> Result<()> {
         let key = group_key(&workspace)?;
@@ -414,7 +491,6 @@ impl NavigationFeature {
         );
         Ok(())
     }
-    #[allow(clippy::too_many_lines)] // Closed command dispatcher shares one serialized navigation owner.
     async fn execute_inner(&self, command: NavigationCommand, saved: &mut bool) -> Result<()> {
         if let NavigationCommand::OrderSeed { scope } = command {
             let seed = self.client.order_seed(scope).await.map_err(error)?;
@@ -479,7 +555,7 @@ impl NavigationFeature {
                 metadata,
                 metadata_revision,
             } => {
-                let (revision, filter) = {
+                {
                     let state = self.state.lock().expect("navigation view poisoned");
                     if state.view.ticket.is_empty()
                         || state.view.ticket != ticket
@@ -487,20 +563,30 @@ impl NavigationFeature {
                     {
                         return Err("Navigation changed; refresh before editing".into());
                     }
-                    (
-                        state.view.metadata_revision.clone(),
-                        state.view.filter.clone(),
-                    )
-                };
-                self.client
-                    .replace(session, &revision, metadata)
+                }
+                let receipt = self
+                    .client
+                    .replace(session, &metadata_revision, metadata)
                     .await
                     .map_err(error)?;
                 *saved = true;
-                (filter, None)
+                let mut state = self.state.lock().expect("navigation view poisoned");
+                if state.view.apply_metadata_receipt(receipt)? {
+                    return Ok(());
+                }
+                (state.view.filter.clone(), None)
             }
         };
         let (page, scanned) = self.page(filter.clone(), after).await?;
+        self.install_page(filter, page, scanned, continued).await
+    }
+    async fn install_page(
+        &self,
+        filter: NavigationFilter,
+        page: NavigationPage,
+        scanned: u32,
+        continued: bool,
+    ) -> Result<()> {
         let pins = self.client.pinned(filter.clone()).await.map_err(error)?;
         if pins.metadata_revision != page.metadata_revision {
             return Err("Navigation changed during refresh; try again".into());
@@ -512,17 +598,17 @@ impl NavigationFeature {
             } else {
                 std::collections::BTreeMap::new()
             };
+            let refresh = groups
+                .values()
+                .filter(|group| !group.stale && !group.continued)
+                .map(|group| group.workspace.clone())
+                .collect::<Vec<_>>();
             let changed = page.metadata_revision != state.view.metadata_revision;
             if changed {
                 for group in groups.values_mut() {
                     group.invalidate();
                 }
             }
-            let refresh = groups
-                .values()
-                .filter(|group| !group.stale && !group.continued)
-                .map(|group| group.workspace.clone())
-                .collect::<Vec<_>>();
             let ticket = if filter == state.view.filter
                 && page.metadata_revision == state.view.metadata_revision
                 && page.entries == state.view.entries
@@ -603,22 +689,28 @@ impl NavigationFeature {
         };
         let result = client.read().await;
         let mut state = self.state.lock().expect("navigation attention view");
-        let (page, notice) = match result {
-            Ok(page) => (Some(page), None),
+        let page = match result {
+            Ok(page) => Some(page),
             Err(
                 rsi_api_protocol::ApiError::UnknownOperation
                 | rsi_api_protocol::ApiError::OperationRetiring
                 | rsi_api_protocol::ApiError::ProtocolMismatch,
-            ) => (None, None),
-            Err(_) => (
-                state.view.attention.clone(),
-                Some("Activity refresh unavailable; showing the last observation".to_owned()),
-            ),
+            ) => None,
+            Err(_) => {
+                const NOTICE: &str = "Activity refresh unavailable; showing the last observation";
+                if state.view.attention_notice.as_deref() == Some(NOTICE) {
+                    return false;
+                }
+                state.view.attention_notice = Some(NOTICE.to_owned());
+                return true;
+            }
         };
-        let changed = state.view.attention != page || state.view.attention_notice != notice;
+        if state.view.attention == page && state.view.attention_notice.is_none() {
+            return false;
+        }
         state.view.attention = page;
-        state.view.attention_notice = notice;
-        changed
+        state.view.attention_notice = None;
+        true
     }
 }
 /// Nominal per-application navigation presentation capability.
@@ -948,10 +1040,16 @@ mod group_tests {
         Arc::get_mut(&mut owner).unwrap().attention =
             Some(rsi_navigation_api::attention::Client::new(api.clone()));
         assert!(owner.refresh_attention().await);
+        let current = owner.content_revision();
+        assert!(!owner.refresh_attention().await);
+        assert_eq!(owner.content_revision(), current);
         *api.attention_error.lock().unwrap() = Some(ApiError::Unavailable);
         assert!(owner.refresh_attention().await);
         assert!(!owner.view()["attention"].is_null());
         assert!(!owner.view()["attention_notice"].is_null());
+        let failed = owner.content_revision();
+        assert!(!owner.refresh_attention().await);
+        assert_eq!(owner.content_revision(), failed);
         for error in [
             ApiError::UnknownOperation,
             ApiError::OperationRetiring,
@@ -971,7 +1069,7 @@ mod group_tests {
         assert_eq!(
             api.attention_reads
                 .load(std::sync::atomic::Ordering::SeqCst),
-            8
+            10
         );
     }
     #[tokio::test]
@@ -981,6 +1079,171 @@ mod group_tests {
         assert_eq!(api.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
         let _ = owner.refresh_background(false).await;
         assert_eq!(api.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn changed_activity_updates_first_page_but_keeps_the_readers_continuation() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (api, owner) = fixture();
+        let filter = NavigationFilter::default();
+        owner
+            .command(NavigationCommand::Query {
+                filter: filter.clone(),
+            })
+            .await
+            .unwrap();
+        owner
+            .command(NavigationCommand::OrderSeed {
+                scope: OrderScope::All,
+            })
+            .await
+            .unwrap();
+        let seed = owner.view()["order"]["ticket"].clone();
+        let previous = ActivityCursor {
+            session_id: SessionId::new("previous").unwrap(),
+            last_activity_ms: 2,
+        };
+        {
+            let mut state = owner.state.lock().unwrap();
+            state.view.newest = Some(previous.clone());
+            state.view.continued = true;
+        }
+        assert!(owner.observe_head(filter.clone()).await);
+        {
+            let mut state = owner.state.lock().unwrap();
+            assert!(state.view.newer_activity);
+            assert_eq!(state.view.newest, Some(previous));
+            state.view.continued = false;
+        }
+        assert!(owner.observe_head(filter.clone()).await);
+        {
+            let state = owner.state.lock().unwrap();
+            assert!(!state.view.newer_activity);
+            assert!(state.view.newest.is_none());
+        }
+        assert!(!owner.observe_head(filter).await);
+        assert_eq!(owner.view()["order"]["ticket"], seed);
+        assert_eq!(api.queries.load(SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn title_and_archive_receipts_update_complete_pages_without_another_query() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        let row: NavigationEntry = serde_json::from_value(json!({
+            "session":"edited","created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},
+            "path":"/project","workspace":null,"metadata":{"pinned":false,"archived":false,"title":null}
+        })).unwrap();
+        let command = {
+            let mut state = owner.state.lock().unwrap();
+            let command = NavigationCommand::Replace {
+                ticket: state.view.ticket.clone(),
+                session: row.session.clone(),
+                metadata: SessionMetadata {
+                    title: Some("New title".into()),
+                    ..row.metadata.clone()
+                },
+                metadata_revision: state.view.metadata_revision.clone(),
+            };
+            state.view.entries.push(row.clone());
+            state.view.groups.insert(
+                "other".into(),
+                GroupPage {
+                    ticket: "old-group".into(),
+                    workspace: WorkspaceFilter::Unregistered,
+                    entries: vec![row],
+                    scanned: 1,
+                    more: false,
+                    continued: false,
+                    stale: false,
+                    after: None,
+                },
+            );
+            command
+        };
+        let ticket = owner.view()["ticket"].clone();
+        owner.command(command).await.unwrap();
+        let view = owner.view();
+        assert_eq!(view["entries"][0]["metadata"]["title"], "New title");
+        assert_eq!(
+            view["groups"]["other"]["entries"][0]["metadata"]["title"],
+            "New title"
+        );
+        assert_eq!(view["metadata_revision"], "2");
+        assert_ne!(view["ticket"], ticket);
+        assert_ne!(view["groups"]["other"]["ticket"], "old-group");
+        assert_eq!(api.queries.load(SeqCst), 1);
+        assert_eq!(api.replacements.load(SeqCst), 1);
+
+        owner
+            .command(NavigationCommand::Replace {
+                ticket: view["ticket"].as_str().unwrap().into(),
+                session: SessionId::new("edited").unwrap(),
+                metadata: SessionMetadata {
+                    archived: true,
+                    ..SessionMetadata::default()
+                },
+                metadata_revision: "2".into(),
+            })
+            .await
+            .unwrap();
+        let archived = owner.view();
+        assert_eq!(archived["entries"], json!([]));
+        assert_eq!(archived["groups"]["other"]["entries"], json!([]));
+        assert_ne!(archived["ticket"], view["ticket"]);
+        assert_eq!(archived["metadata_revision"], "3");
+        assert_eq!(api.queries.load(SeqCst), 1);
+        assert_eq!(api.replacements.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn all_conversations_retains_archived_rows_and_requeries_pin_changes() {
+        let row: NavigationEntry = serde_json::from_value(json!({
+            "session":"one","created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},
+            "path":"/project","workspace":null,"metadata":{"pinned":false,"archived":false,"title":null}
+        })).unwrap();
+        let session = row.session.clone();
+        let mut view = View {
+            entries: vec![row],
+            filter: NavigationFilter {
+                archived: None,
+                ..NavigationFilter::default()
+            },
+            ..View::default()
+        };
+        let receipt = |revision: &str, archived, pinned| MetadataReceipt {
+            session: session.clone(),
+            revision: revision.into(),
+            metadata: SessionMetadata {
+                archived,
+                pinned,
+                title: None,
+            },
+        };
+        assert!(
+            view.apply_metadata_receipt(receipt("2", true, false))
+                .unwrap()
+        );
+        assert!(view.entries[0].metadata.archived);
+        assert!(
+            view.apply_metadata_receipt(receipt("3", false, false))
+                .unwrap()
+        );
+        assert!(!view.entries[0].metadata.archived);
+        assert!(
+            !view
+                .apply_metadata_receipt(receipt("4", false, true))
+                .unwrap()
+        );
+        assert_eq!(view.metadata_revision, "3");
     }
 
     #[tokio::test]
@@ -1314,12 +1577,12 @@ mod group_tests {
     #[tokio::test]
     async fn groups_keep_independent_empty_continuations_and_reject_replaced_tickets() {
         let (api, owner) = fixture();
-        owner
-            .command(NavigationCommand::Query {
+        let refresh = || {
+            owner.command(NavigationCommand::Query {
                 filter: NavigationFilter::default(),
             })
-            .await
-            .unwrap();
+        };
+        refresh().await.unwrap();
         let other = WorkspaceFilter::Unregistered;
         owner
             .command(NavigationCommand::Group {
@@ -1366,12 +1629,7 @@ mod group_tests {
         );
         let retained = owner.view()["groups"]["other"].clone();
         let reads = api.other_reads.load(std::sync::atomic::Ordering::SeqCst);
-        owner
-            .command(NavigationCommand::Query {
-                filter: NavigationFilter::default(),
-            })
-            .await
-            .unwrap();
+        refresh().await.unwrap();
         assert_eq!(owner.view()["groups"]["other"], retained);
         assert_eq!(
             api.other_reads.load(std::sync::atomic::Ordering::SeqCst),
@@ -1379,17 +1637,15 @@ mod group_tests {
             "refresh must not rescan a continued workspace"
         );
         api.revision.store(2, std::sync::atomic::Ordering::SeqCst);
-        owner
-            .command(NavigationCommand::Query {
-                filter: NavigationFilter::default(),
-            })
-            .await
-            .unwrap();
+        refresh().await.unwrap();
+        let refreshed = owner.view()["groups"]["a".repeat(64)].clone();
+        assert_eq!(refreshed["stale"], false);
+        assert_ne!(refreshed["ticket"], untouched["ticket"]);
         assert_eq!(owner.view()["groups"]["other"]["stale"], true);
         assert_eq!(
             api.other_reads.load(std::sync::atomic::Ordering::SeqCst),
             reads,
-            "metadata invalidation must not silently re-expand stale groups"
+            "metadata invalidation must not silently restart a continued group"
         );
         assert!(
             owner

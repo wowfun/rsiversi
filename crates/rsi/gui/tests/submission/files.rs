@@ -181,7 +181,7 @@ async fn fixture() -> (
     for (name, factory) in [
         (
             "providers",
-            Arc::new(Providers(backend)) as Arc<dyn PluginFactory>,
+            Arc::new(Providers(backend.clone())) as Arc<dyn PluginFactory>,
         ),
         ("files", Arc::new(Supply(reader.clone()))),
         ("ui", Arc::new(rsi_ui::UiFactory)),
@@ -206,6 +206,11 @@ async fn fixture() -> (
         .lookup_local::<rsi_gui::GuiApplicationContract>()
         .unwrap();
     app.command(r#"{"action":"create","pane":"main","workspace":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#).await.unwrap();
+    assert_eq!(
+        backend.attaches.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the surface controller and Files browser share one Session attachment",
+    );
     (runtime, reader, app, files_fiber.unwrap())
 }
 async fn open_card(app: &Arc<rsi_gui::GuiApplication>, pane: &str) {
@@ -231,9 +236,20 @@ fn shown(detail: &Value) -> String {
 #[tokio::test]
 async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_independent() {
     let (runtime, reader, app, _files) = fixture().await;
+    assert_eq!(reader.next.load(Ordering::SeqCst), 0);
     open_card(&app, "main").await;
-    let directory = click(&app, "Workspace root").await;
+    let directory = super::sources::panel(&app)["ui_detail"].clone();
     assert!(shown(&directory).contains("0–16 of 20"));
+    let elements = directory["model"]["standard_view"]["elements"]
+        .as_array()
+        .unwrap();
+    assert_eq!(elements[0]["value"], ".");
+    let index = |label| elements.iter().position(|e| e["label"] == label).unwrap();
+    assert!(index("Refresh") < index("00.txt"));
+    assert!(index("15.txt") < index("Workspace-relative path"));
+    open_card(&app, "main").await;
+    assert!(shown(&super::sources::panel(&app)["ui_detail"]).contains("00.txt"));
+    assert_eq!(reader.next.load(Ordering::SeqCst), 1);
     let next = click(&app, "Next page").await;
     assert!(shown(&next).contains("16–20 of 20"));
     let file = click(&app, "�").await;
@@ -270,9 +286,10 @@ async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_
         .await
         .unwrap();
     open_card(&app, "compare").await;
-    click(&app, "Workspace root").await;
+    assert!(shown(&super::sources::panel(&app)["ui_detail"]).contains("00.txt"));
     assert_eq!(reader.opened.lock().unwrap().len(), 2);
     open_card(&app, "main").await;
+    assert_eq!(reader.opened.lock().unwrap().len(), 2);
     assert!(shown(&click(&app, "Current snapshot").await).contains("Workspace file"));
     click(&app, "Release snapshot").await;
     assert_eq!(reader.opened.lock().unwrap().len(), 1);
@@ -283,10 +300,24 @@ async fn files_cards_page_exact_bytes_paths_refresh_and_keep_same_session_panes_
 }
 
 #[tokio::test]
+async fn unavailable_initial_root_keeps_path_selection_and_can_be_retried() {
+    let (runtime, reader, app, _files) = fixture().await;
+    *reader.missing_path.lock().unwrap() = Some(Vec::new());
+    open_card(&app, "main").await;
+    let view = shown(&super::sources::panel(&app)["ui_detail"]);
+    assert!(view.contains("unavailable"));
+    assert!(view.contains("Workspace-relative path"));
+    assert!(reader.opened.lock().unwrap().is_empty());
+    *reader.missing_path.lock().unwrap() = None;
+    assert!(shown(&click(&app, "Workspace root").await).contains("00.txt"));
+    assert_eq!(reader.next.load(Ordering::SeqCst), 1);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_action() {
     let (runtime, reader, app, _files) = fixture().await;
     open_card(&app, "main").await;
-    click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     reader.block.store(true, Ordering::SeqCst);
     let pending = app.command(
@@ -338,7 +369,6 @@ async fn closing_files_detail_cancels_read_and_replaced_surface_rejects_its_acti
 async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
     let (runtime, reader, app, files) = fixture().await;
     open_card(&app, "main").await;
-    click(&app, "Workspace root").await;
     click(&app, "00.txt").await;
     let old = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Next page"));
     let reference = ui::reference(&super::sources::panel(&app)["ui_detail"], &old["name"]);
@@ -371,13 +401,15 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
         registry.is_current(&reference),
         "the actual Session UI target did not change"
     );
+    open_card(&app, "main").await;
+    assert!(shown(&super::sources::panel(&app)["ui_detail"]).contains("00.txt"));
+    assert_eq!(replacement.next.load(Ordering::SeqCst), 1);
     assert!(
         matches!(registry.invoke(&reference, serde_json::from_value(old["input"].clone()).unwrap()).await,
         Err(rsi_ui::UiError::Invalid(message)) if message.contains("changed"))
     );
-    assert_eq!(replacement.next.load(Ordering::SeqCst), 0);
+    assert!(replacement.reads.lock().unwrap().is_empty());
     assert!(reader.opened.lock().unwrap().is_empty());
-    open_card(&app, "main").await;
     let mut invalid = ui::button(&super::sources::panel(&app)["ui_detail"], Some("Read file"));
     invalid["input"]["fields"] = json!({"path":"sample","root":"/"});
     assert!(matches!(
@@ -400,7 +432,8 @@ async fn replacing_only_files_provider_cannot_retarget_an_old_browser_action() {
             .await,
         Err(rsi_ui::UiError::Invalid(_))
     ));
-    assert_eq!(replacement.next.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement.next.load(Ordering::SeqCst), 1);
+    assert!(replacement.reads.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
 }
 

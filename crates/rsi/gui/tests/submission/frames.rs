@@ -1,8 +1,5 @@
 use super::*;
 use serde_json::{Value, json};
-fn frame(app: &rsi_gui::GuiApplication, base: Option<&str>) -> Value {
-    serde_json::from_slice(app.next_frame(base).unwrap().as_bytes()).unwrap()
-}
 #[derive(Debug)]
 struct GlobalCard;
 impl rsi_ui::SurfaceRenderer for GlobalCard {
@@ -158,7 +155,11 @@ async fn application_frames_follow_models_details_and_generation_changes_without
     let initial = frame(&app, None);
     assert_eq!(initial["kind"], "snapshot");
     let pane = &initial["view"]["surfaces"]["main"];
-    assert!(pane.get("draft").is_none());
+    assert_eq!(
+        pane["draft"], true,
+        "the unpublished Session can change its preset"
+    );
+    assert!(pane.get("text").is_none());
     assert!(pane.get("images").is_none());
     assert!(pane.get("conversation").is_none());
     assert!(pane.get("capabilities").is_none());
@@ -188,14 +189,15 @@ async fn application_frames_follow_models_details_and_generation_changes_without
         .unwrap();
     let next = frame(&app, Some("4"));
     assert_eq!(next["kind"], "snapshot");
-    assert!(next["view"]["surfaces"]["main"].get("draft").is_none());
+    assert_eq!(next["view"]["surfaces"]["main"]["draft"], true);
+    assert!(next["view"]["surfaces"]["main"].get("text").is_none());
     assert_eq!(
         next["view"]["surfaces"]["compare"]["session"],
         pane["session"]
     );
     assert!(runtime.shutdown().await.is_clean());
     assert!(matches!(
-        app.next_frame(Some("5")),
+        app.next_frame(Some("5"), false),
         Err(rsi_api_protocol::ApiError::ShuttingDown)
     ));
 }
@@ -262,28 +264,27 @@ async fn global_frame_cases(detail_sizes: &[usize], samples: u64, report: bool) 
                 }
                 let base = snapshot["frame_id"].as_str().unwrap();
                 let (encoded, allocations) =
-                    frame_allocations::measure(|| app.next_frame(Some(base)).unwrap());
+                    frame_allocations::measure(|| app.next_frame(Some(base), false).unwrap());
                 let measurement = rsi_gui::test_support::take_frame_measurement();
-                let patch: Value = serde_json::from_slice(encoded.as_bytes()).unwrap();
-                assert_eq!(patch["kind"], "patch");
-                if scenario == "single_block" {
-                    assert_eq!(patch["surfaces"].as_array().unwrap().len(), 1);
-                    reconstruct_changed_block(
-                        &mut snapshot["view"]["surfaces"]["main"],
-                        &patch["surfaces"][0],
-                    );
-                } else {
-                    assert_eq!(patch["surfaces"], json!([]));
+                assert_eq!(encoded.is_none(), scenario == "unchanged");
+                let output_bytes = encoded.as_ref().map_or(0, |frame| frame.as_bytes().len());
+                if let Some(encoded) = encoded {
+                    let patch: Value = serde_json::from_slice(encoded.as_bytes()).unwrap();
+                    assert_eq!(patch["kind"], "patch");
+                    if scenario == "single_block" {
+                        assert_eq!(patch["surfaces"].as_array().unwrap().len(), 1);
+                        reconstruct_changed_block(
+                            &mut snapshot["view"]["surfaces"]["main"],
+                            &patch["surfaces"][0],
+                        );
+                    } else {
+                        assert_eq!(patch["surfaces"], json!([]));
+                    }
+                    for (key, value) in patch["sections"].as_object().unwrap() {
+                        snapshot["view"][key] = value.clone();
+                    }
+                    snapshot["frame_id"] = patch["frame_id"].clone();
                 }
-                if scenario == "unchanged" {
-                    assert_eq!(patch["sections"], json!({}));
-                }
-                for (key, value) in patch["sections"].as_object().unwrap() {
-                    snapshot["view"][key] = value.clone();
-                }
-                snapshot["frame_id"] = patch["frame_id"].clone();
-                let output_bytes = encoded.as_bytes().len();
-                drop(encoded);
                 let complete = frame(&app, None);
                 assert_eq!(snapshot["view"], complete["view"]);
                 // The complete frame is now the server's sole baseline, including

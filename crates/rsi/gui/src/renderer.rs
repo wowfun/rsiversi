@@ -10,16 +10,26 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "kind", content = "request", rename_all = "snake_case")]
+pub(crate) enum Interaction<'a> {
+    Approval(&'a rsi_approval_protocol::ApprovalRequest),
+    Question(&'a rsi_user_questions_protocol::QuestionRequest),
+}
+
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Pending {
-    pub id: String,
-    pub owner: String,
+pub(crate) struct Pending<'a> {
+    pub id: &'a str,
+    pub owner: &'a str,
     pub kind: &'static str,
-    pub title: String,
+    pub title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<Interaction<'a>>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct RenderState {
+    interaction_panels: Option<crate::panel_registry::InteractionPanels>,
     binding: Option<(
         Arc<crate::panes::SubmissionState>,
         Arc<dyn rsi_session_protocol::SessionHandle>,
@@ -67,8 +77,11 @@ impl Renderer {
         &self,
         submission: Arc<crate::panes::SubmissionState>,
         handle: Arc<dyn rsi_session_protocol::SessionHandle>,
+        panels: crate::panel_registry::InteractionPanels,
     ) {
-        self.state.lock().expect("Web renderer poisoned").binding = Some((submission, handle));
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        state.binding = Some((submission, handle));
+        state.interaction_panels = Some(panels);
     }
     pub fn seed(&self, transcript: Transcript, before: Option<u64>, more: bool) {
         let mut state = self.state.lock().expect("Web renderer poisoned");
@@ -96,28 +109,6 @@ impl Renderer {
         self.changed
             .send_modify(|value| *value = value.saturating_add(1));
     }
-    pub fn pending(&self) -> Vec<Pending> {
-        let state = self.state.lock().expect("Web renderer poisoned");
-        let Some(snapshot) = &state.interactions else {
-            return Vec::new();
-        };
-        snapshot
-            .questions()
-            .iter()
-            .map(|request| Pending {
-                id: request.id.clone(),
-                owner: request.session_id.clone(),
-                kind: "question",
-                title: short(&request.questions[0].prompt, 512).into(),
-            })
-            .chain(snapshot.approvals().iter().map(|request| Pending {
-                id: request.id.clone(),
-                owner: request.subject.session_id().into(),
-                kind: "approval",
-                title: short(&request.action, 512).into(),
-            }))
-            .collect()
-    }
     async fn ready(&self) -> Result<(), ObservationFailure> {
         let mut receiver = self.ready.subscribe();
         loop {
@@ -132,6 +123,40 @@ impl Renderer {
                 result = receiver.changed() => result.map_err(|_| ObservationFailure::SinkStopped)?,
             }
         }
+    }
+}
+impl RenderState {
+    pub fn pending(&self, actionable: bool) -> Option<Vec<Pending<'_>>> {
+        let snapshot = self.interactions.as_ref()?;
+        let questions = snapshot.questions();
+        let approvals = snapshot.approvals();
+        let question = questions
+            .iter()
+            .rposition(|request| request.review.is_some())
+            .or_else(|| questions.len().checked_sub(1));
+        let pending = questions
+            .iter()
+            .enumerate()
+            .map(|(index, request)| Pending {
+                id: &request.id,
+                owner: &request.session_id,
+                kind: "question",
+                title: short(&request.questions[0].prompt, 512),
+                review: (actionable && question == Some(index))
+                    .then_some(Interaction::Question(request)),
+            })
+            .chain(approvals.iter().enumerate().map(|(index, request)| {
+                Pending {
+                    id: &request.id,
+                    owner: request.subject.session_id(),
+                    kind: "approval",
+                    title: short(&request.action, 512),
+                    review: (actionable && question.is_none() && index + 1 == approvals.len())
+                        .then_some(Interaction::Approval(request)),
+                }
+            }))
+            .collect();
+        Some(pending)
     }
 }
 #[async_trait]
@@ -203,9 +228,13 @@ impl ObservationSink for Renderer {
         if self.stop.is_cancelled() {
             return Err(ObservationFailure::SinkStopped);
         }
-        state.interactions = Some(snapshot);
+        let panels = state.interaction_panels.clone();
+        state.interactions = Some(snapshot.clone());
         state.interaction_notice.clear();
         drop(state);
+        if let Some(panels) = panels {
+            panels.observe(&snapshot);
+        }
         self.changed();
         Ok(())
     }
@@ -313,7 +342,103 @@ impl PluginFactory for RendererFactory {
 mod tests {
     use super::*;
     use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId, TurnOutcome};
+    #[test]
+    fn an_unobserved_pending_list_is_distinct_from_a_settled_list() {
+        let mut state = RenderState::default();
+        assert!(state.pending(true).is_none());
+        state.interactions = Some(
+            rsi_session_protocol::InteractionRetention::default()
+                .retain(Vec::new(), Vec::new())
+                .unwrap(),
+        );
+        assert!(state.pending(true).unwrap().is_empty());
+    }
     use rsi_agent_turn_protocol::{ObservationRetention, SessionObservation};
+    #[test]
+    fn only_the_selected_actionable_request_carries_its_full_detail() {
+        use rsi_approval_protocol::{ApprovalRequest, ApprovalSubject};
+        let requests = ["first", "second"].map(|id| ApprovalRequest {
+            subject: ApprovalSubject::new("child", "turn", id).unwrap(),
+            id: id.into(),
+            action: "Read file".into(),
+            reason: "Human decision".into(),
+            review: None,
+        });
+        let state = RenderState {
+            interactions: Some(
+                rsi_session_protocol::InteractionRetention::default()
+                    .retain(Vec::from(requests), Vec::new())
+                    .unwrap(),
+            ),
+            ..RenderState::default()
+        };
+        let pending = state.pending(true).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending[0].review.is_none());
+        assert!(
+            matches!(pending[1].review, Some(Interaction::Approval(request)) if request.id == "second" && request.subject.session_id() == "child")
+        );
+        assert!(
+            state
+                .pending(false)
+                .unwrap()
+                .iter()
+                .all(|item| item.review.is_none())
+        );
+    }
+    #[test]
+    fn a_plan_review_precedes_an_ordinary_question_and_a_child_approval() {
+        use rsi_approval_protocol::{ApprovalRequest, ApprovalSubject};
+        use rsi_user_questions_protocol::{ClosedReview, Question, QuestionRequest, ReviewChoice};
+        let question = |id: &str, review| QuestionRequest {
+            id: id.into(),
+            session_id: "root".into(),
+            turn_id: "turn".into(),
+            review,
+            questions: vec![Question {
+                id: "color".into(),
+                prompt: "Which color?".into(),
+                options: vec![],
+            }],
+        };
+        let plan = ClosedReview {
+            binding: "plan-revision".into(),
+            choices: ["approve", "change"]
+                .map(|label| ReviewChoice {
+                    id: label.into(),
+                    label: label.into(),
+                })
+                .into(),
+        };
+        let approval = ApprovalRequest {
+            subject: ApprovalSubject::new("child", "turn", "effect").unwrap(),
+            id: "approval".into(),
+            action: "Read file".into(),
+            reason: "Human decision".into(),
+            review: None,
+        };
+        let state = RenderState {
+            interactions: Some(
+                rsi_session_protocol::InteractionRetention::default()
+                    .retain(
+                        vec![approval],
+                        vec![question("plan", Some(plan)), question("later", None)],
+                    )
+                    .unwrap(),
+            ),
+            ..RenderState::default()
+        };
+        let selected: Vec<_> = state
+            .pending(true)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.review.is_some())
+            .collect();
+        assert_eq!(selected.len(), 1);
+        assert!(
+            matches!(selected[0].review, Some(Interaction::Question(request)) if request.id == "plan")
+        );
+    }
     #[tokio::test]
     async fn a_recovered_interaction_stream_clears_its_notice() {
         let renderer = Renderer {

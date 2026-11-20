@@ -14,6 +14,62 @@ const MAXIMUM_VIEWS: usize = 64;
 const MAXIMUM_SESSION_VIEWS: usize = 16;
 const MAXIMUM_SESSION_FLOATS: usize = 4;
 
+#[derive(Clone, Debug)]
+pub(crate) struct InteractionPanels {
+    registry: std::sync::Weak<rsi_workbench_ui::PresentationState<PanelRegistry>>,
+    pane: SurfaceId,
+    generation: Arc<str>,
+}
+
+impl InteractionPanels {
+    pub fn new(
+        registry: &Arc<rsi_workbench_ui::PresentationState<PanelRegistry>>,
+        pane: SurfaceId,
+        generation: u64,
+    ) -> Self {
+        Self {
+            registry: Arc::downgrade(registry),
+            pane,
+            generation: generation.to_string().into(),
+        }
+    }
+
+    pub fn observe(&self, snapshot: &rsi_session_protocol::InteractionSnapshot) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let mut registry = registry.lock().expect("Web details poisoned");
+        let retired: Vec<_> = registry
+            .entries
+            .iter()
+            .filter_map(|(view, entry)| {
+                let (pane, generation, _) = entry.owner.as_ref()?;
+                if *pane != self.pane || generation != self.generation.as_ref() {
+                    return None;
+                }
+                let detail = entry.detail.interaction.as_ref()?;
+                let request = &detail["request"];
+                let id = request["id"].as_str()?;
+                let pending = match detail["kind"].as_str()? {
+                    "approval" => snapshot.approvals().iter().any(|item| {
+                        item.id == id
+                            && request["subject"]["session_id"] == item.subject.session_id()
+                    }),
+                    "question" => snapshot
+                        .questions()
+                        .iter()
+                        .any(|item| item.id == id && request["session_id"] == item.session_id),
+                    _ => return None,
+                };
+                (!pending).then_some(*view)
+            })
+            .collect();
+        for view in retired {
+            registry.entries.remove(&view);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Entry {
     open_revision: u64,
@@ -277,6 +333,45 @@ mod tests {
             "1".into(),
             SessionId::new("session").unwrap(),
         )
+    }
+    #[test]
+    fn remote_settlement_retires_only_matching_attachment_details() {
+        use rsi_approval_protocol::{ApprovalRequest, ApprovalSubject};
+        let registry: Arc<rsi_workbench_ui::PresentationState<PanelRegistry>> = Arc::default();
+        let panels = InteractionPanels::new(&registry, SurfaceId::MAIN, 1);
+        let add = |generation: &str, subject: &str| {
+            let mut registry = registry.lock().unwrap();
+            let mut owner = owner();
+            owner.1 = generation.into();
+            let entry = registry.open(Some(owner), json!({})).unwrap();
+            entry.interaction = Some(
+                json!({"kind":"approval","request":{"id":"shared","subject":{"session_id":subject}}}),
+            );
+            entry.revision.to_string()
+        };
+        let child = add("1", "child");
+        let parent = add("1", "parent");
+        let other = add("2", "parent");
+        let observed = rsi_session_protocol::InteractionRetention::default()
+            .retain(
+                vec![ApprovalRequest {
+                    id: "shared".into(),
+                    subject: ApprovalSubject::new("child", "turn", "effect").unwrap(),
+                    action: "Read".into(),
+                    reason: "Human decision".into(),
+                    review: None,
+                }],
+                vec![],
+            )
+            .unwrap();
+        panels.observe(&observed);
+        let revision = registry.content_revision();
+        panels.observe(&observed);
+        assert_eq!(registry.content_revision(), revision);
+        let entries = registry.lock().unwrap();
+        assert!(entries.ticket(&child).is_ok());
+        assert!(entries.ticket(&parent).is_err());
+        assert!(entries.ticket(&other).is_ok());
     }
     #[test]
     fn closing_and_reopening_one_view_cannot_retire_siblings_or_revive_old_tickets() {

@@ -15,6 +15,7 @@ pub(crate) enum Node {
     End,
     Text { text: String },
     Code { text: String },
+    Math { text: String, display: bool },
     Break,
     Rule,
 }
@@ -60,6 +61,30 @@ fn link(value: &str) -> Option<String> {
     let parsed = url::Url::parse(value).ok()?;
     matches!(parsed.scheme(), "http" | "https").then(|| parsed.into())
 }
+
+fn leaf(event: Event<'_>) -> Option<Node> {
+    Some(match event {
+        Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => Node::Text {
+            text: text.into_string(),
+        },
+        Event::Code(text) => Node::Code {
+            text: text.into_string(),
+        },
+        Event::InlineMath(text) => Node::Math {
+            text: text.into_string(),
+            display: false,
+        },
+        Event::DisplayMath(text) => Node::Math {
+            text: text.into_string(),
+            display: true,
+        },
+        Event::SoftBreak => Node::Text { text: "\n".into() },
+        Event::HardBreak => Node::Break,
+        Event::Rule => Node::Rule,
+        _ => return None,
+    })
+}
+
 /// Failure preserves plain source, including unsupported or over-budget input.
 pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
     if source.len() > MAXIMUM_INPUT_BYTES {
@@ -72,7 +97,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
     let mut header = false;
     for event in Parser::new_ext(
         source,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_MATH,
     ) {
         if nodes.len() == MAXIMUM_EVENTS {
             return None;
@@ -86,7 +111,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                 let element = match tag {
                     Tag::Paragraph => Element::Paragraph,
                     Tag::Heading { level, .. } => Element::Heading { level: level as u8 },
-                    Tag::BlockQuote => Element::Quote,
+                    Tag::BlockQuote(_) => Element::Quote,
                     Tag::CodeBlock(kind) => Element::Pre {
                         language: match kind {
                             CodeBlockKind::Fenced(info) => language(&info),
@@ -132,6 +157,12 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                 Node::Start { element }
             }
             Event::End(tag) => {
+                if tag == TagEnd::CodeBlock
+                    && let Some(Node::Text { text }) = nodes.last_mut()
+                    && text.ends_with('\n')
+                {
+                    text.pop();
+                }
                 if tag == TagEnd::TableHead {
                     header = false;
                 }
@@ -141,16 +172,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                 depth = depth.checked_sub(1)?;
                 Node::End
             }
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => Node::Text {
-                text: text.into_string(),
-            },
-            Event::Code(text) => Node::Code {
-                text: text.into_string(),
-            },
-            Event::SoftBreak => Node::Text { text: "\n".into() },
-            Event::HardBreak => Node::Break,
-            Event::Rule => Node::Rule,
-            _ => return None,
+            event => leaf(event)?,
         };
         nodes.push(node);
     }
@@ -167,7 +189,9 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
         + nodes
             .iter()
             .map(|node| match node {
-                Node::Text { text } | Node::Code { text } => text.capacity(),
+                Node::Text { text } | Node::Code { text } | Node::Math { text, .. } => {
+                    text.capacity()
+                }
                 Node::Start {
                     element: Element::Link { href },
                 } => href.capacity(),
@@ -312,6 +336,48 @@ mod tests {
             assert!(link(invalid).is_none());
         }
     }
+    #[test]
+    fn math_is_distinct_from_currency_escapes_and_literal_code() {
+        let source = r"Cost \$5. Inline $x^2$ and display $$a+b=c$$. `$code$`";
+        let nodes = parse(source).unwrap();
+        let formulae: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Math { text, display } => Some((text.as_str(), *display)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(formulae, [("x^2", false), ("a+b=c", true)]);
+        assert!(
+            nodes
+                .iter()
+                .any(|n| matches!(n, Node::Code {text} if text == "$code$"))
+        );
+    }
+
+    #[test]
+    fn code_bodies_keep_intentional_blank_lines_for_display_and_copy() {
+        for (source, expected) in [
+            ("```js\nconst x = 1;\n```", "const x = 1;"),
+            ("```js\r\nconst x = 1;\r\n\r\n```", "const x = 1;\n"),
+            ("```\n\n```", ""),
+            ("```\nongoing", "ongoing"),
+        ] {
+            let text: String = parse(source)
+                .unwrap()
+                .into_iter()
+                .filter_map(|event| {
+                    if let Node::Text { text } = event {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(text, expected);
+        }
+    }
+
     #[test]
     fn source_event_depth_and_encoded_expansion_bounds_fall_back_to_plain_text() {
         assert!(parse(&"x".repeat(MAXIMUM_INPUT_BYTES)).is_some());

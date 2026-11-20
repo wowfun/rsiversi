@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 mod admission;
 #[path = "submission/automation.rs"]
 mod automation;
+#[path = "submission/catalog.rs"]
+mod catalog;
 #[path = "submission/commands.rs"]
 mod commands;
 #[path = "submission/export.rs"]
@@ -41,6 +43,11 @@ mod tree_replacement;
 #[path = "submission/ui.rs"]
 mod ui;
 
+fn frame(app: &rsi_gui::GuiApplication, base: Option<&str>) -> serde_json::Value {
+    let bytes = app.next_frame(base, false).unwrap().expect("changed view");
+    serde_json::from_slice(bytes.as_bytes()).unwrap()
+}
+
 async fn prepare(
     app: &Arc<rsi_gui::GuiApplication>,
     generation: &str,
@@ -48,8 +55,7 @@ async fn prepare(
     images: Vec<rsi_media_protocol::MediaRef>,
     steer: bool,
 ) -> serde_json::Value {
-    let frame: serde_json::Value =
-        serde_json::from_slice(app.next_frame(None).unwrap().as_bytes()).unwrap();
+    let frame = frame(app, None);
     app.acknowledge_frame(frame["frame_id"].as_str().unwrap())
         .unwrap();
     let revision = &frame["view"]["composer_actions"]["main"]["revision"];
@@ -82,6 +88,10 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 #[derive(Debug, Default)]
 struct Backend {
     creations: Mutex<Vec<CreateSession>>,
+    attaches: std::sync::atomic::AtomicUsize,
+    registration_name: Mutex<Option<rsi_workspace_protocol::WorkspaceName>>,
+    registration_unavailable: std::sync::atomic::AtomicBool,
+    model_catalog: Mutex<Vec<rsi_ai_protocol::ModelRef>>,
     current_registration: Mutex<Option<rsi_workspace_protocol::WorkspaceId>>,
     metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
     metrics_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
@@ -160,6 +170,9 @@ impl SessionService for Service {
         Ok(self.0.clone())
     }
     async fn attach(&self, id: &SessionId) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        self.0
+            .attaches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.0.children.lock().unwrap().get(id) {
             return Ok(child.clone());
         }
@@ -687,6 +700,15 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Service {
         &self,
         key: &rsi_workspace_protocol::WorkspaceKey,
     ) -> rsi_workspace_protocol::Result<Option<rsi_workspace_protocol::WorkspaceRecord>> {
+        if self
+            .0
+            .registration_unavailable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_workspace_protocol::WorkspaceError::Corrupt(
+                "fixture registry unavailable".into(),
+            ));
+        }
         let coordinates = self.0.header().await.unwrap().coordinates().clone();
         assert_eq!(
             *key,
@@ -698,7 +720,13 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Service {
             .lock()
             .unwrap()
             .clone()
-            .map(|id| rsi_workspace_protocol::WorkspaceRecord::new(id, coordinates)))
+            .map(|id| {
+                let mut record = rsi_workspace_protocol::WorkspaceRecord::new(id, coordinates);
+                record
+                    .name
+                    .clone_from(&self.0.registration_name.lock().unwrap());
+                record
+            }))
     }
 
     async fn display_order(
@@ -723,7 +751,7 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Service {
     async fn order_seed(
         &self,
     ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceOrderSeed> {
-        unreachable!("workspace order membership is not used by this fixture")
+        Ok(rsi_workspace_protocol::WorkspaceOrderSeed::Available { records: vec![] })
     }
     async fn get(
         &self,
@@ -739,6 +767,15 @@ impl rsi_workspace_protocol::WorkspaceRegistry for Service {
         self.0
             .workspace_lists
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .0
+            .registration_unavailable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rsi_workspace_protocol::WorkspaceError::Corrupt(
+                "fixture registry unavailable".into(),
+            ));
+        }
         Ok(rsi_workspace_protocol::WorkspacePage {
             records: vec![],
             next: None,
@@ -817,10 +854,19 @@ impl rsi_ai_protocol::LanguageModels for Service {
 
     async fn list_models(
         &self,
-        _: Option<&rsi_ai_protocol::ModelRef>,
-        _: usize,
+        after: Option<&rsi_ai_protocol::ModelRef>,
+        limit: usize,
     ) -> std::result::Result<rsi_ai_protocol::LanguageModelPage, rsi_ai_protocol::ModelsError> {
-        unreachable!()
+        assert_eq!(limit, 64);
+        let models = self.0.model_catalog.lock().unwrap();
+        let start = after.map_or(0, |after| {
+            models.iter().position(|model| model == after).unwrap() + 1
+        });
+        let end = (start + limit).min(models.len());
+        Ok(rsi_ai_protocol::LanguageModelPage {
+            models: models[start..end].to_vec(),
+            has_more: end < models.len(),
+        })
     }
 }
 #[derive(Debug)]
@@ -1219,6 +1265,21 @@ async fn interaction_refresh_reads_authoritative_pending_requests_even_without_q
     }).to_string()).await.unwrap();
     let pane = sources::view(&app)["surfaces"]["main"].clone();
     let inspect = serde_json::json!({"action":"inspect_interaction", "pane":"main", "generation":pane["generation"], "owner":pane["session"], "id":"approval"}).to_string();
+    let read = serde_json::json!({"kind":"approval","pane":"main", "generation":pane["generation"], "owner":pane["session"], "id":"approval"});
+    let mut foreign = read.clone();
+    foreign["owner"] = "other-session".into();
+    assert_eq!(
+        app.read_pending_interaction(&foreign.to_string())
+            .await
+            .unwrap(),
+        "null"
+    );
+    foreign["generation"] = "old".into();
+    assert!(
+        app.read_pending_interaction(&foreign.to_string())
+            .await
+            .is_err()
+    );
     assert_eq!(
         sources::panel(&app)["detail"]["request"]["action"],
         "Write file"
@@ -1229,6 +1290,13 @@ async fn interaction_refresh_reads_authoritative_pending_requests_even_without_q
             format!("Revision {index}");
         app.command(&inspect).await.unwrap();
         let frame = sources::view(&app);
+        let approved: serde_json::Value = serde_json::from_str(
+            &app.read_pending_interaction(&read.to_string())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(approved["request"]["reason"], format!("Revision {index}"));
         assert_eq!(frame["panels"].as_array().unwrap().len(), 1);
         assert_eq!(frame["panels"][0]["view"], view);
         assert_eq!(
@@ -1248,5 +1316,11 @@ async fn interaction_refresh_reads_authoritative_pending_requests_even_without_q
         "confirmed settlement is successful refresh, not an error"
     );
     assert!(sources::view(&app)["panels"].as_array().unwrap().is_empty());
+    assert_eq!(
+        app.read_pending_interaction(&read.to_string())
+            .await
+            .unwrap(),
+        "null"
+    );
     assert!(runtime.shutdown().await.is_clean());
 }

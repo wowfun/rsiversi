@@ -8,14 +8,25 @@ use serde::Deserialize;
 use std::sync::Arc;
 fn reply<T: serde::Serialize>(
     value: rsi_directory_picker_api::Result<T>,
-) -> serde_json::Result<serde_json::Value> {
-    match value {
-        Ok(value) => serde_json::to_value(value)
-            .map(|value| serde_json::json!({"status":"ok","value":value})),
-        Err(failure) => Ok(
-            serde_json::json!({"status":"failed","message":failure.to_string(),"failure":failure}),
-        ),
+) -> serde_json::Result<String> {
+    #[derive(serde::Serialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    enum Reply<T> {
+        Ok {
+            value: T,
+        },
+        Failed {
+            message: String,
+            failure: rsi_directory_picker_api::Failure,
+        },
     }
+    serde_json::to_string(&match value {
+        Ok(value) => Reply::Ok { value },
+        Err(failure) => Reply::Failed {
+            message: failure.to_string(),
+            failure,
+        },
+    })
 }
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -77,12 +88,12 @@ impl GuiApplication {
             }
             return Box::pin(async { Ok("null".into()) });
         }
-        self.admit(false, None, move |app| async move {
+        self.admit_reply(move |app| async move {
             let client = app
                 .directory
                 .as_ref()
                 .ok_or("Directory browsing is unavailable; enter a path manually")?;
-            let value = match request {
+            match request {
                 Request::Status { location } => reply(client.status(location).await.map_err(error)?),
                 Request::List { location, path, request_id } => {
                     if request_id.is_empty()
@@ -125,8 +136,7 @@ impl GuiApplication {
                         .map_err(error)?,
                 ),
             }
-            .map_err(error)?;
-            serde_json::to_string(&value).map_err(error)
+            .map_err(error)
         })
     }
 }

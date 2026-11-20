@@ -10,7 +10,9 @@ use rsi_configuration_api::{
     ProviderKind, ProvidersSnapshot,
 };
 use rsi_credentials_protocol::{CredentialStatus, SecretValue};
-use rsi_settings_protocol::{SettingsAccess, SettingsAccessContract, SettingsSnapshot};
+use rsi_settings_protocol::{
+    SettingsAccess, SettingsAccessContract, SettingsSnapshot, SettingsVersion,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -136,8 +138,8 @@ pub struct SetupView {
 struct State {
     view: SetupView,
     capabilities: Option<rsi_api_protocol::OperationCatalog>,
-    agent: Option<SettingsSnapshot>,
-    presets: Option<SettingsSnapshot>,
+    agent_version: Option<SettingsVersion>,
+    presets_version: Option<SettingsVersion>,
 }
 /// Setup presentation state owned by one ordinary application plugin.
 #[derive(Debug)]
@@ -402,14 +404,10 @@ impl SetupFeature {
             state.view.credential = None;
         }
         state.view.providers = providers;
-        state.view.agent = agent
-            .as_ref()
-            .map_or(Value::Null, |snapshot| snapshot.value.clone());
-        state.view.presets = presets
-            .as_ref()
-            .map_or(Value::Null, |snapshot| snapshot.value.clone());
-        state.agent = agent;
-        state.presets = presets;
+        state.agent_version = agent.as_ref().map(SettingsSnapshot::version);
+        state.presets_version = presets.as_ref().map(SettingsSnapshot::version);
+        state.view.agent = agent.map_or(Value::Null, |snapshot| snapshot.value);
+        state.view.presets = presets.map_or(Value::Null, |snapshot| snapshot.value);
         Ok(())
     }
     async fn credential_status(&self, provider: ProviderKind, slot: String) -> Result<()> {
@@ -516,26 +514,28 @@ impl SetupFeature {
         value: Value,
         extra: Option<(&str, Value)>,
     ) -> Result<()> {
-        let snapshot = {
+        let (version, mut replacement) = {
             let state = self.state.lock().expect("setup view poisoned");
             if state.view.ticket != ticket {
                 return Err("Setup changed; refresh before selecting a default".into());
             }
-            if namespace == "rsi.agent" {
-                state.agent.clone()
+            let (version, document) = if namespace == "rsi.agent" {
+                (&state.agent_version, &state.view.agent)
             } else {
-                state.presets.clone()
-            }
-            .ok_or("Setup has not been loaded")?
+                (&state.presets_version, &state.view.presets)
+            };
+            (
+                version.clone().ok_or("Setup has not been loaded")?,
+                document.clone(),
+            )
         };
-        let mut replacement = snapshot.value.clone();
         replacement[field] = value;
         if let Some((key, value)) = extra {
             replacement[key] = value;
         }
         let result = self
             .settings
-            .replace(namespace, &snapshot.version(), replacement)
+            .replace(namespace, &version, replacement)
             .await;
         let receipt_result = result
             .as_ref()
