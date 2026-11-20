@@ -51,7 +51,7 @@ export function WorkspaceHeader({record, name, children, ...props}: HTMLAttribut
       onKeyDown={event=>{if(overlay!=='menu'||!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;event.preventDefault();const buttons=Array.from(floating.current!.querySelectorAll('button'));const current=buttons.indexOf(document.activeElement as HTMLButtonElement);buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(current+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}}>
       {overlay==='info'?<><strong>{name}</strong><span>{record.coordinates.path}</span>{record.coordinates.location.kind==='ssh'&&<span>SSH · {record.coordinates.location.target}</span>}{created&&<span>Created {created.getFullYear()}-{String(created.getMonth()+1).padStart(2,'0')}-{String(created.getDate()).padStart(2,'0')} {String(created.getHours()).padStart(2,'0')}:{String(created.getMinutes()).padStart(2,'0')}</span>}</>:
       <><button type="button" role="menuitem" onClick={()=>choose('rename')}><IconEditOutlineRegular/>Rename</button><button type="button" role="menuitem" className={css.danger} onClick={()=>choose('delete')}><IconTrashOutlineRegular/>Delete workspace</button></>}
-    </div>,document.body)}
+    </div>,root.current?.closest('dialog') ?? document.body)}
     {edit&&record&&<WorkspaceDialog kind={edit} record={record} name={name} close={()=>setEdit(undefined)}/>}
   </>;
 }

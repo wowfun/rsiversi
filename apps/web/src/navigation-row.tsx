@@ -1,10 +1,17 @@
 import {conversationRecency} from "../navigation-presentation.js";
 import {messageClock} from '../message-metrics.js';
-import { IconEllipsisOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
+import { IconArchiveOffOutlineRegular, IconArchiveOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular,
+  IconEditOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
+import { useRef, useState, type SyntheticEvent } from "react";
+import { Menu } from "../vendor/dsh/dockkit-primitives/Menu.tsx";
+import { writeClipboard } from "../mounts.js";
+import { Modal, presentationIdentity } from "./presentation.tsx";
 import { Button } from "./button.tsx";
+import dialogCss from "./workspace-header.module.css";
+import css from "./navigation.module.css";
 import { ActivityLabel } from "./activity-label.tsx";
 import {
-  input,
+  input, selection, source, setNotice,
   useSelected,
   useView,
   run,
@@ -12,32 +19,56 @@ import {
   type AttentionEntry,
 } from "./bridge.ts";
 import type { useDeviceNavigation } from "./navigation-device.ts";
+export interface SessionMenuTarget {
+  entry: NavigationEntry;
+  opener: HTMLElement;
+  point: {x: number; y: number};
+  revision?: string;
+}
+
 export function ConversationRow({
   entry,
   title,
   activity,
+  workspaceLabel,
+  openSearchResult,
+  unarchive,
   device,
-  onRename,
-  mutate,
+  onMenu,
+  opener,
   now,
 }: {
   entry: NavigationEntry;
   title: string | undefined;
   activity: AttentionEntry["status"] | undefined;
+  workspaceLabel?: string;
+  openSearchResult?: (entry: NavigationEntry) => unknown;
+  unarchive?: () => Promise<unknown>;
   device: ReturnType<typeof useDeviceNavigation>;
   now: number;
-  onRename(entry: NavigationEntry): void;
-  mutate(
-    session: string,
-    metadata: NavigationEntry["metadata"],
-  ): Promise<unknown>;
+  onMenu(target?: SessionMenuTarget): void;
+  opener?: HTMLElement;
 }) {
+  const row = useRef<HTMLDivElement>(null);
+  const menuOpen = !!opener && !!row.current?.contains(opener);
   const selected=useSelected(value=>value);
   const active=useView(value=>value?.surfaces[selected]?.kind === "native" && value.surfaces[selected].session===entry.session);
-  const clock = messageClock(entry.last_activity_ms, now);
+  const clock = workspaceLabel ? undefined : messageClock(entry.last_activity_ms, now);
+  function showMenu(event: SyntheticEvent<HTMLElement>, point?: SessionMenuTarget["point"]) {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const opener = event.target instanceof Element ? event.target.closest("button") : null;
+    if (!opener) return;
+    opener.focus({preventScroll: true});
+    const rect = opener.getBoundingClientRect();
+    onMenu({entry, opener, point: point ?? {x: rect.left, y: rect.bottom}});
+  }
   return (
     <div
+      ref={row}
       className="session-row"
+      data-menu-open={menuOpen || undefined}
       data-testid="conversation-row"
       data-session-id={entry.session}
       key={entry.session}
@@ -54,7 +85,20 @@ export function ConversationRow({
         const id = event.dataTransfer.getData("application/rsi-session");
         if (id) void run(() => device.move(id, "before", entry.session));
       }}
+      onContextMenu={event => showMenu(event, event.clientX || event.clientY ? {x: event.clientX, y: event.clientY} : undefined)}
+      onKeyUp={event => {
+        if (event.key === "ContextMenu" && !event.nativeEvent.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) showMenu(event);
+      }}
       onKeyDown={(event) => {
+        if (event.key === "ContextMenu" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          // Windows opens its native menu on release. Keep focus on the opener until then.
+          event.preventDefault();
+          return;
+        }
+        if (event.key === "F10" && event.shiftKey && !event.repeat && !event.nativeEvent.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          showMenu(event);
+          return;
+        }
         if (
           event.altKey &&
           ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)
@@ -79,77 +123,97 @@ export function ConversationRow({
         className="nav-item"
         data-testid="conversation-open"
         aria-current={active||undefined}
+        aria-haspopup="menu"
         title={`${entry.path}\n${entry.session}`}
         onClick={() =>
-          run(() => input.open({ action: "open", session: entry.session }))
+          run(() => openSearchResult ? openSearchResult(entry) : input.open({ action: "open", session: entry.session }))
         }
       >
-        <strong>{title}</strong>
+        {workspaceLabel ? <span className={css.searchLabel}><strong>{title}</strong><small>{workspaceLabel}</small></span> : <strong>{title}</strong>}
         <ActivityLabel state={activity} iconOnly />
-        <time className="session-recency" dateTime={clock?.iso} title={clock?.title}>{conversationRecency(entry.last_activity_ms, now)}</time>
+        {!workspaceLabel && <time className="session-recency" dateTime={clock?.iso} title={clock?.title}>{conversationRecency(entry.last_activity_ms, now)}</time>}
       </button>
-      <details className="session-options">
-        <summary aria-label={`Options for ${title}`}>
-          <IconEllipsisOutlineRegular />
-        </summary>
-        <div className="session-menu-items">
-        <Button
-          size="sm"
-          onClick={() =>
-            run(() =>
-              mutate(entry.session, {
-                ...entry.metadata,
-                pinned: !entry.metadata.pinned,
-              }),
-            )
-          }
-          disabled={entry.metadata.archived}
-        >
-          {entry.metadata.pinned ? "Unpin" : "Pin"}
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => {
-            onRename(entry);
-          }}
-        >
-          Rename
-        </Button>
-        <Button
-          size="sm"
-          onClick={() =>
-            run(() =>
-              mutate(entry.session, {
-                ...entry.metadata,
-                pinned: false,
-                archived: !entry.metadata.archived,
-              }),
-            )
-          }
-        >
-          {entry.metadata.archived ? "Unarchive" : "Archive"}
-        </Button>
-        <Button
-          size="sm"
-          disabled={!device.ready}
-          onClick={() => run(() => device.move(entry.session, "first"))}
-        >
-          Move to first
-        </Button>
-        <Button
-          size="sm"
-          disabled={!device.ready}
-          onClick={() => run(() => device.move(entry.session, "last"))}
-        >
-          Move to last
-        </Button>
-        <p className="hint">
-          {entry.path}
-          <br />
-          {entry.session}
-        </p>
-        </div>
-      </details>
+      {unarchive ? <button type="button" className={css.sessionActions} aria-label="Unarchive session"
+        title="Unarchive session" onClick={() => void run(unarchive)}>
+        <IconArchiveOffOutlineRegular size={16}/>
+      </button> : <button type="button" className={css.sessionActions} aria-label={`Session actions for ${title ?? entry.session}`}
+        aria-haspopup="menu" aria-expanded={menuOpen} data-session-menu-trigger=""
+        onClick={event => opener === event.currentTarget ? onMenu() : showMenu(event)}>
+        <IconEllipsisOutlineRegular size={16}/>
+      </button>}
     </div>
   );
+}
+
+export function SessionMenu({target, device, close, rename, mutate}: {
+  target: SessionMenuTarget;
+  device: ReturnType<typeof useDeviceNavigation>;
+  close(): void;
+  rename(): void;
+  mutate(metadata: NavigationEntry["metadata"]): Promise<unknown>;
+}) {
+  const {entry, opener, point} = target;
+  const {metadata, session} = entry;
+  async function toggleArchive() {
+    const owner = presentationIdentity.getSnapshot();
+    const pane = selection.getSnapshot();
+    const idleGeneration = () => {
+      const surface = source.getSnapshot()?.surfaces[pane];
+      return surface?.kind === "native" && surface.session === session && !surface.active ? surface.generation : undefined;
+    };
+    const generation = !metadata.archived && idleGeneration();
+    await mutate({...metadata, pinned: false, archived: !metadata.archived});
+    if (generation && owner === presentationIdentity.getSnapshot() && pane === selection.getSnapshot() && generation === idleGeneration()) {
+      await input.open({action: "new_conversation"});
+    }
+  }
+  const select = (id: string) => {
+    close();
+    switch (id) {
+      case "rename":
+        opener.focus({preventScroll: true});
+        rename();
+        break;
+      case "pin": void run(() => mutate({...metadata, pinned: !metadata.pinned})); break;
+      case "archive": void run(toggleArchive); break;
+      case "copy": void run(async () => { await writeClipboard(session); setNotice("Session ID copied"); }); break;
+      case "first": case "last": void run(() => device.move(session, id)); break;
+    }
+  };
+  return <Menu open anchor={null} portal={opener.closest('dialog') ?? true} autoFocus contextual returnFocus={() => opener} anchorPoint={point}
+    isExternalTrigger={node => node instanceof Element && !!node.closest("[data-session-menu-trigger]")}
+    items={[
+      ...(metadata.archived ? [] : [{id: "pin", label: metadata.pinned ? "Unpin session" : "Pin session", icon: <IconPinOutlineRegular/>}]),
+      {id: "rename", label: "Rename", icon: <IconEditOutlineRegular/>},
+      {id: "first", label: "Move to first", disabled: !device.ready},
+      {id: "last", label: "Move to last", disabled: !device.ready},
+      {type: "separator", id: "copy-separator"},
+      {id: "copy", label: "Copy Session ID", icon: <IconCopyOutlineRegular/>},
+    ]}
+    footer={[{id: "archive", label: metadata.archived ? "Unarchive session" : "Archive session",
+      icon: metadata.archived ? <IconArchiveOffOutlineRegular/> : <IconArchiveOutlineRegular/>}]}
+    onClose={close} onSelect={select}/>;
+}
+
+export function RenameSession({title, close, save}: {title: string; close(): void; save(value: string): Promise<unknown>}) {
+  const [value, setValue] = useState(title), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const composing = useRef(false);
+  const dismiss = () => { if (!busy) close(); };
+  return <Modal label="Rename session" className={dialogCss.dialog} close={dismiss} initialFocus="input">
+    <form aria-busy={busy} onSubmit={async event => {
+      event.preventDefault();
+      if (busy) return;
+      setBusy(true);
+      try { await save(value.trim()); close(); }
+      catch (cause) { setBusy(false); setError(cause instanceof Error ? cause.message : String(cause)); }
+    }}>
+      <header><h2>Rename session</h2><button type="button" aria-label="Close rename session" onClick={dismiss} disabled={busy}><IconCloseOutlineRegular/></button></header>
+      <input aria-label="Session name" maxLength={256} value={value} disabled={busy}
+        onFocus={event => event.target.select()} onChange={event => {setValue(event.target.value); setError("");}}
+        onCompositionStart={() => {composing.current = true;}} onCompositionEnd={() => {composing.current = false;}}
+        onKeyDown={event => {if (event.key === "Enter" && (event.nativeEvent.isComposing || composing.current)) event.preventDefault();}}/>
+      {error && <p role="alert" className={dialogCss.danger}>{error}</p>}
+      <footer><Button variant="outline" disabled={busy} onClick={dismiss}>Cancel</Button><Button variant="primary" type="submit" disabled={busy}>Rename</Button></footer>
+    </form>
+  </Modal>;
 }

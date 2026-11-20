@@ -11,12 +11,13 @@ type Position='before'|'after'|'first'|'last'|'previous'|'next'
 const useIdentity=bindSnapshotSelector(presentationIdentity)
 const scope='sessions:all'
 const navigationLane=new NavigationCommandLane()
+export function recentFirst(a:{last_activity_ms:string;session:string},b:{last_activity_ms:string;session:string}) {
+  const left=BigInt(a.last_activity_ms),right=BigInt(b.last_activity_ms)
+  return left===right?(a.session<b.session?1:a.session>b.session?-1:0):left>right?-1:1
+}
 function members(order:ManualOrder) {
   if(order.seed.membership.kind!=='available')throw new Error('Manual ordering is paused: complete membership exceeds 1024 sessions or 128 KiB.')
-  return [...order.seed.membership.members].sort((a,b)=>{
-    const left=BigInt(a.last_activity_ms),right=BigInt(b.last_activity_ms)
-    return left===right?(a.session<b.session?1:-1):left>right?-1:1
-  }).map(member=>({id:member.session,partition:`${member.group}:${member.pinned}:${member.archived}`}))
+  return [...order.seed.membership.members].sort(recentFirst).map(member=>({id:member.session,partition:`${member.group}:${member.pinned}:${member.archived}`}))
 }
 function waitSeed(previous?:string):Promise<ManualOrder> {
   return new Promise((resolve,reject)=>{

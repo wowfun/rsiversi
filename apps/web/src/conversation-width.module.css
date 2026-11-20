@@ -2,12 +2,12 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 2;
+  z-index: 0;
 }
 .handle {
   position: absolute;
   inset-block: 0;
-  width: max(8px, calc((100% - var(--conversation-width)) / 2 - 48px));
+  width: min(10px, calc((100% - var(--conversation-width)) / 2 - 48px));
   pointer-events: auto;
   touch-action: none;
   cursor: col-resize;
@@ -22,22 +22,29 @@
 .handle::after {
   content: '';
   position: absolute;
-  top: 40%;
-  height: 64px;
-  width: 3px;
-  background: var(--dsw-alias-border-l2);
+  inset-block: 0;
+  width: 2px;
+  background: linear-gradient(to bottom,
+    transparent calc(var(--handle-y, 50%) - 36px),
+    var(--dsw-alias-scrollbar-bg-l1) calc(var(--handle-y, 50%) - 8px),
+    var(--dsw-alias-scrollbar-bg-l1) calc(var(--handle-y, 50%) + 8px),
+    transparent calc(var(--handle-y, 50%) + 36px));
   border-radius: 2px;
   opacity: 0;
+  pointer-events: none;
 }
 .handle[data-side='left']::after {
-  right: 6px;
+  right: 4px;
 }
 .handle[data-side='right']::after {
-  left: 6px;
+  left: 4px;
 }
-.handle:hover::after,
+.handle:active::after,
 .handle:focus-visible::after {
   opacity: 1;
+}
+@media (hover: hover) {
+  .handle:hover::after { opacity: 1; }
 }
 .handle:focus-visible {
   outline: 2px solid var(--teal);

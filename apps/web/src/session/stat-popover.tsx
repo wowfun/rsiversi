@@ -3,8 +3,9 @@ import {createPortal} from 'react-dom';
 import {statPosition} from '../../stat-position.js';
 import css from './metrics.module.css';
 
-export function StatPopover({label, name, icon, headline, children, compact = false}: {
+export function StatPopover({label, accessibleLabel, name, icon, headline, children, compact = false}: {
   label: ReactNode;
+  accessibleLabel?: string;
   name: string;
   icon?: ReactNode;
   headline?: ReactNode;
@@ -53,12 +54,12 @@ export function StatPopover({label, name, icon, headline, children, compact = fa
     };
   }, [open]);
   return <>
-    <button ref={trigger} type="button" className={`${css.pill}${compact ? ` ${css.contextPill}` : ''}`} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(value => !value)}>
+    <button ref={trigger} type="button" className={`${css.pill}${compact ? ` ${css.contextPill}` : ''}`} aria-label={accessibleLabel} title={accessibleLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(value => !value)}>
       {icon}<span className={css.label}>{label}</span>
     </button>
     {open && createPortal(<div ref={panel} id={id} role="dialog" aria-label={name} tabIndex={-1} className={`${css.panel}${compact ? ` ${css.context}` : ''}`}>
-      <div className={css.title}><span>{icon}{name}</span>{headline != null && <strong>{headline}</strong>}</div>
-      <div className={css.rule}/>
+      {!compact && <><div className={css.title}><span>{icon}{name}</span>{headline != null && <strong>{headline}</strong>}</div>
+      <div className={css.rule}/></>}
       {children}
     </div>, document.body)}
   </>;

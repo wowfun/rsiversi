@@ -1,5 +1,21 @@
 # Document persistence
 
+Reloading a Web tab reopens its primary conversation after the same endpoint and
+principal authenticate. The browser history entry holds the Session ID and its
+identity namespace. It is updated when the attachment changes and cleared when
+the user returns to a new conversation or disconnects. The Service checks
+access on every reopen. A fresh tab starts at the new conversation surface.
+The selected Chat or Trajectory view belongs to the authenticated conversation.
+The document stores one device-local preference for each Session using
+Trajectory. Selecting Chat removes the preference.
+
+Unsubmitted ordinary question answers and the active question survive reopening
+the conversation on the same browser. Progress belongs to the endpoint,
+principal, attached Session, owning turn and request. A complete pending
+observation removes progress for settled requests. Suspended or unopened
+observations retain it. Untouched questions create no record. The question
+remains answerable when the browser cannot retain its progress.
+
 Composer access choices are bounded device preferences, keyed by connection
 namespace and Session, with at most 128 entries. They contain only a sandbox mode;
 eviction restores that Session's frozen default. Storage errors are reported and
@@ -8,13 +24,15 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 8 namespaces composer records by endpoint, real principal
-(`local` or authenticated DeviceId), stable surface key and SessionId. Schema 8
-adds a command's optional consumed input span to the pending envelope. Its database
-version fences schema-7 writers, whose validator cannot understand that envelope;
-after version change their old-version reopen fails. Schema 7 receives a
-transactional record-version upgrade; its text, captures and pending identities
-are retained. Other schemas are refused without rewriting
+IndexedDB schema 10 namespaces composer records by endpoint, real principal
+(`local` or authenticated DeviceId), stable surface key and SessionId. The first
+three components of that primary key select a pane's saved drafts in key order.
+The primary key alone serves listing and single-record lookup. Its endpoint and
+device IDs use their 16 bytes; a zero-length principal selects local access.
+The value stores the draft content once and takes its scope from the key.
+Upgrading schema 7, 8 or 9
+preserves editor text, captures, pending identities and opaque receipts in one
+transaction, and fences older writers. Other schemas are refused without rewriting
 their records, ledgers or version. Refusal explains that the saved drafts remain on this device;
 validation failures during asynchronous upgrade reads retain their specific reason
 and abort the whole upgrade, including earlier cursor updates. Explicit discard
@@ -39,8 +57,11 @@ and edit revision. The same panel exposes the existing confirmed site-wide disca
 for quota recovery across namespaces, without revealing another principal's input.
 The current editor record also retains at most four frozen conversation
 references, charged to editable-text quota by their encoded descriptor size.
-Captured descriptors keep their original target Header binding;
-moving a Fresh draft to a different Header requires removing its references and
+Captured descriptors keep their original target Header binding.
+An explicit preset change on the same unpublished Session rebinds saved text
+and images after the Host confirms its new Header. Pending submissions and
+reference captures retain their original bindings until settled or released.
+Moving a Fresh draft to a different Header requires removing its references and
 explicitly capturing them again. Capture failure, preview and removal preserve
 the text editor and focus. Submission freezes text, images and references together;
 retry uses the same opaque request and never captures again. Attachment rows use
@@ -93,7 +114,7 @@ and release obligations are empty. Preview-only captures remain owned by their p
 Composer records live in IndexedDB under endpoint, authenticated principal, surface and
 Session identity. Each record has a random incarnation, independent editable and
 pending revisions, exact Header fingerprint, and optional Fresh creation intent.
-An ordinary welcome draft requests the default preset. An independent fork draft
+An ordinary welcome draft requests its staged preset or the configured default. An independent fork draft
 retains the selected preset, source Session, completed Turn and history selection
 (all, none, or a positive number of recent Turns). Moving a never-submitted draft
 may change its new Session ID, but must preserve this creation intent; the Session
@@ -101,7 +122,9 @@ service reauthorizes the source when recreating it.
 All namespaces share the fixed origin allowance defined above. Each record permits
 1 MiB text, eight canonical Media references and one unresolved submission.
 No image bytes, object URLs or credentials are persisted. Counters and records
-change in one transaction. Nonempty or pending records are never evicted.
+change in one transaction. Validation supplies the byte counts used for quota
+accounting. The transaction edits IndexedDB's private read copy and retains the
+previous capture owners until retirement is computed. Nonempty or pending records are never evicted.
 Unresolved requests continue consuming these limits even if their Session becomes
 unavailable. Enough retained requests can exhaust the pane's quota and block new
 submissions across every namespace in that origin. Individual uncertain requests
@@ -126,9 +149,10 @@ per editor, so checking a keystroke does not encode every other draft again.
 Rust prepares a full typed message or command invocation, including its original
 identity, Session and Header fingerprint, before any mutation. The document keeps
 that Rust JSON string opaque (including u64 revisions and argument member order).
-It persists `prepared`, then CAS-transitions to `dispatching` and waits for the
-transaction's completion before posting the execution call. Only the transition
-winner may initially dispatch. Reloaded prepared input may explicitly execute or
+The first send records the envelope, its `dispatching` phase and the conservative
+dispatch marker in one CAS transaction. Its winner waits for commit before
+posting the execution call. A failed commit leaves the editor available.
+Reloaded prepared input may explicitly execute with a fresh CAS claim or
 cancel; dispatching or unknown input first queries its original identity. An
 explicit message retry can resend the exact envelope only after authoritative
 NotFound. Commands remain query-only after dispatch, including absent receipts.
@@ -139,12 +163,18 @@ A detached no-argument command preserves the editor. A slash-triggered command
 can carry a bounded consume span; successful settlement removes that span only
 when its captured edit revision still matches, including after reload.
 Failed receipt persistence leaves pending input blocked, never allocating a new ID.
+Rechecking an already unknown or definitively unadmitted result reads the saved
+incarnation, pending revision and frozen request. An unchanged outcome keeps the
+same revision and performs no write. The check returns the latest editor text
+and detects another tab's settlement. Frozen request bodies compare as exact
+strings, including sequence numbers outside JavaScript's safe integer range.
 Completed receipts also arrive as opaque Rust JSON strings and are stored verbatim;
 the document never decodes their sequence numbers through JavaScript numbers.
 The stored `everDispatched` marker is conservative: it records that a dispatch
 transition has ever begun, including attempts later proved not admitted. It is
 not proof that a request reached the service. Once set, cancelling a prepared
 request does not restore eligibility to recreate an expired Fresh Session.
+The first dispatch retires the Fresh creation parameters in the same transaction.
 
 Restore drafts lists only the current authenticated namespace. Existing Sessions
 must reopen with the same Header. A Fresh record can also reattach while its
@@ -166,30 +196,32 @@ conversations with a previous write failure. Surface close fences editing while
 saving and restores input admission on failure. Ordinary submission saves only
 its selected editor. Unavailable draft storage reports that diagnosis consistently.
 
-Reference descriptors use the exact envelope-2 source/capture contract. Draft schema 8 retains schema 7 reference and receipt semantics; only that known
-predecessor can be upgraded. Unsupported older formats fail without changing
-rows or database version. Unsupported reference metadata
+Reference descriptors use the exact envelope-2 source/capture contract. Unsupported reference metadata
 is never translated into a new selection or silently removed from an uncertain
 submission.
 Changing History's query or source filters clears the displayed matches and their
 pagination actions. Changing a source filter also drops discovery continuation;
 pagination cannot silently reuse a previous query or workspace.
 
-Device presentation uses IndexedDB `rsi.presentation` schema 3, separately scoped
+Device presentation uses IndexedDB `rsi.presentation` schema 6, separately scoped
 by endpoint and authenticated principal. Three object stores have independent
 origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
 128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
 Record wrappers count toward each budget. A semantic intent reads the latest
 revision and applies in the same read-write transaction. Writes preserve
 unrelated records without rewriting them. Bucket accounting validates every
-record's envelope and byte size; full content validation and Dock history replay
-occur when that record is read or changed. Unread records confer no authority.
-Each intent validates the freshly read history once. Its internally generated
-result crosses the incremental state and record-budget checks without replaying
-that history again. Independent `boundedRecords` inputs still receive full
-content validation. LRU ordering is computed only when a write needs eviction.
-An unchanged Dock intent still validates the selected document and bucket bounds,
-but preserves its revision and LRU position without a write or notification.
+record's envelope and byte size. The selected record's content is validated
+on read or mutation. Internally generated Dock transitions check the resulting
+state and storage budget. LRU ordering is computed only when a write needs eviction.
+Session Dock primary keys store the endpoint and device identity as their 16 bytes,
+an empty principal for local access, and the exact scope. A Web-generated Session
+scope stores the 16 bytes after its fixed `dock:web-` prefix. All other scopes
+retain their original strings. Upgrading rekeys each
+existing authenticated or local Dock in the same transaction, retaining its
+payload, revision and LRU position. Quota accounting uses the logical key.
+An unchanged Dock intent or a patch that requests already-selected shell or
+navigation settings preserves the record revision and LRU position. Incoming
+records still undergo the normal content and bucket checks.
 Malformed selected content fails closed. Layout patches preserve
 unrelated fields; expansion toggles preserve unrelated groups. Order moves use
 complete membership and exact coordinate/pin/archive partitions; previous, next,
@@ -201,6 +233,8 @@ than silently discarding positions; Updated mode explicitly resets the order.
 Reading never writes or evicts. BroadcastChannel messages
 only invalidate reads, and focus always rereads storage. Only committed values
 are reported as saved; aborts retain the prior durable revision and show a notice.
+The editing Dock applies the layout returned by its transaction. Other Dock
+windows reread their own records when the commit notification arrives.
 An invalid layout falls back locally without opening or changing drafts. Explicit
 Reset layout replaces only the selected principal's workbench record in a write
 transaction, without validating its old value or revision; unrelated records still
@@ -213,24 +247,34 @@ and show a reload notice. A blocked open exposes Retry after other windows close
 Neither
 presentation records nor channel messages contain credentials, history or input.
 
-The device layout record is version 4: navigation is expanded, rail or hidden;
-widths clamp to 264 to 420 px (default 280) and the rail is 56 px. Below 1024 px,
+The schema-3 upgrade removes the workbench resource-width field. Other layout
+preferences, panel documents, revisions and LRU positions are retained.
+The version 5 device layout records whether navigation is expanded, a rail or hidden.
+Expanded widths clamp to 264 to 420 px (default 280) and the rail is 56 px. Below 1024 px,
 automatic rail presentation does not overwrite the stored preference; mobile
-uses a 280 px overlay. Resources start closed; their desktop width is a viewport
-fraction, default 45%, clamped by 300 px, 70% and a 400 px conversation minimum.
-Resize controls track viewport changes before applying keyboard or pointer deltas.
+uses a 280 px overlay. Resources start closed. On first opening, the document
+chooses 45% of the viewport as its preferred width in CSS pixels. The document
+retains that width across window resizes and panel toggles. Reload samples a new
+initial width. The visible column respects the 300 px minimum, 70% maximum and
+400 px conversation minimum. Resource width changes require no storage writes.
 Below 768 px resources use fullscreen without changing the saved desktop mode.
 Conversation width is null (automatic) or a safe integer of at least 640 CSS px.
-Automatic width clamps 64% of the conversation column to 680–920px. Display width
-is limited to the available column; viewport changes never rewrite the saved
+Automatic width clamps 64% of the conversation column to 680–880px. A saved
+width reserves 176px for the two gutters where space permits. On a narrow
+screen the transcript fits the available column. Viewport changes never rewrite the saved
 preferred width. The composer allows 32px more than the transcript. Pointer and
-keyboard handles share the same bounds; reset returns to automatic width.
+keyboard handles share the same bounds. Dragging previews at most once per
+paint and commits on release. The 10px handles pass vertical wheel input to
+the transcript. Reset returns to automatic width.
 Disconnect remains reachable through the command palette at every supported viewport width.
 When the conversation column is at most 560 px wide, its tabs move into the
 conversation menu so the global controls and conversation options remain distinct.
 The compact menu also closes the selected additional conversation surface.
 The layout owns the four detail modes and at most 16 recently used Workspace
-expansion exceptions. Layout records retain the 32 KiB, 64-record, 2 MiB limits and
+expansion choices. The first visit to a conversation reveals its workspace and
+remembers the open group across archive filters and reloads. An existing choice,
+including a collapse committed by another window, takes precedence over this
+default. Layout records retain the 32 KiB, 64-record, 2 MiB limits and
 never share a database or transaction with drafts.
 
 Queue `rejected` settlements retire only the saved queue intent, without inventing
@@ -249,11 +293,24 @@ the order it cleared, including when another window made that choice.
 
 Session dock records share the layouts bucket, separately keyed by Session and
 endpoint/principal. Semantic intents apply to the latest record in one transaction.
-The adapter enforces two horizontal panes, 20 to 80% split, 16 tabs, four floats and
-at most 64 undo entries within the record budget. Runtime view IDs, references and
-terminal attachments never enter this record. Close/undo/reload resolve current
+The record stores the current layout and its ID counter. Each open Session dock
+keeps up to 64 undo entries in memory. Reloading restores the layout with a
+fresh undo history. A write from another window that changes the saved state
+also starts a fresh history before the next local edit. An unchanged reread
+preserves the live history. Focusing the already active pane or its selected
+tab leaves the revision and undo/redo history intact, including when a
+concurrent window selected it first. Selecting an open resource tab displays its
+content immediately. The transaction still selects it in the latest saved layout.
+If the save fails, the dock shows the committed selection unless the user has
+since selected another tab. Keyboard focus in a replaced tab strip returns to
+the attempted chip when it still exists. Older records supply their current layout and ID
+counter only. The adapter enforces two horizontal panes, 20 to 80% split, 16
+tabs and four floats. Runtime view IDs, references and terminal attachments
+never enter this record. Close/undo/reload resolve current
 resource coordinates; terminal restore only attaches read-only. A failed save
-leaves the committed layout intact and reports its failure.
+leaves the committed layout intact and reports its failure. A subsequent
+successful saved layout action clears the notice that was visible when it
+started. A different message and pending resource cleanup remain visible.
 Document resource opens carry a connection-local UUID and return an exact
 view/open-revision receipt or an unavailable result. Frames echo the UUID;
 neither reply ordering nor equal coordinates identify a pending tab. Duplicate

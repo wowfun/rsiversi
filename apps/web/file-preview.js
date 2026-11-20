@@ -1,6 +1,7 @@
 import { mount as mountStandard } from './standard.js';
 import { boundedImage, imageBudget, maximumImagePixels } from './image-bounds.js';
-import {highlightCode,colorToken} from './code-highlight.js';
+import {colorToken} from './code-highlight.js';
+import {highlights} from './src/runtime/highlight-queue.js';
 
 const maximum = 32 * 1024 * 1024;
 let retained = 0;
@@ -8,22 +9,25 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 const aliases = { rs:'rust',ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',py:'python',json:'json',yaml:'yaml',yml:'yaml',toml:'toml',sh:'shellscript',bash:'shellscript',html:'html',htm:'html',css:'css' };
 function node(tag, cls, text) { const item=document.createElement(tag); if(cls)item.className=cls;if(text!==undefined)item.textContent=text;return item; }
 function language(label) { const suffix=label.toLowerCase().split('.').pop();return aliases[suffix]??suffix; }
-function code(text, lang, numbered=true) {
+function code(text, lang, numbered=true, signal) {
   const pre=node('pre','file-code'), content=node('code');pre.append(content);pre.dataset.language=lang;
-  // Very long lines and large documents remain inspectable without synchronous regex work.
-  const tokens=highlightCode(text,lang);
-  const lines=tokens??text.split('\n').map(line=>[{content:line}]);
+  const lines=text.split('\n');
   if(lines.length>20000){content.textContent=text;return pre;}
+  const values=[];
   for(const [index,line] of lines.entries()) {
     const row=node('span','file-code-line');
     if(numbered){const number=node('span','file-line-number',String(index+1));number.setAttribute('aria-hidden','true');row.append(number);}
-    const value=node('span','file-code-content');
-    for(const token of line){const part=node('span','file-token',token.content);colorToken(part,token);value.append(part);}
+    const value=node('span','file-code-content',line);values.push(value);
     row.append(value);content.append(row);if(index+1<lines.length)content.append(document.createTextNode('\n'));
   }
+  const cancel=highlights.enqueue(text,lang,tokens=>{
+    if(!tokens||signal?.aborted)return;
+    tokens.forEach((line,index)=>values[index].replaceChildren(...line.map(token=>{const part=node('span','file-token',token.content);colorToken(part,token);return part;})));
+  });
+  signal?.addEventListener('abort',cancel,{once:true});
   return pre;
 }
-function markdown(source, assets) {
+function markdown(source, assets, signal) {
   const parsed=new DOMParser().parseFromString(source,'text/html');
   const allowed=new Set(['P','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','PRE','CODE','UL','OL','LI','STRONG','EM','DEL','S','A','IMG','HR','BR','TABLE','THEAD','TBODY','TR','TH','TD','INPUT']);
   let count=0;
@@ -32,7 +36,7 @@ function markdown(source, assets) {
     if(item.nodeType===Node.TEXT_NODE)return document.createTextNode(item.textContent);
     if(item.nodeType!==Node.ELEMENT_NODE)return document.createTextNode('');
     if(!allowed.has(item.tagName))return document.createTextNode(item.textContent);
-    if(item.tagName==='PRE'&&item.firstElementChild?.tagName==='CODE')return code(item.textContent,item.firstElementChild.className.replace(/^language-/,''),false);
+    if(item.tagName==='PRE'&&item.firstElementChild?.tagName==='CODE')return code(item.textContent,item.firstElementChild.className.replace(/^language-/,''),false,signal);
     const result=node(item.tagName.toLowerCase());
     if(item.tagName==='A') {const href=item.getAttribute('href')??'';if(/^https?:\/\//.test(href)){result.href=href;result.target='_blank';result.rel='noopener noreferrer';}else if(href.startsWith('#'))result.href=href;}
     if(item.tagName==='IMG') {const match=/^rsi-preview-resource:(\d+)(#.*)?$/.exec(item.getAttribute('src')??'');result.alt=item.getAttribute('alt')??'';if(match&&assets.has(`asset-${match[1]}`))result.src=assets.get(`asset-${match[1]}`)+(match[2]??'');else return node('span','file-resource-error',`[${result.alt||'Image unavailable'}]`);result.addEventListener('error',()=>result.replaceWith(node('span','file-resource-error',`[${result.alt||'Image unavailable'}]`)),{once:true});}
@@ -94,21 +98,38 @@ export async function mount(root,initial,host,signal) {
     if(path){const identity=node('details','file-path');identity.append(node('summary','','File path bytes'),node('code','',path.value));body.append(identity);}
     for(const message of data.diagnostics??[])body.append(node('p','file-resource-error',message));
     const content=node('div','file-preview-body');body.append(content);root.replaceChildren(body);
-    if(mode==='source'||data.kind==='code'){const value=code(decoder.decode(bytes.get('main')),language(data.label));value.classList.toggle('wrap',wrap);content.append(value);}
+    if(mode==='source'||data.kind==='code'){const value=code(decoder.decode(bytes.get('main')),language(data.label),true,events.signal);value.classList.toggle('wrap',wrap);content.append(value);}
     else if(data.kind==='markdown'){
       const images=new Map(),admitPixels=imageBudget();for(const item of data.sources.filter(item=>item.name.startsWith('asset-'))){
         try { if(!item.media_type.startsWith('image/'))throw new Error('Unsupported image type');images.set(item.name,blob(bytes.get(item.name),item.media_type,admitPixels)); }
         catch(error){content.append(node('p','file-resource-error',error.message));}
       }
-      content.append(markdown(decoder.decode(bytes.get('document')),images));
+      content.append(markdown(decoder.decode(bytes.get('document')),images,events.signal));
     }else if(data.kind==='image'){
       const prepared=boundedImage(bytes.get('main'),data.sources[0].media_type);
       const image=node('img','file-image');image.alt=data.label;image.src=objectUrl(prepared.bytes,data.sources[0].media_type);let scale;
       const intrinsicWidth=()=>prepared.intrinsic?.width??image.naturalWidth;
+      const displayedScale=()=>scale??image.getBoundingClientRect().width/intrinsicWidth();
       const size=node('span','hint');bar.append(size);
-      const resize=()=>{image.classList.toggle('fit',scale===undefined);image.style.width=scale===undefined?'':`${intrinsicWidth()*scale}px`;size.textContent=scale===undefined?'Fit':`${Math.round(scale*100)}%`;};
-      bar.append(button('Fit',()=>{scale=undefined;resize();}),button('100%',()=>{scale=1;resize();}),button('Zoom in',()=>{scale=Math.min(8,(scale??Math.min(1,content.clientWidth/intrinsicWidth()))*1.25);resize();}),button('Zoom out',()=>{scale=Math.max(.05,(scale??1)/1.25);resize();}));
-      image.addEventListener('load',()=>{if(image.naturalWidth*image.naturalHeight>maximumImagePixels){image.remove();content.append(node('p','source-error','Image exceeds the pixel limit'));}else resize();},{once:true});image.addEventListener('error',()=>{image.remove();content.append(node('p','source-error','Image could not be decoded'));},{once:true});image.classList.add('fit');content.append(image);
+      function setScale(next){
+        scale=next;
+        image.classList.toggle('fit',scale===undefined);
+        image.style.width=scale===undefined?'':`${intrinsicWidth()*scale}px`;
+        size.textContent=scale===undefined?'Fit':`${Math.round(scale*100)}%`;
+        updateControls();
+      }
+      const zoomIn=button('Zoom in',()=>setScale(Math.min(8,(Math.floor(displayedScale()*4)+1)/4)));
+      const zoomOut=button('Zoom out',()=>setScale(Math.max(.05,(Math.ceil(displayedScale()*4)-1)/4)));
+      function updateControls(){
+        const zoom=displayedScale();
+        zoomIn.disabled=!(zoom>0&&zoom<8);
+        zoomOut.disabled=!(zoom>.05);
+      }
+      bar.append(button('Fit',()=>setScale(undefined)),button('100%',()=>setScale(1)),zoomIn,zoomOut);
+      const observer=new ResizeObserver(updateControls);
+      observer.observe(image);
+      events.signal.addEventListener('abort',()=>observer.disconnect(),{once:true});
+      image.addEventListener('load',()=>{if(image.naturalWidth*image.naturalHeight>maximumImagePixels){image.remove();content.append(node('p','source-error','Image exceeds the pixel limit'));}else setScale(undefined);},{once:true});image.addEventListener('error',()=>{image.remove();content.append(node('p','source-error','Image could not be decoded'));},{once:true});image.classList.add('fit');content.append(image);
     }else if(data.kind==='html')showFrame(content,data);
   }
   async function update(snapshot) {

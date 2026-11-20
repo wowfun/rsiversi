@@ -21,6 +21,9 @@ export function createSettingsDraft(initial, command) {
       return () => listeners.delete(listener);
     },
     getSnapshot: () => revision,
+    get dirty() {
+      return dirty;
+    },
     get conflict() {
       return version(draft.current) !== base;
     },
@@ -80,7 +83,7 @@ export function createSettingsDraft(initial, command) {
         if (!retired) changed();
       }
     },
-    async save() {
+    async save({restoreOnFailure = false} = {}) {
       if (retired || !draft.canSave) return;
       const ticket = draft.current.ticket,
         text = draft.fields.json();
@@ -94,7 +97,10 @@ export function createSettingsDraft(initial, command) {
         awaiting = ticket;
         if (draft.current.ticket !== ticket) draw(draft.current);
       } catch (error) {
-        if (!retired) draft.message = String(error.message ?? error);
+        if (!retired) {
+          if (restoreOnFailure) draw(draft.current);
+          draft.message = String(error.message ?? error);
+        }
       } finally {
         draft.saving = false;
         if (!retired) changed();

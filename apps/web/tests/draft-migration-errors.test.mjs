@@ -23,6 +23,7 @@ test('asynchronous composer upgrade validation preserves the reason and rolls ba
   const store=new DraftStore(undefined,'a'.repeat(32),'local');
   const first={...store.blank('a','session','b'.repeat(64)),version:7};
   const invalid={...store.blank('z','session','b'.repeat(64)),version:7,text:123};
+  first.scope=first.key.slice(0,3);invalid.scope=invalid.key.slice(0,3);
   const db=await database('rsi.composer',7,db=>{
     const records=db.createObjectStore('drafts',{keyPath:'key'});records.createIndex('scope','scope');records.put(first);records.put(invalid);db.createObjectStore('usage');
   });db.close();

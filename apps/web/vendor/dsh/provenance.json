@@ -1,16 +1,22 @@
 {
   "repository": "https://github.com/deepseek-ai/deepseek-harness",
   "changes": [
-    "All source files use one immutable DSH revision; import aliases target the selected local closure.",
+    "Source revisions are pinned per file. Import aliases target the selected local closure.",
     "ScopedStandardSourceBinding.ctx is an opaque RSI object instead of a Cordis Context.",
     "Dockkit keeps upstream geometry and gestures; imports use its local primitive closure. exports.ts is an RSI import adapter.",
+    "Menu accepts an explicit portal container so navigation actions opened in a native modal stay in its interactive layer.",
     "Product SVG artwork and icon components are unchanged. The RSI root mounts the static sprite; no DSH brand or font assets are imported.",
     "theme-base.css omits the unused brand font declaration; system text/code fonts and focus rules remain.",
     "dockkit-tokens.css retains the full platform token source, adapts selectors to RSI appearance, and repeats dark declarations for system appearance.",
     "slots/index.ts exposes the keyed Hook member overload already implemented by renderer/bindings.tsx.",
     "TabLayout releases scroll offsets when their pane is removed, after child strip cleanup; TabPanel documents this bounded lifetime.",
     "Split separators and floating move/resize controls expose host-owned accessible labels, bounded keyboard intents and visible focus boxes; undo uses the existing intent history.",
-    "Keyboard float resizing preserves the engine minimum even when End fills a viewport edge smaller than that minimum."
+    "Keyboard float resizing preserves the engine minimum even when End fills a viewport edge smaller than that minimum.",
+    "TrajectoryTimeline keeps the upstream gesture, accessibility and time projections. Its record, layout and English translation contracts include only the fields used by the timeline.",
+    "The Schedule catalog uses the upstream recommendation artwork, English recommendation copy and tile styling. The task click opens the local starting draft.",
+    "TextSearchIndex retains the upstream multilingual matching and ranking. The task manager builds it on the first search and releases it when cleared. Its closure omits localization helpers and cross-index preparation caches.",
+    "typography.css keeps the five font shorthands used by the imported presentation components.",
+    "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included."
   ],
   "files": [
     {
@@ -247,9 +253,9 @@
     {
       "path": "dockkit-primitives/MenuSurface.tsx",
       "source": "packages/client/ui-primitives/src/MenuSurface.tsx",
-      "source_sha256": "1e9b1f476305d4076b23b42fd08b63f9429b8e1f646c06ebc39d8ded5de7fdbf",
-      "adapted_sha256": "1e9b1f476305d4076b23b42fd08b63f9429b8e1f646c06ebc39d8ded5de7fdbf",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "5dbac6561f62440d168a94895ef7a4ed172e29d3ed1d3766bc358d718d5b3a3b",
+      "adapted_sha256": "5dbac6561f62440d168a94895ef7a4ed172e29d3ed1d3766bc358d718d5b3a3b",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
       "path": "dockkit-primitives/ShortcutKeys.tsx",
@@ -303,9 +309,9 @@
     {
       "path": "dockkit-primitives/MenuSurface.module.css",
       "source": "packages/client/ui-primitives/src/MenuSurface.module.css",
-      "source_sha256": "6230cfabdb5294b5cf174bc79842a9596f6aee6cd76a8cd5e183c67279bca9ae",
-      "adapted_sha256": "6230cfabdb5294b5cf174bc79842a9596f6aee6cd76a8cd5e183c67279bca9ae",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "9ec1f4b089ac40163475245661d27cc118a73238d3ce5e5fb5dbc4475a6f7589",
+      "adapted_sha256": "9ec1f4b089ac40163475245661d27cc118a73238d3ce5e5fb5dbc4475a6f7589",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
       "path": "dockkit-primitives/ShortcutKeys.module.css",
@@ -376,6 +382,230 @@
       "source_sha256": "803926ce39f5ea48b652021d06b6ca65c4acc7be2c5c4e19bd904ab1dabf0b67",
       "adapted_sha256": "74c927de0b2e3ec7a4c0f0c599243aeeabe080df9b60b7c13cc15f0c2dca8f9d",
       "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/TrajectoryTimeline.tsx",
+      "source": "packages/client/ui-trajectory/src/client/TrajectoryTimeline.tsx",
+      "source_sha256": "c062d06535a38498051346095bb713a292f45085e7de817a9400a92292c4eedc",
+      "adapted_sha256": "da2a1460daa7a6d6385d3d7abfa1c231434ed5b71b85ed84c8e920e92252e1e9",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/timeline.ts",
+      "source": "packages/client/ui-trajectory/src/client/timeline.ts",
+      "source_sha256": "ed2ebfd8b4233022115d9757d50d3af6cf399690ccc4fcf36f9f3edcf8e7b173",
+      "adapted_sha256": "ed2ebfd8b4233022115d9757d50d3af6cf399690ccc4fcf36f9f3edcf8e7b173",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/TrajectoryTimeline.module.css",
+      "source": "packages/client/ui-trajectory/src/client/TrajectoryTimeline.module.css",
+      "source_sha256": "47f9980daf23022d52541f6627bc8b4caf8e3d90bb7ab1d1b4e20bdd8f25afa8",
+      "adapted_sha256": "47f9980daf23022d52541f6627bc8b4caf8e3d90bb7ab1d1b4e20bdd8f25afa8",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/trajectory-record.ts",
+      "source": "packages/client/ui-trajectory/src/client/trajectory-record.ts",
+      "source_sha256": "24788a35c41318c4a3a529c82a6bf432687b55e845610388c9f5439413142662",
+      "adapted_sha256": "e9118a64c8ec8dd75d8a06ed7091ae6e9f3cffa55944e09decf5720744e6b4fc",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/layout.ts",
+      "source": "packages/client/ui-trajectory/src/client/layout.ts",
+      "source_sha256": "19e9823a98e18910d3f0cc884cb76448e5407511e54e0bcae903da85ac0b669c",
+      "adapted_sha256": "486c465a03bff2d44bf1ec5a39045de98dd0c182cb29aa8567d70de5abd79b1e",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "trajectory/locales.ts",
+      "source": "packages/client/ui-trajectory/src/client/locales.ts",
+      "source_sha256": "ef4e192dde680684b06157055cd2e17d63fee485ed3ef8ed2523fea1e81ae6e5",
+      "adapted_sha256": "c399fd46704ef1ba80ac25d8e256c3e3980fee4d44970dcb45e7c213249b0266",
+      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+    },
+    {
+      "path": "schedule/ScheduleEmptyIllustration.tsx",
+      "source": "packages/client/ui-schedule/src/client/ScheduleEmptyIllustration.tsx",
+      "source_sha256": "a3b81d6f56851a40a10281cc6f1deaab0f6bf39e35b6f4c0b35ca60da52d940a",
+      "adapted_sha256": "a3b81d6f56851a40a10281cc6f1deaab0f6bf39e35b6f4c0b35ca60da52d940a",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "schedule/RecommendationArtwork.tsx",
+      "source": "packages/client/ui-schedule/src/client/RecommendationArtwork.tsx",
+      "source_sha256": "65c0d48cbad4e2e13a37e3cf596ed44fa5214fb75e5737635fa6761c5d220d95",
+      "adapted_sha256": "65c0d48cbad4e2e13a37e3cf596ed44fa5214fb75e5737635fa6761c5d220d95",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "schedule/recommendations-en.ts",
+      "source": "packages/client/ui-schedule/src/client/recommendation-locales.ts",
+      "source_sha256": "5394a998320808afa843d7c786a00d794bc0fe0f39e541593a9fbb6d27d24b11",
+      "adapted_sha256": "46f8584fd03f54dbf9cacf1a236e92e75f495fb5fd6795d46b6395ac08c9dcb5",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "schedule/ScheduleRecommendations.tsx",
+      "source": "packages/client/ui-schedule/src/client/ScheduleRecommendations.tsx",
+      "source_sha256": "11689d0c7c6364f8924760817bda557bda16eb033c667fcdc9a72c5f4c08358b",
+      "adapted_sha256": "6ee59907302ed4c9484931942ecab7a0afed626acb81ddb9c4386d8691535867",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "schedule/recommendations.module.css",
+      "source": "packages/client/ui-schedule/src/client/TaskManagerPage.module.css",
+      "source_sha256": "b0b1ebbd60d5a6e2da6e1da7e527460cf99c119cd89be42a3601d87b2a93cb98",
+      "adapted_sha256": "23b2dbfa4aeae33c0b1c85efff7a541bc7b372fd8cf3f1c25357d78badfad9d8",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/Menu.tsx",
+      "source": "packages/client/ui-primitives/src/Menu.tsx",
+      "source_sha256": "cf8a9596aec14563bf1b6ca807d1e26c8b82feb90b5f7e740a5290d8fa422499",
+      "adapted_sha256": "10fa5e717477cd908d3a7788d57ad041b268f82d54be61d96fc9f771a6ee7f62",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/Menu.module.css",
+      "source": "packages/client/ui-primitives/src/Menu.module.css",
+      "source_sha256": "ac03c6b4777b1b86e0e2ae09591fd2fe3c0da5718c493b458f67cbc7990b7649",
+      "adapted_sha256": "ac03c6b4777b1b86e0e2ae09591fd2fe3c0da5718c493b458f67cbc7990b7649",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/MenuRow.tsx",
+      "source": "packages/client/ui-primitives/src/MenuRow.tsx",
+      "source_sha256": "2c6775cdc035efe81367eec9c843275bbf88e0be57631203583f891f12793168",
+      "adapted_sha256": "2c6775cdc035efe81367eec9c843275bbf88e0be57631203583f891f12793168",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/SubmenuPanel.tsx",
+      "source": "packages/client/ui-primitives/src/SubmenuPanel.tsx",
+      "source_sha256": "a464eae9a399df43c37f2983e3f45513508aa6afdd93ae9597bb308724b38d97",
+      "adapted_sha256": "a464eae9a399df43c37f2983e3f45513508aa6afdd93ae9597bb308724b38d97",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/useMenuSubmenu.ts",
+      "source": "packages/client/ui-primitives/src/useMenuSubmenu.ts",
+      "source_sha256": "fe95da7625e73191de1a852527363a60032be6fa05d9ec7192c1a3a969ce4f6e",
+      "adapted_sha256": "fe95da7625e73191de1a852527363a60032be6fa05d9ec7192c1a3a969ce4f6e",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/pointer-grace.ts",
+      "source": "packages/client/ui-primitives/src/pointer-grace.ts",
+      "source_sha256": "cba1529e052cf3ea09fd3851990219e2b80d61fa4b3d35da490f28ba9f9965c6",
+      "adapted_sha256": "cba1529e052cf3ea09fd3851990219e2b80d61fa4b3d35da490f28ba9f9965c6",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/menu-submenu-position.ts",
+      "source": "packages/client/ui-primitives/src/menu-submenu-position.ts",
+      "source_sha256": "d4dca858f8eba2f2a9ac1bc9ec6def2c865695d34465347defbbac57e73990b0",
+      "adapted_sha256": "d4dca858f8eba2f2a9ac1bc9ec6def2c865695d34465347defbbac57e73990b0",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/file-size.ts",
+      "source": "packages/client/ui-primitives/src/file-size.ts",
+      "source_sha256": "e79997913c1fd49602b56decab19e740edec869abe5c5d69d8b68e7b041aaa4d",
+      "adapted_sha256": "e79997913c1fd49602b56decab19e740edec869abe5c5d69d8b68e7b041aaa4d",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "text-search.ts",
+      "source": "packages/util/text-search/src/index.ts",
+      "source_sha256": "bad1375ced3e83aeb27e0417877409b88487e35d2fd2bef885696ccdc19a2c67",
+      "adapted_sha256": "253e2276fb6423741777b5b27a69163afd5a928b67e86c4696df8c459223986d",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/DropOverlay.tsx",
+      "source": "packages/client/ui-attachment/src/DropOverlay.tsx",
+      "source_sha256": "4911dcbd56263e5076564210519574c78dd2d58ce2122f8194c61909fb7b2e51",
+      "adapted_sha256": "4911dcbd56263e5076564210519574c78dd2d58ce2122f8194c61909fb7b2e51",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/DropOverlay.module.css",
+      "source": "packages/client/ui-attachment/src/DropOverlay.module.css",
+      "source_sha256": "cce5c2b38f9db422895d498ea652fad36276b6117a8e02d7b5dbe4960e000189",
+      "adapted_sha256": "cce5c2b38f9db422895d498ea652fad36276b6117a8e02d7b5dbe4960e000189",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "typography.css",
+      "source": "packages/client/ui-theme/src/styles/gradient-shadow-text.css",
+      "source_sha256": "b6e1e8387edbfa60ec03bb29aad7c01245c0adbd22229d5a6f2916caa7e7b427",
+      "adapted_sha256": "15a967b4a7f5869f2e54110e0808b20aa602f54c6608d85e861ebdfee7ae37cc",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "copy-tex.ts",
+      "source": "packages/client/ui-primitives/src/markdown/copy-tex.ts",
+      "source_sha256": "37176056a9ba00db5d5e1681dbb0022af9ddbd8ebaaab7d8bf7cf976ff34023b",
+      "adapted_sha256": "37176056a9ba00db5d5e1681dbb0022af9ddbd8ebaaab7d8bf7cf976ff34023b",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "control-row-layout.ts",
+      "source": "packages/client/ui-conversation/src/client/skeleton/control-row-layout.ts",
+      "source_sha256": "4d8e50b98ed790259f0c33e44fcc3406676369544a2fe75f1efb44401a4b87ed",
+      "adapted_sha256": "4d8e50b98ed790259f0c33e44fcc3406676369544a2fe75f1efb44401a4b87ed",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "guide/GuideBody.module.css",
+      "source": "packages/client/ui-sidebar-right/src/client/tabs/guide/GuideBody.module.css",
+      "source_sha256": "5fcc1d2f005ae1e2084a53f2d72962dcc7824af1f832671cfaecd334d5abafe6",
+      "adapted_sha256": "65bc6b11f9b02a54e508e77a7b2775dd89eb8b29d893991f9a0322f057f9f129",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "guide/GuideMoreIcon.tsx",
+      "source": "packages/client/ui-sidebar-right/src/client/tabs/guide/GuideMoreIcon.tsx",
+      "source_sha256": "f4baf56795f036a188d0b69414a9b33a84d51bff6834dca6031839ecd9f259f2",
+      "adapted_sha256": "f4baf56795f036a188d0b69414a9b33a84d51bff6834dca6031839ecd9f259f2",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "guide/Compass.tsx",
+      "source": "packages/client/ui-sidebar-right/src/client/tabs/guide/GuideTitle.tsx",
+      "source_sha256": "992010da5b0821eef21fb36bcee04ed8828714b64c2f10c4c0f9795cbc8c3e63",
+      "adapted_sha256": "41e13bca17ae3ca602efa667b30b2cb10100d76a11b0fccb5cc6f3efddb2bbc5",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "guide/Files.tsx",
+      "source": "packages/client/ui-primitives/src/guide-artwork.tsx",
+      "source_sha256": "819844fc5c0f7396b7d6c502d14e2e337dfe52a9943f1f7c6536c784b181ee0a",
+      "adapted_sha256": "76d0e94771f3118265e64613456d24faeeee0bcbc6cd4276056926b37797e87f",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "guide/Terminal.tsx",
+      "source": "packages/client/ui-primitives/src/plugin-artwork.tsx",
+      "source_sha256": "9620e9150ab8f849427fae2fd5ca5d62e319d0d69e932ef5e358b29859935e18",
+      "adapted_sha256": "d7e2a6d04d0fd188f29c076920566313461358fcfc8557ee5f83919487ec9031",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/Toast.tsx",
+      "source": "packages/client/ui-primitives/src/Toast.tsx",
+      "source_sha256": "85ed92693c910decadb38f095764bbdb3a1c6992b60bf63dedabdbebccd309b6",
+      "adapted_sha256": "85ed92693c910decadb38f095764bbdb3a1c6992b60bf63dedabdbebccd309b6",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/Toast.module.css",
+      "source": "packages/client/ui-primitives/src/Toast.module.css",
+      "source_sha256": "85e7e50f4d18d30751cbb64fd6d85554561a0982080d8ab57afebb848e8fe4e3",
+      "adapted_sha256": "85e7e50f4d18d30751cbb64fd6d85554561a0982080d8ab57afebb848e8fe4e3",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]
 }

@@ -61,7 +61,8 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
     const text = draft.text, serial = draft.serial, generation = pane.generation;
     const selection = draft === pane.starting && pane.input?.value === text
       ? [pane.input.selectionStart,pane.input.selectionEnd] : undefined;
-    await context.boundCall(connection)('command', JSON.stringify({action:'create', pane:pane.index, workspace:workspace.id}));
+    const preset = draft === pane.starting ? pane.stagedPreset : undefined;
+    await context.boundCall(connection)('command', JSON.stringify({action:'create', pane:pane.index, workspace:workspace.id, agent_preset_id:preset}));
     // A command response may precede its React frame/attachment commit.
     await new Promise((resolve, reject) => {
       let unsubscribe;
@@ -69,7 +70,7 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
       const check = () => {
         try { current(); }
         catch(error) { clearTimeout(timer); unsubscribe?.(); reject(error); return; }
-        if (pane.generation && pane.generation !== generation && pane.editor && pane.staged?.data?.creation?.workspace_id === workspace.id) { clearTimeout(timer); unsubscribe?.(); resolve(); }
+        if (pane.generation && pane.generation !== generation && pane.editor && pane.staged?.data?.creation?.workspace_id === workspace.id && (!preset || pane.staged.data.agent_preset === preset)) { clearTimeout(timer); unsubscribe?.(); resolve(); }
       };
       unsubscribe = pane.subscribe(check); check();
     });

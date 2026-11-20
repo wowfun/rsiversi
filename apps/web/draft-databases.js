@@ -1,5 +1,6 @@
 // Both draft formats share one document lifetime. Retired editors never reopen it.
 export const draftDatabaseNames = {composer:'rsi.composer',starting:'rsi.composer-starts'};
+export const questionProgressPrefix = 'rsi.questions.';
 const connections = new Map();
 let retired = false;
 export const draftStorageRetired = () => retired;
@@ -9,6 +10,14 @@ channel?.addEventListener('message', event => { if (event.data === 'retire') ret
 
 export function assertDraftStorageActive() {
   if (retired) throw new Error('Draft storage was reset or upgraded in another window. Reload before editing.');
+}
+
+export function removeQuestionDrafts(prefix, keep) {
+  if (typeof localStorage === 'undefined') return;
+  for (let i = localStorage.length - 1; i >= 0; --i) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(prefix) && !keep?.has(key)) localStorage.removeItem(key);
+  }
 }
 
 function retire() {
@@ -54,6 +63,7 @@ export async function discardDraftDatabases() {
   retire();
   channel?.postMessage('retire');
   await Promise.all([...connections.values()].map(opened => opened.then(db => db.close(), () => {})));
+  removeQuestionDrafts(questionProgressPrefix);
   const results = await Promise.allSettled(Object.values(draftDatabaseNames).map(name => new Promise((resolve, reject) => {
     const request = indexedDB.deleteDatabase(name);
     request.onsuccess = () => resolve();

@@ -8,9 +8,9 @@ export interface SettingsProjection {
 }
 export interface SettingsDraft {
   current: SettingsProjection; fields: SettingsFields; saving: boolean;
-  readonly disabled: boolean; readonly canSave: boolean; readonly reloadVisible: boolean;
+  readonly dirty: boolean; readonly disabled: boolean; readonly canSave: boolean; readonly reloadVisible: boolean;
   readonly awaiting: boolean; readonly error: string;
   subscribe(listener: () => void): () => void; getSnapshot(): number;
-  update(editor: SettingsProjection): void; readFailure(message: string): void; reload(): Promise<void>; save(): Promise<void>; browse(): Promise<void>; retire(): void;
+  update(editor: SettingsProjection): void; readFailure(message: string): void; reload(): Promise<void>; save(options?: {restoreOnFailure?: boolean}): Promise<void>; browse(): Promise<void>; retire(): void;
 }
 export function createSettingsDraft(initial: SettingsProjection, command: (value: Record<string, unknown>) => Promise<unknown>): SettingsDraft;

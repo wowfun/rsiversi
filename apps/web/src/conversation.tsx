@@ -1,12 +1,13 @@
 import css from "./conversation.module.css";
 import {conversationTitle} from '../conversation-title.js';
 import { SessionSurfaces } from "./session/surface.tsx";
-import { useState, useLayoutEffect } from "react";
+import { useState, useLayoutEffect, useSyncExternalStore } from "react";
 import { useLayout } from "./presentation.tsx";
 import { Button } from "./button.tsx";
-import { input, run, useView, useSelected } from "./bridge.ts";
+import { input, run, useView, useSelected, scheduleCatalog, catalogVisible } from "./bridge.ts";
 import { openTerminals } from "./resource-dock.tsx";
 export function Conversation() {
+  const catalogOpen = useSyncExternalStore(scheduleCatalog.subscribe, catalogVisible);
   const [column, setColumn] = useState<HTMLElement | null>(null);
   const surfaceKeys = useView((view) =>
     Object.keys(view?.surfaces ?? {}).join(","),
@@ -25,6 +26,7 @@ export function Conversation() {
   return (
     <section
       ref={setColumn}
+      hidden={catalogOpen}
       className={`workspace-main mode-${mode} ${css.scope}`}
       aria-label="Conversations"
     >
@@ -140,7 +142,7 @@ export function Conversation() {
         />
       </div>
       <div id="panes" className="panes">
-        <SessionSurfaces mode={mode} column={column} />
+        <SessionSurfaces mode={mode} column={column} catalogOpen={catalogOpen} />
       </div>
     </section>
   );

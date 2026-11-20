@@ -1,8 +1,8 @@
 const formatter = new Intl.DateTimeFormat('en', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
 const common = (a, b) => { let i=0; while(i<a.length && i<b.length && a[i]===b[i])i++; return i; };
 // One bounded view pass; duplicate rows from pinned/group pages share an identity.
-export function navigationPresentation(entries, observation) {
-  const titles=new Map(), attention=new Map(), times=new Map();
+export function navigationTitles(entries) {
+  const titles=new Map(), times=new Map();
   for(const entry of entries) {
     if(entry.metadata.title){titles.set(entry.session,entry.metadata.title);continue;}
     let ids=times.get(entry.created_at_ms);
@@ -19,11 +19,15 @@ export function navigationPresentation(entries, observation) {
       titles.set(id,`${stamp} · ${id.slice(0,width)}`);
     }
   }
+  return titles;
+}
+export function navigationAttention(observation) {
+  const attention=new Map();
   for(const row of observation?.entries??[]) {
     const {kind,id}=row.position.conversation;
     if(kind==='native')attention.set(id,row.status);
   }
-  return {titles,attention};
+  return attention;
 }
 export class GroupRestoration {
   pending=new Set();

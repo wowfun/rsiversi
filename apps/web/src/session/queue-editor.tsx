@@ -2,16 +2,31 @@ import css from "./surface.module.css";
 import { useLayoutEffect, useRef } from "react";
 import { useOwnedDialog } from "./use-owned-dialog.ts";
 import { run } from "../bridge.ts";
+import { fileSizeText } from "../../vendor/dsh/primitives/file-size.ts";
+
+type Attachment =
+  | { type: "file"; file: { name: string; bytes: number } }
+  | { type: "image" }
+  | { type: "reference"; reference: { preview: string } };
+
+function attachmentLabel(block: Attachment): string {
+  switch (block.type) {
+    case "file": return `${block.file.name} · ${fileSizeText(block.file.bytes)}`;
+    case "image": return "Attached image retained";
+    case "reference": return `Conversation reference retained: ${block.reference.preview}`;
+  }
+}
 
 export interface QueueEditorState {
   id: string;
+  inlineSlot?: string;
   restoreFocus(): void;
   editable: boolean;
   saving: boolean;
   status: string;
   blocks: {
     key: string;
-    value: { type: string; text?: string; reference?: { preview: string } };
+    value: { type: "text"; text: string } | Attachment;
   }[];
   edit(key: string, text: string): void;
   remove(key: string): void;
@@ -56,11 +71,7 @@ export function QueueEditor({ state }: { state: QueueEditorState }) {
                 />
               </label>
             ) : (
-              <p className="hint">
-                {value.type === "image"
-                  ? "Attached image retained"
-                  : `Conversation reference retained: ${value.reference?.preview}`}
-              </p>
+              <p className="hint">{attachmentLabel(value)}</p>
             )}
             {state.editable && (
               <button

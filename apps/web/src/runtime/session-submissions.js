@@ -50,6 +50,7 @@ export async function submit(pane, context, choice = "primary") {
     const editor = pane.editor,
       generation = pane.generation,
       current = context.connection;
+    let mode = "dispatch";
     if (!editor.record.pending) {
       if (!action)
         throw new Error(
@@ -59,41 +60,39 @@ export async function submit(pane, context, choice = "primary") {
       const references = pane.referenceState(editor);
       references.preparing = captured.references.map(reference => ({target: reference.metadata.target, snapshot: reference.snapshot}));
       try {
-      const prepared = JSON.parse(
-        await context.call(
-          "prepare_submission",
-          JSON.stringify({
-            pane: pane.index,
-            generation,
-            text: captured.text,
-            images: captured.images,
-            references: captured.references,
-            sandbox: action.id === 'steer' ? null : pane.composerView.access ?? null,
-            action_revision: displayed.revision,
-            action: action.id,
-          }),
-        ),
-      );
-      if (
-        context.connection !== current ||
-        current.closing ||
-        pane.editor !== editor
-      )
-        throw new Error(
-          "Conversation changed before request preparation completed",
+        const prepared = JSON.parse(
+          await context.call(
+            "prepare_submission",
+            JSON.stringify({
+              pane: pane.index,
+              generation,
+              text: captured.text,
+              images: captured.images,
+              references: captured.references,
+              sandbox: action.id === 'steer' ? null : pane.composerView.access ?? null,
+              action_revision: displayed.revision,
+              action: action.id,
+            }),
+          ),
         );
-      await editor.update(() => editor.store.freeze(captured, prepared));
+        if (
+          context.connection !== current ||
+          current.closing ||
+          pane.editor !== editor
+        )
+          throw new Error(
+            "Conversation changed before request preparation completed",
+          );
+        await editor.update(() => editor.store.startDispatch(captured, prepared));
       } finally {
         references.preparing = undefined;
         void pane.drainReferenceReleases(editor, generation).catch(() => {});
       }
+    } else if (editor.record.pending.phase === "prepared") {
+      await editor.update(record => editor.store.claimPrepared(record));
+    } else {
+      mode = editor.record.pending.kind === "command" ? "query" : "retry_message";
     }
-    const mode =
-      editor.record.pending.phase === "prepared"
-        ? "dispatch"
-        : editor.record.pending.kind !== "command"
-          ? "retry_message"
-          : "query";
     await pane.executePending(editor, generation, current, mode);
   } finally {
     pane.submitting = false;
@@ -110,6 +109,8 @@ export async function reconcile(pane, context, mode) {
   pane.renderComposer();
   try {
     await editor.flush();
+    if (mode === "dispatch")
+      await editor.update(record => editor.store.claimPrepared(record));
     await pane.executePending(editor, generation, current, mode);
   } finally {
     pane.submitting = false;
@@ -126,8 +127,6 @@ export async function executePending(
   mode,
 ) {
   if (!editor.record.pending) return;
-  if (mode === "dispatch")
-    await editor.update((record) => editor.store.begin(record));
   const expected = editor.record;
   let result;
   if (
@@ -158,6 +157,8 @@ export async function executePending(
     }
   }
   await editor.update(() => editor.store.settle(expected, result));
+  if (result.status === "complete" && pane.editor === editor && !editor.record.text)
+    pane.closeCompletions();
   if (result.notice) context.notify(result.notice);
   if (result.status !== "complete")
     throw new Error(
@@ -189,7 +190,7 @@ export async function submitQueue(pane, context, queue, generation) {
       current.closing
     )
       throw new Error("Conversation changed before saving the queue request");
-    await editor.update((record) => editor.store.freeze(record, prepared));
+    await editor.update((record) => editor.store.startDispatch(record, prepared));
     await pane.executePending(editor, generation, current, "dispatch");
   } finally {
     pane.submitting = false;
@@ -209,7 +210,8 @@ export async function upload(pane, context, files) {
     throw new Error(`A draft can hold at most ${limits.images} images`);
   if (files.some((file) => !file.size || file.size > limits.upload_bytes))
     throw new Error("Each image source must contain 1 byte to 16 MiB");
-  pane.uploading = true;
+  const batch = {editor, files, next:0};
+  pane.uploading = batch;
   pane.renderComposer();
   try {
     for (const file of files) {
@@ -227,11 +229,12 @@ export async function upload(pane, context, files) {
           [bytes],
         ),
       );
+      batch.next++;
       editor.edit(editor.text, [...editor.images, media]);
       await editor.flush();
     }
   } finally {
-    pane.uploading = false;
+    pane.uploading = undefined;
     pane.renderComposer();
   }
 }
@@ -255,7 +258,7 @@ export async function executeDocumentCommand(pane, context, name, input = '', co
     if (pane.editor !== editor || pane.generation !== generation || context.connection !== current || current.closing)
       throw new Error('Conversation changed before command preparation completed');
     // Keep the pre-preparation editRevision: typing during preparation must prevent consuming that captured span.
-    await editor.update(() => editor.store.freeze(captured, prepared, true, consume));
+    await editor.update(() => editor.store.startDispatch(captured, prepared, true, consume));
     await pane.executePending(editor, generation, current, 'dispatch');
   } finally {
     pane.submitting = false;

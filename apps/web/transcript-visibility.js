@@ -10,8 +10,15 @@ export class TranscriptVisibility {
   get ready() { return this.pending.size === 0; }
   update(entries, generation) {
     if (this.disposed) return;
+    if (!entries.length) {
+      if (this.observer) {
+        this.clear();
+        this.changed();
+      }
+      return;
+    }
     if (!this.observer || generation !== this.generation) {
-      this.observer?.disconnect(); this.records.clear(); this.visible.clear(); this.pending.clear();
+      this.clear();
       this.generation = generation;
       const observer = this.observe(changes => {
         if (this.observer !== observer) return;
@@ -44,7 +51,11 @@ export class TranscriptVisibility {
       .sort((a,b) => a.order-b.order).slice(-count).map(({key,entry}) => [key,entry]);
   }
   dispose() {
-    this.disposed = true; this.observer?.disconnect(); this.observer = undefined;
+    this.disposed = true;
+    this.clear();
+  }
+  clear() {
+    this.observer?.disconnect(); this.observer = undefined;
     this.records.clear(); this.visible.clear(); this.pending.clear();
   }
 }

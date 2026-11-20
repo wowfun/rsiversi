@@ -30,7 +30,7 @@ export function usageReadings(summary, capacity) {
     total: tokenTotal(usage),
     cache: usage?.input_tokens > 0 && usage.cache_read_tokens != null ? 100 * usage.cache_read_tokens / usage.input_tokens : undefined,
     speed: timing?.decode_ms > 0 ? 1000 * timing.decode_output_tokens / timing.decode_ms : undefined,
-    context: summary?.last_context && capacity > 0 ? 100 * summary.last_context.input_tokens / capacity : undefined,
+    context: summary?.last_context && capacity > 0 ? Math.min(100, Math.round(100 * summary.last_context.input_tokens / capacity)) : undefined,
   };
 }
 

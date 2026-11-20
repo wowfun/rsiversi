@@ -1,4 +1,4 @@
-import { ConversationRow } from "./navigation-row.tsx";
+import { ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
 import { WorkspaceNavigation } from "./navigation-workspaces.tsx";
 import {NavigationOptions, type ConversationFilter} from "./navigation-options.tsx";
 import { AttentionNavigation } from "./navigation-attention.tsx";
@@ -10,15 +10,22 @@ import {
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import css from "./navigation.module.css";
 import { useLayout } from "./presentation.tsx";
-import { useDeviceNavigation } from "./navigation-device.ts";
+import { recentFirst, useDeviceNavigation } from "./navigation-device.ts";
+import { TextSearchIndex } from "../vendor/dsh/text-search.ts";
+import {workspaceName} from "../workspace-name.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
-import { input, run, useView, type NavigationEntry } from "./bridge.ts";
+import { input, run, setNotice, useView, type NavigationEntry } from "./bridge.ts";
 import {
-  navigationPresentation,
+  navigationTitles, navigationAttention,
   GroupRestoration,
 } from "../navigation-presentation.js";
+
+function searchInput(value: string) {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 500).replace(/[\uD800-\uDBFF]$/, "");
+}
+
 export function Navigation() {
   const [now, setNow] = useState(Date.now);
   useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()), 60_000);return ()=>clearInterval(timer);}, []);
@@ -29,7 +36,7 @@ export function Navigation() {
       [
         ...new Set(
           Object.values(value?.surfaces ?? {})
-            .map((surface) => surface?.kind === "native" ? surface.workspace : undefined)
+            .map((surface) => surface?.kind === "native" ? surface.workspace.registration.status === 'registered' ? surface.workspace.registration.id : undefined : undefined)
             .filter(Boolean),
         ),
       ].sort(),
@@ -48,18 +55,14 @@ export function Navigation() {
   );
   const device = useDeviceNavigation(nav, workspaces, !completeWorkspaces);
   const restoring = useRef(new GroupRestoration());
+  const firstVisits = useMemo(() => (JSON.parse(selectedWorkspaces) as string[]).filter(id =>
+    workspaces.some(record => record.id === id) && !layout.workspaces.some(item => item.id === id)),
+    [selectedWorkspaces, workspaces, layout.workspaces]);
+  useEffect(() => { for (const id of firstVisits) expand(id); }, [firstVisits, expand]);
   const restoreKey = useMemo(() => {
-    const registered = new Set(workspaces.map((row) => row.id)),
-      collapsed = new Set(
-        layout.workspaces
-          .filter((item) => !item.expanded)
-          .map((item) => item.id),
-      );
-    const desired = new Set(
-      layout.workspaces.filter((item) => item.expanded).map((item) => item.id),
-    );
-    for (const id of JSON.parse(selectedWorkspaces) as string[])
-      if (registered.has(id) && !collapsed.has(id)) desired.add(id);
+    const registered = new Set(workspaces.map(row => row.id));
+    const desired = new Set(layout.workspaces.filter(item => item.expanded).map(item => item.id));
+    for (const id of firstVisits) desired.add(id);
     return JSON.stringify(
       [...desired]
         .filter(
@@ -67,9 +70,9 @@ export function Navigation() {
         )
         .sort(),
     );
-  }, [workspaces, layout.workspaces, selectedWorkspaces, nav?.groups]);
+  }, [workspaces, layout.workspaces, firstVisits, nav?.groups]);
   useEffect(() => {
-    if (!nav?.ticket) return;
+    if (!nav?.ticket || nav.filter.query) return;
     for (const id of JSON.parse(restoreKey) as string[]) {
       const workspace =
         id === "other" ? { kind: "unregistered" } : { kind: "registered", id };
@@ -82,59 +85,122 @@ export function Navigation() {
         ),
       );
     }
-  }, [restoreKey, nav?.ticket]);
+  }, [restoreKey, nav?.ticket, nav?.filter.query]);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState(""),
+  const [searchText, setSearchText] = useState(""),
     [mode, setMode] = useState<ConversationFilter>("active");
-  const [edit, setEdit] = useState<NavigationEntry>(),
-    [editRevision, setEditRevision] = useState<string>(),
-    [title, setTitle] = useState("");
+  const query = searchText.trim();
+  const searchRoot = useRef<HTMLFormElement>(null);
+  const submitSearch = useRef<() => void>();
+  const dispatchedQuery = useRef<string | undefined>("");
+  const [menu, setMenu] = useState<SessionMenuTarget>();
+  const [edit, setEdit] = useState<SessionMenuTarget>();
   const filter = {
     query,
     archived: mode === "all" ? null : mode === "archived",
     workspace: { kind: "all" },
   };
-  const search = (value = filter) =>
+  const completeList = nav?.ticket && nav.continued === false && !nav.more &&
+    !nav.newer_activity && !nav.diagnostic && !nav.filter.query &&
+    nav.filter.workspace.kind === "all" && nav.filter.archived === filter.archived;
+  const remoteQuery = completeList ? "" : query;
+  const search = (value = filter, current?: () => boolean) =>
     device.command({
       action: "navigate",
       command: { kind: "query", filter: value },
-    });
+    }, current);
+  useEffect(() => {
+    let active = true, queued = false;
+    const dispatch = () => {
+      if (queued || dispatchedQuery.current === remoteQuery) return;
+      queued = true;
+      void run(async () => {
+        try {
+          await search({...filter, query:remoteQuery}, () => {
+            if (active) dispatchedQuery.current = remoteQuery;
+            return active;
+          });
+        } catch (error) {
+          if (active) {
+            dispatchedQuery.current = undefined;
+            throw error;
+          }
+        } finally { queued = false; }
+      });
+    };
+    submitSearch.current = dispatch;
+    const timer = remoteQuery ? window.setTimeout(dispatch, 250) : undefined;
+    if (!remoteQuery) dispatch();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      submitSearch.current = undefined;
+    };
+  }, [remoteQuery, filter.archived]);
+  useEffect(() => {
+    if (!searchOpen || query) return;
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !searchRoot.current?.contains(event.target)) {
+        setSearchOpen(false);
+        setSearchText("");
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [searchOpen, query]);
+  const closeSearch = () => { setSearchOpen(false); setSearchText(""); };
   const mutate = (session: string, metadata: NavigationEntry["metadata"], revision = nav?.metadata_revision) =>
     device.command({
       action: "navigate",
       command: { kind: "replace", ticket: nav?.ticket, session, metadata, metadata_revision: revision },
     });
-  const presentation = useMemo(
-    () =>
-      navigationPresentation(
-        [
-          ...(nav?.entries ?? []),
-          ...Object.values(nav?.groups ?? {}).flatMap((group) => group.entries),
-          ...(nav?.pins ?? []).flatMap((pin) =>
-            pin.status === "available" ? [pin.entry] : [],
-          ),
-          ...(nav?.order?.entries ?? []).flatMap((entry) =>
-            entry ? [entry] : [],
-          ),
-        ],
-        nav?.attention,
-      ),
-    [nav?.entries, nav?.groups, nav?.pins, nav?.order?.entries, nav?.attention],
-  );
+  const visibleEntries = useMemo(() => [
+    ...(nav?.entries ?? []),
+    ...Object.values(nav?.groups ?? {}).flatMap((group) => group.entries),
+    ...(nav?.pins ?? []).flatMap((pin) => pin.status === "available" ? [pin.entry] : []),
+    ...(nav?.order?.entries ?? []).flatMap((entry) => entry ? [entry] : []),
+  ], [nav?.entries, nav?.groups, nav?.pins, nav?.order?.entries]);
+  const titles = useMemo(() => navigationTitles(visibleEntries), [visibleEntries]);
+  const attention = useMemo(() => navigationAttention(nav?.attention), [nav?.attention]);
+  const awaitingQuery = !!nav && nav.filter.query !== remoteQuery;
+  const searching = query.length > 0;
+  const workspaceLabels = useMemo(() => searching
+    ? new Map(workspaces.map(item => [item.id, workspaceName(item.path, item.name)]))
+    : undefined, [searching, workspaces]);
+  const searchIndex = useMemo(() => {
+    if (!workspaceLabels) return;
+    const candidates = new Map<string, NavigationEntry>();
+    for (const entry of visibleEntries) {
+      if (filter.archived === null || entry.metadata.archived === filter.archived) candidates.set(entry.session, entry);
+    }
+    return new TextSearchIndex([...candidates.values()].sort(recentFirst), entry => ({
+      fuzzy: [titles.get(entry.session), entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped"],
+      substring: [entry.session, entry.path],
+    }));
+  }, [workspaceLabels, visibleEntries, filter.archived, titles]);
+  const searchEntries = useMemo(() => searchIndex?.search(query) ?? [], [searchIndex, query]);
+  const openSearchResult = (entry: NavigationEntry) => {
+    if (entry.metadata.archived) {
+      setNotice("Unarchive this session to open it.");
+      return;
+    }
+    closeSearch();
+    if (device.preferences.view !== "flat") expand(entry.workspace ?? "other");
+    return input.open({action:"open", session:entry.session});
+  };
   const row = (entry: NavigationEntry) => (
     <ConversationRow
       now={now}
       key={entry.session}
       entry={entry}
-      title={presentation.titles.get(entry.session)}
-      activity={presentation.attention.get(entry.session)}
+      title={titles.get(entry.session)}
+      activity={attention.get(entry.session)}
+      workspaceLabel={workspaceLabels && (entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped")}
+      openSearchResult={searching ? openSearchResult : undefined}
+      unarchive={searching && entry.metadata.archived ? () => mutate(entry.session, {...entry.metadata, archived:false}) : undefined}
       device={device}
-      mutate={mutate}
-      onRename={(entry) => {
-        setEdit(entry);
-        setEditRevision(nav?.metadata_revision);
-        setTitle(entry.metadata.title ?? "");
-      }}
+      opener={menu?.opener}
+      onMenu={target => setMenu(target && {...target, revision: nav?.metadata_revision})}
     />
   );
   const pins = nav?.pins ? [...nav.pins] : [];
@@ -151,10 +217,10 @@ export function Navigation() {
   return (
     <>
       <div className={`section-heading ${css.heading}`}>
-        {searchOpen ? <form className="navigation-search" onSubmit={event=>{event.preventDefault();void run(()=>search())}}>
-          <input autoFocus aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={event=>setQuery(event.target.value)} onKeyDown={event=>{if(event.key==='Escape'){event.stopPropagation();setSearchOpen(false);setQuery('');void run(()=>search({...filter,query:''}))}}}/>
-          <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={16}/></Button>
-          <Button size="sm" aria-label="Close search" onClick={()=>{setSearchOpen(false);setQuery('');return search({...filter,query:''})}}><IconCloseOutlineRegular size={16}/></Button>
+        {searchOpen ? <form ref={searchRoot} className="navigation-search" onSubmit={event=>{event.preventDefault();submitSearch.current?.()}}>
+          <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={14}/></Button>
+          <input autoFocus aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>setSearchText(searchInput(event.target.value))} onKeyDown={event=>{if(event.key==='Escape'){event.stopPropagation();closeSearch()}}}/>
+          <Button size="sm" aria-label="Close search" onClick={closeSearch}><IconCloseOutlineRegular size={16}/></Button>
         </form> : <>
           <h2 data-testid="workspace-heading">Workspaces</h2>
           <div className="navigation-actions">
@@ -194,11 +260,11 @@ export function Navigation() {
           {nav.diagnostic}
         </p>
       )}
-      {mode === "attention" ? (
+      {mode === "attention" && !query ? (
         <AttentionNavigation nav={nav} />
       ) : (
         <>
-          {!!nav?.pins.length && (
+          {!query && !awaitingQuery && !!nav?.pins.length && (
             <section
               className="pinned-conversations"
               aria-label="Pinned conversations"
@@ -231,7 +297,7 @@ export function Navigation() {
             </section>
           )}
           <div id="sessions" className="nav-list">
-            {device.manual ? (
+            {awaitingQuery && !query ? <p role="status" className="hint">Loading conversations…</p> : !query && device.manual ? (
               <>
                 {device.loading ? (
                   <p role="status" className="hint">
@@ -271,15 +337,16 @@ export function Navigation() {
               mode === "archived" ||
               device.preferences.view === "flat" ? (
               <>
-                {nav?.entries.map(row)}
-                {nav && !nav.entries.length && (
+                {(query ? searchEntries : nav?.entries)?.map(row)}
+                {awaitingQuery && <p role="status" className="hint">Searching conversations…</p>}
+                {nav && !awaitingQuery && !(query ? searchEntries : nav.entries).length && (
                   <p className="hint">
                     {nav.more
                       ? "Continue searching the remaining conversations."
                       : "No matching conversations."}
                   </p>
                 )}
-                {nav?.more && (
+                {nav?.more && !awaitingQuery && (
                   <Button
                     id="sessions-next"
                     size="sm"
@@ -323,37 +390,11 @@ export function Navigation() {
         </>
       )}
       <ExternalNavigation />
-      {edit && (
-        <form
-          className="rename-session"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void run(async () => {
-              await mutate(edit.session, {
-                ...edit.metadata,
-                title: title || null,
-              }, editRevision);
-              setEdit(undefined);
-            });
-          }}
-        >
-          <label>
-            Conversation title
-            <input
-              aria-label="Conversation title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              maxLength={256}
-            />
-          </label>
-          <Button type="submit" size="sm">
-            Save title
-          </Button>
-          <Button size="sm" onClick={() => setEdit(undefined)}>
-            Cancel
-          </Button>
-        </form>
-      )}
+      {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} close={() => setMenu(undefined)}
+        rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
+      {edit && <RenameSession title={edit.entry.metadata.title ?? titles.get(edit.entry.session) ?? ""}
+        close={() => setEdit(undefined)}
+        save={title => mutate(edit.entry.session, {...edit.entry.metadata, title: title || null}, edit.revision)}/>}
     </>
   );
 }

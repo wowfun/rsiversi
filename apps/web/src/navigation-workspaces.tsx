@@ -9,7 +9,10 @@ import {
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { workspaceTree } from "../workspace-tree.js";
 import { Button } from "./button.tsx";
+import { sessionSurfaces } from "./session/state.ts";
 import {
+  closeScheduleCatalog,
+  dismissNavigationDrawer,
   run,
   useSelected,
   useView,
@@ -64,6 +67,11 @@ export function WorkspaceNavigation({
         : savedPage;
     const visible = visibleConversations(page?.entries ?? [], expanded.has(key), active?.session);
     const remaining = (page?.entries.length ?? 0) - visible.length;
+    const registration = active?.workspace.registration;
+    const draftGroup = registration?.status === 'registered' ? registration.id :
+      registration?.status === 'unregistered' ? 'other' : undefined;
+    const showDraft = active?.draft && draftGroup === key && nav?.filter.archived !== true &&
+      !page?.entries.some(entry => entry.session === active.session);
     return (
       <section
         className="workspace-group"
@@ -73,7 +81,7 @@ export function WorkspaceNavigation({
       >
         <WorkspaceHeader record={record} name={name}
           className="workspace-row"
-          data-active={active?.workspace === key || undefined}
+          data-active={active?.workspace.registration.status === 'registered' && active.workspace.registration.id === key || undefined}
           draggable={!!path && device.ready && completeWorkspaces}
           onDragStart={(event) => {
             event.stopPropagation();
@@ -115,13 +123,14 @@ export function WorkspaceNavigation({
             aria-expanded={!!page}
             onClick={() =>
               run(async () => {
+                if (page) expand(key, false);
                 await device.command({
                   action: "navigate",
                   command: page
                     ? { kind: "close_group", workspace }
                     : { kind: "group", workspace, ticket: null },
                 });
-                expand(key, !page);
+                if (!page) expand(key, true);
               })
             }
           >
@@ -134,6 +143,14 @@ export function WorkspaceNavigation({
         </WorkspaceHeader>
         {page && (
           <div className="workspace-conversations">
+            {showDraft && <div className="session-row" data-session-id={active.session}>
+              <button type="button" className="nav-item" aria-current="true" onClick={() => {
+                closeScheduleCatalog();
+                dismissNavigationDrawer();
+                const pane = sessionSurfaces.getSnapshot().find(surface => surface.index === selected);
+                if (pane && pane.kind !== 'external') requestAnimationFrame(() => pane.focusInput());
+              }}><strong>New session</strong></button>
+            </div>}
             {page.continued && !page.stale && (
               <p className="hint">
                 Earlier entries are outside this page.{" "}
@@ -172,11 +189,7 @@ export function WorkspaceNavigation({
               </p>
             )}
             {!page.stale && !page.entries.length && page.more && (
-              <p className="hint">
-                {page.more
-                  ? "No matches in this scan. Continue searching."
-                  : "No conversations yet."}
-              </p>
+              <p className="hint">No matches in this scan. Continue searching.</p>
             )}
             {page.more && (
               <Button

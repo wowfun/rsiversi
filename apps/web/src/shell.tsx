@@ -16,6 +16,8 @@ import fitLicense from "@xterm/addon-fit/LICENSE?raw";
 import provenance from "../vendor/dsh/provenance.json";
 import type { PropsRenderSlots } from "@rsi/dsh-slots";
 import {
+  lazy,
+  Suspense,
   useState,
   useEffect,
   useLayoutEffect,
@@ -27,7 +29,6 @@ import { createPortal } from "react-dom";
 import {
   usePresentation,
   useResourceVisibility,
-  useNarrow,
   useViewport,
   ResizeHandle,
   Modal,
@@ -43,17 +44,22 @@ import {
   useView,
   useSelected,
   settingsPanel,
+  compactNavigation, dismissNavigationDrawer,
+  scheduleCatalog, catalogVisible, loadScheduleCatalog, closeScheduleCatalog,
   connectionStatus,
 } from "./bridge.ts";
 import { Notices } from "./notices.tsx";
+import { Toast } from "../vendor/dsh/dockkit-primitives/Toast.tsx";
 import { Setup } from "./setup.tsx";
 import settingsCss from "./settings/settings.module.css";
 import { Automation } from "./automation.tsx";
-import { ResourceDocks, ResourceCleanupNotice } from "./resource-dock.tsx";
+import { ResourceCleanupNotice } from "./resource-dock.tsx";
+const ScheduleCatalog = lazy(()=>import('./schedule-catalog.tsx'));
 export function Shell({
   renderSlot,
 }: PropsRenderSlots<"rsi.navigation" | "rsi.main" | "rsi.resources">) {
   const [automation, setAutomation] = useState(false);
+  const showTasks = useSyncExternalStore(scheduleCatalog.subscribe,catalogVisible);
   const connection = useSyncExternalStore(
     connectionStatus.subscribe,
     connectionStatus.getSnapshot,
@@ -62,8 +68,11 @@ export function Shell({
       settingsPanel.subscribe,
       settingsPanel.getSnapshot,
     ),
-    setSettings = settingsPanel.set,
     [licenses, setLicenses] = useState(false);
+  const setSettings = (tab: NonNullable<typeof settings>) => {
+    dismissNavigationDrawer();
+    settingsPanel.set(tab);
+  };
   const {
       layout: desktopLayout,
       update: updateDesktop,
@@ -72,9 +81,9 @@ export function Shell({
       storageRecovery,
       retry,
       reset,
-    } = usePresentation(),
-    narrow = useNarrow(),
-    compact = useNarrow("(max-width: 1023px)");
+    } = usePresentation();
+  const viewport = useViewport();
+  const narrow = viewport.width < 768, compact = viewport.width < 1024;
   const selected = useSelected(value=>value);
   const hasResources = useView(view=>!!view?.surfaces[selected]);
   const { layout, update } = useResourceVisibility(
@@ -83,16 +92,38 @@ export function Shell({
     narrow,
     hasResources,
   );
-  const viewport = useViewport();
+  const [resourceWidth,setResourceWidth] = useState<number>();
+  const [deletedTask,setDeletedTask] = useState(0);
+  const openingWidth = Math.max(300, Math.round(viewport.width * .45));
+  useLayoutEffect(() => {
+    if (!layout.resourcesClosed && resourceWidth === undefined) setResourceWidth(openingWidth);
+  }, [layout.resourcesClosed, openingWidth, resourceWidth]);
   const layoutContext = useMemo(()=>({layout,update,expand}),[layout,update,expand]);
+  const expansion = useSyncExternalStore(compactNavigation.subscribe, compactNavigation.getSnapshot);
+  const drawer = narrow && expansion === "drawer";
   const navigationMode = narrow
     ? "hidden"
-    : compact && layout.navigation === "expanded"
-      ? "rail"
+    : compact
+      ? expansion === "column" ? "expanded" : "rail"
       : layout.navigation;
-  const [drawer, setDrawer] = useState(false),
-    [palette, setPalette] = useState(false);
+  const [palette, setPalette] = useState(false);
+  useLayoutEffect(() => { compactNavigation.set(undefined); }, [narrow, compact]);
+  useLayoutEffect(() => {
+    if (!layout.resourcesClosed && compact) compactNavigation.set(undefined);
+  }, [layout.resourcesClosed, compact]);
   const newConversation = () => void run(() => input.open({action:"new_conversation"}));
+  const catalogTrigger = useRef<HTMLButtonElement | null>(null);
+  const openTasks = (event: React.MouseEvent<HTMLButtonElement>) => {
+    catalogTrigger.current = event.currentTarget;
+    if (!catalogVisible()) void loadScheduleCatalog();
+    dismissNavigationDrawer();
+  };
+  const closeTasks = () => {
+    closeScheduleCatalog();
+    const trigger = catalogTrigger.current;
+    if (trigger?.getClientRects().length) trigger.focus();
+    else workbench.current?.querySelector<HTMLButtonElement>('[aria-label="Toggle navigation"], [aria-label="Expand navigation"]')?.focus();
+  };
   const hasAutomation = useView((view) => !!view?.automation);
   const connected = useView((view) => !!view),
     preferenceError = useView((view) => view?.preference_error);
@@ -106,9 +137,9 @@ export function Shell({
     );
     workbench.current?.style.setProperty(
       "--resources-width",
-      `${layout.resourcesWidth * 100}vw`,
+      `${resourceWidth ?? openingWidth}px`,
     );
-  }, [layout]);
+  }, [layout.navigationWidth, resourceWidth, openingWidth]);
   useLayoutEffect(() => {
     (connected
       ? document.getElementById("connection-controls-host")
@@ -132,14 +163,15 @@ export function Shell({
   }, [connected]);
   useEffect(() => {
     if (!connected) {
+      closeScheduleCatalog();
       setPalette(false);
-      setDrawer(false);
+      compactNavigation.set(undefined);
       input.dismissSettings();
     }
   }, [connected]);
   const navigation = () =>
-    drawer || compact
-      ? setDrawer((value) => !value)
+    compact
+      ? compactNavigation.set(expansion ? undefined : narrow ? "drawer" : "column")
       : update({
           navigation: layout.navigation === "expanded" ? "rail" : "expanded",
         });
@@ -164,7 +196,8 @@ export function Shell({
       </Button>
       <nav className={css.shortcuts} aria-label="Workspace tools">
         <Button aria-label="Open plugins" onClick={()=>setSettings('plugins')}><IconPluginPinwheelOutlineMedium/>Plugins</Button>
-        {hasAutomation && <Button onClick={()=>setAutomation(true)}><IconClockOutlineRegular/>Deployment checks</Button>}
+        <Button aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/>Automation tasks</Button>
+        {hasAutomation && <Button onClick={()=>{dismissNavigationDrawer();setAutomation(true)}}><IconClockOutlineRegular/>Deployment checks</Button>}
       </nav>
       {renderSlot("rsi.navigation", {})}
       <div className={`sidebar-footer ${css.footer}`}>
@@ -173,7 +206,7 @@ export function Shell({
             <IconEllipsisOutlineRegular /> More
           </summary>
           <div className={css.menu}>
-            <Button id="settings-open" size="sm" onClick={() => {setSettings("appearance");setDrawer(false);}}>
+            <Button id="settings-open" size="sm" onClick={() => setSettings("appearance")}>
               <IconSettingsOutlineRegular /> Settings
             </Button>
             <Button size="sm" onClick={() => setLicenses(true)}>
@@ -214,7 +247,7 @@ export function Shell({
               {narrow && <Button
                 size="sm"
                 aria-label="Toggle navigation"
-                aria-expanded={compact ? drawer : navigationMode === "expanded"}
+                aria-expanded={drawer}
                 onClick={navigation}
               >
                 <IconPanelLeftOutlineRegular />
@@ -249,6 +282,7 @@ export function Shell({
         chrome,
       )}
       <Notices />
+      {deletedTask > 0 && <Toast key={deletedTask} tone="success" text="Task deleted." onDone={()=>setDeletedTask(0)}/>}
       {connected && <ResourceCleanupNotice />}
       <main
         id="login"
@@ -356,8 +390,8 @@ export function Shell({
                 type="button"
                 className={css.railToggle}
                 aria-label="Expand navigation"
-                aria-expanded={drawer}
-                onClick={() => compact ? setDrawer(true) : update({navigation:"expanded"})}
+                aria-expanded={false}
+                onClick={navigation}
               >
                 <span className={css.railMark} aria-hidden="true"><Brand compact /></span>
                 <IconPanelLeftOutlineRegular className={css.railPanel} size={18} />
@@ -366,6 +400,8 @@ export function Shell({
             <Button aria-label="New conversation" onClick={newConversation}>
               <IconNewChatOutlineRegular />
             </Button>
+            <Button aria-label="Open plugins" onClick={()=>setSettings('plugins')}><IconPluginPinwheelOutlineMedium/></Button>
+            <Button aria-label="Automation tasks" aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/></Button>
             <Button
               aria-label="Settings"
               onClick={() => setSettings("appearance")}
@@ -375,27 +411,29 @@ export function Shell({
           </aside>
         )}
         {renderSlot("rsi.main", {})}
-        <aside className="resources" aria-label="Session resources">
+        {showTasks && <Suspense fallback={<p role="status">Loading tasks…</p>}><ScheduleCatalog onClose={closeTasks} onDeleted={()=>setDeletedTask(value=>value+1)}/></Suspense>}
+        {!showTasks && <aside className="resources" aria-label="Session resources">
           <ResizeHandle
             name="resources"
-            value={layout.resourcesWidth * viewport.width}
+            value={Math.min(resourceWidth ?? openingWidth, viewport.width * .7)}
             min={300}
             max={viewport.width * 0.7}
             reverse
-            onChange={(resourcesWidth) =>
-              update({ resourcesWidth: resourcesWidth / viewport.width })
-            }
+            onChange={setResourceWidth}
           />
-          <ResourceDocks launcher={renderSlot("rsi.resources", {})} />
-        </aside>
+          {renderSlot("rsi.resources", {viewport})}
+        </aside>}
       </main>
-      {connected && drawer && (
+      {connected && narrow && (
         <Modal
           className="navigation-drawer"
           label="Workspace navigation"
-          close={() => setDrawer(false)}
+          open={drawer}
+          initialFocus='[aria-label="Collapse navigation"]'
+          fallbackFocus='[aria-label="Expand navigation"], [aria-label="Toggle navigation"], .workbench > .sidebar [aria-label="Collapse navigation"]'
+          lightDismiss
+          close={dismissNavigationDrawer}
         >
-          <button onClick={() => setDrawer(false)}>Close navigation</button>
           <div className={`sidebar ${css.sidebar} ${navigationCss.scope}`}>{sidebar}</div>
         </Modal>
       )}

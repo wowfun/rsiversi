@@ -91,9 +91,7 @@ export function Setup({
         >
           <RegisteredSettings />
         </div>
-        <div hidden={tab !== "appearance"}>
-          <ConversationDefaults actions={actions} />
-        </div>
+        {tab === "appearance" && <ConversationDefaults actions={actions} />}
         <div hidden={tab !== "models"}>
           <ModelsSettings actions={actions} />
         </div>

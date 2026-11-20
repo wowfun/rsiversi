@@ -1,4 +1,4 @@
-import { keyboardAction } from "../../composer-actions.js";
+import { composerKeydown } from "../../composer-actions.js";
 import { externalDrafts } from "../../external-drafts.js";
 
 // Rust owns observed history and one-shot controls. This owner retains only the
@@ -38,10 +38,7 @@ export function externalPaneClass({ command, perform }) {
         node.addEventListener(event, run, { signal: this.events.signal });
       on(this.input, "input", () => this.save());
       on(this.input, "keydown", (event) => {
-        if (keyboardAction(event, this.submitKey ?? "enter")) {
-          event.preventDefault();
-          perform(() => this.submit());
-        }
+        if (composerKeydown(event, this)) perform(() => this.submit());
       });
     }
     unmount() {

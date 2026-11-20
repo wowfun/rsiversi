@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 import {IconDatabaseOutlineRegular, IconGaugeOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import {tokenCount, tokenTotal, usageReadings, durationReading} from '../../message-metrics.js';
 import type {SessionSurfaceOwner} from './state.ts';
@@ -61,8 +61,15 @@ export function MessageUsage({usage}: {usage: TokenUsage}) {
 export function SessionMetrics({owner}: {owner: SessionSurfaceOwner}) {
   const data = owner.staged?.data;
   const generation = data?.generation;
-  const turns = Object.values(data?.transcript.turns?.entries ?? {});
-  const settlement = turns.map(turn => turn.terminal ?? '').join('|');
+  const turns = data?.transcript.turns?.entries;
+  const settlement = useMemo(() => {
+    let terminals = '';
+    for (const id in turns) {
+      const key = turns[id]?.terminal;
+      if (key) terminals += '|' + key;
+    }
+    return terminals;
+  }, [turns]);
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState(false);
   const refresh = useCallback(async () => {
@@ -72,7 +79,7 @@ export function SessionMetrics({owner}: {owner: SessionSurfaceOwner}) {
     catch (error) { setFailure(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }, [owner, generation]);
-  useEffect(() => {if (settlement.replaceAll('|', '')) void refresh();}, [refresh, settlement]);
+  useEffect(() => {if (settlement) void refresh();}, [refresh, settlement]);
   const metrics = data?.metrics;
   if (!metrics && !failure) return null;
   const summary = metrics?.summary;
@@ -100,9 +107,14 @@ export function SessionMetrics({owner}: {owner: SessionSurfaceOwner}) {
       {summary.reported_attempts < summary.attempts && <p>{summary.reported_attempts} of {summary.attempts} requests reported usage.</p>}
     </StatPopover>}
     {readings.context != null && summary?.last_context && data?.context_capacity_tokens && <StatPopover name="Context usage" compact
-      icon={<span className={css.ring} aria-hidden="true"/>} label={`${Math.round(readings.context)}%`}>
+      label={`${readings.context}%`} accessibleLabel={`${readings.context}% of context used`}
+      icon={<svg width="14" height="14" viewBox="0 0 14 14" fill="none" strokeWidth="2" aria-hidden="true">
+        <circle cx="7" cy="7" r="5.5" className={css.ringTrack}/>
+        {readings.context>0 && <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeLinecap="round"
+          pathLength="100" strokeDasharray={`${readings.context} 100`} transform="rotate(-90 7 7)"/>}
+      </svg>}>
       <div className={css.contextHeading} title="Last reported input and captured input capacity">
-        <span><strong>{Math.round(readings.context)}%</strong> of context used</span>
+        <span><strong>{readings.context}%</strong> of context used</span>
         <strong>{tokenCount(summary.last_context.input_tokens)} / {tokenCount(data.context_capacity_tokens)}</strong>
       </div>
       <progress className={css.progress} aria-label="Context usage" max={data.context_capacity_tokens} value={summary.last_context.input_tokens}/>

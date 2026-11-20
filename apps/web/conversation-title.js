@@ -12,8 +12,8 @@ export function navigationTitle(view, session) {
 export function conversationTitle(view, key) {
   const surface = view?.surfaces[key];
   if (surface?.kind === 'native') {
-    const workspace = view.catalog.workspaces.find(entry=>entry.id===surface.workspace);
-    return navigationTitle(view,surface.session) || workspaceName(surface.path,workspace?.name) || 'New conversation';
+    const workspace = surface.workspace;
+    return navigationTitle(view,surface.session) || workspaceName(workspace.coordinates.path,workspace.registration.status==='registered'?workspace.registration.name:null) || 'New conversation';
   }
   if (surface?.kind === 'external') return workspaceName(surface.external.observed.snapshot.cwd) || 'External conversation';
   return key === 'main' ? 'New conversation' : key === 'compare' ? 'Compare' : key;

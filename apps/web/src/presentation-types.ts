@@ -9,6 +9,7 @@ export interface SessionCreation {workspace_id:string;session_id:string;agent_pr
 export interface MediaLimits {images:number;upload_bytes:number;preview_objects:number;preview_bytes:number;preview_concurrency:number}
 export interface SettingsCatalog {ticket:string;namespace:string|null;page:{namespaces:string[];next:string|null}|null;error:string|null}
 export interface TranscriptBlock {
+  trigger?: 'schedule' | 'goal' | 'agent' | 'completion' | 'request';
   key: string;
   role: string;
   title: string;
@@ -16,12 +17,15 @@ export interface TranscriptBlock {
   markdown?: MarkdownEvent[];
   clipped?: boolean;
   sources: number;
+  request_intent_seq?: string;
+  scheduled_retry?: true;
   external?: unknown;
+  created_schedule?: {id:string; title:string; interval_ms:number|null};
   tool?: {
     name?: string | null;
     argument_summary?: string | null;
     arguments?: unknown;
-    result?: unknown;
+    result?: {seq:string} | null;
     rejection?: unknown;
     intent_present: boolean;
     phase: "prepared" | "running" | "rejected" | {settled: "completed" | "tool_failed" | "process_failed"};
@@ -37,10 +41,22 @@ export interface TranscriptTurn {
   process: string[];
   candidate: string[];
   answer: string[];
+  closing_prose?: number[];
+  feedback_message?: string;
+  retries?: ModelRetry[];
   terminal?: string | null;
   timestamps?: Record<string, number>;
   elapsed_ms?: number | null;
   usage?: TokenUsage | null;
+}
+export interface ModelRetry {
+  block: number;
+  number: number;
+  maximum: number | null;
+  delay_ms: number;
+  reason: string;
+  explanation: string;
+  state: 'scheduled' | 'started' | 'cancelled';
 }
 export interface TranscriptView {
   status?: string;
@@ -63,8 +79,9 @@ export interface ExternalSurface {
   attention_focus?:{kind:string;request:string;generation:string}|null;
   external_source?:{start:number;end:number;text:string;more:boolean;source:ExternalSource}|null;
 }
+export interface AttachedWorkspace {key:string;coordinates:import('./bridge.ts').Coordinates;registration:{status:'registered';id:string;name:string|null}|{status:'unregistered'|'unavailable'}}
 export interface NativeSurface extends ComposerProjection {
-  kind:'native';header:string;agent_preset:string;generation:string;session:string;path:string;workspace:string;
+  kind:'native';header:string;agent_preset:string;draft?:boolean;generation:string;session:string;workspace:AttachedWorkspace;
   selection:string;creation:SessionCreation|null;sandbox:SandboxMode;ui_revision:string;active:string|null;
   completions:{query:string;sequence:string;entries:import('./session/projection-types.ts').CompletionEntry[];notice:string|null}|null;
   transcript:TranscriptView;notice?:string;historical?:boolean;history_more?:boolean;

@@ -39,7 +39,7 @@ export function createViewProjector(context) {
       if (pane?.kind === "external" && data?.kind === "external") {
         pane.staged = {data, submitKey};
       } else if (pane && pane.kind !== "external" && data?.kind !== "external") {
-        pane.staged = {data, models: next.catalog.models, submitKey, composerActions};
+        pane.staged = {data, submitKey, composerActions};
       } else throw new Error("Surface owner does not match presentation kind");
     }
     if (!context.selected || !context.panes.has(context.selected))

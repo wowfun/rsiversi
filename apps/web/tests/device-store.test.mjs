@@ -23,10 +23,22 @@ test('semantic intents preserve unrelated values and reject malformed saves',()=
   let layout=applyIntent('layouts',defaultLayout,{kind:'patch',patch:{navigationWidth:300}});
   layout=applyIntent('layouts',layout,{kind:'workspace',id:'one',expanded:true});
   layout=applyIntent('layouts',layout,{kind:'workspace',id:'two',expanded:true});
-  layout=applyIntent('layouts',layout,{kind:'patch',patch:{resourcesWidth:.35}});
-  assert.equal(layout.navigationWidth,300);assert.equal(layout.resourcesWidth,.35);assert.equal(layout.workspaces.length,2);
+  layout=applyIntent('layouts',layout,{kind:'patch',patch:{detail:'verbose'}});
+  assert.equal(layout.navigationWidth,300);assert.equal(layout.detail,'verbose');assert.equal(layout.workspaces.length,2);
+  assert.throws(()=>applyIntent('layouts',layout,{kind:'patch',patch:{resourcesWidth:.35}}));
   for(const intent of [{kind:'patch',patch:{navigation:'nope'}},{kind:'patch',patch:{version:3}},{kind:'patch',patch:{workspaces:[]}},{kind:'workspace',expanded:true}])assert.throws(()=>applyIntent('layouts',layout,intent));
   assert.equal(applyIntent('preferences',defaultPreferences,{kind:'patch',patch:{view:'workspace_tree'}}).sessionOrder,'updated');
+  assert.equal(applyIntent('layouts',layout,{kind:'patch',patch:{resourcesClosed:layout.resourcesClosed}}),layout);
+  assert.equal(applyIntent('preferences',defaultPreferences,{kind:'patch',patch:{}}),defaultPreferences);
+});
+test('first visit opens its workspace once and preserves a committed collapse',()=>{
+  const reveal={kind:'reveal_workspace',id:'one'};
+  const visited=applyIntent('layouts',defaultLayout,reveal);
+  assert.deepEqual(visited.workspaces,[{id:'one',expanded:true}]);
+  assert.equal(applyIntent('layouts',visited,reveal),visited);
+  const collapsed=applyIntent('layouts',visited,{kind:'workspace',id:'one',expanded:false});
+  assert.equal(applyIntent('layouts',collapsed,reveal),collapsed);
+  assert.throws(()=>applyIntent('layouts',visited,{...reveal,id:''}),/Invalid workspace expansion/);
 });
 test('each store independently enforces record, cardinality, bytes and monotonic revision',()=>{
   for(const [bucket,value] of [['preferences',defaultPreferences],['layouts',defaultLayout],['orders',{ids:members.map(m=>m.id)}]]){

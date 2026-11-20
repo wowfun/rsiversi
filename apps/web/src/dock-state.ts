@@ -4,11 +4,25 @@ import {applyOp} from '../vendor/dsh/dockkit/engine/operations.ts'
 import * as plan from '../vendor/dsh/dockkit/engine/planner.ts'
 import {record,stepBack,stepForward,EMPTY_HISTORY,type History} from '../vendor/dsh/dockkit/engine/sequence.ts'
 import {dockPaneIds,findTabPane,getPane} from '../vendor/dsh/dockkit/engine/tree.ts'
-import type {LayoutState,LayoutOp,TabId,PaneId,SplitId,FloatRect,DockZone} from '../vendor/dsh/dockkit/contract/types.ts'
+import type {LayoutState,LayoutOp,TabId,PaneId,SplitId,FloatRect} from '../vendor/dsh/dockkit/contract/types.ts'
 
 export type Coordinate = {action:string;[key:string]:unknown}
-export interface DockDocument {kind:'session-dock';version:1;counter:number;state:LayoutState;history:History}
+export interface DockSnapshot {kind:'session-dock';version:2;counter:number;state:LayoutState}
+export interface DockDocument extends DockSnapshot {history:History}
 export type DockIntent = {kind:'dock';operation:string;[key:string]:unknown}
+export const guideContentId=JSON.stringify({action:'resources'})
+export function guideInPane(state:LayoutState,pane:PaneId) {
+  return plan.findPaneContentTab(state,pane,guideContentId)
+}
+function focusTab(state:LayoutState,tab:TabId):readonly LayoutOp[] {
+  const pane=findTabPane(state,tab)
+  return pane.id===state.activePaneId&&pane.activeTabId===tab ? [] : [{type:'focusTab',tabId:tab}]
+}
+function mergeArrivingGuide(state:LayoutState,tab:TabId,pane:PaneId):readonly LayoutOp[]|undefined {
+  if(state.tabs[tab]?.contentId!==guideContentId||getPane(state,pane).host!=='dock')return
+  const existing=guideInPane(state,pane)
+  if(existing&&existing!==tab)return [{type:'closeTab',tabId:tab},{type:'focusTab',tabId:existing}]
+}
 const plain=(v:unknown):v is Record<string,any>=>!!v&&typeof v==='object'&&!Array.isArray(v)
 const keys=(v:unknown,list:string)=>plain(v)&&Object.keys(v).sort().join()===list.split(',').sort().join()
 const text=(v:unknown,max=256):v is string=>typeof v==='string'&&v.length>0&&new TextEncoder().encode(v).length<=max&&!/[\x00-\x1f\x7f]/.test(v)
@@ -19,6 +33,7 @@ export function coordinate(value:unknown):Coordinate {
   const v=value as Record<string,any>
   const valid=v.action==='terminal' ? keys(v,'action,terminal')&&text(v.terminal) :
     v.action==='resources' ? keys(v,'action') :
+    v.action==='schedule_task' ? keys(v,'action,task')&&text(v.task) :
     ['surface','application_surface','remote_surface'].includes(v.action) ? keys(v,'action,bundle,name')&&text(v.bundle,128)&&text(v.name,128) :
     ['ui_block','inspect_block'].includes(v.action) ? keys(v,'action,key')&&text(v.key,512) :
     v.action==='inspect_image' ? keys(v,'action,media')&&plain(v.media) :
@@ -28,27 +43,26 @@ export function coordinate(value:unknown):Coordinate {
   if(!valid)fail()
   // MediaRef and source coordinates receive their authoritative typed checks in
   // Rust before any read. Never retain a presentation/action/terminal attachment.
-  return structuredClone(v) as Coordinate
+  return v as Coordinate
 }
 export function emptyDock():DockDocument {
   const minter=createIdMinter()
-  return {kind:'session-dock',version:1,counter:1,state:{...createInitialState(minter),expanded:true},history:EMPTY_HISTORY}
+  return {kind:'session-dock',version:2,counter:1,state:{...createInitialState(minter),expanded:true},history:EMPTY_HISTORY}
 }
-export function validateDock(value:unknown):DockDocument {
-  if(!keys(value,'kind,version,counter,state,history'))fail()
-  const doc=value as DockDocument
-  if(doc.kind!=='session-dock'||doc.version!==1||!Number.isSafeInteger(doc.counter)||doc.counter<1||doc.counter>1e14)fail()
+export function savedDock({counter,state}:DockSnapshot):DockSnapshot {
+  return {kind:'session-dock',version:2,counter,state}
+}
+export function validateDock(value:unknown):DockSnapshot {
+  if(!plain(value)||!keys(value,value.version===1?'kind,version,counter,state,history':'kind,version,counter,state'))fail()
+  const doc=value as DockSnapshot
+  if(doc.kind!=='session-dock'||![1,2].includes(doc.version)||!Number.isSafeInteger(doc.counter)||doc.counter<1||doc.counter>1e14)fail()
   validateState(doc.state,doc.counter)
-  if(!keys(doc.history,'entries,cursor')||!Array.isArray(doc.history.entries)||doc.history.entries.length>64||!Number.isInteger(doc.history.cursor)||doc.history.cursor<0||doc.history.cursor>doc.history.entries.length)fail()
-  // Stored inverses are not trusted executable commands. Verify every reachable
-  // state through both directions before allowing this history to be replayed.
-  for(const entry of doc.history.entries)if(!keys(entry,'ops,inverse')||!Array.isArray(entry.ops)||!Array.isArray(entry.inverse)||entry.ops.length>16||entry.inverse.length>32)fail()
-  try {
-    let step={state:doc.state,history:doc.history}
-    while(step.history.cursor>0){step=stepBack(step.history,step.state) ?? fail();validateState(step.state,doc.counter)}
-    while(step.history.cursor<step.history.entries.length){step=stepForward(step.history,step.state) ?? fail();validateState(step.state,doc.counter)}
-  }catch{fail()}
-  return doc
+  return savedDock(doc)
+}
+export function restoreDock(value:unknown,live?:DockDocument):DockDocument {
+  const saved=validateDock(value)
+  if(live&&saved.counter===live.counter&&JSON.stringify(saved.state)===JSON.stringify(live.state))return live
+  return {...saved,history:EMPTY_HISTORY}
 }
 function validateState(state:LayoutState,counter:number) {
   if(!keys(state,'nodes,tabs,rootId,floats,activePaneId,expanded,mode')||!plain(state.nodes)||!plain(state.tabs)||Object.keys(state.nodes).length>7||Object.keys(state.tabs).length>16||!Array.isArray(state.floats)||state.floats.length>4||new Set(state.floats).size!==state.floats.length||typeof state.expanded!=='boolean'||!['push','fullscreen'].includes(state.mode))fail()
@@ -72,7 +86,6 @@ function validateState(state:LayoutState,counter:number) {
   if(docked>2||seen.size!==Object.keys(state.nodes).length||tabs.size!==Object.keys(state.tabs).length||!seen.has(state.activePaneId)||state.nodes[state.activePaneId]?.kind!=='pane')fail()
 }
 export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
-  validateDock(value)
   if(!plain(intent)||intent.kind!=='dock')fail()
   let {counter}=value
   // Prefixes are layout identities only; no runtime authority is persisted.
@@ -80,16 +93,40 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
   const s=value.state,t=intent.tab as TabId,p=intent.pane as PaneId
   let ops:readonly LayoutOp[]=[], result
   switch(intent.operation){
-    case 'open': {const c=coordinate(intent.coordinate);ops=plan.planOpenContent(s,next,{kind:'rsi',contentId:JSON.stringify(c),title:text(intent.title,512)?intent.title:'Resource',revealIfOpened:intent.duplicate!==true,...(p?{paneId:p}:{})}).ops;break}
+    case 'open': {
+      const c=coordinate(intent.coordinate),isGuide=c.action==='resources'
+      const held=isGuide?guideInPane(s,p??plan.activeDockPaneId(s)):undefined
+      ops=held?focusTab(s,held):plan.planOpenContent(s,next,{
+        kind:'rsi',contentId:JSON.stringify(c),title:text(intent.title,512)?intent.title:'Resource',
+        revealIfOpened:!isGuide&&intent.duplicate!==true,paneId:p,
+      }).ops
+      break
+    }
     case 'close':ops=[{type:'closeTab',tabId:t}];break
-    case 'focus':ops=[{type:'focusTab',tabId:t}];break
-    case 'focus-pane':ops=[{type:'focusPane',paneId:p}];break
-    case 'split':if(dockPaneIds(s).length<2)ops=plan.planSplitPane(s,next,p);break
-    case 'duplicate':ops=plan.planDuplicateTab(s,next,t).ops;break
-    case 'place':ops=plan.planPlaceTab(s,t,p,intent.index as number);break
-    case 'drop':if(['center','left','right'].includes(intent.zone as string)&&(intent.zone==='center'||dockPaneIds(s).length<2))ops=plan.planDropTab(s,next,t,p,intent.zone as DockZone);break
+    case 'focus':ops=focusTab(s,t);break
+    case 'focus-pane':
+      if(p===s.activePaneId)return value
+      ops=[{type:'focusPane',paneId:p}];break
+    case 'split':
+      if(dockPaneIds(s).length<2){
+        const guide=Object.keys(s.tabs).length<16
+          ? (id:TabId)=>({id,kind:'rsi',contentId:guideContentId,title:'Resources'})
+          : undefined
+        ops=plan.planSplitPane(s,next,p,guide)
+      }
+      break
+    case 'duplicate':if(s.tabs[t]?.contentId!==guideContentId)ops=plan.planDuplicateTab(s,next,t).ops;break
+    case 'place':ops=mergeArrivingGuide(s,t,p)??plan.planPlaceTab(s,t,p,intent.index as number);break
+    case 'drop':
+      if(intent.zone==='center')ops=mergeArrivingGuide(s,t,p)??plan.planDropTab(s,next,t,p,'center')
+      else if((intent.zone==='left'||intent.zone==='right')&&dockPaneIds(s).length<2)ops=plan.planDropTab(s,next,t,p,intent.zone)
+      break
     case 'float':if(s.floats.length<4||findTabPane(s,t)?.host==='float')ops=plan.planFloatTab(s,next,t,intent.rect as FloatRect|undefined).ops;break
-    case 'dock':ops=plan.planUnfloatPane(s,p);break
+    case 'dock':{
+      const source=getPane(s,p)
+      ops=(source.host==='float'?mergeArrivingGuide(s,source.tabs[0]!,plan.activeDockPaneId(s)):undefined)??plan.planUnfloatPane(s,p)
+      break
+    }
     case 'move-float':ops=[{type:'moveFloat',paneId:p,x:intent.x as number,y:intent.y as number}];break
     case 'resize-float':ops=[{type:'resizeFloat',paneId:p,rect:intent.rect as FloatRect}];break
     case 'resize':ops=plan.planResizeSplit(intent.split as SplitId,intent.sizes as number[],.2);break
@@ -107,11 +144,7 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
   result??=record(value.history,s,ops)
   // Check the two-pane/float/tab constraints after every semantic operation.
   validateState(result.state,counter)
-  let history=result.history.entries.length>64?{entries:result.history.entries.slice(-64),cursor:64}:result.history
-  // Checkpoint older undo steps before the durable record budget is reached.
-  // Open coordinates are never evicted to make room for history.
-  while(history.cursor>0 && new TextEncoder().encode(JSON.stringify({state:result.state,history})).length>28*1024)
-    history={entries:history.entries.slice(1),cursor:history.cursor-1}
+  const history=result.history.entries.length>64?{entries:result.history.entries.slice(-64),cursor:64}:result.history
   return {...value,counter,state:result.state,history}
 }
 export function floatingTab(state:LayoutState,tab:TabId) {return findTabPane(state,tab)?.host==='float'}
@@ -131,8 +164,12 @@ export function narrowDock(state:LayoutState):LayoutState {
   return {...state,nodes,rootId:root.id,activePaneId:active.host==='float'?active.id:root.id}
 }
 
-export function displayDock(state:LayoutState,width:number,height:number,narrow:boolean):LayoutState {
-  const shown=narrow?narrowDock(state):state,nodes={...shown.nodes}
+export function displayDock(state:LayoutState,width:number,height:number,narrow:boolean,selected?:TabId):LayoutState {
+  if(selected&&state.tabs[selected]&&getPane(state,state.activePaneId).activeTabId!==selected)
+    state=applyOp(state,{type:'focusTab',tabId:selected}).state
+  const shown=narrow?narrowDock(state):state
+  if(!shown.floats.length)return shown
+  const nodes={...shown.nodes}
   for(const id of shown.floats){
     const pane=getPane(shown,id),rect=pane.rect!
     const w=Math.min(rect.width,Math.max(100,width-16)),h=Math.min(rect.height,Math.max(100,height-16))

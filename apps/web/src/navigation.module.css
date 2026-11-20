@@ -40,8 +40,12 @@
   border: 0;
   background: transparent;
   font-size: 12px;
-  padding: 7px;
+  padding: 7px 0;
+  outline: none;
 }
+:global(.navigation-search:focus-within):where(.scope, .scope *) { border-color: var(--muted); }
+.searchLabel { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: stretch; gap: 2px; text-align: left; }
+:global(.session-row .nav-item):has(.searchLabel):where(.scope, .scope *) { min-height: 46px; padding-left: 33px; }
 :global(.nav-list):where(.scope, .scope *) {
   display: flex;
   flex: 0 0 auto;
@@ -91,34 +95,13 @@
 :global(.workspace-conversations):where(.scope, .scope *) {
   padding-left: 0;
 }
-:global(.session-row:has(.session-options[open])):where(.scope, .scope *) {
-  background: var(--hover);
-  border-radius: 6px;
+:global(.session-row[data-menu-open]):where(.scope, .scope *) { background: var(--hover); }
+.sessionActions {
+  position: absolute; right: 0; top: 2px; display: grid; place-items: center;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+  color: var(--muted); background: transparent;
 }
-:global(.session-options):where(.scope, .scope *) {
-  position: relative;
-  flex-shrink: 0;
-}
-:global(.session-options summary):where(.scope, .scope *) {
-  list-style: none;
-  padding: 4px 6px;
-  cursor: pointer;
-}
-:global(.session-options[open]):where(.scope, .scope *) {
-  z-index: 5;
-}
-:global(.session-options[open] > :not(summary)):where(.scope, .scope *) {
-  position: relative;
-  display: block;
-  min-width: 100px;
-  background: var(--mist);
-  margin: 0;
-}
-:global(.session-options .hint):where(.scope, .scope *) {
-  max-width: 220px;
-  overflow-wrap: anywhere;
-  font-size: 10px;
-}
+.sessionActions:hover { background: var(--hover); color: var(--ink); }
 :global(.session-state):where(.scope, .scope *) {
   width: 5px;
   height: 5px;
@@ -148,13 +131,6 @@
   font-size: 11px;
   color: var(--muted);
   font-weight: 400;
-}
-:global(.rename-session):where(.scope, .scope *) {
-  display: grid;
-  gap: 8px;
-}
-:global(.rename-session input):where(.scope, .scope *) {
-  width: 100%;
 }
 :global(.navigation-actions):where(.scope, .scope *) {
   display: flex;
@@ -275,24 +251,22 @@
 :global(.session-row:has([aria-current=true])):where(.scope, .scope *) { background: var(--hover); }
 :global(.session-row .nav-item):where(.scope, .scope *) { padding-right: 48px; }
 :global(.session-row .session-activity):where(.scope, .scope *) { position: absolute; left: 6px; width: 16px; justify-content: center; gap: 0; }
+:global(.session-row .nav-item:has(.session-activity)),
 :global(.workspace-conversations .session-row .nav-item):where(.scope, .scope *) { padding-left: 33px; }
 :global(.workspace-row[data-active] .workspace-icon):where(.scope, .scope *) { color: var(--teal); }
 :global(.workspace-show-more):where(.scope, .scope *) { padding: 6px 9px 6px 33px; background: transparent; border: 0; color: var(--muted); font-size: 12px; text-align: left; }
 :global(.session-recency):where(.scope, .scope *) { position: absolute; right: 6px; color: var(--muted); font-size: 10px; pointer-events: none; }
-:global(.session-options):where(.scope, .scope *) { position: absolute; right: 0; top: 3px; }
-:global(.session-menu-items):where(.scope, .scope *) { position: absolute !important; right: 0; top: 100%; width: 200px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--dsw-elevation-prominent); }
-:global(.session-menu-items > button):where(.scope, .scope *) { display: block; width: 100%; text-align: left; }
 @media (hover: hover) {
   :global(.workspace-row > [data-testid=workspace-open]):where(.scope, .scope *),
-  :global(.session-options:not([open])):where(.scope, .scope *) { opacity: 0; }
+  .sessionActions[aria-expanded=false] { opacity: 0; }
   :global(.workspace-row:hover > [data-testid=workspace-open]):where(.scope, .scope *),
   :global(.workspace-row:focus-within > [data-testid=workspace-open]):where(.scope, .scope *),
-  :global(.session-row:hover .session-options):where(.scope, .scope *),
-  :global(.session-row:focus-within .session-options):where(.scope, .scope *) { opacity: 1; }
+  :global(.session-row:hover) .sessionActions,
+  :global(.session-row:focus-within) .sessionActions { opacity: 1; }
 }
 :global(.session-row:hover .session-recency):where(.scope, .scope *),
 :global(.session-row:focus-within .session-recency):where(.scope, .scope *),
-:global(.session-row:has(.session-options[open]) .session-recency):where(.scope, .scope *) { visibility: hidden; }
+:global(.session-row[data-menu-open] .session-recency):where(.scope, .scope *) { visibility: hidden; }
 @media (hover: none) { :global(.session-recency):where(.scope, .scope *) { display: none; } }
 .external {
   border-top: 1px solid var(--line);

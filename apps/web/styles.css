@@ -381,8 +381,8 @@ dialog {
   border: 1px solid var(--line);
 }
 dialog::backdrop {
-  background: #080c1860;
-  backdrop-filter: blur(3px);
+  background: var(--dsw-alias-bg-mask-1);
+  backdrop-filter: var(--dsw-mask-blur);
 }
 body {
   margin: 0;
@@ -447,4 +447,24 @@ button.rsi-button[data-rsi-size="sm"] {
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.history-edge { display:flex; justify-content:center; margin-block:0 12px; }
+/* The header remains within reach while the cited summary scrolls. */
+.compaction-row, .message.context { --compact-height:calc(24px + var(--dsh-content-font-delta, 0px)); padding:2px 0; }
+.compaction-toggle { display:flex; align-items:center; width:100%; height:var(--compact-height); padding:0; border:0; border-radius:var(--radius-compact); background:none; color:var(--muted); text-align:left; font:inherit; font-size:var(--dsh-content-font-size-secondary,13px); }
+.compaction-toggle:disabled { opacity:1; }
+.compaction-toggle:not(:disabled) { cursor:pointer; }
+.compaction-toggle[aria-expanded=true] { position:sticky; top:0; z-index:7; background:var(--paper); border-radius:0; }
+.compaction-icon { flex:none; display:grid; place-items:center; width:16px; height:16px; margin-right:6px; }
+.compaction-icon svg { grid-area:1/1; width:14px; height:14px; }
+.compaction-icon svg:last-child { visibility:hidden; }
+.compaction-toggle:not(:disabled):is(:hover,:focus-visible) .compaction-icon svg:first-child { visibility:hidden; }
+.compaction-toggle:not(:disabled):is(:hover,:focus-visible) .compaction-icon svg:last-child { visibility:visible; }
+.compaction-separator { flex:none; width:2px; height:2px; margin:0 8px; border-radius:50%; background:currentColor; }
+.compaction-caption { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.compaction-summary { padding:4px 0 4px 22px; overflow-wrap:anywhere; font-size:var(--dsh-content-font-size-secondary,13px); }
+.compaction-summary :has(> [data-code-block-banner]) { top:var(--compact-height); }
+@media (hover:hover) {
+  .compaction-toggle:not(:disabled):hover { background:var(--dsw-alias-interactive-bg-hover-solid); color:var(--ink); }
 }

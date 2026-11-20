@@ -14,10 +14,12 @@ export function ConversationWidthControls({
   const [column, setColumn] = useState(0),
     [preview, setPreview] = useState<number>()
   const drag = useRef<{
+    pointerId: number
     x: number
     base: number
     latest: number
     side: number
+    frame?: number
   }>()
   const maximum = Math.max(640, Math.floor(column - 176))
   const bounded = (width: number) =>
@@ -37,9 +39,11 @@ export function ConversationWidthControls({
   }, [container, width])
   const finish = (commit: boolean) => {
     const current = drag.current
+    if (!current) return
+    if (current.frame !== undefined) cancelAnimationFrame(current.frame)
     drag.current = undefined
     setPreview(undefined)
-    if (commit && current && current.latest !== current.x)
+    if (commit && current.latest !== current.x)
       update({
         conversationWidth: bounded(
           current.base + (current.latest - current.x) * current.side * 2,
@@ -47,7 +51,14 @@ export function ConversationWidthControls({
       })
   }
   // At small widths the transcript already occupies its column's usable space.
-  if (!showHandles || column < 816 || column - width < 96) return null
+  const handles = showHandles && column - width > 96
+  useLayoutEffect(() => () => {
+    if (!drag.current) return
+    if (drag.current.frame !== undefined) cancelAnimationFrame(drag.current.frame)
+    drag.current = undefined
+    setPreview(undefined)
+  },[container,handles])
+  if (!handles) return null
   return (
     <div className={css.controls}>
       {(['left', 'right'] as const).map((side) => (
@@ -84,10 +95,11 @@ export function ConversationWidthControls({
           }}
           onDoubleClick={() => update({ conversationWidth: null })}
           onPointerDown={(event) => {
-            if (event.button !== 0) return
+            if (event.button !== 0 || drag.current) return
             event.preventDefault()
             event.currentTarget.setPointerCapture(event.pointerId)
             drag.current = {
+              pointerId: event.pointerId,
               x: event.clientX,
               latest: event.clientX,
               base: width,
@@ -102,18 +114,27 @@ export function ConversationWidthControls({
             )
               return
             current.latest = event.clientX
-            setPreview(
-              bounded(
-                current.base + (current.latest - current.x) * current.side * 2,
-              ),
-            )
+            event.currentTarget.style.setProperty('--handle-y', `${event.clientY-event.currentTarget.getBoundingClientRect().top}px`)
+            current.frame ??= requestAnimationFrame(() => {
+              current.frame = undefined
+              setPreview(bounded(current.base + (current.latest - current.x) * current.side * 2))
+            })
           }}
           onPointerUp={(event) => {
-            if (drag.current) drag.current.latest = event.clientX
+            if (drag.current?.pointerId !== event.pointerId) return
+            drag.current.latest = event.clientX
             finish(true)
           }}
-          onPointerCancel={() => finish(false)}
-          onLostPointerCapture={() => finish(false)}
+          onPointerCancel={event => { if (drag.current?.pointerId === event.pointerId) finish(false) }}
+          onLostPointerCapture={event => { if (drag.current?.pointerId === event.pointerId) finish(false) }}
+          onWheel={(event) => {
+            if (event.ctrlKey || event.deltaY === 0) return
+            const port = container?.querySelector<HTMLElement>('.transcript')
+            if (!port) return
+            const unit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? port.clientHeight
+              : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? parseFloat(getComputedStyle(port).lineHeight) || 16 : 1
+            port.scrollBy({top:event.deltaY * unit})
+          }}
         />
       ))}
     </div>

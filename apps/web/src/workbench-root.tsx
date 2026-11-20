@@ -10,7 +10,8 @@ import { IconSprite } from "./icon-sprite.tsx";
 import { FrameCommitObserver, PresentationBoundary } from "./frame-commit.tsx";
 import { Shell } from "./shell.tsx";
 import { Conversation } from "./conversation.tsx";
-import { Resources } from "./resources.tsx";
+import { ResourceDocks } from "./resource-dock.tsx";
+import type { Viewport } from "./presentation.tsx";
 import { Navigation } from "./navigation.tsx";
 import { slots, host, renderer } from "./slots.tsx";
 
@@ -19,7 +20,7 @@ declare module "@rsi/dsh-slots" {
     root: { kind: "single"; scope: "root" };
     "rsi.navigation": { kind: "single"; scope: "root" };
     "rsi.main": { kind: "single"; scope: "root"; owner: Record<string, never> };
-    "rsi.resources": { kind: "single"; scope: "session-maybe" };
+    "rsi.resources": { kind: "single"; scope: "session-maybe"; owner: { viewport: Viewport } };
   }
 }
 const registrations = [
@@ -42,7 +43,7 @@ const registrations = [
   slots.register({ name: "rsi.main", registrant: "rsi.gui" }, Conversation),
   slots.register(
     { name: "rsi.resources", registrant: "rsi.session.resources" },
-    Resources,
+    ResourceDocks,
   ),
 ];
 void registrations;

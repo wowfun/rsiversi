@@ -7,6 +7,7 @@ export class LayoutEdits {
     else if (intent.kind === 'patch') {
       for (const [key, value] of Object.entries(intent.patch)) put(`field:${key}`, {kind:'patch',patch:{[key]:value}});
     } else {
+      if (intent.kind === 'reveal_workspace' && this.entries.has(`workspace:${intent.id}`)) return;
       put(`workspace:${intent.id}`, intent);
       const workspaces = [...this.entries.keys()].filter(key=>key.startsWith('workspace:'));
       if (workspaces.length > 16) this.entries.delete(workspaces[0]);

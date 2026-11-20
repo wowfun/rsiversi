@@ -9,7 +9,6 @@ import {reactPresentation} from '../frame-commit.tsx';
 import {createFramePresenter} from './frame-presenter.js';
 import { resourceHosts, publishResources, clearResources } from "../resource-hosts.ts";
 const documentBuildFamily = typeof __RSI_BUILD_FAMILY__ === "string" ? __RSI_BUILD_FAMILY__ : "";
-import { keyboardAction } from "../../composer-actions.js";
 import { completionToken } from "../../completion-token.js";
 import { TranscriptVisibility } from "../../transcript-visibility.js";
 import { presentationIdentity } from "../presentation.tsx";
@@ -17,6 +16,7 @@ import { presentationKey } from "../../presentation-store.js";
 import { downloadSession } from "../../session-export.js";
 import { DocumentConnection } from "../../document-connection.js";
 import {installDisclosures} from '../../disclosure.js';
+import { StartingDraft } from "../../starting-draft.js";
 import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice } from "../bridge.ts";
 import { createDocumentTransport } from "../native.ts";
 import { isDesktop, desktopCall } from "../../desktop-bridge.js";
@@ -139,6 +139,17 @@ function boundCall(owner) {
 const settings=createSettingsRuntime({get connection(){return connection},get view(){return view},boundCall,notify});
 const command=settings.command;
 
+function rememberConversation(session) {
+  const owner = presentationIdentity.getSnapshot();
+  if (nativeDocument || !owner) return;
+  try {
+    const state = {...history.state};
+    if (session) state.rsiConversation = {owner,session};
+    else delete state.rsiConversation;
+    history.replaceState(state, '');
+  } catch { /* Browser history can be unavailable in an embedded document. */ }
+}
+
 function completeConnection(current, identity, local) {
     if (!identity || connection !== current || current.closing) return;
     if (local) {
@@ -146,11 +157,14 @@ function completeConnection(current, identity, local) {
       try { localStorage.setItem("rsi.local-web", "1"); } catch { /* Optional browser storage. */ }
     }
     endpoint = identity.endpoint_id;
-    presentationIdentity.set(presentationKey(endpoint,identity.principal));
+    const owner = presentationKey(endpoint,identity.principal);
+    presentationIdentity.set(owner);
     try { localStorage.setItem("rsi.endpoint", endpoint); } catch { /* Storage is optional. */ }
     setConnection({phase:'Connected',closing:false,reconnect:true});
     if (current.storageNotice) notify("");
-    void current.request("command", JSON.stringify({action:"initialize_workspace"})).catch(error => { if (connection === current && !current.closing) notify(error.message); });
+    const saved = !nativeDocument && history.state?.rsiConversation;
+    const resume = saved?.owner === owner && typeof saved.session === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(saved.session) ? saved.session : undefined;
+    void current.request("command", JSON.stringify({action:"initialize_workspace",resume})).catch(error => { if (connection === current && !current.closing) notify(error.message); });
 }
 async function connectWith(receipt, localTicket) {
   if (connecting || (connection && !connection.closing)) throw new Error("A connection is already active or opening");
@@ -194,21 +208,39 @@ listen($("reconnect"), "click", () => perform(() => connectWith(JSON.stringify({
 const closer=createDocumentClose({
  get connection(){return connection},get panes(){return panes},nativeCall,nativeDocument,notify,failWorker,
  setClosing(value){setConnection({closing:value})},
- disconnected(resources){document.dispatchEvent(new CustomEvent("rsi-disconnected",{detail:resources}));clearView();setConnection({phase:'Disconnected',closing:false});notify('')},
+ disconnected(resources){rememberConversation(undefined);document.dispatchEvent(new CustomEvent("rsi-disconnected",{detail:resources}));clearView();setConnection({phase:'Disconnected',closing:false});notify('')},
 });
 const disconnectDocument=closer.disconnectDocument;
 listen(window, "rsi-native-close", event => { if (!nativeDocument || !Number.isSafeInteger(event.detail)) return; closer.attempt = event.detail; perform(disconnectDocument); });
 if(nativeDocument)setClipboardWriter(text=>nativeCall({kind:"clipboard",text}));
 
-const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, keyboardAction, location, notify, perform, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
+const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, location, notify, perform, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
 const panes = new Map();
 listen(window, "rsi:detail-mode",()=>{for(const pane of panes.values())if(pane.lastTranscript)pane.renderTranscript(pane.lastTranscript,false);});
 const ExternalPane = externalPaneClass({command,perform});
+async function workspaceBlank(pane, workspace, store) {
+  if (!store) return;
+  const eligible = editor => editor?.store === store && editor.reuseGeneration && editor.record.creation?.workspace_id === workspace &&
+    !editor.record.everDispatched && !editor.dirty && !editor.failure && !editor.record.pending &&
+    !editor.text && !editor.images.length && !editor.references.length && !editor.record.releases.length;
+  if (eligible(pane.editor)) return {generation:pane.generation, header:pane.editor.record.header};
+  for (const editor of pane.editors.values()) {
+    if (!eligible(editor)) continue;
+    const record = editor.record;
+    const generation = editor.reuseGeneration;
+    editor.reuseGeneration = undefined;
+    const session = record.key[3];
+    try { if (await store.get(pane.index, session)) continue; }
+    catch { return; }
+    return {session, generation, header:record.header};
+  }
+}
+
 function select(index) {
   selected = index;
   selectSurface(index);
 }
-async function openInSelected(fields) {
+async function openInSelected(fields, startingText) {
   const owner = connection;
   const pane = panes.get(selected);
   if (!pane) throw new Error("Open a conversation surface first");
@@ -217,11 +249,22 @@ async function openInSelected(fields) {
   pane.renderComposer();
   try {
     await pane.flush();
-    const editor = pane.editor;
-    const reuse = fields.action === "create" && editor && !editor.dirty && !editor.failure && !editor.record.pending && !editor.text && !editor.images.length && !editor.references.length && !pane.submitting && !pane.uploading
-      ? {generation:pane.generation,header:editor.record.header} : undefined;
+    const reuse = fields.action === "create" && !fields.agent_preset_id
+      ? await workspaceBlank(pane, fields.workspace, owner.drafts) : undefined;
     await owner.request("command", JSON.stringify({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) }));
-    if (connection === owner && fields.action === "new_conversation" && !pane.generation) { pane.switching = false; pane.renderComposer(); }
+    if (startingText && fields.action === "new_conversation") {
+      const target = panes.get(pane.index);
+      await target?.startBinding;
+      if (owner !== connection || owner.closing) throw new Error("The connection changed while opening the task draft.");
+      const draft = target?.starting ?? await StartingDraft.load(owner.drafts.namespace, pane.index);
+      draft.edit(draft.text ? draft.text + "\n" + startingText : startingText);
+      await draft.flush();
+    }
+    if (connection === owner && fields.action === "new_conversation" && !pane.generation) {
+      pane.stagedPreset = undefined;
+      pane.switching = false;
+      pane.renderComposer();
+    }
   } catch (error) {
     if (connection !== owner) throw error;
     pane.switching = false;
@@ -230,7 +273,12 @@ async function openInSelected(fields) {
   }
 }
 const projectView=createViewProjector({publishSurfaces:sessionSurfaces.set,get rendererSlots(){return rendererSlots},set rendererSlots(value){rendererSlots=value},get view(){return view},set view(value){view=value},get lastNotice(){return lastNotice},set lastNotice(value){lastNotice=value},get notify(){return notify},get panes(){return panes},get ExternalPane(){return ExternalPane},get Pane(){return Pane},get selected(){return selected},set selected(value){selected=value},get select(){return select},get publish(){return publish},renderSettings:settings.present,get renderResources(){return renderResources}});
-function render(next){return projectView(next)}
+function render(next){
+  const previous = view?.surfaces.main?.session;
+  projectView(next);
+  const session = next.surfaces.main?.session;
+  if (session !== previous) rememberConversation(session);
+}
 installActions({ captureSetupBinding:settings.captureSetupBinding, disconnect:async()=>nativeDocument?nativeCall({kind:"request_close"}):disconnectDocument(), restoreDrafts:async()=>{const pane=panes.get(selected);if(!(pane instanceof Pane))throw new Error("Open a local conversation first");await pane.restoreDrafts()}, command, open: openInSelected, select, call, resources: () => connection?.resources, dismissSettings:settings.dismiss,
   async closeSurface(key) {
     const owner = connection;

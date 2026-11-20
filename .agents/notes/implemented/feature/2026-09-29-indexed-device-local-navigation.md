@@ -50,17 +50,14 @@ Semantic intents apply to the latest revision in a single transaction; cross-tab
 notifications do not supply correctness. Separate preference, order and Session
 layout stores have independent admission and retention budgets.
 
-Bucket capacity checks validate envelopes and encoded sizes; each record's
-content is interpreted only when it is read or edited. Replaying every unrelated
-Session's Dock history for one layout intent multiplies semantic work without
-establishing authority for that intent. Unread values remain opaque, cannot
-authorize actions and retain their original records. The transaction writes the
-replacement and actual LRU removals; it does not rewrite unrelated records.
-The consuming read still validates complete history before any replay.
-An intent's generated result goes directly to private record accounting after
-the intent owner checks its resulting state. This removes a second full history
-replay without trusting a previous read or another window's revision. The public
-record-admission helper continues validating independently supplied content.
+Bucket capacity checks use record envelopes and encoded sizes. Only the selected
+record needs semantic interpretation. A reopened Dock needs its current layout
+and identity counter. Persisting its undo sequence would rewrite accumulated
+operations and inverses on each gesture. The window owns that sequence and can
+reuse it while the committed layout and counter match. A new window validates
+the saved layout and starts its own sequence. A semantic intent checks its
+result once before record accounting. The transaction writes changed records
+and evicts the least recently used records when capacity requires it.
 
 ## Alternatives considered
 

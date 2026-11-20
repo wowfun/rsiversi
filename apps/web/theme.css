@@ -1,5 +1,6 @@
 @import './vendor/dsh/theme-base.css';
 @import './vendor/dsh/dockkit-tokens.css';
+@import './vendor/dsh/typography.css';
 
 /* Global renderer aliases resolve to the same platform tokens as first-party UI. */
 :root {

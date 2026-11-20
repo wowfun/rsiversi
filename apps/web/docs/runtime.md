@@ -101,7 +101,21 @@ reconnection never automatically repeats them. Normal long-running operations
 retain their owning cancellation and the independent Disconnect action, rather
 than a document-wide request deadline.
 
-The document owns persistent composer drafts;
+The document owns persistent composer drafts.
+The native composer accepts pasted or dropped images through the same media
+import as the file picker. A paste in an editor belongs to that editor.
+Outside editable controls it uses the last focused available composer, then
+the main composer. A foreground dialog or menu keeps background composers
+from receiving the paste. Text accompanying an image in a focused editor is
+inserted at its selection. Plain text retains normal browser paste behavior.
+Dragging an image over the conversation shows a page-wide overlay with the
+Host's count and size limits. Dropping it on the transcript or composer imports
+it once into the addressed composer. Leaving the page or ending the drag clears
+the overlay.
+During import, each remaining file appears in order with its name and upload
+status. The owning draft replaces it with the canonical image when Media
+returns. The pending list lives only for that import.
+
 Worker frames never overwrite editable text or ordered image references. Dynamic content enters text
 nodes or the Worker's restricted Markdown event stream, using only its closed
 element set. HTML and remote Markdown images remain inert text.
@@ -133,6 +147,23 @@ including one returned after retirement. Adding transfers it to the current draf
 Pending controls carry their exact interaction owner and ID as DOM data; these
 annotations identify a durable request across rendering and reconnects. Native
 command bindings own the action inputs and authorization.
+One native interaction occupies its conversation's composer until it settles,
+including when another device answers. Plan review takes precedence over
+ordinary questions, then approvals. Ties use the last item in observed order.
+The editor retains its draft while hidden. Ordinary reviews have no device
+layout entry. Opening an observed review from Needs attention keeps a single
+form mounted. Choosing another waiting request temporarily selects it in the
+same editor. Explicit refresh reads the request from its own service under
+the current attachment generation.
+Ordinary questions show one prompt at a time. A suggested answer advances
+to the next prompt; free text replaces a selected suggestion. Collapsing the
+card leaves the current prompt visible and retains edits. The final
+submit sends the ordered answers once. A plan review retains the exact
+version binding and the choice IDs provided by the plan owner.
+Explicitly restored resource coordinates retain their dock binding.
+Review evidence scrolls independently of the decision buttons. With focus in
+the review, Enter allows once and Escape denies. Input composition, repeated
+keys, modifiers and native activation of a focused control keep their usual behavior.
 Approval details are identified by both the owning Session and request ID, so
 switching between parent and child approvals also replaces their action bindings.
 An unchanged interaction keeps its decision lock across new frame tickets and
@@ -185,6 +216,16 @@ renders them as separate messages. React owns the Session surface, composer and
 stable control nodes. The controller receives those hosts after commit and owns
 draft/submission lifetimes. History and reference pickers, observed external
 conversations, resource details and registered settings use the same React root.
+Chat shows injected runtime context as a collapsed disclosure with its recorded
+producer label. Opening it reveals the text, copy action and source inspection.
+Trajectory retains the full record independently of the disclosure.
+When the reader is following the end of Chat, new rows and changes to the
+composer height keep the most recent row fully visible above the editor.
+The [composer interaction contract](presentation.md) defines which choices bind
+a starting draft and when menu content is retained.
+Chat offers **Load earlier** at the top when an older transcript page is
+available. The Session history action reads that page under the current
+attachment. **Back to live** returns to the active transcript.
 Resource detail models retain identity across unchanged connection, entry and
 media inputs. Renderer slots are still collected on every frame; replacing any
 of those inputs rebuilds the model and its bound authority.
@@ -208,6 +249,10 @@ intersecting blocks in transcript order without per-block scroll geometry reads.
 Inline-card selection waits for the initial observation of every current block;
 an unobserved block is not evidence of an empty viewport. Removing all blocks or
 disabling inline cards still clears the selection without waiting for observations.
+Only panes with an inline renderer observe message intersections. Message
+nodes acquire inline mount points when a renderer or bound card needs them. An empty
+selection on a fresh attachment needs no visibility command. Removing the
+last visible card publishes one empty selection and releases its observations.
 Visibility delivery retries at most twice immediately with the same sequence.
 After both attempts fail, a later unchanged observation may send a fresh sequence;
 an older failure cannot invalidate a newer observation or generation.
@@ -350,6 +395,15 @@ also recheck the connection and attachment after completion.
 
 ## Workspace identities
 
-History pickers use pane `workspace_key` and catalog Workspace `key`, both
+History pickers use pane `workspace.key` and catalog Workspace `key`, both
 coordinate-scoped. Creation and draft reuse use the registration ID in the
 creation receipt. The document does not derive or interchange these identities.
+An attached pane displays its immutable `workspace.coordinates` and resolved
+registration, including off-page registrations. An unavailable or deleted
+registration never falls back to the starting draft or first catalog entry.
+
+## Formula resources
+
+The standard document's pairing receipt binds its formula module, stylesheet and
+WOFF2 fonts as additional document assets. The browser requests them when a
+settled formula mounts and uses the same-origin document policy.

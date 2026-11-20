@@ -4,7 +4,13 @@ import assert from 'node:assert/strict';
 import {StartingDraft} from '../starting-draft.js';
 import {DraftStore} from '../drafts.js';
 
-test('all-drafts reset erases both persisted formats and retires old editors',async()=>{
+test('all-drafts reset erases message and question drafts and retires old editors',async t=>{
+  const keys=['rsi.questions.first','rsi.trajectory.saved','rsi.questions.second'];
+  const previous=Object.getOwnPropertyDescriptor(globalThis,'localStorage');
+  Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{
+    get length(){return keys.length;},key:index=>keys[index],removeItem:key=>keys.splice(keys.indexOf(key),1),
+  }});
+  t.after(()=>{if(previous)Object.defineProperty(globalThis,'localStorage',previous);else delete globalThis.localStorage;});
   globalThis.window=new EventTarget();let retired=0;
   window.addEventListener('rsi:draft-storage-retired',()=>retired++);
   const namespace=['a'.repeat(32),'local'];
@@ -21,6 +27,7 @@ test('all-drafts reset erases both persisted formats and retires old editors',as
   assert.equal((await store.get('main','session')).text,'private session text');
   await DraftStore.discardAllDrafts();
   assert.equal(retired,1);
+  assert.deepEqual(keys,['rsi.trajectory.saved']);
   assert.deepEqual(await indexedDB.databases(),[]);
   assert.throws(()=>start.edit('late save'),/reset or upgraded/);
   await assert.rejects(store.get('main','session'),/reset or upgraded/);

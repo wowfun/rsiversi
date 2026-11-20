@@ -1,4 +1,5 @@
 import { closeDisclosure } from "../../disclosure.js";
+import { composerKeydown } from "../../composer-actions.js";
 import { awayFromBottom } from "../../turn-presentation.js";
 export function mount(pane, context, elements) {
   Object.assign(pane, elements);
@@ -44,6 +45,8 @@ export function mount(pane, context, elements) {
     pane.transcript.scrollTop = pane.transcript.scrollHeight;
   });
   pane.resizeObserver = new ResizeObserver(() => {
+    if (!pane.readingSummary && !pane.transcript.classList.contains('trajectory'))
+      pane.transcript.scrollTop = pane.transcript.scrollHeight;
     pane.scheduleVisible();
     pane.setReadingSummary(awayFromBottom(pane.transcript));
   });
@@ -66,17 +69,9 @@ export function mount(pane, context, elements) {
     }
   });
   listen(pane.input, "keydown", (event) => {
-    if (event.isComposing || event.keyCode === 229) return;
-    if (pane.completionKey(event)) return;
-    const choice = context.keyboardAction(
-      event,
-      pane.submitKey,
-      pane.composerActions,
-    );
-    if (choice) {
-      event.preventDefault();
-      context.perform(() => pane.submit(choice));
-    }
+    if (pane.input.readOnly) return;
+    const choice = composerKeydown(event, pane);
+    if (choice) context.perform(() => pane.submit(choice));
   });
   listen(pane.input, "click", () => pane.updateCompletions());
   listen(pane.input, "keyup", (event) => {
@@ -91,13 +86,8 @@ export function mount(pane, context, elements) {
   listen(pane.imageInput, "change", () => {
     const files = [...pane.imageInput.files];
     pane.imageInput.value = "";
-    context.perform(() => pane.upload(files));
+    if (files.length) context.perform(() => pane.upload(files));
   });
-  action(pane.attach, () => pane.imageInput.click());
-  action(pane.addReference, () => pane.showReferencePicker());
-  action(pane.exportButton, () => pane.exportSession(""));
-  action(pane.searchHistory, () => pane.showHistoryPicker());
-  action(pane.addFile, () => pane.showFilePicker());
   action(
     pane.cancel,
     () =>

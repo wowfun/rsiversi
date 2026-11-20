@@ -29,6 +29,9 @@ import {
 import { mount, unmount } from "./session-elements.js";
 import { restoreDrafts, recreateDraft } from "./session-recovery.js";
 import { createQueueEditor } from "./queue-editor.js";
+function showsQueuedMessage(data, messageId) {
+  return !data?.protected && data?.queue?.some(item => item.message_id === messageId);
+}
 // The Session lifetime and commands use live owner ports across asynchronous work.
 export function createPaneClass(context) {
   return class Pane {
@@ -36,6 +39,7 @@ export function createPaneClass(context) {
       this.index = index;
       this.blocks = new Map();
       this.visibleSequence = 0n;
+      this.visibleKey = "";
       this.generation = undefined;
       this.editors = new Map();
       this.submitKey = "enter";
@@ -115,9 +119,10 @@ export function createPaneClass(context) {
     async action(action, fields = {}) {
       if (!this.generation) throw new Error("Open a conversation first");
       const generation = this.generation;
-      if (action === "document_resource") {
+      if (action === "document_resource" || action === "read_pending_interaction") {
         const connection = context.connection;
-        const response = await context.call("read_session_resource", JSON.stringify({pane:this.index,generation,request:fields.request}));
+        const method = action === "document_resource" ? "read_session_resource" : "read_pending_interaction";
+        const response = await context.call(method, JSON.stringify({...fields,pane:this.index,generation}));
         if (this.generation !== generation || context.connection !== connection || connection?.closing) throw new Error("Resource Session was replaced");
         return JSON.parse(response);
       }
@@ -142,7 +147,7 @@ export function createPaneClass(context) {
       });
     }
     scheduleVisible() {
-      if (this.visibleFrame) return;
+      if (this.visibleFrame || (!this.uiCards && this.visibleKey === "")) return;
       this.visibleFrame = requestAnimationFrame(() => {
         this.visibleFrame = undefined;
         this.syncVisible();
@@ -158,12 +163,12 @@ export function createPaneClass(context) {
         return;
       if (this.uiCards && !this.visibleBlocks.ready) return;
       const entries = this.uiCards ? this.visibleBlocks.last(4) : [];
-      const key = JSON.stringify([
+      const key = entries.length ? JSON.stringify([
         this.generation,
         this.historical,
         this.uiRevision,
         entries.map(([key, entry]) => [key, entry.sourceKey]),
-      ]);
+      ]) : "";
       if (key === this.visibleKey) return;
       this.visibleKey = key;
       this.visiblePending = {
@@ -218,9 +223,10 @@ export function createPaneClass(context) {
     }
     renderInline(cards) {
       const owner = context.connection;
-      for (const [key, entry] of this.blocks) {
-        const card = cards?.[key];
-        if (!card?.model || !card.ticket) continue;
+      if (!cards) return;
+      for (const [key, card] of Object.entries(cards)) {
+        const entry = this.blocks.get(key);
+        if (!entry || !card?.model || !card.ticket) continue;
         context.rendererSlots.push({
           key: `inline-${this.index}-${card.binding.epoch}`,
           surface: "pane",
@@ -310,6 +316,11 @@ export function createPaneClass(context) {
             data.header,
             data.creation,
           );
+          const change = this.pendingPresetChange;
+          if (change && change.connection === current && data.session === change.session && data.agent_preset === change.preset && data.generation !== change.generation) {
+            if (record.header !== data.header) record = await store.rebindPreset(change.record, data.header, change.preset);
+            if (this.pendingPresetChange === change) this.pendingPresetChange = undefined;
+          }
         } catch (error) {
           failure = error;
           record =
@@ -327,6 +338,7 @@ export function createPaneClass(context) {
       )
         return;
       this.editor = editor;
+      editor.reuseGeneration = data.creation && !editor.record.everDispatched ? generation : undefined;
       this.bindingError =
         editor.record.header !== data.header
           ? "Saved Session Header changed. The draft is retained and cannot be sent to this Session."
@@ -356,6 +368,33 @@ export function createPaneClass(context) {
       this.starting?.edit(this.starting.text, id);
     }
     startConversation() { return startConversation(this, context); }
+    async selectPreset(id) {
+      if (this.submitting || this.switching || this.uploading) throw new Error('Wait for the current operation before selecting a preset');
+      if (!this.generation) {
+        this.stagedPreset = id;
+        this.invalidate();
+        return;
+      }
+      const editor = this.editor, generation = this.generation, data = this.staged.data;
+      if (id === data.agent_preset) return;
+      this.switching = true;
+      this.renderComposer();
+      try {
+        await this.flush();
+        if (!editor || this.editor !== editor || this.generation !== generation) throw new Error('The draft changed while selecting a preset');
+        if (editor.record.pending || editor.record.references.length || editor.record.releases.length)
+          throw new Error('Resolve pending input and release references before changing the draft preset');
+        this.pendingPresetChange = {connection:context.connection, generation, session:data.session, preset:id, record:editor.record};
+        await this.action('select_preset', {header:editor.record.header, preset:id});
+      } catch (error) {
+        if (this.generation === generation) {
+          this.pendingPresetChange = undefined;
+          this.switching = false;
+          this.renderComposer();
+        }
+        throw error;
+      }
+    }
     prepareComposer() { return prepareComposer(this, context); }
     setAccess(mode) {
       if (!this.editor) throw new Error('Open a conversation before changing access');
@@ -525,6 +564,7 @@ export function createPaneClass(context) {
       return state.releasing;
     }
     renderComposer() {
+      const data = this.staged?.data;
       const storageRetired = draftStorageRetired();
       const starting = !this.generation ? this.starting : undefined;
       const session = this.staged?.data?.session;
@@ -551,6 +591,8 @@ export function createPaneClass(context) {
         (!pending && (!this.composerActions || (!editor.text.trim() && !editor.images.length && !editor.references.length)));
       const fileDisabled =
         !editor || !!this.bindingError || editor.transferring || editor.resolving || this.switching;
+      const disabled = !!(storageRetired || this.switching ||
+        (!this.generation ? !starting || this.submitting : !editor || editor.transferring || editor.resolving));
       this.images = editor?.images ?? [];
       this.composerView = {
         completionsAvailable: !!this.generation && !this.switching,
@@ -558,9 +600,9 @@ export function createPaneClass(context) {
         accessDisabled: !!this.submitting || !!editor?.record.pending || !!this.switching,
         text: starting?.text ?? editor?.text ?? "",
         command: claimedCommand(editor?.text ?? '', [...(this.staged?.data?.commands?.commands ?? []),...(this.selectedCommand ? [this.selectedCommand] : [])]),
-        workspace: startingWorkspace(this, context)?.id,
-        disabled:
-          !!(storageRetired || this.switching || (!this.generation ? !starting || this.submitting : !editor || editor.transferring || editor.resolving)),
+        workspace: data?.workspace?.registration.status === 'registered' ? data.workspace.registration.id : data ? undefined : startingWorkspace(this, context)?.id,
+        bindingInput: !!(this.submitting && !this.switching && !storageRetired && (!this.generation || !editor)),
+        disabled,
         sendDisabled: storageRetired || (starting ? !!starting.failure || this.submitting || this.switching || !starting.text.trim() : !!sendDisabled),
         alternativeDisabled:
           !!sendDisabled || !!pending || !this.composerActions?.alternative,
@@ -605,6 +647,7 @@ export function createPaneClass(context) {
             },
           })),
         images: this.images,
+        importingImages: this.uploading?.editor === editor ? this.uploading : undefined,
         references: (editor?.references ?? []).map((reference) => {
           const interval = context.referenceInterval(reference.metadata);
           return {
@@ -615,14 +658,8 @@ export function createPaneClass(context) {
         fileDisabled: !!fileDisabled,
         referenceDisabled: !!fileDisabled || !canCaptureReference(editor.record, editor.references),
         referenceRemovalDisabled: !!this.submitting || !!this.switching || !!editor?.resolving || !!(editor && this.referenceState(editor).preparing),
-        imageDisabled:
-          !this.staged?.data ||
-          !editor ||
-          editor.resolving ||
-          this.uploading ||
-          this.submitting ||
-          this.switching,
-        mediaEnabled: !!context.view?.has_media,
+        imageDisabled: disabled || !!this.uploading || !!this.submitting,
+        mediaLimits: context.view?.has_media ? context.view.media_limits : undefined,
       };
       this.renderCompletions(context.view?.surfaces[this.index]);
       this.invalidate();
@@ -716,10 +753,9 @@ export function createPaneClass(context) {
       return executePending(this, context, editor, generation, current, mode);
     }
     renderQueue(data) {
-      if (data?.protected) {
-        this.queueBinding = undefined;
-        this.queueDialog?.close();
-      }
+      if (data?.protected) this.queueBinding = undefined;
+      if (this.queueDialog && !showsQueuedMessage(data, this.queueDialog.messageId))
+        this.queueDialog.close();
     }
     async queueAction(slot, action) {
       const binding = this.queueBinding;
@@ -740,6 +776,8 @@ export function createPaneClass(context) {
       const trigger = document.activeElement,
         generation = binding.generation,
         current = context.connection;
+      const sequence = (this.queueDialogSequence ?? 0) + 1;
+      this.queueDialogSequence = sequence;
       const detail = JSON.parse(
         await context.call(
           "prepare_submission",
@@ -749,7 +787,9 @@ export function createPaneClass(context) {
       if (
         generation !== this.generation ||
         current !== context.connection ||
-        current.closing
+        current.closing ||
+        sequence !== this.queueDialogSequence ||
+        !showsQueuedMessage(this.staged?.data, item.message_id)
       )
         return;
       this.queueDialog?.close();
@@ -767,17 +807,18 @@ export function createPaneClass(context) {
           this.invalidate();
         },
       });
+      editor.messageId = item.message_id;
+      if (item.editable && detail.content.length === 1 && detail.content[0].type === "text")
+        editor.inlineSlot = slot;
       editor.restoreFocus = () => {
         if (
           this.generation === generation &&
           context.connection === current &&
-          !current.closing
+          !current.closing && !this.queueDialog
         )
           (trigger?.isConnected ? trigger : this.input)?.focus();
       };
-      editor.id = String(
-        (this.queueDialogSequence = (this.queueDialogSequence ?? 0) + 1),
-      );
+      editor.id = String(sequence);
       this.queueDialog = editor;
       this.invalidate();
     }
@@ -786,7 +827,7 @@ export function createPaneClass(context) {
       return submitQueue(this, context, queue, generation);
     }
     async upload(files) {
-      return upload(this, context, files);
+      if (await this.prepareComposer()) await upload(this, context, files);
     }
     async restoreDrafts() {
       return restoreDrafts(this, context);
@@ -795,6 +836,8 @@ export function createPaneClass(context) {
       return recreateDraft(this, context, record, current);
     }
     reset() {
+      this.pendingPresetChange = undefined;
+      this.stagedPreset = undefined;
       this.startBindingOwner = undefined;
       this.startBinding = undefined;
       this.starting = undefined;
@@ -850,7 +893,7 @@ export function createPaneClass(context) {
         });
       }
       this.historyContext = data
-        ? { session: data.session, workspace: data.workspace_key }
+        ? { session: data.session, workspace: data.workspace.key }
         : undefined;
       const changed = this.generation !== data?.generation;
       if (this.selection !== data?.selection) {
@@ -858,6 +901,8 @@ export function createPaneClass(context) {
         this.switching = false;
       }
       if (changed) {
+        if (this.pendingPresetChange?.session !== data?.session) this.pendingPresetChange = undefined;
+        this.stagedPreset = undefined;
         this.commandSelection = undefined;
         this.selectedCommand = undefined;
         this.commandsExpanded = false;
@@ -880,7 +925,7 @@ export function createPaneClass(context) {
         this.lastTranscript = undefined;
         this.readingSummary = false;
         this.visibleBlocks?.update([], this.generation);
-        this.visibleKey = undefined;
+        this.visibleKey = "";
       }
       this.historical = !!data?.historical;
       this.uiCards = !!data?.ui_cards;
@@ -903,12 +948,14 @@ export function createPaneClass(context) {
 
     renderTranscript(transcript) {
       this.lastTranscript = transcript;
-      this.visibleBlocks.update(
-        transcript.blocks
-          .map((block) => [block.key, this.blocks.get(block.key)])
-          .filter(([, entry]) => entry),
-        this.generation,
-      );
+      const entries = [];
+      if (this.uiCards) {
+        for (const block of transcript.blocks) {
+          const entry = this.blocks.get(block.key);
+          if (entry) entries.push([block.key, entry]);
+        }
+      }
+      this.visibleBlocks.update(entries, this.generation);
     }
   };
 }

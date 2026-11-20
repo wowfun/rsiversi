@@ -1,15 +1,24 @@
 import {createContext,useCallback,useContext,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode} from 'react'
 import {bindSnapshotSelector} from '../vendor/dsh/renderer/bind.ts'
 import {defaultLayout,validateLayout,PresentationStore} from '../presentation-store.js'
-import {observable,useView} from './bridge.ts'
+import {observable,useView,type View} from './bridge.ts'
 import {applyIntent} from '../device-store.js'
 import {LayoutEdits} from '../layout-edits.js'
 
-export interface Layout {version:4;navigationWidth:number;resourcesWidth:number;conversationWidth:number|null;navigation:'expanded'|'rail'|'hidden';resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
-export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
+export interface Layout {version:5;navigationWidth:number;conversationWidth:number|null;navigation:'expanded'|'rail'|'hidden';resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
+export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)
 const useIdentity = bindSnapshotSelector(presentationIdentity)
+type Theme = NonNullable<View['appearance']>['theme']
+const themePreview = observable<{identity: string | undefined; theme: Theme} | undefined>(undefined)
+const useThemePreview = bindSnapshotSelector(themePreview)
+export async function previewThemeWrite(theme: Theme, write: () => Promise<void>) {
+  const preview = {identity: presentationIdentity.getSnapshot(), theme}
+  themePreview.set(preview)
+  try { await write() }
+  finally { if (themePreview.getSnapshot() === preview) themePreview.set(undefined) }
+}
 export function usePresentation() {
   const identity = useIdentity(value=>value)
   const appearance = useView(view=>view?.appearance)
@@ -22,10 +31,32 @@ export function usePresentation() {
   const owner = useRef(identity)
   const pending = useRef(new LayoutEdits())
   const save = useRef<()=>void>(()=>{})
+  const preview = useThemePreview(value=>value?.identity === identity ? value?.theme : undefined)
+  const theme = preview ?? appearance?.theme ?? 'system'
+  const fontSize = appearance?.content_font_size ?? 14
+  const [themeColor] = useState(()=>{
+    const meta = document.createElement('meta')
+    meta.name = 'theme-color'
+    return meta
+  })
   useLayoutEffect(()=>{
-    document.documentElement.dataset.theme = appearance?.theme ?? 'system'
-    document.documentElement.dataset.contentSize = String(appearance?.content_font_size ?? 14)
-  },[appearance])
+    document.head.append(themeColor)
+    return ()=>themeColor.remove()
+  },[themeColor])
+  useLayoutEffect(()=>{
+    const root = document.documentElement
+    root.dataset.theme = theme
+    const synchronize = ()=>{ themeColor.content = getComputedStyle(root).backgroundColor }
+    synchronize()
+    const system = theme === 'system' ? matchMedia('(prefers-color-scheme: dark)') : undefined
+    system?.addEventListener('change',synchronize)
+    return ()=>{
+      system?.removeEventListener('change',synchronize)
+    }
+  },[theme,themeColor])
+  useLayoutEffect(()=>{
+    document.documentElement.dataset.contentSize = String(fontSize)
+  },[fontSize])
   useEffect(()=>{
     const openingRevision=++revision.current
     let active = true
@@ -90,7 +121,10 @@ export function usePresentation() {
     save.current()
   },[])
   const update=useCallback((patch:Partial<Layout>)=>apply({kind:'patch',patch}),[apply])
-  const expand=useCallback((id:string,expanded:boolean)=>apply({kind:'workspace',id,expanded}),[apply])
+  const expand=useCallback((id:string,expanded?:boolean)=>{
+    if(expanded!==undefined)apply({kind:'workspace',id,expanded})
+    else if(storage.current)apply({kind:'reveal_workspace',id})
+  },[apply])
   return {layout,storageNotice,storageRecovery,retry:()=>setAttempt(value=>value+1),reset:()=>apply({kind:'reset'}),update,expand}
 }
 // Long-lived resource listeners must route through the current viewport, even
@@ -108,50 +142,99 @@ export function useResourceVisibility(desktop:Layout,persist:(patch:Partial<Layo
   const layout=useMemo(()=>!available?{...desktop,resourcesClosed:true}:narrow?{...desktop,resourcesClosed:closed}:desktop,[available,narrow,desktop,closed])
   return {layout,update}
 }
-export function useViewport() {
+export interface Viewport {width:number;height:number}
+export function useViewport():Viewport {
   const [viewport,setViewport]=useState(()=>({width:innerWidth,height:innerHeight}))
   useEffect(()=>{
     let frame=0
-    const resize=()=>{if(!frame)frame=requestAnimationFrame(()=>{frame=0;setViewport({width:innerWidth,height:innerHeight})})}
+    const resize=()=>{if(!frame)frame=requestAnimationFrame(()=>{
+      frame=0
+      const width=innerWidth,height=innerHeight
+      setViewport(previous=>previous.width===width&&previous.height===height?previous:{width,height})
+    })}
     window.addEventListener('resize',resize)
     return ()=>{window.removeEventListener('resize',resize);cancelAnimationFrame(frame)}
   },[])
   return viewport
 }
-export function useNarrow(queryText = '(max-width: 767px)') {
-  const [narrow,setNarrow] = useState(()=>matchMedia(queryText).matches)
-  useEffect(()=>{
-    const query = matchMedia(queryText)
-    const change = ()=>setNarrow(query.matches)
-    query.addEventListener('change',change); return ()=>query.removeEventListener('change',change)
-  },[queryText])
-  return narrow
-}
-export function Modal({children,close,className,label,initialFocus}:{children:ReactNode;close:()=>void;className:string;label:string;initialFocus?:string}) {
+export function Modal({children,close,className,label,initialFocus,open,lightDismiss=false,fallbackFocus}:{children:ReactNode;close:()=>void;className:string;label:string;initialFocus?:string;open?:boolean;lightDismiss?:boolean;fallbackFocus?:string}) {
   const ref = useRef<HTMLDialogElement>(null)
-  const [trigger] = useState(()=>document.activeElement instanceof HTMLElement ? document.activeElement : undefined)
+  const [mountTrigger] = useState(()=>open === undefined && document.activeElement instanceof HTMLElement ? document.activeElement : undefined)
   const onClose = useRef(close); onClose.current=close
   useEffect(()=>{
+    if (open === false) return
+    const trigger = mountTrigger ?? document.activeElement
     const dialog=ref.current!;dialog.showModal()
     if(initialFocus)dialog.querySelector<HTMLElement>(initialFocus)?.focus()
     return ()=>{
       dialog.close()
-      if(trigger?.isConnected && trigger.getClientRects().length && !trigger.matches(':disabled') && !dialog.contains(trigger))trigger.focus()
-      else document.querySelector<HTMLTextAreaElement>('.pane.selected textarea:not([disabled])')?.focus()
+      const target = trigger instanceof HTMLElement && trigger.getClientRects().length && !trigger.matches(':disabled') && !dialog.contains(trigger)
+        ? trigger : document.querySelector<HTMLElement>(fallbackFocus ?? '.pane.selected textarea:not([disabled])')
+      if (target) target.focus()
     }
-  },[])
-  return <dialog ref={ref} className={className} aria-label={label} onCancel={event=>{event.preventDefault();onClose.current()}}>{children}</dialog>
+  },[open,mountTrigger,initialFocus,fallbackFocus])
+  return <dialog ref={ref} className={className} aria-label={label} {...(lightDismiss ? {closedby:'any'} : {})}
+    onCancel={event=>{event.preventDefault();event.stopPropagation();onClose.current()}}
+    onKeyDown={event=>{
+      if(event.key!=='Tab'||event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey||event.nativeEvent.isComposing)return
+      const dialog=event.currentTarget,active=dialog.ownerDocument.activeElement
+      if(!active||active.closest('dialog,[role="dialog"],[role="menu"]')!==dialog)return
+      const controls=Array.from(dialog.querySelectorAll<HTMLElement>('button,input,textarea,select,a[href],summary,[tabindex],[contenteditable="true"]'))
+        .filter(el=>el.closest('dialog')===dialog&&!el.closest('[inert]')&&!el.matches(':disabled,[tabindex^="-"]')&&el.checkVisibility({visibilityProperty:true}))
+      const first=controls[0]??dialog,last=controls.at(-1)??dialog
+      if(active===dialog||active===(event.shiftKey?first:last)){
+        event.preventDefault()
+        const destination=event.shiftKey?last:first
+        destination.focus()
+      }
+    }}>{children}</dialog>
 }
 export function ResizeHandle({name,value,min,max,onChange,reverse=false}:{name:string;value:number;min:number;max:number;onChange:(value:number)=>void;reverse?:boolean}) {
-  const start=useRef<{x:number;value:number;preview:number;root:HTMLElement;previous:string}>()
+  const start=useRef<{pointer:number;x:number;width:number;latest:number;root:HTMLElement;previous:string;frame?:number}>()
   const property=`--${name==='navigation'?'navigation':'resources'}-width`
-  const bounded=(value:number)=>Math.max(min,Math.min(max,value))
-  const finish=(commit:boolean)=>{const drag=start.current;if(!drag)return;start.current=undefined;drag.root.style.setProperty(property,drag.previous);if(commit)onChange(drag.preview)}
+  const bounded=(width:number)=>Math.max(min,Math.min(max,Math.round(width)))
+  const finish=(pointer:number,end?:number)=>{
+    const drag=start.current
+    if(!drag || pointer!==drag.pointer)return
+    start.current=undefined
+    if(drag.frame!==undefined)cancelAnimationFrame(drag.frame)
+    drag.root.style.setProperty(property,drag.previous)
+    if(end!==undefined && end!==drag.x){
+      const width=bounded(drag.width+(end-drag.x)*(reverse?-1:1))
+      if(width!==drag.width)onChange(width)
+    }
+  }
+  useLayoutEffect(()=>()=>{if(start.current)finish(start.current.pointer)},[property])
   return <div className="panel-resize" role="separator" tabIndex={0} aria-label={`Resize ${name}`} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={max} aria-valuenow={value}
-    onKeyDown={event=>{const delta=event.key==='ArrowLeft'?-10:event.key==='ArrowRight'?10:0;if(delta){event.preventDefault();const visible=event.currentTarget.parentElement!.getBoundingClientRect().width;onChange(bounded(visible+delta*(reverse?-1:1)))}}}
-    onPointerDown={event=>{const root=document.getElementById('workbench');if(!root)return;const visible=event.currentTarget.parentElement!.getBoundingClientRect().width;start.current={x:event.clientX,value:visible,preview:visible,root,previous:root.style.getPropertyValue(property)};event.currentTarget.setPointerCapture(event.pointerId)}}
-    onPointerMove={event=>{const drag=start.current;if(drag){drag.preview=bounded(drag.value+(event.clientX-drag.x)*(reverse?-1:1));drag.root.style.setProperty(property,`${drag.preview}px`)}}}
-    onPointerUp={()=>finish(true)} onPointerCancel={()=>finish(false)} onLostPointerCapture={()=>finish(false)}/>
+    onKeyDown={event=>{
+      if(event.key==='Escape' && start.current){finish(start.current.pointer);event.preventDefault();return}
+      const delta=event.key==='ArrowLeft'?-10:event.key==='ArrowRight'?10:0
+      if(delta){
+        event.preventDefault()
+        const visible=event.currentTarget.parentElement!.getBoundingClientRect().width
+        const width=bounded(visible+delta*(reverse?-1:1))
+        if(width!==visible)onChange(width)
+      }
+    }}
+    onPointerDown={event=>{
+      if(event.button!==0 || start.current)return
+      const root=event.currentTarget.closest<HTMLElement>('#workbench')
+      if(!root)return
+      const width=event.currentTarget.parentElement!.getBoundingClientRect().width
+      start.current={pointer:event.pointerId,x:event.clientX,width,latest:width,root,previous:root.style.getPropertyValue(property)}
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }}
+    onPointerMove={event=>{
+      const drag=start.current
+      if(!drag || event.pointerId!==drag.pointer)return
+      drag.latest=bounded(drag.width+(event.clientX-drag.x)*(reverse?-1:1))
+      drag.frame??=requestAnimationFrame(()=>{
+        drag.frame=undefined
+        drag.root.style.setProperty(property,`${drag.latest}px`)
+      })
+    }}
+    onPointerUp={event=>finish(event.pointerId,event.clientX)}
+    onPointerCancel={event=>finish(event.pointerId)} onLostPointerCapture={event=>finish(event.pointerId)}/>
 
 }
 export interface PaletteAction {label:string;run:()=>void}

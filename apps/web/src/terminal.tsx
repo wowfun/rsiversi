@@ -14,7 +14,7 @@ export type Follower={terminal:Status;id:string}
 type Reply={type:string;value:any;ack?:string}
 function terminalTheme(){const style=getComputedStyle(document.documentElement);return {background:style.getPropertyValue('--secondary-surface').trim(),foreground:style.getPropertyValue('--ink').trim(),cursor:style.getPropertyValue('--teal').trim(),selectionBackground:style.getPropertyValue('--active').trim()}}
 const encoder=new TextEncoder()
-export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owner:ResourceOwner;pane:string;surface:NativeSurface;hide:()=>void;initial:string;created?:ReturnType<ResourceOwner['attachment']>;onOpen:(id?:string)=>void}) {
+export function Terminals({owner,pane,surface,selected,hide,initial,created,onOpen}:{owner:ResourceOwner;pane:string;surface:NativeSurface;selected:boolean;hide:()=>void;initial:string;created?:ReturnType<ResourceOwner['attachment']>;onOpen:(id?:string)=>void}) {
   const [follower,setFollower]=useState<Follower>(),[status,setStatus]=useState<Status>(),[notice,setNotice]=useState(''),[resizeNotice,setResizeNotice]=useState(''),[busy,setBusy]=useState(false)
   const screen=useRef<HTMLDivElement>(null),alive=useRef(true),current=useRef<Follower>(),pump=useRef<TerminalInput>(),display=useRef<Xterm>(),resizeCurrent=useRef<()=>void>(),attachment=useRef<ReturnType<ResourceOwner['attachment']>>()
   const request=async(request:unknown):Promise<Reply>=>JSON.parse(await owner.call('terminal',JSON.stringify({pane,generation:surface.generation,request})))
@@ -43,7 +43,7 @@ export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owne
     if(!follower||!screen.current)return
     let active=true,ack:string|undefined,resizeTimer:ReturnType<typeof setTimeout>|undefined
     const styles=terminalDocument(document)
-    const term=new Xterm({documentOverride:styles.document,fontFamily:'"SFMono-Regular",Consolas,"Liberation Mono",monospace',fontSize:12,lineHeight:1.2,scrollback:1000,rows:follower.terminal.size.rows,cols:follower.terminal.size.columns,disableStdin:true,convertEol:false,theme:terminalTheme()})
+    const term=new Xterm({documentOverride:styles.document,minimumContrastRatio:4.5,fontFamily:'"SFMono-Regular",Consolas,"Liberation Mono",monospace',fontSize:12,lineHeight:1.2,scrollback:1000,rows:follower.terminal.size.rows,cols:follower.terminal.size.columns,disableStdin:true,convertEol:false,theme:terminalTheme()})
     const fit=new FitAddon()
     try{term.loadAddon(fit);term.open(screen.current)}catch(error){term.dispose();styles.dispose();setNotice(String(error));return}
     display.current=term;installWriter(follower,follower.terminal)
@@ -87,13 +87,16 @@ export function Terminals({owner,pane,surface,hide,initial,created,onOpen}:{owne
     return()=>{active=false;themeObserver.disconnect();systemTheme.removeEventListener('change',refreshTheme);clearTimeout(resizeTimer);observer.disconnect();data.dispose();binary.dispose();pump.current?.stop();term.dispose();styles.dispose();display.current=undefined;resizeCurrent.current=undefined}
   },[follower?.id])
   const writer=!!follower&&status?.controller===follower.id&&status.phase.state==='running'
+  useEffect(()=>{
+    if(selected&&writer)display.current?.focus()
+  },[selected,writer,follower?.id,status?.controller_epoch])
   const visibleNotice=notice||(writer?resizeNotice:'')
   const phase=status?.phase.state==='exited'?`Exited ${status.phase.exit_code??`(signal ${status.phase.signal??'unknown'})`}`:status?.phase.state==='failed'?'Stopped with an error':writer?'You have control':status?'Read only':'No terminal selected'
   return <section className="terminal-panel" aria-label="Session terminals">
-    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen()}>New terminal</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.();display.current?.focus()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();detach();current.current=undefined;setFollower(undefined);setStatus(undefined)})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
+    <div className="terminal-toolbar"><strong>Terminal</strong><span className={`terminal-authority ${writer?'is-writer':''}`} role="status">{phase}</span><div className="terminal-actions"><Button size="sm" disabled={busy} onClick={()=>onOpen()}>New terminal</Button>{follower&&status?.phase.state==='running'&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{const reply=await operate({type:'takeover',attachment:follower.id});follower.terminal=reply.value;current.current=follower;setStatus(reply.value);installWriter(follower,reply.value);resizeCurrent.current?.()})}>Take control</Button>}{follower&&<Button size="sm" disabled={busy} onClick={()=>void action(async()=>{await operate({type:'close',terminal:follower.terminal.id});pump.current?.stop();detach();current.current=undefined;setFollower(undefined);setStatus(undefined)})}>Terminate terminal</Button>}<Button size="sm" onClick={hide} aria-label="Hide terminal panel">×</Button></div></div>
     {visibleNotice&&<p className="terminal-notice" role="alert">{visibleNotice}</p>}
     <div className="terminal-screen" ref={screen} hidden={!follower}/>
     {!follower&&<div className="terminal-empty"><p>Run commands in this Session’s workspace.</p><p className="hint">Hiding this panel leaves shells running.</p></div>}
-    <footer className="terminal-footer"><span title={surface.path}>{surface.path}</span>{status&&<span aria-label="Terminal permissions" title="Manual terminal permissions. Agent permissions are unchanged.">{status.sandbox==='danger-full-access'?'Current user permissions':status.sandbox==='workspace-write'?'Workspace Write':'Read only'}</span>}<span>{status?`${status.size.columns} × ${status.size.rows}`:'ANSI/VT100'}</span></footer>
+    <footer className="terminal-footer"><span title={surface.workspace.coordinates.path}>{surface.workspace.coordinates.path}</span>{status&&<span aria-label="Terminal permissions" title="Manual terminal permissions. Agent permissions are unchanged.">{status.sandbox==='danger-full-access'?'Current user permissions':status.sandbox==='workspace-write'?'Workspace Write':'Read only'}</span>}<span>{status?`${status.size.columns} × ${status.size.rows}`:'ANSI/VT100'}</span></footer>
   </section>
 }

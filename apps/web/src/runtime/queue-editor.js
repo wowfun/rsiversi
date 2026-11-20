@@ -10,7 +10,7 @@ export function createQueueEditor({
     retired = false;
   const entry = (value) => ({ key: String(++sequence), value });
   const editor = {
-    blocks: structuredClone(content).map(entry),
+    blocks: content.map(entry),
     editable,
     saving: false,
     status: "",
@@ -18,7 +18,7 @@ export function createQueueEditor({
       if (!editable || retired || editor.saving) return;
       const block = editor.blocks.find((block) => block.key === key);
       if (block?.value.type === "text") {
-        block.value.text = text;
+        block.value = { ...block.value, text };
         changed();
       }
     },
@@ -38,9 +38,7 @@ export function createQueueEditor({
       editor.status = "Saving queue edit…";
       changed();
       try {
-        await submit(
-          structuredClone(editor.blocks.map((block) => block.value)),
-        );
+        await submit(editor.blocks.map((block) => block.value));
         editor.close();
       } catch (error) {
         if (!retired) editor.status = error.message;

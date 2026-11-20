@@ -170,6 +170,6 @@ test('external composer shares Enter preference, modifier and IME handling',asyn
       pane.input.listeners.keydown({key:'Enter',preventDefault:()=>prevented++,...extra});
       assert.equal(sends-before,Number(expected));
     }
-    assert.equal(prevented,sends);
+    assert.equal(prevented,sends + 1, 'Alt+Enter also suppresses the native line break');
   }finally{globalThis.document=original;}
 });

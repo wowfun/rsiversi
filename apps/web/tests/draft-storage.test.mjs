@@ -58,15 +58,14 @@ test('command controls retain editor content through unknown-result recovery and
   let saved = store.blank('main','session','b'.repeat(64));
   saved.text = 'Unsubmitted work';
   store.mutate = async (_key, change) => saved = change(structuredClone(saved));
-  saved = await store.freeze(saved, {kind:'command', id:'command-1',opaque:'frozen',text_bytes:0,images:0,captures:[]}, true);
-  saved = await store.begin(saved);
+  saved = await store.startDispatch(saved, {kind:'command', id:'command-1',opaque:'frozen',text_bytes:0,images:0,captures:[]}, true);
   saved = await store.settle(saved, {status:'unknown'});
   assert.equal(saved.pending.opaque, 'frozen');
   assert.equal(saved.pending.preserve_editor, true);
   saved = await store.settle(saved, {status:'complete',receipt:'confirmed'});
   assert.equal(saved.text, 'Unsubmitted work');
   assert.equal(saved.pending, null);
-  assert.throws(() => store.freeze(saved,{kind:'message'},true), /Only a command/);
+  assert.throws(() => store.startDispatch(saved,{kind:'message'},true), /Only a command/);
 });
 test('independent fork drafts retain their exact creation intent through storage and replacement', async () => {
   const store = new DraftStore(undefined, 'a'.repeat(32), 'local');
@@ -105,7 +104,7 @@ test('capture identity is independent of JSON object member ordering', async()=>
   saved.references=[{metadata:{target},snapshot}];
   store.mutate=async(_key,change)=>saved=change(structuredClone(saved));
   const capture={snapshot:{byte_len:1,sha256:snapshot.sha256,capture_id:'identity'},target:{header_sha256:saved.header,session_id:'session'}};
-  saved=await store.freeze(saved,{kind:'message',id:'request',opaque:'opaque',text_bytes:0,images:0,captures:[capture]});
+  saved=await store.startDispatch(saved,{kind:'message',id:'request',opaque:'opaque',text_bytes:0,images:0,captures:[capture]});
   assert.equal(saved.pending.captures[0].snapshot.capture_id,'identity');
   saved.references=[];saved.pending=null;saved.releases=[capture];
   saved=await store.acknowledgeRelease(saved,{target,snapshot});
@@ -140,8 +139,8 @@ test('command trigger consumption survives recovery and never deletes newer text
     const store=new DraftStore(undefined,'a'.repeat(32),'local');
     let saved=store.blank('main','command-span','b'.repeat(64));saved.text='before /help after';
     store.mutate=async(_key,change)=>saved=change(structuredClone(saved));
-    saved=await store.freeze(saved,{kind:'command',id:'help',opaque:'opaque',text_bytes:0,images:0,captures:[]},true,{start:7,end:12});
-    saved=await store.begin(saved);saved=await store.settle(saved,{status:'unknown'});
+    saved=await store.startDispatch(saved,{kind:'command',id:'help',opaque:'opaque',text_bytes:0,images:0,captures:[]},true,{start:7,end:12});
+    saved=await store.settle(saved,{status:'unknown'});
     assert.equal(saved.text,'before /help after');
     if(changed)saved=await store.edit(saved,'new text',[]);
     saved=await store.settle(saved,{status:'complete',receipt:'confirmed'});
