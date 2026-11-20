@@ -1293,6 +1293,64 @@ async fn held_command_context_enters_an_automatic_turn_without_waking_or_authori
 }
 
 #[tokio::test]
+async fn waking_command_supersedes_a_continuation_beyond_the_first_payload_page() {
+    use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery};
+    for sqlite in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn SessionStore> = if sqlite {
+            Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
+        } else {
+            Arc::new(MemoryStore::new())
+        };
+        let store = Arc::new(FactReadRaceStore::new(inner));
+        let fixture = Fixture::start(store.clone(), false).await;
+        let session = &fixture.session_id;
+        let command = async |delivery, name: &str| {
+            *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
+                delivery,
+                content: vec![AgentMessageContent::Text { text: name.into() }],
+                attribution: None,
+            }];
+            SessionCommands::execute(
+                &fixture.kernel,
+                fixture.kernel.prepare_resume(session).await.unwrap(),
+                fixture.invocation(name, true).await,
+            )
+            .await
+            .unwrap()
+        };
+        let held = command(CommandInputDelivery::Inject, "held").await;
+        let lease = arm(&fixture).await;
+        reserve(&fixture, &lease).await;
+        store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
+        command(CommandInputDelivery::Steer, "wake").await;
+        let automatic = fixture
+            .kernel
+            .message_status(session, &input().message_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            automatic.state,
+            MessageState::Discarded {
+                reason: MessageDiscardReason::Superseded,
+                ..
+            }
+        ));
+        let retained = fixture
+            .kernel
+            .message_status(
+                session,
+                &held.commit().command_inputs()[0].message.message_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retained.state, MessageState::Pending);
+        drop(lease);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn busy_reservation_preserves_authority_and_budget_then_accepts_once_when_idle() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
     let lease = arm(&fixture).await;

@@ -1894,11 +1894,18 @@ impl SessionStore for MemoryStore {
         let mut first_step: Option<&StoreAgentMessage> = None;
         let mut injected_commands = 0;
         let mut promotable = Vec::new();
+        let mut continuations = Vec::new();
         for ((candidate, _), entry) in &state.agent_messages {
             if candidate != session_id || !matches!(entry.state, StoreAgentMessageState::Pending) {
                 continue;
             }
             pending_count += 1;
+            if matches!(
+                entry.message.source,
+                AgentMessageSource::Continuation { .. }
+            ) {
+                continuations.push((entry.accepted_control_seq, entry.message.message_id.clone()));
+            }
             if entry.target != MessageTarget::NextStep {
                 continue;
             }
@@ -1917,12 +1924,14 @@ impl SessionStore for MemoryStore {
             }
         }
         promotable.sort_by_key(|(control_seq, _)| *control_seq);
+        continuations.sort_by_key(|(control_seq, _)| *control_seq);
         let summary = StoreAgentMailboxSummary {
             inbox_paused: session.inbox_paused,
             first_pending_step_source: first_step.map(|entry| entry.message.source.kind()),
             injected_commands,
             pending_count,
             pending_promotable_message_ids: promotable.into_iter().map(|(_, id)| id).collect(),
+            pending_continuation_ids: continuations.into_iter().map(|(_, id)| id).collect(),
             durable_control_seq: session.controls.last().map_or(0, AgentControlRecord::seq),
             durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
         };

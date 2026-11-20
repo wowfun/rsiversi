@@ -12,7 +12,6 @@ use rsi_agent_session_protocol::{
     CommandRevision, DomainMutationSource, DomainRequestId, DomainStateCommit, DomainStateUpdate,
     DomainStateView, SessionCommandInvocation,
 };
-use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_turn_protocol::{DomainMutationReceipt, SessionCommands};
 
 type CommandKey = (SessionId, DomainRequestId);
@@ -517,17 +516,12 @@ impl AgentKernel {
         let mut controls = vec![control];
         let mut command_execution = Vec::new();
         if !candidate.inputs.is_empty() {
-            let scan = scan_durable_messages(&self.inner, &session_id, MailboxRead::All).await?;
-            if scan
-                .pending
-                .iter()
-                .filter(|entry| matches!(entry.message.source, AgentMessageSource::Command { .. }))
-                .count()
-                .saturating_add(candidate.inputs.len())
-                > rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUTS
-            {
-                return Err(TurnError::Capacity);
-            }
+            let mailbox = self
+                .inner
+                .store
+                .read_agent_mailbox_summary(&session_id)
+                .await
+                .map_err(turn_store_error)?;
             let reserved = self
                 .inner
                 .store
@@ -549,19 +543,12 @@ impl AgentKernel {
                 && candidate.inputs.iter().any(|input| {
                     input.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
                 });
-            let superseded = scan
-                .pending
-                .iter()
-                .filter(|entry| {
-                    wakes
-                        && matches!(
-                            entry.message.source,
-                            AgentMessageSource::Continuation { .. }
-                        )
-                })
-                .map(|entry| entry.message.message_id.clone())
-                .collect::<Vec<_>>();
-            if scan
+            let superseded = if wakes {
+                mailbox.pending_continuation_ids
+            } else {
+                Vec::new()
+            };
+            if mailbox
                 .pending_count
                 .saturating_sub(superseded.len())
                 .saturating_add(reserved)
@@ -605,7 +592,7 @@ impl AgentKernel {
                     .map_err(|error| TurnError::Invalid(error.to_string()))?,
                 );
             }
-            if scan.inbox_paused
+            if mailbox.inbox_paused
                 && candidate.inputs.iter().any(|input| {
                     input.delivery != rsi_agent_session_protocol::MessageDelivery::NextStep
                 })

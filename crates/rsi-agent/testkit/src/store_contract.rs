@@ -1968,6 +1968,7 @@ pub async fn assert_mechanical_store_contract(
             injected_commands: 0,
             pending_count: rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES,
             pending_promotable_message_ids: vec![MessageId::new("bounded-message-0").unwrap(),],
+            pending_continuation_ids: vec![],
             durable_control_seq: full_control_seq,
             durable_fact_seq: 8,
         }

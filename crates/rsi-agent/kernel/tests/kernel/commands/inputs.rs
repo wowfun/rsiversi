@@ -20,7 +20,8 @@ async fn inbox_pause_command_injection_preserves_pause_and_receipt_retry_cannot_
         } else {
             Arc::new(MemoryStore::new())
         };
-        let fixture = Fixture::start(store.clone(), false).await;
+        let counted = Arc::new(FactReadRaceStore::new(store.clone()));
+        let fixture = Fixture::start(counted.clone(), false).await;
         let session = &fixture.session_id;
         let read_mailbox = || async {
             store
@@ -60,14 +61,17 @@ async fn inbox_pause_command_injection_preserves_pause_and_receipt_retry_cannot_
         ] {
             *fixture.callback.inputs.lock().unwrap() = vec![text_input(delivery, request)];
             let invocation = fixture.invocation(request, true).await;
+            let prepared = fixture.kernel.prepare_resume(session).await.unwrap();
+            counted.mailbox.reads.lock().unwrap().clear();
             let receipt = fixture
                 .kernel
-                .execute(
-                    fixture.kernel.prepare_resume(session).await.unwrap(),
-                    invocation.clone(),
-                )
+                .execute(prepared, invocation.clone())
                 .await
                 .unwrap();
+            assert!(
+                counted.mailbox.reads.lock().unwrap().is_empty(),
+                "command admission read pending message bodies for {request}"
+            );
             let mailbox = read_mailbox().await;
             assert_eq!(mailbox.inbox_paused, paused);
             let input = &receipt.commit().command_inputs()[0];

@@ -1149,6 +1149,8 @@ pub struct StoreAgentMailboxSummary {
     pub first_pending_step_source: Option<rsi_agent_session_protocol::AgentMessageSourceKind>,
     /// Pending promotable next-Step identities in acceptance order at the same snapshot.
     pub pending_promotable_message_ids: Vec<MessageId>,
+    /// Pending continuation identities, superseded by a waking ordinary input.
+    pub pending_continuation_ids: Vec<MessageId>,
     /// Exact durable control tail at the same Store snapshot.
     pub durable_control_seq: u64,
     /// Exact durable Fact tail at the same Store snapshot.
@@ -1161,15 +1163,18 @@ impl StoreAgentMailboxSummary {
         let identities = self
             .pending_promotable_message_ids
             .iter()
+            .chain(&self.pending_continuation_ids)
             .collect::<BTreeSet<_>>();
+        let selected =
+            self.pending_promotable_message_ids.len() + self.pending_continuation_ids.len();
         if self.pending_count > MAXIMUM_PENDING_AGENT_MESSAGES
             || self.injected_commands > self.pending_count
             || (self.pending_count == 0 && self.first_pending_step_source.is_some())
-            || self.pending_promotable_message_ids.len() > self.pending_count
-            || identities.len() != self.pending_promotable_message_ids.len()
+            || selected > self.pending_count
+            || identities.len() != selected
         {
             return Err(StoreError::Corrupt(
-                "mailbox summary exceeds its bound or repeats a next-Step identity".into(),
+                "mailbox summary exceeds its bound or repeats a pending identity".into(),
             ));
         }
         Ok(())

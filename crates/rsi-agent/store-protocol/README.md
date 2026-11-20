@@ -356,8 +356,9 @@ a byte-bounded prefix plus the exact pending-mailbox count and direct message
 status, and the one currently active activation per session. A lightweight
 mailbox summary returns the pending count, the count of non-waking injected
 command inputs, the bounded ordered identities of
-pending promotable next-Step messages, and Fact/control tails for capacity and
-terminal-promotion decisions. Payload inspection reads all pending messages,
+pending promotable next-Step messages and supersedable continuation inputs,
+and Fact/control tails. Command admission uses these identities and counts even
+when the pending bodies span multiple payload pages. Payload inspection reads pending messages,
 optionally with one exact message status. Claim metadata selection separately
 reports whether any ordinary next-Turn input is pending, so continuation
 priority needs no unrelated message bodies. Every read uses one Store snapshot:

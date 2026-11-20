@@ -2014,14 +2014,15 @@ impl SessionStore for SqliteStore {
                 .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
             let mut statement = transaction
                 .prepare(
-                    "SELECT message_id FROM agent_messages
+                    "SELECT message_id, message_source = 'continuation' FROM agent_messages
                      WHERE session_id = ?1 AND state = 'pending'
-                       AND target = 'next_step' AND wake_required = 0
-                       AND (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL)
+                       AND (message_source = 'continuation' OR
+                            (target = 'next_step' AND wake_required = 0 AND
+                             (message_source IN ('completion', 'program') OR delivery = 'steer' AND bound_turn_id IS NOT NULL)))
                      ORDER BY accepted_control_seq LIMIT ?2",
                 )
                 .map_err(sql_error)?;
-            let pending_promotable_message_ids = statement
+            let identities = statement
                 .query_map(
                     params![
                         session_id.as_str(),
@@ -2030,14 +2031,21 @@ impl SessionStore for SqliteStore {
                         )
                         .expect("pending-message overflow probe fits SQLite INTEGER"),
                     ],
-                    |row| bounded_text(row, 0, 256),
+                    |row| Ok((bounded_text(row, 0, 256)?, row.get::<_, bool>(1)?)),
                 )
-                .map_err(sql_error)?
-                .map(|row| {
-                    MessageId::new(row.map_err(sql_error)?)
-                        .map_err(|error| StoreError::Corrupt(error.to_string()))
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map_err(sql_error)?;
+            let mut pending_promotable_message_ids = Vec::new();
+            let mut pending_continuation_ids = Vec::new();
+            for row in identities {
+                let (id, continuation) = row.map_err(sql_error)?;
+                let id =
+                    MessageId::new(id).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+                if continuation {
+                    pending_continuation_ids.push(id);
+                } else {
+                    pending_promotable_message_ids.push(id);
+                }
+            }
             let summary = StoreAgentMailboxSummary {
                 inbox_paused,
                 injected_commands,
@@ -2048,6 +2056,7 @@ impl SessionStore for SqliteStore {
                     StoreError::Corrupt("mailbox pending count is outside usize".into())
                 })?,
                 pending_promotable_message_ids,
+                pending_continuation_ids,
                 durable_control_seq: decode_u64(
                     "mailbox durable control sequence",
                     durable_control_seq,
