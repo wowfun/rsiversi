@@ -13,7 +13,7 @@ use rsi_meta::Execution;
 use rsi_storage_domain::Domain;
 use rsi_storage_domain::storage_error;
 use rsi_workspace_review_api::{
-    ConversationIdentity, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
+    ConversationIdentity, FileChange, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
 };
 use std::{
     collections::BTreeMap,
@@ -40,8 +40,21 @@ fn now() -> String {
         .min(u128::from(u64::MAX))
         .to_string()
 }
+#[derive(Clone, Debug)]
+enum Ready {
+    Empty,
+    Changes(Arc<Changes>),
+}
+impl Ready {
+    fn files(&self) -> &[FileChange] {
+        match self {
+            Self::Empty => &[],
+            Self::Changes(changes) => &changes.comparison.files,
+        }
+    }
+}
 #[derive(Debug)]
-struct Ready {
+struct Changes {
     scratch: Scratch,
     comparison: Comparison,
     patch: tokio::sync::Mutex<Option<(String, Arc<str>)>>,
@@ -50,7 +63,7 @@ struct Ready {
 struct Entry {
     summary: Summary,
     active: bool,
-    runtime: Option<Arc<Ready>>,
+    runtime: Option<Ready>,
 }
 #[derive(Debug)]
 struct State {
@@ -260,7 +273,7 @@ impl WorkspaceReview {
     async fn publish(
         &self,
         summary: Summary,
-        runtime: Option<Arc<Ready>>,
+        runtime: Option<Ready>,
         active: bool,
     ) -> Result<()> {
         summary.validate()?;
@@ -379,12 +392,12 @@ impl WorkspaceReview {
         };
         match request {
             Request::Files { offset, .. } => {
-                if *offset > runtime.comparison.files.len() {
+                if *offset > runtime.files().len() {
                     return Err(invalid("file cursor exceeds comparison"));
                 }
                 let mut files = Vec::new();
                 let mut bytes = 0;
-                for file in runtime.comparison.files.iter().skip(*offset).take(64) {
+                for file in runtime.files().iter().skip(*offset).take(64) {
                     let length = serde_json::to_vec(file).map_err(invalid)?.len();
                     if bytes + length > 240 * 1024 {
                         break;
@@ -395,11 +408,14 @@ impl WorkspaceReview {
                 Ok(Reply::Files {
                     id: id.clone(),
                     offset: *offset,
-                    has_more: offset + files.len() < runtime.comparison.files.len(),
+                    has_more: offset + files.len() < runtime.files().len(),
                     files,
                 })
             }
             Request::Diff { path, offset, .. } => {
+                let Ready::Changes(runtime) = runtime else {
+                    return Err(ApiError::Unavailable);
+                };
                 let index = runtime
                     .comparison
                     .files
@@ -550,13 +566,14 @@ impl Interval {
                         .compare(&scratch, &before, &after, stop)
                         .await
                     {
-                        Ok(comparison) => {
-                            ready = Some(Arc::new(Ready {
+                        Ok(Some(comparison)) => {
+                            ready = Some(Ready::Changes(Arc::new(Changes {
                                 scratch,
                                 comparison,
                                 patch: tokio::sync::Mutex::new(None),
-                            }));
+                            })));
                         }
+                        Ok(None) => ready = Some(Ready::Empty),
                         Err(reason) => omission(&mut inner.omissions, reason, 1),
                     }
                 } else {
@@ -578,8 +595,8 @@ impl Interval {
         };
         if let Some(ready) = &ready {
             summary.changed_files =
-                u32::try_from(ready.comparison.files.len()).expect("bounded changed files");
-            for file in &ready.comparison.files {
+                u32::try_from(ready.files().len()).expect("bounded changed files");
+            for file in ready.files() {
                 summary.added_lines = summary.added_lines.saturating_add(file.added);
                 summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
             }

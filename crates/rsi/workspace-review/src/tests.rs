@@ -232,13 +232,16 @@ async fn scenario(native: bool) {
         "one listing and three blob batches for 135 files"
     );
     assert!(before.omissions.is_empty(), "{:?}", before.omissions);
+    let captured_calls = process_calls.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(git.compare(&scratch, &before, &before, &stop).await.unwrap().is_none());
+    assert_eq!(process_calls.load(std::sync::atomic::Ordering::Relaxed), captured_calls);
     std::fs::write(workspace.join("tracked.txt"), "after 中文🦀\n").unwrap();
     std::fs::rename(workspace.join("rename.txt"), workspace.join("renamed.txt")).unwrap();
     std::fs::remove_file(workspace.join("deleted.txt")).unwrap();
     std::fs::write(workspace.join(":(glob)literal.txt"), "independent writer\n").unwrap();
     let after = git.capture(&workspace, &mut scratch, &stop, None).await;
     assert!(after.omissions.is_empty(), "{:?}", after.omissions);
-    let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap();
+    let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap().unwrap();
     assert_eq!(comparison.files.len(), 4, "{:?}", comparison.files);
     let file = comparison
         .files
@@ -281,7 +284,7 @@ async fn scenario(native: bool) {
     );
     let partial = git.compare(&scratch, &after, &binary, &stop).await.unwrap();
     assert!(
-        !partial.files.iter().any(|f| f.path == "tracked.txt"),
+        !partial.iter().flat_map(|c| &c.files).any(|f| f.path == "tracked.txt"),
         "an unreadable/binary original cannot be represented as a deletion"
     );
     std::fs::write(workspace.join("large.txt"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
@@ -304,9 +307,7 @@ async fn scenario(native: bool) {
         .await
         .unwrap();
     assert!(
-        !safe
-            .files
-            .iter()
+        !safe.iter().flat_map(|c| &c.files)
             .any(|f| matches!(f.path.as_str(), "large.txt" | "linked.txt" | "tracked.txt"))
     );
     let cancelled = CancellationToken::new();

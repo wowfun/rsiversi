@@ -555,14 +555,20 @@ impl Git {
         before: &Capture,
         after: &Capture,
         stop: &CancellationToken,
-    ) -> Result<Comparison> {
+    ) -> Result<Option<Comparison>> {
+        if stop.is_cancelled() {
+            return Err(OmissionKind::Deadline);
+        }
         let included: BTreeSet<_> = before
             .files
             .keys()
             .chain(after.files.keys())
-            .filter(|p| before.known(p) && after.known(p))
+            .filter(|p| before.known(p) && after.known(p) && before.files.get(*p) != after.files.get(*p))
             .cloned()
             .collect();
+        if included.is_empty() {
+            return Ok(None);
+        }
         let old = self.tree(scratch, &before.files, &included, stop).await?;
         let new = self.tree(scratch, &after.files, &included, stop).await?;
         let bytes = self
@@ -585,11 +591,11 @@ impl Git {
                 stop,
             )
             .await?;
-        Ok(Comparison {
+        Ok(Some(Comparison {
             before: old,
             after: new,
             files: numstat(&bytes)?,
-        })
+        }))
     }
     pub async fn diff(
         &self,

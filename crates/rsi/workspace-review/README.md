@@ -64,6 +64,10 @@ Capacity exhaustion never silently removes an old durable summary or claims that
 an omitted capture was complete. The [API](../workspace-review-api/README.md)
 owns bounded reads and source authorization.
 
+Comparison uses the captured object ID and file mode for each path known at
+both ends. An unchanged interval serves an empty file list and releases its
+scratch repository. Omission diagnostics remain visible for partial captures.
+
 Capture imports validated in-memory file bytes with Git fast-import in batches
 of at most 64 files and 8 MiB of original bytes. Private blob marks never name
 worktree paths or refs; no user filters or index writes are involved. Repository

@@ -237,7 +237,7 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
         .capture(&workspace, &mut scratch, &stop, Some(&execution))
         .await;
     assert_eq!(after.files["run.sh"].1, 0o100_755);
-    let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap();
+    let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap().unwrap();
     let diff = git
         .diff(&scratch, &comparison, &comparison.files[0], &stop)
         .await
@@ -258,8 +258,7 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
         git.compare(&scratch, &before, &unreadable, &stop)
             .await
             .unwrap()
-            .files
-            .is_empty()
+            .is_none()
     );
     let resolved = backend.resolved.load(Ordering::SeqCst);
     gate.0.store(true, Ordering::SeqCst);

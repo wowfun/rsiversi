@@ -21,9 +21,7 @@ impl Storage {
             Ok(())
         }
     }
-    async fn snapshot(
-        &self,
-    ) -> std::result::Result<BTreeMap<String, serde_json::Value>, StorageError> {
+    fn snapshot(&self) -> std::result::Result<BTreeMap<String, serde_json::Value>, StorageError> {
         self.ensure_available()?;
         Ok(self.rows.lock().unwrap().clone())
     }
@@ -600,7 +598,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         async move { interval.begin(CancellationToken::new()).await }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while domain.snapshot().await.unwrap().is_empty() {
+        while domain.snapshot().unwrap().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -654,6 +652,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         panic!("diff")
     };
     assert!(has_more);
+    let Ready::Changes(ready) = ready else { panic!("changed file has captured evidence"); };
     let private = ready.scratch.path().join("repository");
     let hidden = ready.scratch.path().join("repository-hidden");
     std::fs::rename(&private, &hidden).unwrap();
@@ -722,14 +721,14 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
             CancellationToken::new(),
         )
         .await;
-    let finished = domain.snapshot().await.unwrap();
+    let finished = domain.snapshot().unwrap();
     interval.begin(CancellationToken::new()).await;
     assert!(
         !owner.state.lock().unwrap().entries[&interval.id].active,
         "late begin must not consume a resident slot again"
     );
     assert_eq!(
-        domain.snapshot().await.unwrap(),
+        domain.snapshot().unwrap(),
         finished,
         "finished evidence must not be overwritten"
     );
