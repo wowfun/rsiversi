@@ -1,5 +1,10 @@
 # rsi-meta-profile
 
+Diagnostic compilation attributes each node's declaration, complete configuration
+and enabled flag to a source layer. A disabled ancestor is identified by its
+instance ID. Layer records are local inspection data and have no role in the
+compiled source digest or live activation.
+
 Frozen source fingerprinting encodes the environment, fragments and launch
 patches without evaluating expressions or resolving patch targets. Compilation
 of the complete selected program owns those semantic checks.

@@ -257,6 +257,7 @@ pub(super) async fn run_host_profile_preview(command: &ProfileCommand) -> u8 {
                 "source_digest": preview.profile.source_digest,
                 "source_paths": preview.profile.source_paths,
                 "configuration_validation": "not_prepared",
+                "origins": preview.profile.origins,
                 "factories": preview.factories,
                 "leaves": preview.profile.leaves.iter().map(|leaf| serde_json::json!({
                     "instance_id": leaf.instance_id,
@@ -549,15 +550,23 @@ pub(super) async fn show_agent_preset(
                 available,
             })
         })?;
-    let composition = if row.health == AgentPresetHealth::Healthy {
-        Some(
-            catalog
-                .document(&id)
-                .map_err(preset_management_error)?
-                .content,
-        )
-    } else {
-        None
+    let (composition, origins) = match (&row.health, output) {
+        (AgentPresetHealth::Healthy, ManagementOutput::Json) => {
+            let (doc, origins) = catalog
+                .inspect_document(&id)
+                .map_err(preset_management_error)?;
+            (Some(doc.content), Some(origins))
+        }
+        (AgentPresetHealth::Healthy, ManagementOutput::Text) => (
+            Some(
+                catalog
+                    .document(&id)
+                    .map_err(preset_management_error)?
+                    .content,
+            ),
+            None,
+        ),
+        _ => (None, None),
     };
     let preset = PresetOutput::from(row);
     match output {
@@ -565,6 +574,7 @@ pub(super) async fn show_agent_preset(
             version: 1,
             kind: "agent_preset",
             preset,
+            origins,
             composition,
         }),
         ManagementOutput::Text => write_show_text(&preset, composition.as_deref()),
@@ -644,6 +654,7 @@ pub(super) struct ShowOutput {
     #[serde(rename = "type")]
     kind: &'static str,
     preset: PresetOutput,
+    origins: Option<rsi_meta_profile::ProfileOrigins>,
     composition: Option<String>,
 }
 

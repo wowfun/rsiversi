@@ -444,29 +444,50 @@ impl AgentPresetCatalog {
     /// Returns an error when `id` is absent or broken, or its bounded file
     /// changes while it is read.
     pub fn document(&self, id: &AgentPresetId) -> Result<AgentPresetDocument> {
+        self.read_document(id, |path| self.compiler.compile_shared(path).map(|_| ()))
+            .map(|(document, ())| document)
+    }
+
+    /// Reads the selected preset text and its effective source layers together.
+    ///
+    /// # Errors
+    /// Rejects a missing, changing, unreadable or invalid preset.
+    pub fn inspect_document(
+        &self,
+        id: &AgentPresetId,
+    ) -> Result<(AgentPresetDocument, rsi_meta_profile::ProfileOrigins)> {
+        self.read_document(id, |path| self.compiler.origins(path))
+    }
+
+    fn read_document<T>(
+        &self,
+        id: &AgentPresetId,
+        compile: impl FnOnce(&Path) -> std::result::Result<T, String>,
+    ) -> Result<(AgentPresetDocument, T)> {
         let preset = self.resolve_selected(id)?;
         let path = preset.path.join(COMPOSITION_FILE);
         let content = read_utf8_regular(&path, MAX_COPY_BYTES, "read composition")?;
-        self.compiler
-            .compile(&path)
-            .map_err(|reason| PresetError::BrokenPreset {
-                id: id.as_str().to_owned(),
-                reason,
-            })?;
+        let inspection = compile(&path).map_err(|reason| PresetError::BrokenPreset {
+            id: id.as_str().to_owned(),
+            reason,
+        })?;
         if read_utf8_regular(&path, MAX_COPY_BYTES, "re-read composition")? != content {
             return Err(PresetError::BrokenPreset {
                 id: id.as_str().to_owned(),
                 reason: "composition changed while it was compiled".into(),
             });
         }
-        Ok(AgentPresetDocument {
-            id: preset.id,
-            source: preset.source,
-            trust: preset.trust,
-            content,
-            name: preset.metadata.name,
-            description: preset.metadata.description,
-        })
+        Ok((
+            AgentPresetDocument {
+                id: preset.id,
+                source: preset.source,
+                trust: preset.trust,
+                content,
+                name: preset.metadata.name,
+                description: preset.metadata.description,
+            },
+            inspection,
+        ))
     }
 
     /// Rebuilds one selected preset into a pure Profile candidate.

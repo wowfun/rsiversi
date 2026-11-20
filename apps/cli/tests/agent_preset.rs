@@ -633,7 +633,7 @@ fn built_binary_never_promotes_a_cache_sibling_to_a_system_preset() {
     let fixture = CliFixture::new();
     let initial = fixture.command(&["agent-preset", "list", "--output", "json"]);
     assert!(initial.status.success());
-    let system_cache = fixture.xdg_cache.join("rsi/agent-presets/system");
+    let system_cache = fixture.xdg_cache.join("rsiversi/agent-presets/system");
     let digest_root = fs::read_dir(system_cache)
         .unwrap()
         .map(|entry| entry.unwrap().path())

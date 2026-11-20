@@ -22,6 +22,66 @@ fn environment(root: &std::path::Path) -> ProfileEnvironment {
 }
 
 #[test]
+fn inspection_attributes_includes_and_parent_patches_without_changing_identity() {
+    use rsi_meta_profile::ProfileLayer;
+    let temp = tempfile::tempdir().unwrap();
+    let child = temp.path().join("child.toml");
+    let root = temp.path().join("profile.toml");
+    std::fs::write(
+        &child,
+        r#"format = 1
+[[steps]]
+kind = "group"
+id = "group"
+[[steps.nodes]]
+kind = "plugin"
+id = "leaf"
+plugin = "test.child"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &root,
+        r#"format = 1
+[[steps]]
+kind = "include"
+path = "child.toml"
+[[steps]]
+kind = "patch"
+target = "group"
+enabled = false
+[[steps]]
+kind = "patch"
+target = "leaf"
+config = { value = "private-test-value" }
+"#,
+    )
+    .unwrap();
+    let compiler = ProfileCompiler::new(environment(temp.path()), ProfileLimits::default());
+    let program = ProfileProgram::from_file(&root);
+    let regular = compiler.compile(&program).unwrap();
+    let (inspected, origins) = compiler.compile_for_inspection(&program).unwrap();
+    assert_eq!(inspected, regular);
+    let leaf = &origins.nodes["leaf"];
+    let group = &origins.nodes["group"];
+    assert_eq!(
+        origins.layers[leaf.declared_by],
+        ProfileLayer::File(child.canonicalize().unwrap())
+    );
+    assert_eq!(
+        origins.layers[leaf.config_from.unwrap()],
+        ProfileLayer::File(root.canonicalize().unwrap())
+    );
+    assert_eq!(group.enabled_from, leaf.config_from.unwrap());
+    assert_eq!(leaf.disabled_by.as_deref(), Some("group"));
+    assert!(
+        !serde_json::to_string(&origins)
+            .unwrap()
+            .contains("private-test-value")
+    );
+}
+
+#[test]
 fn frozen_data_and_scratch_paths_are_visible_and_change_source_identity() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("paths.toml");

@@ -19,6 +19,8 @@ use tokio::sync::watch;
 /// Pure source/compiler/resolver preview of one frozen Host Profile candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostProfilePreview {
+    /// Local origins of effective configuration and enabled state, including disabled nodes.
+    pub origins: rsi_meta_profile::ProfileOrigins,
     /// Digest of the complete source program and frozen compile environment.
     pub source_digest: String,
     /// Canonical root and transitive include paths in deterministic order.
@@ -246,9 +248,11 @@ impl Host {
     /// Purely compiles and resolves one explicit immutable source program.
     pub fn preview_program(&self, program: ProfileProgram) -> Result<HostProfilePreview> {
         let program = self.configured_program(program);
-        let candidate = ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone())
-            .compile(&program)?;
+        let (candidate, origins) =
+            ProfileCompiler::new(self.environment.clone(), self.limits.profile.clone())
+                .compile_for_inspection(&program)?;
         Ok(HostProfilePreview {
+            origins,
             source_digest: candidate.source_digest().to_owned(),
             source_paths: candidate.watch_paths().to_vec(),
             leaves: self.resolve_preview_leaves(&candidate)?,

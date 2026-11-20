@@ -24,7 +24,9 @@ mod control;
 mod identity;
 mod preview;
 mod watch_policy;
-pub use preview::{NodeChange, NodeChangeAspect, NodeChangeKind};
+pub use preview::{
+    NodeChange, NodeChangeAspect, NodeChangeKind, NodeOrigin, ProfileLayer, ProfileOrigins,
+};
 pub use watch_policy::{SourceWatchLease, SourceWatchPolicy};
 #[cfg(test)]
 mod isolation_tests;
@@ -763,7 +765,19 @@ impl ProfileCompiler {
 
     /// Rebuilds one candidate from empty state.
     pub fn compile(&self, program: &ProfileProgram) -> Result<ProfileCandidate> {
-        self.compile_with_root_source(program, None)
+        self.compile_with_root_source(program, None, None)
+    }
+
+    /// Compiles the same inputs as ordinary activation and records source layers
+    /// solely for the requesting local inspector.
+    pub fn compile_for_inspection(
+        &self,
+        program: &ProfileProgram,
+    ) -> Result<(ProfileCandidate, ProfileOrigins)> {
+        let mut origins = ProfileOrigins::default();
+        let candidate = self.compile_with_root_source(program, None, Some(&mut origins))?;
+        origins.set_disabled(&candidate.tree, None);
+        Ok((candidate, origins))
     }
 
     /// Previews one native root document edit without writing or preparing factories.
@@ -784,23 +798,26 @@ impl ProfileCompiler {
                 maximum: self.limits.maximum_document_bytes,
             });
         }
-        self.compile_with_root_source(program, Some(contents))
+        self.compile_with_root_source(program, Some(contents), None)
     }
 
     fn compile_with_root_source(
         &self,
         program: &ProfileProgram,
         root_source: Option<&[u8]>,
+        origins: Option<&mut ProfileOrigins>,
     ) -> Result<ProfileCandidate> {
         validate_limits(&self.limits)?;
         self.validate_environment()?;
         let mut state = CompileState::new(self, source_hasher(&self.environment));
+        state.origins = origins;
         state.root_source = root_source;
         if let ProgramRoot::Bundle(bundle) = &program.root {
             bundle.validate(&self.limits)?;
             state.bundle = Some(bundle);
         }
         for fragment in &program.linked {
+            state.enter_layer(|| ProfileLayer::Fragment(fragment.id.clone()));
             hash_fragment(&mut state.digest, fragment);
             state.charge_identifier("fragment", &fragment.id)?;
             for entry in &fragment.entries {
@@ -824,6 +841,7 @@ impl ProfileCompiler {
                 state.execute_source(Path::new(bundle.root()), 1)?;
             }
             ProgramRoot::Memory(profile) => {
+                state.enter_layer(|| ProfileLayer::Memory);
                 hash_marker(&mut state.digest, b"root-memory");
                 for entry in &profile.entries {
                     hash_entry(&mut state.digest, entry);
@@ -838,7 +856,8 @@ impl ProfileCompiler {
                 }
             }
         }
-        for patch in &program.launch_patches {
+        for (index, patch) in program.launch_patches.iter().enumerate() {
+            state.enter_layer(|| ProfileLayer::LaunchPatch(index));
             hash_patch(&mut state.digest, patch);
             state.charge_step()?;
             state.execute_public_patch(patch)?;
@@ -1041,6 +1060,8 @@ struct PluginNode {
 }
 
 struct CompileState<'a> {
+    origins: Option<&'a mut ProfileOrigins>,
+    current_layer: usize,
     compiler: &'a ProfileCompiler,
     bundle: Option<&'a ProfileBundle>,
     root_source: Option<&'a [u8]>,
@@ -1220,6 +1241,8 @@ impl<'a> CompileState<'a> {
             compiler,
             bundle: None,
             root_source: None,
+            origins: None,
+            current_layer: 0,
             seen_sources: BTreeSet::new(),
             tree: Vec::new(),
             instance_ids: HashSet::new(),
@@ -1275,6 +1298,13 @@ impl<'a> CompileState<'a> {
             bytes
         };
         Ok((canonical, bytes))
+    }
+
+    fn enter_layer(&mut self, layer: impl FnOnce() -> ProfileLayer) {
+        if let Some(origins) = &mut self.origins {
+            self.current_layer = origins.layers.len();
+            origins.layers.push(layer());
+        }
     }
 
     fn execute_source(&mut self, requested: &Path, depth: usize) -> Result<()> {
@@ -1349,6 +1379,15 @@ impl<'a> CompileState<'a> {
             self.watch_paths.insert(canonical.clone());
         }
         self.include_stack.push(canonical.clone());
+        let parent_layer = self.current_layer;
+        let bundled = self.bundle.is_some();
+        self.enter_layer(|| {
+            if bundled {
+                ProfileLayer::Bundle(canonical.clone())
+            } else {
+                ProfileLayer::File(canonical.clone())
+            }
+        });
         let base = canonical.parent().ok_or_else(|| ProfileError::Source {
             message: "required source has no parent directory".to_owned(),
         })?;
@@ -1357,6 +1396,7 @@ impl<'a> CompileState<'a> {
             self.execute_step(step, base, depth)?;
         }
         let popped = self.include_stack.pop();
+        self.current_layer = parent_layer;
         debug_assert_eq!(popped.as_deref(), Some(canonical.as_path()));
         Ok(())
     }
@@ -1745,6 +1785,17 @@ impl<'a> CompileState<'a> {
                 target: target.to_owned(),
             }
         })?;
+        if let Some(origins) = &mut self.origins {
+            let origin = origins
+                .nodes
+                .get_mut(target)
+                .expect("registered patch target");
+            match &operation {
+                CompiledPatch::Config(_) => origin.config_from = Some(self.current_layer),
+                CompiledPatch::Enabled(_) => origin.enabled_from = self.current_layer,
+                CompiledPatch::Isolation(_) | CompiledPatch::Append(_) => {}
+            }
+        }
         match node {
             TreeNode::Plugin(plugin) => match operation {
                 CompiledPatch::Config(config) => {
@@ -1943,6 +1994,18 @@ impl<'a> CompileState<'a> {
         }
         visit_nodes(nodes, &mut |node| {
             if self.instance_ids.insert(node.id().to_owned()) {
+                if let Some(origins) = &mut self.origins {
+                    origins.nodes.insert(
+                        node.id().to_owned(),
+                        NodeOrigin {
+                            declared_by: self.current_layer,
+                            config_from: matches!(node, TreeNode::Plugin(_))
+                                .then_some(self.current_layer),
+                            enabled_from: self.current_layer,
+                            disabled_by: None,
+                        },
+                    );
+                }
                 Ok(())
             } else {
                 Err(ProfileError::DuplicateInstance {

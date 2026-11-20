@@ -1,5 +1,9 @@
 # rsi-agent-presets
 
+Local preset inspection reports source layers from the selected Agent profile
+under the same contribution and isolation policy as normal compilation. Its
+origin metadata is independent of the identity pinned by running sessions.
+
 Fresh and cold Session selection compile the current preset source through the
 Agent-only contribution and isolation allowlist. Composition owns recovery and
 retained pins; see the [generation contract](../docs/subsystems/composition-generations.md).

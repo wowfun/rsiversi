@@ -178,6 +178,18 @@ impl AgentPresetProfileCompiler {
         Ok(candidate)
     }
 
+    pub(crate) fn origins(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<rsi_meta_profile::ProfileOrigins, String> {
+        let (candidate, origins) = self
+            .compiler
+            .compile_for_inspection(&ProfileProgram::from_file(path))
+            .map_err(|error| profile_health_reason(&error))?;
+        self.validate(candidate)?;
+        Ok(origins)
+    }
+
     fn validate(
         &self,
         candidate: ProfileCandidate,
