@@ -33,6 +33,10 @@
       "stage": "copy"
     },
     {
+      "name": "storage-namespace.js",
+      "stage": "copy"
+    },
+    {
       "name": "admission.js",
       "stage": "copy"
     },

@@ -1,4 +1,4 @@
-import {highlightCode} from '../../code-highlight.js';
+import {createHighlightSession} from '../../code-highlight.js';
 
 function afterFrame(run) {
   let timer;
@@ -6,30 +6,39 @@ function afterFrame(run) {
   return () => { cancelAnimationFrame(frame); clearTimeout(timer); };
 }
 
-// Optional presentation work shares one document queue, never the frame ACK lane.
+// Optional presentation work shares one bundle-owned queue, never the frame ACK lane.
 // Cancellation removes retained source; callers keep exact plain text on overflow.
-export function createHighlightQueue({highlight = highlightCode, schedule = afterFrame, now = () => performance.now()} = {}) {
+export function createHighlightQueue({createSession = createHighlightSession, schedule = afterFrame, now = () => performance.now()} = {}) {
   const jobs = new Set();
-  let units = 0, cancelScheduled;
+  let units = 0, retainedTokens = 0, cancelScheduled;
+  function release(job) {
+    if(!jobs.delete(job))return;
+    units-=job.text.length;retainedTokens-=job.retained;
+    job.session=null;
+  }
   function wake() {
     if (cancelScheduled || !jobs.size) return;
     cancelScheduled = schedule(() => {
       cancelScheduled = undefined;
       const job = jobs.values().next().value;
       if (!job) return;
-      jobs.delete(job); units -= job.text.length;
-      let tokens = null, exhausted = false;
-      const started = now();
-      try { tokens = highlight(job.text, job.language, {budgetMs: Math.min(16, 500 - job.spent), onBudgetExceeded: () => { exhausted = true; }}); }
-      catch { /* Optional grammar work must not fail an accepted presentation. */ }
-      job.spent += now() - started;
-      job.attempts++;
-      if (!job.cancelled) {
-        if (tokens === null && exhausted && job.spent < 500 && job.attempts < 32) {
-          // Lazy grammar compilation can consume several slices. Rejoin the
-          // back of the queue so other blocks and input get their turn.
-          jobs.add(job); units += job.text.length;
-        } else job.complete(tokens);
+      let result={status:'plain'}, before=0;
+      const started=now();
+      try {
+        job.session??=createSession(job.text,job.language);
+        before=job.session?.progress??0;
+        result=job.session?.step(Math.min(16,500-job.spent))??result;
+      } catch { /* Optional grammar work must not fail an accepted presentation. */ }
+      job.spent+=now()-started;
+      if(job.cancelled){wake();return;}
+      retainedTokens+=(job.session?.retainedTokens??0)-job.retained;
+      job.retained=job.session?.retainedTokens??0;
+      const pending=result.status==='pending' && job.session.progress>before;
+      if(retainedTokens>32768||job.spent>=500)result={status:'plain'};
+      if(result.status==='pending'&&pending){jobs.delete(job);jobs.add(job);}
+      else {
+        release(job);
+        job.complete(result.status==='complete'?result.tokens:null);
       }
       wake();
     });
@@ -38,12 +47,11 @@ export function createHighlightQueue({highlight = highlightCode, schedule = afte
     enqueue(text, language, complete) {
       if (jobs.size >= 128 || text.length > 256 * 1024 || units + text.length > 1024 * 1024)
         return () => {};
-      const job = {text, language, complete, attempts: 0, spent: 0, cancelled: false};
-      jobs.add(job); units += text.length; wake();
+      const job = {text, language, complete, session:null, retained:0, spent:0, cancelled:false};
+      jobs.add(job);units+=text.length;wake();
       return () => {
-        job.cancelled = true;
-        if (jobs.delete(job)) units -= text.length;
-        if (!jobs.size) { cancelScheduled?.(); cancelScheduled = undefined; }
+        job.cancelled=true;release(job);
+        if(!jobs.size){cancelScheduled?.();cancelScheduled=undefined;}
       };
     },
   };

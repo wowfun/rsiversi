@@ -4,6 +4,20 @@ import { bootstrapFiles, rendererFiles, upstreamAssetPattern } from '../bundle-c
 import {build} from 'vite';
 import {documentConfiguration} from '../vite.config.mjs';
 import {fileURLToPath} from 'node:url';
+import {readFile} from 'node:fs/promises';
+import ts from 'typescript';
+
+test('every literal module dependency of a copied bootstrap script ships in the same release', async () => {
+  const names = new Set(bootstrapFiles.map(file=>file.name));
+  for (const {name,stage} of bootstrapFiles) {
+    if(stage!=='copy'&&stage!=='worker')continue;
+    const source=await readFile(new URL('../'+name,import.meta.url),'utf8');
+    for (const {fileName} of ts.preProcessFile(source).importedFiles) {
+      assert.match(fileName,/^(?:\.\/|\/)[\w.-]+\.js$/,name+' imports '+fileName);
+      assert(names.has(fileName.split('/').at(-1)),name+' needs '+fileName+' in the bootstrap');
+    }
+  }
+});
 
 test('development proxies every fixed upstream asset and keeps document overrides local', () => {
   const route = new RegExp(upstreamAssetPattern);

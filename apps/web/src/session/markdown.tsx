@@ -2,18 +2,17 @@ import {
   createElement,
   startTransition,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
-import type { highlightCode } from "../../code-highlight.js";
+import type { HighlightToken } from "../../code-highlight.js";
 import { highlights } from "../runtime/highlight-queue.js";
-import { writeClipboard } from "/mounts.js";
-import { report } from "../bridge.ts";
+import { CopyButton } from "./copy-button.tsx";
 import {
-  IconCheckOutlineRegular,
-  IconCopyOutlineRegular,
   IconNowrapFillRegular,
   IconWrapFillRegular,
 } from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
@@ -45,11 +44,12 @@ export type MarkdownEvent =
   | { kind: "start"; element: Element }
   | { kind: "end" }
   | { kind: "text" | "code"; text: string }
+  | { kind: "math"; text: string; display: boolean }
   | { kind: "break" | "rule" };
 type Tree =
   | string
   | {
-      element: Element | { kind: "code" | "break" | "rule" };
+      element: Element | { kind: "code" | "break" | "rule" } | {kind:"math"; display:boolean};
       children: Tree[];
     };
 const tags = {
@@ -84,6 +84,8 @@ function tree(events: readonly MarkdownEvent[]) {
     } else if (event.kind === "text") parent.push(event.text);
     else if (event.kind === "code")
       parent.push({ element: { kind: "code" }, children: [event.text] });
+    else if (event.kind === "math")
+      parent.push({element:{kind:"math",display:event.display},children:[event.text]});
     else if (event.kind === "break" || event.kind === "rule")
       parent.push({ element: { kind: event.kind }, children: [] });
     else throw new Error("Unsupported Markdown event");
@@ -105,28 +107,19 @@ function CodeBlock({
   language?: string | null;
   streaming: boolean;
 }) {
-  const [wrapped, setWrapped] = useState(true),
-    [copied, setCopied] = useState<string>();
+  const [wrapped, setWrapped] = useState(true);
   const [highlighted, setHighlighted] = useState<{
-    text: string; language?: string | null; tokens: ReturnType<typeof highlightCode>;
+    text: string; language?: string | null; tokens: HighlightToken[][] | null;
   }>();
   const current = highlighted?.text === text && highlighted.language === language;
   useEffect(() => {
     if (streaming || current) return;
-    return highlights.enqueue(text, language, (tokens: ReturnType<typeof highlightCode>) => {
+    return highlights.enqueue(text, language, (tokens: HighlightToken[][] | null) => {
       startTransition(() => setHighlighted({text, language, tokens}));
     });
   }, [text, language, streaming, current]);
   const tokens = !streaming && current
     ? highlighted.tokens : null;
-  const copy = async () => {
-    try {
-      await writeClipboard(text);
-      setCopied(text);
-    } catch (error) {
-      report(error);
-    }
-  };
   return (
     <div className="code-block">
       <div className="code-toolbar">
@@ -145,30 +138,20 @@ function CodeBlock({
             <IconWrapFillRegular size={14} />
           )}
         </button>
-        <button
-          type="button"
-          className="copy-code"
-          aria-label={copied === text ? "Copied" : "Copy code"}
-          title={copied === text ? "Copied" : "Copy code"}
-          onClick={() => void copy()}
-        >
-          {copied === text ? (
-            <IconCheckOutlineRegular size={14} />
-          ) : (
-            <IconCopyOutlineRegular size={14} />
-          )}
-        </button>
+        <CopyButton className="copy-code" text={text} label="Copy code" size={14}/>
       </div>
       <pre className={`transcript-code${wrapped ? " wrap" : ""}`}>
         <code>
           {tokens
-            ? tokens.map((line: Record<string, string>[], index: number) => (
+            ? tokens.map((line, index) => (
                 <span key={index}>
                   {line.map((token, part) => {
                     const style: CSSProperties & Record<string, string> = {};
-                    for (const theme of ["light", "dark"])
-                      if (/^#[0-9a-f]{6,8}$/i.test(token[theme] ?? ""))
-                        style[`--code-${theme}`] = token[theme];
+                    for (const theme of ["light", "dark"] as const) {
+                      const color = token[theme];
+                      if (color && /^#[0-9a-f]{6,8}$/i.test(color))
+                        style[`--code-${theme}`] = color;
+                    }
                     return (
                       <span key={part} className="code-token" style={style}>
                         {token.content}
@@ -185,13 +168,32 @@ function CodeBlock({
   );
 }
 
-function render(nodes: Tree[], streaming: boolean): ReactNode[] {
+function Formula({source,display,streaming}: {source:string;display:boolean;streaming:boolean}) {
+  const host = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const target = host.current!;
+    const delimiter = display ? "$$" : "$";
+    const literal = delimiter + source + delimiter;
+    target.textContent = literal;
+    if (streaming) return;
+    let current = true;
+    void import("/math.js").then(({typeset}) => {
+      if (current) typeset(target,source,display);
+    }).catch(() => { if (current) target.textContent = literal; });
+    return () => { current = false; };
+  }, [source,display,streaming]);
+  return <span ref={host}/>;
+}
+
+function render(nodes: Tree[], streaming: boolean, inQuote = false): ReactNode[] {
   return nodes.map((node, key) => {
     if (typeof node === "string") return node;
-    const element = node.element,
-      children = render(node.children, streaming);
+    const element = node.element;
+    const children = () => render(node.children, streaming, inQuote || element.kind === "quote");
     switch (element.kind) {
       case "pre":
+        if (element.language === "math" && !streaming)
+          return <Formula key={key} source={textOf(node.children)} display streaming={false}/>;
         return (
           <CodeBlock
             key={key}
@@ -200,16 +202,18 @@ function render(nodes: Tree[], streaming: boolean): ReactNode[] {
             streaming={streaming}
           />
         );
+      case "math":
+        return <Formula key={key} source={textOf(node.children)} display={element.display} streaming={streaming}/>;
       case "heading":
         if (element.level < 1 || element.level > 6)
           throw new Error("Unsupported Markdown heading");
-        return createElement(`h${element.level}`, { key }, children);
+        return createElement(`h${element.level}`, { key }, children());
       case "list":
         return element.start === null ? (
-          <ul key={key}>{children}</ul>
+          <ul key={key}>{children()}</ul>
         ) : (
           <ol key={key} start={element.start}>
-            {children}
+            {children()}
           </ol>
         );
       case "link":
@@ -220,29 +224,23 @@ function render(nodes: Tree[], streaming: boolean): ReactNode[] {
             target="_blank"
             rel="noopener noreferrer"
           >
-            {children}
+            {children()}
           </a>
         );
       case "table": {
-        const header = node.children.filter(
-          (child) =>
-            typeof child !== "string" && child.element.kind === "table_head",
-        );
-        const rows = node.children.filter(
-          (child) =>
-            typeof child === "string" || child.element.kind !== "table_head",
-        );
+        const [header, ...rows] = node.children;
+        const wide = !inQuote && typeof header === "object" && header.children.length >= 4;
         return (
           <div
             key={key}
-            className="markdown-table"
+            className={wide ? "markdown-table md-table-wide" : "markdown-table"}
             role="region"
             aria-label="Table"
-            tabIndex={0}
+            tabIndex={wide ? 0 : undefined}
           >
             <table>
-              {render(header, streaming)}
-              <tbody>{render(rows, streaming)}</tbody>
+              {header && render([header], streaming, inQuote)}
+              <tbody>{render(rows, streaming, inQuote)}</tbody>
             </table>
           </div>
         );
@@ -250,17 +248,17 @@ function render(nodes: Tree[], streaming: boolean): ReactNode[] {
       case "table_head":
         return (
           <thead key={key}>
-            <tr>{children}</tr>
+            <tr>{children()}</tr>
           </thead>
         );
       case "table_cell":
         return element.header ? (
           <th key={key} scope="col" data-align={element.alignment ?? undefined}>
-            {children}
+            {children()}
           </th>
         ) : (
           <td key={key} data-align={element.alignment ?? undefined}>
-            {children}
+            {children()}
           </td>
         );
       case "break":
@@ -270,7 +268,7 @@ function render(nodes: Tree[], streaming: boolean): ReactNode[] {
       default: {
         const tag = tags[element.kind];
         if (!tag) throw new Error("Unsupported Markdown element");
-        return createElement(tag, { key }, children);
+        return createElement(tag, { key }, children());
       }
     }
   });

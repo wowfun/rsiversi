@@ -113,8 +113,11 @@ override, with inert template placeholders and explicit disposal. The production
 ES module and validates it when Vite config loads; resolution also rejects a
 different entry in development; production builds also require
 the patched module to have been loaded. It checks the exact
-dependency digest before correcting the 6.0.0 document-override precedence error;
-dependency upgrades require reviewing this patch. No global DOM method is patched.
+dependency digest before correcting the 6.0.0 document override and its
+cell color writer. xterm applies its generated foreground and background
+colors as individual CSSOM properties so truecolor and contrast adjustments
+render under the production policy. Dependency upgrades require reviewing
+these sites. No global DOM method is patched.
 
 Terminal output reads retry an ambiguous bridge failure at most three times with the
 same opaque acknowledgement. Rust retains cursor and page ownership; rendering
@@ -136,6 +139,9 @@ the existing acknowledgement and lease protocol.
 File previews use the [Files contribution contract](../../../crates/rsi/session-files-ui/README.md#rich-file-previews).
 SVG zoom uses the intrinsic dimensions validated from its encoded source, because
 WebKit can report the responsive display size through `naturalWidth`.
+Image zoom buttons step from the displayed scale to the next 25-percentage-point
+increment in either direction. Fit follows the current pane width. Manual zoom
+retains the 5% and 800% endpoints.
 The independently admitted `rsi.file-preview` renderer builds code and Markdown
 DOM from bounded source windows. Its bundled Shiki grammars use the JavaScript
 regex engine; large inputs retain plain source. Transcript code and file previews

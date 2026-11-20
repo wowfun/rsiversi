@@ -20,6 +20,7 @@
     "baseUrl": ".",
     "paths": {
       "/mounts.js": ["mounts.js"],
+      "/math.js": ["math.js"],
       "@rsi/dsh-slots": [
         "vendor/dsh/slots/index.ts"
       ],

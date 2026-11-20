@@ -2,7 +2,7 @@ import { bootstrapFiles, rendererFiles } from './bundle-contract.mjs';
 import { previewDocument } from './preview-document.mjs';
 import { buildRenderers } from "./renderers.mjs";
 import { spawnSync } from "node:child_process";
-import { mkdir, readdir, copyFile, writeFile, readFile } from "node:fs/promises";
+import { mkdir, readdir, copyFile, writeFile, readFile, unlink } from "node:fs/promises";
 import { dirname, resolve, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
@@ -56,13 +56,27 @@ const builtBootstrap=await build({configFile:false,root:source,logLevel:"error",
 const bootstrap=builtBootstrap[0].output.find(item=>item.type==="chunk").code;
 for(const file of bootstrapFiles.filter(file => file.stage === "preview").map(file => file.name))await writeFile(join(output,file),previewDocument(bootstrap));
 await buildRenderers(output);
+const math = await build({
+  root: source, configFile:false,
+  plugins:[{name:'katex-woff2', enforce:'pre', transform(css,id) {
+    if(id.endsWith('/katex.min.css')) return css.replace(/,\s*url\([^)]*\.(?:woff|ttf)\)\s*format\([^)]*\)/g,'');
+  }}],
+  build:{outDir:output,emptyOutDir:false,target:'es2022',assetsInlineLimit:0,
+    rollupOptions:{input:join(source,'math.js'),preserveEntrySignatures:'strict',
+      output:{entryFileNames:'math.js',assetFileNames:asset=>asset.names.some(n=>n.endsWith('.css'))?'math.css':'[name][extname]'}}},
+});
+const mathFiles = math.output.map(asset=>asset.fileName);
 const produced = (await readdir(output)).sort();
-const expected = [...bootstrapFiles.map(file => file.name), ...rendererFiles].sort();
-if (JSON.stringify(produced) !== JSON.stringify(expected)) throw new Error('Bundle outputs differ from the compiled asset contract');
+const documentFiles = [...bootstrapFiles.map(file => file.name), ...rendererFiles, ...mathFiles].sort();
+if (JSON.stringify(produced) !== JSON.stringify(documentFiles)) throw new Error('Bundle outputs differ from the compiled asset contract');
 const compiler = spawnSync("rustc", ["--print", "host-tuple"], { cwd: root, encoding: "utf8" });
 if (compiler.status !== 0) throw compiler.error ?? new Error("rustc host lookup failed");
 const host = compiler.stdout.trim();
 if (!host) throw new Error("rustc did not report its native host");
-run("cargo", ["run", "--locked", "-p", "rsi-web-assets", "--example", "check_bundle",
-  "--target", host, ...(profile === "release" ? ["--release"] : []), "--", output, "--write-pairing", family, documentConfig.define.__RSI_DESKTOP_BRIDGE__]);
+const documentInput = join(dirname(output), `.rsi-document-${randomBytes(12).toString('hex')}.json`);
+await writeFile(documentInput, JSON.stringify({files:documentFiles, trusted_inline_styles:false}), {flag:'wx'});
+try {
+  run("cargo", ["run", "--locked", "-p", "rsi-web-assets", "--example", "check_bundle",
+    "--target", host, ...(profile === "release" ? ["--release"] : []), "--", output, "--write-pairing", family, documentConfig.define.__RSI_DESKTOP_BRIDGE__, "--document",documentInput]);
+} finally { await unlink(documentInput); }
 console.log(JSON.stringify({ event: "web-built", directory: output, profile }));

@@ -21,8 +21,7 @@ build decisions.
 The document test command verifies every adapted DSH file against its recorded
 SHA-256, including the retained license. CI runs both this command and TypeScript
 checking before the product browser fixture. With `RSI_DSH_REFERENCE` pointing to
-the pinned checkout, it also verifies each recorded upstream source hash; CI
-performs this comparison after acquiring that exact revision.
+the DSH checkout, the test verifies the upstream Git blob at each file's pinned revision.
 
 The document Node tests require Node 22.18 or later for direct TypeScript imports.
 The terminal resource owner retries an uncertain shell create once using the

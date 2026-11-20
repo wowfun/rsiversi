@@ -66,18 +66,42 @@
   overscroll-behavior-x: contain;
   margin-block: 16px;
 }
+.markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 .markdown-table table {
   border-collapse: collapse;
-  min-width: 100%;
+  width: 100%;
   font: 13px/22px var(--dsw-font-family);
+}
+.markdown-table.md-table-wide table {
+  width: max-content;
+}
+@media (hover: hover) {
+  .markdown-table.md-table-wide {
+    overflow-x: hidden;
+    padding-bottom: var(--dsh-scrollbar-width, 5px);
+  }
+  .markdown-table.md-table-wide:is(:hover, :focus-visible) {
+    overflow-x: scroll;
+    padding-bottom: 0;
+  }
+}
+.markdown-table.md-table-wide:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
 }
 .markdown-table th,
 .markdown-table td {
+  box-sizing: content-box;
   border: 0;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   padding: 10px 16px;
   text-align: left;
   min-width: 100px;
+  max-width: min(30vw, 320px);
 }
 .markdown-table th {
   font-weight: 500;
@@ -87,7 +111,7 @@
 .markdown-table tr > :first-child {
   padding-left: 0;
 }
-.markdown-table tr > :last-child {
+.markdown-table td:last-child {
   padding-right: 0;
 }
 .markdown-table [data-align="center"] {
