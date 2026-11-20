@@ -1,5 +1,6 @@
 import {DocumentSessionScope, DocumentContributions, DocumentReviews} from "../document-plugins.tsx";
 import {WorkspaceChoice} from './workspace-choice.tsx';
+import {PresetChoice, PresetLabel} from './preset-choice.tsx';
 import { ExternalSurface } from "./external.tsx";
 import { IconEllipsisOutlineRegular, IconChevronDownOutlineRegular } from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { HistoryPicker } from "./history-picker.tsx";
@@ -11,12 +12,14 @@ import chat from "./chat.module.css";
 import { ConversationWidthControls } from "../conversation-width.tsx";
 import { ReferencePicker } from "./reference-picker.tsx";
 import { QueueEditor } from "./queue-editor.tsx";
+import { PendingInputs } from "./queue-dock.tsx";
 import { Composer } from "./composer.tsx";
 import { Transcript } from "./transcript.tsx";
 import {SessionMetrics} from './metrics.tsx';
-import { useLayoutEffect, useRef, useId, useState, useSyncExternalStore } from "react";
+import {ScheduledTasks} from './scheduled-tasks.tsx';
+import { useLayoutEffect, useMemo, useRef, useId, useState, useSyncExternalStore } from "react";
+import {presentationIdentity} from '../presentation.tsx';
 import {
-  PendingInputs,
   PendingInteractions,
   SessionCommands,
 } from "./projections.tsx";
@@ -24,21 +27,47 @@ import { useSelected, useView } from "../bridge.ts";
 import { sessionSurfaces, type SessionSurfaceOwner } from "./state.ts";
 import {ConversationAnnouncements, generationRejectionText} from './announcements.js';
 
+type ConversationTab = 'conversation' | 'activity';
+function useConversationTab(session: string | undefined) {
+  const identity = useSyncExternalStore(presentationIdentity.subscribe, presentationIdentity.getSnapshot);
+  const key = useMemo(() => identity && session ? 'rsi.trajectory.' + JSON.stringify([identity,session]) : undefined, [identity,session]);
+  function load(): ConversationTab {
+    try { return key && localStorage.getItem(key) === '1' ? 'activity' : 'conversation'; }
+    catch { return 'conversation'; }
+  }
+  const [selection,setSelection] = useState(() => ({key,tab:load()}));
+  if (selection.key !== key) setSelection({key,tab:load()});
+  function selectTab(tab: ConversationTab) {
+    if (tab === selection.tab) return;
+    setSelection({key,tab});
+    if (key) {
+      try {
+        if (tab === 'activity') localStorage.setItem(key, '1');
+        else localStorage.removeItem(key);
+      } catch { /* The open tab still works when device storage is unavailable. */ }
+    }
+  }
+  return [selection.tab,selectTab] as const;
+}
+
 function NativeSurface({
   owner,
   selected,
   mode,
   column,
+  catalogOpen,
 }: {
   owner: SessionSurfaceOwner;
   selected: boolean;
   mode: string;
   column: HTMLElement | null;
+  catalogOpen?: boolean;
 }) {
   useSyncExternalStore(owner.subscribe, owner.getSnapshot);
   const data = owner.staged?.data;
   const empty = !data?.transcript.blocks.length;
-  const [tab, setTab] = useState("conversation");
+  const earlier = !!data?.history_more || (!data?.historical && !!data?.transcript.omitted);
+  const [tab, setTab] = useConversationTab(data?.session);
   const [announcements] = useState(() => new ConversationAnnouncements());
   const [announcement, announce] = useState<{revision: number; text: string}>();
   useLayoutEffect(() => {
@@ -49,7 +78,7 @@ function NativeSurface({
   }, [announcements, data, selected]);
   const tabId = useId();
   const coordinates = data
-    ? `${data.path} · ${data.session}`
+    ? `${data.workspace.coordinates.path} · ${data.session}`
     : "Select a workspace to begin";
   const remote = useView((view) => view?.has_remote_ui);
   const elements = useRef<Record<string, HTMLElement>>({});
@@ -99,8 +128,10 @@ function NativeSurface({
         <div className="pane-heading">
           <span className="pane-status" hidden>{data?.historical ? "History" : data?.transcript.status || "Ready"}</span>
           <nav className="transcript-tabs" role="tablist" aria-label="Conversation view" hidden={empty}>
-            {['conversation','activity'].map(value=><button key={value} type="button" role="tab" id={`${tabId}-${value}`} aria-controls={`${tabId}-panel`} aria-selected={tab===value} tabIndex={tab===value?0:-1} onClick={()=>setTab(value)} onKeyDown={event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?'conversation':event.key==='End'?'activity':tab==='conversation'?'activity':'conversation';setTab(next);document.getElementById(`${tabId}-${next}`)?.focus();}}}>{value==='conversation'?'Chat':'Trajectory'}</button>)}
+            {(['conversation','activity'] as const).map(value=><button key={value} type="button" role="tab" id={`${tabId}-${value}`} aria-controls={`${tabId}-panel`} aria-selected={tab===value} tabIndex={tab===value?0:-1} onClick={()=>setTab(value)} onKeyDown={event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?'conversation':event.key==='End'?'activity':tab==='conversation'?'activity':'conversation';setTab(next);document.getElementById(`${tabId}-${next}`)?.focus();}}}>{value==='conversation'?'Chat':'Trajectory'}</button>)}
           </nav>
+          {!empty && data?.agent_preset && <PresetLabel id={data.agent_preset}/>}
+          {selected && !empty && data && <ScheduledTasks key={data.generation} pane={owner.index} surface={data}/>}
           <details className="session-menu">
             <summary aria-label="Session tools">
               <IconEllipsisOutlineRegular />
@@ -111,7 +142,7 @@ function NativeSurface({
                 "history",
                 "Earlier history",
                 "quiet",
-                false,
+                earlier,
                 !data || (!data.history_more && !!data.historical),
               )}
               {control("live", "Back to live", "quiet", !data?.historical)}
@@ -136,22 +167,28 @@ function NativeSurface({
       </div>
       <div className={chat.transcriptArea} hidden={empty} role="tabpanel" id={`${tabId}-panel`} aria-labelledby={`${tabId}-${tab}`}>
         <Transcript
+          suspended={catalogOpen}
+            pane={data?.protected ? undefined : owner.index}
           register={ref("transcript")}
           owner={owner}
           transcript={owner.staged?.data?.transcript ?? { blocks: [] }}
           generation={owner.staged?.data?.generation}
           cards={!!owner.staged?.data?.ui_cards}
           inline={data?.inline}
-          mode={tab === "activity" ? "verbose" : mode}
+          mode={mode}
+          trajectory={tab === "activity"}
+          earlier={earlier}
         />
         <button ref={ref("bottom")} type="button" className={`back-bottom ${chat.bottom}`}
           onClick={() => elements.current.transcript.focus({preventScroll: true})}
-          aria-label="Back to bottom" title="Back to bottom" hidden={!owner.readingSummary}>
-          <IconChevronDownOutlineRegular />
+          aria-label="Back to bottom" title="Back to bottom" hidden={tab !== 'conversation' || !owner.readingSummary}>
+          <IconChevronDownOutlineRegular size={16}/>
         </button>
-        {selected && <ConversationWidthControls container={column} showHandles={!empty} />}
+        {selected && <ConversationWidthControls container={column} showHandles={!empty && tab === 'conversation'} />}
       </div>
-      <PendingInputs data={data} owner={owner} register={ref("queueList")} />
+      {!data?.protected && !!data?.queue?.length && (
+        <PendingInputs key={data.session} items={data.queue} owner={owner} editor={owner.queueDialog} />
+      )}
       <PendingInteractions data={data} owner={owner} />
       <div className="pane-notice">{data?.notice}</div>
       {data?.projections?.generation_rebuilding && <p className="pane-notice" role="status">Updating plugins: rebuilding conversation context…</p>}
@@ -178,14 +215,16 @@ function NativeSurface({
           state={owner.referenceDialog}
         />
       )}
-      {owner.queueDialog && (
+      {owner.queueDialog && !owner.queueDialog.inlineSlot && (
         <QueueEditor key={`queue:${owner.queueDialog.id}`} state={owner.queueDialog} />
       )}
-      <div className="composer-context" hidden={!empty}><WorkspaceChoice owner={owner} workspace={data?.workspace ?? owner.composerView?.workspace}/></div>
+      <div className="composer-context" hidden={!empty}>
+        <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
+        {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
+      </div>
       <Composer
         owner={owner}
         data={data}
-        models={owner.staged?.models ?? []}
         submitKey={owner.staged?.submitKey ?? "enter"}
         register={ref}
         hintId={hintId}
@@ -203,9 +242,11 @@ function NativeSurface({
 export function SessionSurfaces({
   mode,
   column,
+  catalogOpen,
 }: {
   mode: string;
   column: HTMLElement | null;
+  catalogOpen?: boolean;
 }) {
   const owners = useSyncExternalStore(
     sessionSurfaces.subscribe,
@@ -228,6 +269,7 @@ export function SessionSurfaces({
             selected={owner.index === selected}
             mode={mode}
             column={column}
+            catalogOpen={catalogOpen}
           />
         ),
       )}

@@ -1,0 +1,48 @@
+.page { grid-column: 2 / -1; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; color: var(--ink); background: var(--paper); font-size: 14px; }
+.catalog { flex: 1; min-width: 0; overflow: auto; scrollbar-gutter: stable; }
+.content { box-sizing: border-box; max-width: calc(960px + 2 * clamp(24px, 4vw, 48px)); margin: 0 auto; padding: 28px clamp(24px, 4vw, 48px) 48px; }
+.catalog header, .filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.catalog header { margin-bottom: 24px; }
+.catalog h1 { flex: 1; margin: 0; font-size: 20px; line-height: 28px; font-weight: 500; }
+.page button { color: var(--ink); }
+.catalog header button { height: 32px; padding-inline: 12px; border-radius: var(--dsw-radius-md); font-size: 13px; }
+.catalog button.create { background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-base); }
+.filters { margin-bottom: 14px; }
+.filters button { height: 28px; padding: 0 10px; border: 0; border-radius: var(--dsw-radius-sm); background: transparent; color: var(--muted); }
+.filters button[aria-pressed="true"], .rows li button[aria-expanded="true"], .filters button:hover, .rows li button:hover { color: var(--ink); background: var(--dsw-alias-interactive-bg-hover); }
+.search { display: flex; align-items: center; gap: 8px; height: 40px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+.search:focus-within { border-color: var(--dsw-alias-brand-primary, currentColor); }
+.search input::-webkit-search-cancel-button { display: none; }
+.search button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; background: transparent; }
+.search input { flex: 1; min-width: 0; padding: 0; background: transparent; color: var(--ink); border: 0; }
+.rows { margin: 14px 0 0; padding: 0; list-style: none; }
+.rows li button { display: flex; align-items: flex-start; gap: 12px; width: 100%; text-align: start; border: 0; border-radius: 10px; padding: 8px; background: transparent; }
+.rows li button > span { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 2px; }
+.rows li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; line-height: 23px; }
+.rows li svg { flex: none; height: 20px; margin-top: 2px; color: var(--muted); }
+.rows li small { font-size: 13px; line-height: 21px; overflow-wrap: anywhere; }
+.catalog small, .catalog time, .catalog p { color: var(--muted); }
+.detail { --detail-gutter: 24px; box-sizing: border-box; flex: 0 0 47%; min-width: 0; overflow: auto; border-inline-start: .5px solid var(--line); padding: 16px var(--detail-gutter); }
+.detail > div { text-align: end; }
+.linkedSession { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-block: 16px; font-size: 13px; }
+.linkedSession > span, .linkedSession svg { flex: none; }
+.linkedSession button { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 75%; border: 0; }
+.linkedSession button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width:1100px) {
+  .detail { --detail-gutter: 20px; }
+}
+@media (max-width:760px) {
+  .page:has(.detail) .catalog { display: none; }
+  .detail { flex-basis: 100%; border: 0; }
+}
+@media (max-width:400px) {
+  .detail { --detail-gutter: 16px; }
+}
+
+.empty { display: flex; align-items: center; flex-direction: column; justify-content: center; min-height: 256px; text-align: center; }
+.empty svg { width: 110px; height: auto; margin-bottom: 12px; }
+.empty p { margin: 0; color: var(--muted); }
+.detailActions { display: flex; justify-content: end; align-items: center; gap: 4px; }
+.detailActions button { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; }
+.detailActions button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.confirmPrompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 13px; }
