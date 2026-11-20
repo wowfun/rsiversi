@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { startService, waitUntil } from './service.mjs';
 import { deepseekProfile } from './live-limits.mjs';
+import {attemptEvents} from './model-attempt.mjs';
 import {chooseStartingWorkspace, connectWorkbench} from './browser-fixture.mjs';
 import {navigationMode, openConversation} from './controls.mjs';
 import {setTimeout as sleep} from 'node:timers/promises';
@@ -97,6 +98,7 @@ try {
   },'turn settled',30000);
   const scheduled=facts.find(f=>f.type==='model_attempt_settled' && f.attempt.scheduled_retry);
   assert(scheduled);
+  assert.equal(Array.from(attemptEvents(scheduled.attempt)).at(-1).event.type,'failed');
   const retry=scheduled.attempt.scheduled_retry;
   assert.equal(retry.delay_ms,delay*1000);
   const terminal = facts.find(f=>f.type==='turn_terminal' && f.turn_id===scheduled.turn_id);

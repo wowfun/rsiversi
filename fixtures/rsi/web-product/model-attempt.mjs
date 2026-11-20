@@ -5,7 +5,8 @@ const rawBlock = (192 * 1024 - 4) / 4 * 3;
 const maximum = 32 * 1024 * 1024 - 4096;
 const utf8 = new TextDecoder('utf-8', {fatal: true});
 export function* attemptEvents(attempt) {
-  assert.deepEqual(Object.keys(attempt).sort(), ['chunks', 'retain_context', 'v']);
+  assert.deepEqual(Object.keys(attempt).filter(key => key !== 'scheduled_retry').sort(),
+    ['chunks', 'retain_context', 'v']);
   assert.equal(attempt.v, 1); assert.equal(typeof attempt.retain_context, 'boolean');
   assert(Array.isArray(attempt.chunks) && attempt.chunks.length > 0);
   let size = 64;

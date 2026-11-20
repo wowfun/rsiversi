@@ -1068,7 +1068,8 @@ its version and records before the user explicitly discards them.
 
 ## Model retry in the shipping Web client
 
-`retry-schedule.mjs` drives a loopback 429 through the DeepSeek adapter.
+`retry-schedule.mjs` drives a loopback 429 through the DeepSeek adapter. The
+fixture decodes the failed attempt's terminal event alongside its retry reservation.
 The default run compares the started chat row with the reserved effect and
 provider calls. With `--exhaust` it checks every allowed retry in the same
 open chat disclosure and the terminal refusal. With `--cancel-reopen` it stops the Turn during backoff, restarts
