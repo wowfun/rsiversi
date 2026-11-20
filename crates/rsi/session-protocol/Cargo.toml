@@ -25,6 +25,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-schedule = { path = "../../rsi-agent/schedule" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-composition-protocol = { path = "../../rsi-agent/composition-protocol" }

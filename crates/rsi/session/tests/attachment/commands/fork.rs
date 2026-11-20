@@ -3,6 +3,65 @@ use rsi_agent_turn_protocol::TurnExecution;
 use rsi_session_protocol::{ForkDraft, SelectDraftPreset, SessionDraftControl, SessionIngress};
 
 #[tokio::test]
+async fn revoking_a_device_releases_a_fork_waiting_for_its_preset() {
+    let fixture = Fixture::new().await;
+    let source = fixture.create("device-fork-source").await;
+    let source_id = source.header().await.unwrap().session_id().clone();
+    submit_text(source, "device-input", "continue")
+        .await
+        .unwrap();
+    let worker = fixture.kernel.register("device-fork-test".into()).unwrap();
+    let claim = fixture
+        .kernel
+        .claim("device-fork-test", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut request = Fixture::request("revoked-fork");
+    request.agent_preset_id = Some(AgentPresetId::new("blocked").unwrap());
+    request.fork = Some(ForkDraft {
+        source_session_id: source_id,
+        point: rsi_agent_session_protocol::ForkPoint::before(claim.turn_id()),
+        turns: rsi_agent_session_protocol::ForkTurnSelection::None,
+    });
+    let target = request.session_id.clone();
+    let device = rsi_api_protocol::AuthenticatedDevice {
+        id: rsi_api_protocol::DeviceId::from_bytes([9; 16]),
+        revoked: CancellationToken::new(),
+    };
+    let creating = fixture.service.create_from(
+        request,
+        rsi_api_protocol::CallOrigin::Device(device.clone()),
+    );
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(creating, async {
+            fixture
+                .composition
+                .entered
+                .acquire()
+                .await
+                .unwrap()
+                .forget();
+            device.revoked.cancel();
+        })
+    })
+    .await
+    .expect("the fork reaches the preset pin and releases it on revocation");
+    assert!(matches!(
+        result,
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+    ));
+    assert!(fixture.store.header(&target).await.is_err());
+    fixture
+        .kernel
+        .finish_turn(&claim, &rsi_agent_session_protocol::TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(worker);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn manual_before_first_active_turn_creates_an_independent_empty_prefix() {
     let fixture = Fixture::new().await;
     let source = fixture.create("active-fork-source").await;

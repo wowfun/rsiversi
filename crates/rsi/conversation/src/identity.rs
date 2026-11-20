@@ -2,6 +2,14 @@ use rsi_agent_session_protocol::{EffectId, MessageId, SessionFact, SessionFactBo
 use rsi_tools_protocol::ToolResultIdentity;
 use serde::Serialize;
 
+/// Identifies a manual compaction across its command receipt and durable facts.
+///
+/// # Panics
+/// Only if serialization of the typed string identifier fails.
+pub fn compaction_key(command: &rsi_agent_session_protocol::DomainRequestId) -> String {
+    serde_json::to_string(&("compact", command)).expect("closed compaction identity")
+}
+
 /// Borrowed semantic identity; presentation keys never flatten user identifiers with delimiters.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

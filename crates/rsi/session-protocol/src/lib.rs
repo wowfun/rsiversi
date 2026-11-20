@@ -33,7 +33,7 @@ mod reads;
 pub use lifecycle::{SessionClosing, SessionEpoch, SessionLifecycle, SessionLifecycleActivity};
 /// Session-bound live terminal requests.
 pub mod terminal;
-pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead};
+pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead, ToolComparison};
 mod model_selection;
 pub use model_selection::{ModelAvailability, ModelSelectionRead};
 pub use reads::{
@@ -491,6 +491,94 @@ pub use rsi_agent_store_protocol::StoreRecentSessionCursor as RecentSessionPosit
 /// One visible durable Session's Header, activity and watermarks from one Store snapshot.
 pub use rsi_agent_store_protocol::StoreRecentSession as SessionSummary;
 
+/// Catalog pages have at most eight Sessions of sixteen 2 KiB reminders each.
+pub const SCHEDULE_CATALOG_PAGE_SIZE: usize = 8;
+/// A reminder addressed by its immutable identity within its owning Session.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledTaskId {
+    /// Caller-visible Session.
+    pub session_id: SessionId,
+    /// ID assigned when the reminder was created.
+    pub id: rsi_agent_session_protocol::DomainRequestId,
+}
+/// Current reminders in one caller-visible Session, at its observed control cut.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledSession {
+    /// Public identity and immutable creation time for page ordering.
+    pub position: RecentSessionPosition,
+    /// The current navigation owner holds delivery to this target while archived.
+    pub archived: bool,
+    /// The Session has used its lifetime automatic Turn allowance.
+    pub exhausted: bool,
+    /// Reminder whose accepted delivery has not settled yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executing: Option<rsi_agent_session_protocol::DomainRequestId>,
+    /// Current reminders, including paused and consumed ones.
+    pub reminders: Vec<rsi_agent_schedule::Reminder>,
+}
+/// Host-wide reminder page. A scan over protected rows can yield an empty intermediate page.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleCatalogPage {
+    /// Visible Session groups in descending creation order.
+    pub sessions: Vec<ScheduledSession>,
+    /// Principal- and query-bound continuation.
+    pub next: Option<RecentSessionCursor>,
+}
+/// An authoritative update to the open Host catalog. Apply pages at completion.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScheduleCatalogUpdate {
+    /// Replaces an existing page or appends the next contiguous page.
+    Page {
+        /// Zero-based position.
+        index: u32,
+        /// One to eight nonempty visible Session groups.
+        sessions: Vec<ScheduledSession>,
+    },
+    /// Publishes the updated catalog, dropping pages beyond this length.
+    Complete {
+        /// Number of current pages, including any reused from the preceding update.
+        pages: u32,
+    },
+}
+/// Demand-driven, generation-scoped catalog updates.
+pub type ScheduleCatalogStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<ScheduleCatalogUpdate>> + Send>>;
+impl ScheduleCatalogPage {
+    /// Validates an external catalog page, including the exclusive public ordering cut.
+    pub fn validate(&self, after: Option<&RecentSessionCursor>) -> Result<()> {
+        ScheduledSession::validate_page(&self.sessions, after, self.next.as_ref())
+    }
+}
+impl ScheduledSession {
+    /// Checks visible ordering and bounded reminders in a catalog response.
+    pub fn validate_page(
+        groups: &[Self],
+        after: Option<&RecentSessionCursor>,
+        next: Option<&RecentSessionCursor>,
+    ) -> Result<()> {
+        if groups.len() > SCHEDULE_CATALOG_PAGE_SIZE {
+            return Err(SessionError::Invalid(
+                "invalid schedule catalog page size".into(),
+            ));
+        }
+        for group in groups {
+            rsi_agent_schedule::validate_reminders(&group.reminders)
+                .map_err(SessionError::Invalid)?;
+        }
+        validate_visible_order(
+            after,
+            next,
+            groups
+                .iter()
+                .map(|group| (group.position.created_at_ms, &group.position.session_id)),
+        )
+    }
+}
+
 /// One bounded recent-session page.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -507,46 +595,94 @@ impl RecentSessionPage {
     pub fn validate(&self, after: Option<&RecentSessionCursor>, limit: usize) -> Result<()> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        if let Some(cursor) = after {
-            cursor.validate()?;
-        }
         if self.sessions.len() > limit || self.has_more != self.next.is_some() {
             return Err(SessionError::Invalid("invalid recent page bounds".into()));
         }
-        let mut previous = after
-            .and_then(|c| c.after.as_ref())
-            .map(|p| (p.created_at_ms, &p.session_id));
-        for row in &self.sessions {
-            if row.last_activity_ms < row.header.created_at_ms() {
-                return Err(SessionError::Invalid(
-                    "recent activity precedes Session creation".into(),
-                ));
-            }
-            let current = (row.header.created_at_ms(), row.header.session_id());
-            if previous.is_some_and(|previous| current >= previous) {
-                return Err(SessionError::Invalid(
-                    "recent page is not strictly descending".into(),
-                ));
-            }
-            previous = Some(current);
+        if self
+            .sessions
+            .iter()
+            .any(|row| row.last_activity_ms < row.header.created_at_ms())
+        {
+            return Err(SessionError::Invalid(
+                "recent activity precedes Session creation".into(),
+            ));
         }
-        if let Some(next) = &self.next {
-            next.validate()?;
-            let visible = next
-                .after
-                .as_ref()
-                .map(|p| (p.created_at_ms, &p.session_id));
-            if visible != previous || after.is_some_and(|old| next.token == old.token) {
-                return Err(SessionError::Invalid("invalid recent continuation".into()));
-            }
-        }
-        Ok(())
+        validate_visible_order(
+            after,
+            self.next.as_ref(),
+            self.sessions
+                .iter()
+                .map(|row| (row.header.created_at_ms(), row.header.session_id())),
+        )
     }
+}
+
+fn validate_visible_order<'a>(
+    after: Option<&'a RecentSessionCursor>,
+    next: Option<&RecentSessionCursor>,
+    positions: impl Iterator<Item = (u64, &'a SessionId)>,
+) -> Result<()> {
+    if let Some(cursor) = after {
+        cursor.validate()?;
+    }
+    let cut = |position: &'a RecentSessionPosition| (position.created_at_ms, &position.session_id);
+    let mut previous = after.and_then(|cursor| cursor.after.as_ref()).map(cut);
+    for current in positions {
+        if current.0 == 0 || previous.is_some_and(|old| current >= old) {
+            return Err(SessionError::Invalid(
+                "recent page is not strictly descending".into(),
+            ));
+        }
+        previous = Some(current);
+    }
+    if let Some(next) = next {
+        next.validate()?;
+        let visible = next
+            .after
+            .as_ref()
+            .map(|p| (p.created_at_ms, &p.session_id));
+        if visible != previous || after.is_some_and(|old| next.token == old.token) {
+            return Err(SessionError::Invalid("invalid recent continuation".into()));
+        }
+    }
+    Ok(())
 }
 
 /// One attached Session interface.
 #[async_trait]
 pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
+    /// Reads one local answer's current operator rating.
+    async fn message_feedback(
+        &self,
+        _message: std::num::NonZeroU64,
+    ) -> Result<Option<rsi_agent_session_protocol::SavedMessageFeedback>> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Changes the rating at its observed predecessor without executing a Turn.
+    async fn change_message_feedback(
+        &self,
+        _change: rsi_agent_session_protocol::MessageFeedbackChange,
+    ) -> Result<rsi_agent_session_protocol::MessageFeedbackOutcome> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Queries the paid boundary without dispatching a command.
+    async fn compact_status(
+        &self,
+        _command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<rsi_agent_turn_protocol::CompactionOutcome>> {
+        Err(SessionError::Invalid(
+            "manual compaction unavailable".into(),
+        ))
+    }
+    /// Compacts eligible durable history without accepting a conversation turn.
+    async fn compact(
+        &self,
+        _command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<rsi_agent_turn_protocol::CompactionOutcome> {
+        Err(SessionError::Invalid(
+            "manual compaction unavailable".into(),
+        ))
+    }
     /// Releases an unsubmitted frozen-reference reservation for this exact Session.
     async fn release_reference(
         &self,
@@ -863,6 +999,21 @@ impl rsi_meta_contract::LocalContract for SessionPurgeCleanupContract {
 /// Transport-independent Session domain service.
 #[async_trait]
 pub trait SessionService: fmt::Debug + Send + Sync + 'static {
+    /// Removes future occurrences, returning false if the reminder is already absent.
+    async fn delete_scheduled_task(&self, _task: ScheduledTaskId) -> Result<bool> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Observes the initial visible catalog and later changes while the consumer is present.
+    async fn observe_scheduled_tasks(&self) -> Result<ScheduleCatalogStream> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
+    /// Reads caller-visible current reminders across Sessions without activating a target.
+    async fn scheduled_tasks(
+        &self,
+        _after: Option<&RecentSessionCursor>,
+    ) -> Result<ScheduleCatalogPage> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
     /// Local-Host-only bounded preview of unreferenced Agent-CAS registrations.
     async fn preview_cas_gc(
         &self,

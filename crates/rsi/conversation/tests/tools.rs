@@ -104,7 +104,8 @@ fn semantic_identity_kinds_and_validated_output_references_remain_distinct() {
     ] {
         assert!(OutputRef::parse(invalid).is_none());
     }
-    assert!(OutputRef::parse(&"1".repeat(32)).is_some());
+    assert!(OutputRef::parse(&format!("{}-{}", "1".repeat(64), "2".repeat(32))).is_some());
+    assert!(OutputRef::parse(&"1".repeat(32)).is_none());
 }
 
 #[test]
@@ -143,6 +144,46 @@ fn delegation_navigation_requires_exact_intent_and_successful_bounded_result() {
         assert_eq!(state.external_conversation(), None);
         assert!(state.owned_bytes() < 2048);
     }
+}
+
+#[test]
+fn created_task_requires_its_successful_result_and_exact_intent_in_either_read_order() {
+    let mut body = fact(6, "result", "owner").body().clone();
+    let SessionFactBody::ToolResult { result, .. } = &mut body else {
+        unreachable!()
+    };
+    *result = ToolResult::new(json!({
+        "status":"created_armed","request_id":"new-task","state":{"reminders":[
+            {"id":"older-task","prompt":"Wrong task","interval_ms":null},
+            {"id":"new-task","prompt":"\n  Review changes  \nKeep the details in the Session","interval_ms":3600000}
+        ]}
+    }),vec![],false).unwrap();
+    let settled = SessionFact::new(6, 1, body.clone()).unwrap();
+    let mut intent_body = fact(4, "intent", "owner").body().clone();
+    let SessionFactBody::ToolIntent { name, .. } = &mut intent_body else {
+        unreachable!()
+    };
+    *name = "schedule_create".into();
+    let intent = SessionFact::new(4, 1, intent_body).unwrap();
+    for (first, second) in [(&settled, &intent), (&intent, &settled)] {
+        let mut state = ToolState::from_fact(first).unwrap();
+        assert!(state.schedule_creation().is_none());
+        state.observe(second);
+        let created = state.schedule_creation().unwrap();
+        assert_eq!(created.id, "new-task");
+        assert_eq!(created.title, "Review changes");
+        assert_eq!(created.interval_ms, Some(3_600_000));
+    }
+    let mut other = ToolState::from_fact(&settled).unwrap();
+    other.observe(&fact(4, "intent", "owner"));
+    assert!(other.schedule_creation().is_none());
+    let SessionFactBody::ToolResult { result, .. } = &mut body else {
+        unreachable!()
+    };
+    result.is_error = true;
+    let mut failed = ToolState::from_fact(&intent).unwrap();
+    failed.observe(&SessionFact::new(6, 1, body).unwrap());
+    assert!(failed.schedule_creation().is_none());
 }
 
 #[test]

@@ -433,6 +433,7 @@ async fn assert_fresh_evidence_avoids_fact_reads(handle: &dyn SessionHandle, sto
         assert!(matches!(
             handle
                 .evidence(rsi_session_protocol::EvidenceRead {
+                    tool_summary: false,
                     intent_seq: 1,
                     section: rsi_agent_session_protocol::EvidenceSection::System,
                     offset: 0,

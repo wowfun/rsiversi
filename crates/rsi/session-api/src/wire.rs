@@ -38,9 +38,16 @@ pub enum Operation {
     Attach,
     ReadSummary,
     Recent,
+    ScheduledTasks,
+    ScheduledTasksObserve,
+    DeleteScheduledTask,
     Submit,
     Commands,
     ExecuteCommand,
+    MessageFeedback,
+    ChangeMessageFeedback,
+    Compact,
+    CompactStatus,
     CommandStatus,
     DraftSnapshot,
     DraftObserve,
@@ -79,7 +86,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 63] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -98,9 +105,16 @@ impl Operation {
         Self::Attach,
         Self::ReadSummary,
         Self::Recent,
+        Self::ScheduledTasks,
+        Self::ScheduledTasksObserve,
+        Self::DeleteScheduledTask,
         Self::Submit,
         Self::Commands,
         Self::ExecuteCommand,
+        Self::MessageFeedback,
+        Self::ChangeMessageFeedback,
+        Self::Compact,
+        Self::CompactStatus,
         Self::CommandStatus,
         Self::DraftSnapshot,
         Self::DraftObserve,
@@ -163,8 +177,23 @@ impl Operation {
             Self::ReadSummary => ("read-summary", Data, Read, 4096, HEADER_REPLY + 256),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
+            Self::ScheduledTasks => ("scheduled-tasks", Data, Read, 4096, LARGE_REPLY),
+            Self::DeleteScheduledTask => ("delete-scheduled-task", Data, Mutation, 4096, 4096),
+            Self::ScheduledTasksObserve => (
+                "scheduled-tasks-observe",
+                Subscription,
+                Read,
+                64,
+                2 * 1024 * 1024,
+            ),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
             Self::Commands => ("commands", Data, Read, 8192, 512 * 1024),
+            Self::MessageFeedback => ("message-feedback", Data, Read, 8192, 65536),
+            Self::ChangeMessageFeedback => {
+                ("change-message-feedback", Data, Mutation, 65536, 65536)
+            }
+            Self::CompactStatus => ("compact-status", Data, Read, 8192, 8192),
+            Self::Compact => ("compact", Data, Mutation, 8192, 8192),
             Self::ExecuteCommand => ("execute-command", Data, Mutation, 128 * 1024, 8192),
             Self::DiscardDraftInputs => (
                 "discard-draft-inputs",
@@ -246,6 +275,8 @@ impl Operation {
             | Self::Cancel
             | Self::Projections => 3,
             Self::ModelObserve
+            | Self::ScheduledTasks
+            | Self::ScheduledTasksObserve
             | Self::Purge
             | Self::PurgeStatus
             | Self::ListWorkflows

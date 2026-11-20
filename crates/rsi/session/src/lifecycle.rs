@@ -8,6 +8,13 @@ use std::{
 #[derive(Debug, Default)]
 pub(super) struct Lifecycles(StdMutex<BTreeMap<SessionId, Weak<SessionLifecycle>>>);
 impl Lifecycles {
+    pub(super) fn attached(&self, session: &SessionId) -> bool {
+        self.0
+            .lock()
+            .expect("Session lifecycles poisoned")
+            .get(session)
+            .is_some_and(|gate| gate.strong_count() > 0)
+    }
     pub(super) fn has_hard_owners(&self, session: &SessionId) -> bool {
         self.0
             .lock()

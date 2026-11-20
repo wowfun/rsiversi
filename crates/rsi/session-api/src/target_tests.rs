@@ -131,6 +131,9 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
     )
     .unwrap();
     let excluded = [
+        Operation::ScheduledTasks,
+        Operation::ScheduledTasksObserve,
+        Operation::DeleteScheduledTask,
         Operation::Create,
         Operation::Recent,
         Operation::ReadSummary,

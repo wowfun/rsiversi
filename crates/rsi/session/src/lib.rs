@@ -40,6 +40,7 @@ mod projections;
 mod reads;
 mod references;
 mod resources;
+mod schedule_catalog;
 mod terminal;
 mod workflow;
 pub use plugin::SessionFactory;
@@ -86,6 +87,7 @@ pub struct LocalSessionService {
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
     export_workers: Arc<tokio::sync::Semaphore>,
+    plugin_context: Option<rsi_meta::Context>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -269,6 +271,7 @@ impl LocalSessionService {
             resources: None,
             references: None,
             resource_retention: rsi_session_protocol::ResourceRetention::default(),
+            plugin_context: None,
             goals: None,
             jobs: None,
             jobs_retention: rsi_session_protocol::JobsRetention::default(),
@@ -368,6 +371,7 @@ impl LocalSessionService {
             references: self.references.clone(),
             resources: self.resources.clone(),
             resource_retention: self.resource_retention.clone(),
+            plugin_context: self.plugin_context.clone(),
             goals: self.goals.clone(),
             continuations: self.continuations.clone(),
             jobs: self.jobs.clone(),
@@ -548,7 +552,6 @@ impl LocalSessionService {
         }
         let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
         let source = self.read_summary(&fork.source_session_id).await?.header;
-        let protection = self.protect_header(&source)?;
         if source.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
@@ -571,7 +574,11 @@ impl LocalSessionService {
             .clone()
             .unwrap_or_else(|| source.agent_preset_id().clone());
         workflow::require_preset(self.workflow.as_deref(), &preset)?;
-        let preparation = self
+        let caller_revoked = match &self.origin {
+            rsi_api_protocol::CallOrigin::Local => tokio_util::sync::CancellationToken::new(),
+            rsi_api_protocol::CallOrigin::Device(device) => device.revoked.clone(),
+        };
+        let prepared = self
             .turns
             .prepare_fork(rsi_agent_turn_protocol::PrepareFork {
                 source,
@@ -580,13 +587,11 @@ impl LocalSessionService {
                 agent_preset_id: preset,
                 point: fork.point.clone(),
                 turns: fork.turns.clone(),
-                cancellation: protection.clone(),
-            });
-        let prepared = tokio::select! {
-            () = protection.cancelled() => return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)),
-            result = preparation => result.map_err(map_turn_error)?,
-        };
+                cancellation: caller_revoked,
+            })
+            .await;
         self.check_origin()?;
+        let prepared = prepared.map_err(map_turn_error)?;
         let _admission = self.admit(coordinates.location())?;
         let mut baseline = prepared.baseline().clone();
         baseline.retain(Arc::new(source_lifetime));
@@ -717,7 +722,32 @@ impl SessionService for LocalSessionService {
                 "recent-session limit must be within 1..={MAXIMUM_SESSIONS_PER_READ}"
             )));
         }
-        self.visible_recent(after, limit).await
+        let (sessions, next) = self
+            .visible_recent(after, limit, None, |row| std::future::ready(Ok(row)))
+            .await?;
+        Ok(RecentSessionPage {
+            sessions,
+            has_more: next.is_some(),
+            next,
+        })
+    }
+
+    async fn observe_scheduled_tasks(&self) -> Result<rsi_session_protocol::ScheduleCatalogStream> {
+        self.observe_catalog()
+    }
+
+    async fn scheduled_tasks(
+        &self,
+        after: Option<&RecentSessionCursor>,
+    ) -> Result<rsi_session_protocol::ScheduleCatalogPage> {
+        let archived = self.navigation().map(|owner| owner.archived_sessions());
+        self.catalog_page(after, archived.as_ref()).await
+    }
+    async fn delete_scheduled_task(
+        &self,
+        task: rsi_session_protocol::ScheduledTaskId,
+    ) -> Result<bool> {
+        self.delete_reminder(task).await
     }
 }
 
@@ -738,37 +768,16 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         let mut drafts = self.drafts.watch_membership();
         let revoked = device.revoked.clone();
         let stopped = self.projection_stopped.clone();
-        let resolver = self.resolver.clone();
-        let policy = self.protection.clone();
-        let mut locations = resolver.as_ref().and_then(|r| r.visibility_revision());
-        let mut protection = policy.as_ref().and_then(|p| p.catalog_generation());
+        let mut visibility = self.visibility_changes();
         Ok(Some(Box::pin(async_stream::try_stream! {
-            let interval = std::time::Duration::from_secs(1);
-            let mut grants = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
-            grants.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                let check_grants = tokio::select! {
+                tokio::select! {
                     biased;
                     () = revoked.cancelled() => break,
                     () = stopped.cancelled() => break,
-                    updated = drafts.changed() => { if updated.is_err() { break; } false },
-                    updated = durable.next() => { if updated.is_none() { break; } false },
-                    _ = grants.tick(), if resolver.is_some() || policy.is_some() => true,
-                };
-                if check_grants {
-                    let mut changed = false;
-                    if let Some(resolver) = &resolver {
-                        let current = resolver.visibility_revision();
-                        changed = current.is_none() || current != locations;
-                        locations = current;
-                    }
-                    if let Some(policy) = &policy {
-                        let current = policy.catalog_generation();
-                        changed |= !protection.as_ref().zip(current.as_ref())
-                            .is_some_and(|(a, b)| Arc::ptr_eq(a, b));
-                        protection = current;
-                    }
-                    if !changed { continue; }
+                    updated = drafts.changed() => if updated.is_err() { break; },
+                    updated = durable.next() => if updated.is_none() { break; },
+                    _ = visibility.next() => {},
                 }
                 yield ();
             }
@@ -818,7 +827,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
                         .history_origin()
                         .map_or(0, |origin| origin.effective_turns),
                 });
-                protections.push(protection);
+                protections.extend(protection);
             }
         }
         scope.check_origin()?;
@@ -885,6 +894,7 @@ struct LocalSessionHandle {
     jobs_retention: rsi_session_protocol::JobsRetention,
     preview_workers: Arc<tokio::sync::Semaphore>,
     export_workers: Arc<tokio::sync::Semaphore>,
+    plugin_context: Option<rsi_meta::Context>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -1463,6 +1473,107 @@ impl SessionHandle for LocalSessionHandle {
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView> {
         let _admission = self.admit()?;
         self.list_commands().await
+    }
+    async fn message_feedback(
+        &self,
+        message: std::num::NonZeroU64,
+    ) -> Result<Option<rsi_agent_session_protocol::SavedMessageFeedback>> {
+        let _operation = self.admit()?;
+        self.read_until_retired(async {
+            self.reconcile_fresh_read().await?;
+            if matches!(&*self.state.lock().await, HandleState::Fresh(_)) {
+                return Ok(None);
+            }
+            self.store
+                .read_message_feedback(self.session_id(), message)
+                .await
+                .map(|snapshot| snapshot.current)
+                .map_err(map_store_error)
+        })
+        .await
+    }
+    async fn change_message_feedback(
+        &self,
+        change: rsi_agent_session_protocol::MessageFeedbackChange,
+    ) -> Result<rsi_agent_session_protocol::MessageFeedbackOutcome> {
+        let _operation = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        if matches!(&*self.state.lock().await, HandleState::Fresh(_)) {
+            return if change.value.is_none() {
+                Ok(rsi_agent_session_protocol::MessageFeedbackOutcome::Saved { current: None })
+            } else {
+                Err(SessionError::NotFound("assistant message".into()))
+            };
+        }
+        self.turns
+            .change_message_feedback(self.session_id(), change)
+            .await
+            .map_err(map_turn_error)
+    }
+    async fn compact_status(
+        &self,
+        command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<Option<rsi_agent_turn_protocol::CompactionOutcome>> {
+        let _operation = self.admit()?;
+        self.read_until_retired(async {
+            self.reconcile_fresh_read().await?;
+            if matches!(&*self.state.lock().await, HandleState::Fresh(_)) {
+                return Ok(None);
+            }
+            let fact = self
+                .store
+                .manual_compaction_fact(self.session_id(), &command)
+                .await
+                .map_err(map_store_error)?;
+            Ok(fact
+                .as_ref()
+                .and_then(rsi_agent_turn_protocol::CompactionOutcome::recorded))
+        })
+        .await
+    }
+
+    async fn compact(
+        &self,
+        command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> Result<rsi_agent_turn_protocol::CompactionOutcome> {
+        use rsi_agent_turn_protocol::{CompactionOutcome, ManualCompactionAdmission};
+        let _operation = self.admit_mutation()?;
+        let (_activity, _draft) = self.begin_activity()?;
+        self.reconcile_fresh_read().await?;
+        {
+            let state = self.state.lock().await;
+            if matches!(&*state, HandleState::Fresh(_)) {
+                return Ok(CompactionOutcome::NoChange);
+            }
+            state.header()?;
+        }
+        match self
+            .turns
+            .reserve_manual_compaction(self.session_id(), &command)
+            .await
+            .map_err(map_turn_error)?
+        {
+            ManualCompactionAdmission::Busy => Ok(CompactionOutcome::Busy),
+            ManualCompactionAdmission::Recorded(outcome) => Ok(outcome),
+            ManualCompactionAdmission::Idle(lease) => {
+                let compactor = self
+                    .plugin_context
+                    .as_ref()
+                    .and_then(
+                        rsi_meta::Context::lookup_local::<
+                            rsi_agent_turn_protocol::ManualCompactorContract,
+                        >,
+                    )
+                    .ok_or_else(|| SessionError::Invalid("no active compaction executor".into()))?;
+                let header = self.header_snapshot().await?;
+                let model = self.current_model_selection(&header).await?;
+                compactor
+                    .compact(lease, model)
+                    .await
+                    .map_err(map_turn_error)
+            }
+        }
     }
     async fn execute_command(
         &self,

@@ -2,6 +2,11 @@
 
 Entered runtime context carries the explicit participant label `Runtime context`.
 Labels follow typed provenance; identical human text remains human input.
+The schedule deletion command contributes held context labelled `Automation task`.
+Its original text and source remain available with the Step that consumed it.
+An automatic input uses the continuation's recorded domain for its shared Web
+and TUI label. Schedule deliveries read `Automation task`, Goal deliveries read
+`Goal continuation`, and other domains read `Automatic continuation`.
 
 Entered file attachments retain a borrowed `FileRef` and an `InputFile` source
 coordinate. Detail reads expose immutable file metadata, never the file bytes
@@ -45,9 +50,18 @@ sequence and record kind; they are not Agent Facts. Native controllers retain
 native Goal and preset authority, while external controllers expose only the
 remote capabilities actually negotiated and local observation reads.
 
+`RequestPresentation` retains a failed attempt's retry decision, including
+the reserved effect, ordinal, delay and failure kind. The prepared request
+supplies its retry limit when loaded. Attempt elapsed time excludes backoff.
+
 `RequestPresentation` folds one effect's partial lifecycle for bounded history
 windows. It preserves the prepared model/effort, reported usage, elapsed time and
 failure independently of event arrival order. It never contributes usage totals.
+A successful `schedule_create` result paired with its exact intent supplies the
+created reminder's ID, single-line title and recurrence. The transcript can
+reconstruct the creation from its original turn without retaining the reminders
+array or performing another read.
+
 Typed Tool argument summaries retain at most 512 UTF-8 bytes; raw arguments and
 results remain exact paged sources. Renderers own labels, color and terminal safety.
 `FactField::ToolCommand` selects the raw UTF-8 `command` string of a `bash` or `pwsh`
@@ -105,7 +119,8 @@ validated result, not a new execution policy or reconstructed process authority.
 Shared block keys use canonical structured identities: direct Turn input and
 claimed Message input have different kinds; model blocks include Turn, effect
 and content index; Tool blocks include Turn, effect and the complete retained
-result identity. Renderers consume keys opaquely and may split a semantic block
+result identity. Immediate manual-compaction feedback and its durable outcome
+share a key derived from the command ID. Renderers consume keys opaquely and may split a semantic block
 into presentation items. They cannot pair different Tool registrations or calls
 merely because an effect string matches.
 

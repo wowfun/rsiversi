@@ -139,7 +139,7 @@ impl LocalSessionService {
             let allowed = match row {
                 Ok(row) => match self.protect_scope(row.protection.as_ref()) {
                     Ok(lease) => {
-                        leases.push(lease);
+                        leases.extend(lease);
                         locations.contains(&row.location)
                     }
                     Err(rsi_session_protocol::SessionError::Api(

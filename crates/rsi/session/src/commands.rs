@@ -351,11 +351,19 @@ impl LocalSessionHandle {
             .prepare_resume(self.session_id())
             .await
             .map_err(map_turn_error)?;
+        let deleting_reminder = invocation.command.as_str() == rsi_agent_schedule::SCHEDULE_DELETE;
         let receipt = self
             .commands
             .execute(session, invocation)
             .await
             .map_err(|error| command_error(error, &request_id))?;
+        if deleting_reminder
+            && let Some(controller) = self.plugin_context.as_ref().and_then(
+                rsi_meta::Context::lookup_local::<rsi_agent_schedule::ScheduleControllerContract>,
+            )
+        {
+            controller.refresh_pending(self.session_id()).await;
+        }
         SessionCommandReceipt::committed(receipt.control_seq(), receipt.commit())
             .map_err(|error| protocol_error(&error))
     }

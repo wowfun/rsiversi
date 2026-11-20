@@ -32,6 +32,10 @@ pub enum FactField {
     ModelFailure,
     /// Redacted prepared provider identity and request metadata.
     ModelSnapshot,
+    /// Names and changes projected from the selected request's tool evidence.
+    ModelToolSummary,
+    /// Full canonical tool section resolved by the attached Session.
+    ModelToolSchemas,
     /// Complete arguments from a Tool intent or pre-execution rejection.
     ToolArguments,
     /// Raw shell command string from a bash intent or pre-execution rejection.
@@ -108,6 +112,8 @@ impl<'de> Deserialize<'de> for FactField {
             }
             ("model_failure", None) => Self::ModelFailure,
             ("model_snapshot", None) => Self::ModelSnapshot,
+            ("model_tool_summary", None) => Self::ModelToolSummary,
+            ("model_tool_schemas", None) => Self::ModelToolSchemas,
             ("tool_arguments", None) => Self::ToolArguments,
             ("tool_command", None) => Self::ToolCommand,
             ("tool_rejection", None) => Self::ToolRejection,
@@ -165,6 +171,8 @@ fn order(field: FactField) -> (u8, u32, u8) {
         FactField::ModelToolArguments { index } => (4, u32::from(index), 0),
         FactField::ModelFailure => (5, 0, 0),
         FactField::ModelSnapshot => (6, 0, 0),
+        FactField::ModelToolSummary => (6, 0, 1),
+        FactField::ModelToolSchemas => (6, 0, 2),
         FactField::ToolCommand => (7, 0, 0),
         FactField::ToolArguments => (7, 0, 1),
         FactField::ToolRejection => (8, 0, 0),

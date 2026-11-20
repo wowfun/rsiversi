@@ -135,7 +135,7 @@ async fn visit_inputs<'a>(
                         .filter(|f| f.seq() == seq)
                         .ok_or_else(invalid)?
                 };
-                if original.body().turn_id() != turn_id {
+                if original.body().turn_id() != Some(turn_id) {
                     return Err(invalid());
                 }
                 let (source, offset, content) = match (original.body(), claim.ordinal()) {

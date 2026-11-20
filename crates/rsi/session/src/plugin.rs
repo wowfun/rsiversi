@@ -104,6 +104,8 @@ impl PluginFactory for SessionFactory {
         let context = plan.context().clone();
         let service =
             service.with_spill(move || context.lookup_local::<rsi_spill::SpillStoreContract>());
+        let mut service = service;
+        service.plugin_context = Some(plan.context().clone());
         let service = Arc::new(service);
         let frozen_supply = plan
             .context()

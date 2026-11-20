@@ -2,7 +2,7 @@ use super::{Result, SessionError, SessionId, SessionStore, map_store_error};
 use futures_util::FutureExt as _;
 use rsi_agent_session_protocol::{
     EvidencePart, EvidenceSection, EvidenceUnavailable, MAXIMUM_REQUEST_EVIDENCE_BYTES,
-    RequestEvidence, SessionFactBody,
+    RequestEvidence,
 };
 use rsi_api_protocol::{ByteBudget, ByteReservation};
 use rsi_session_protocol::{EvidencePage, EvidencePageContent, EvidenceRead};
@@ -16,6 +16,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const MAXIMUM_COLD_LOADS: usize = 4;
 const MAXIMUM_ENTRIES: usize = 64;
 const CLEANUP_SECONDS: u64 = 30;
+mod tools;
+use tools::ToolCatalog;
 const _: () = assert!(
     MAXIMUM_COLD_LOADS * MAXIMUM_REQUEST_EVIDENCE_BYTES <= rsi_api_protocol::MAXIMUM_API_BYTES
 );
@@ -24,6 +26,7 @@ const _: () = assert!(
 struct Key(SessionId, u64, EvidenceSection);
 enum Selected {
     Available {
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
         text: Box<str>,
         sha256: String,
         _reservation: ByteReservation,
@@ -31,12 +34,18 @@ enum Selected {
     Unavailable(EvidenceUnavailable),
 }
 impl Selected {
-    fn available(text: String, sha256: String, mut reservation: ByteReservation) -> Self {
+    fn available(
+        text: String,
+        sha256: String,
+        mut reservation: ByteReservation,
+        purpose: rsi_agent_session_protocol::ModelEventPurpose,
+    ) -> Self {
         let text = text.into_boxed_str();
         reservation
             .shrink(text.len())
             .expect("validated section fits its cold-load reservation");
         Self::Available {
+            purpose,
             text,
             sha256,
             _reservation: reservation,
@@ -150,14 +159,73 @@ impl EvidenceReader {
     ) -> Result<EvidencePage> {
         request.validate()?;
         let guard = Arc::new(guard);
-        self.load(
-            store,
-            Key(session, request.intent_seq, request.section),
-            retiring,
-            guard.clone(),
-        )
-        .await?
-        .page(request)
+        let selected = self
+            .load(
+                store.clone(),
+                Key(session.clone(), request.intent_seq, request.section),
+                retiring.clone(),
+                guard.clone(),
+            )
+            .await?;
+        if request.tool_summary
+            && let Selected::Available {
+                text,
+                purpose,
+                sha256,
+                ..
+            } = selected.as_ref()
+        {
+            use rsi_session_protocol::ToolComparison;
+            let current = ToolCatalog::read(text)?;
+            let previous = store
+                .previous_model_intent(&session, request.intent_seq, *purpose)
+                .await
+                .map_err(map_store_error)?;
+            let comparison = if let Some(seq) = previous {
+                let previous = self
+                    .load(
+                        store,
+                        Key(session, seq, EvidenceSection::Tools),
+                        retiring,
+                        guard,
+                    )
+                    .await?;
+                match previous.as_ref() {
+                    Selected::Unavailable(reason) => ToolComparison::Unavailable {
+                        intent_seq: seq,
+                        reason: *reason,
+                    },
+                    Selected::Available {
+                        sha256: prior_digest,
+                        text: prior,
+                        ..
+                    } => current.compare(
+                        seq,
+                        if sha256 == prior_digest {
+                            None
+                        } else {
+                            Some(ToolCatalog::read(prior)?)
+                        },
+                    ),
+                }
+            } else {
+                ToolComparison::First
+            };
+            let page = EvidencePage {
+                intent_seq: request.intent_seq,
+                section: request.section,
+                content: EvidencePageContent::ToolSummary {
+                    names: current.names,
+                    hosted: current.hosted,
+                    choice: current.choice,
+                    comparison,
+                },
+            };
+            page.validate(request)?;
+            Ok(page)
+        } else {
+            selected.page(request)
+        }
     }
     async fn load<G: Send + 'static>(
         self: &Arc<Self>,
@@ -306,7 +374,7 @@ async fn load_section(
         .pop()
         .filter(|fact| fact.seq() == *intent_seq)
         .ok_or_else(|| SessionError::NotFound("request intent".into()))?;
-    let SessionFactBody::ModelIntent { evidence, .. } = fact.into_body() else {
+    let Some((purpose, evidence)) = fact.into_body().into_request_evidence() else {
         return Err(SessionError::Invalid(
             "selected source is not a request intent".into(),
         ));
@@ -319,7 +387,7 @@ async fn load_section(
                 .expect("available evidence has every section");
             match part {
                 EvidencePart::Inline { text, sha256 } => {
-                    Ok(Selected::available(text, sha256, reservation))
+                    Ok(Selected::available(text, sha256, reservation, purpose))
                 }
                 EvidencePart::Reference {
                     seq,
@@ -342,7 +410,7 @@ async fn load_section(
                     let text = original
                         .into_text(section, &sha256, bytes)
                         .map_err(resolve_error)?;
-                    Ok(Selected::available(text, sha256, reservation))
+                    Ok(Selected::available(text, sha256, reservation, purpose))
                 }
             }
         }

@@ -100,20 +100,39 @@ pub(super) async fn evidence_record(
     id: &SessionId,
     fact: &SessionFact,
 ) -> Result<Option<Value>> {
-    let SessionFactBody::ModelIntent {
-        evidence,
-        effect_id,
-        purpose,
-        snapshot,
-        ..
-    } = fact.body()
-    else {
-        return Ok(None);
-    };
-    let evidence = resolve(store, id, evidence).await?;
-    Ok(Some(
-        json!({"session_id":id,"seq":fact.seq().to_string(),"effect_id":effect_id,"purpose":purpose,"snapshot":snapshot,"evidence":evidence}),
-    ))
+    match fact.body() {
+        SessionFactBody::ModelIntent {
+            evidence,
+            effect_id,
+            purpose,
+            snapshot,
+            ..
+        } => Ok(Some(
+            json!({"session_id":id,"seq":fact.seq().to_string(),"effect_id":effect_id,"purpose":purpose,"snapshot":snapshot,"evidence":resolve(store,id,evidence).await?}),
+        )),
+        SessionFactBody::ManualCompaction {
+            command_id,
+            effect_id,
+            event,
+        } => {
+            let rsi_agent_session_protocol::ManualCompactionEvent::Prepared(prepared) = event
+            else {
+                return Ok(None);
+            };
+            let rsi_agent_session_protocol::PreparedManualCompaction {
+                plan,
+                snapshot,
+                evidence,
+                generation,
+                ..
+            } = prepared.as_ref();
+            Ok(Some(
+                json!({"session_id":id,"seq":fact.seq().to_string(),"command_id":command_id,"effect_id":effect_id,
+                "purpose":{"kind":"context_compaction","plan":plan},"generation":generation,"snapshot":snapshot,"evidence":resolve(store,id,evidence).await?}),
+            ))
+        }
+        _ => Ok(None),
+    }
 }
 async fn resolve(
     store: &dyn SessionStore,

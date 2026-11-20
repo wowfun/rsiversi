@@ -125,6 +125,7 @@ async fn section(
     let mut text = String::new();
     loop {
         let request = EvidenceRead {
+            tool_summary: false,
             intent_seq: seq,
             section,
             offset,
@@ -271,6 +272,10 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
     let tools = section(&handle, second_seq, EvidenceSection::Tools).await;
     assert!(tools.contains("todo_write"));
     assert!(tools.contains("directory_list"));
+    let summary_request = EvidenceRead { intent_seq: second_seq, section: EvidenceSection::Tools, tool_summary: true, offset: 0, maximum_bytes: 4096 };
+    let expected_summary = handle.evidence(summary_request.clone()).await.unwrap().tool_summary_text().unwrap();
+    assert!(expected_summary.contains("directory_list"));
+    assert!(expected_summary.contains(&format!("Compared with request {original_seq}: same tool definitions and choice.")));
     let config = section(&handle, second_seq, EvidenceSection::Configuration).await;
     assert!(!config.contains(KEY));
     assert!(!system.contains("inspect workspace context"));
@@ -281,6 +286,7 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
     assert!(
         handle
             .evidence(EvidenceRead {
+                tool_summary: false,
                 intent_seq: 0,
                 section: EvidenceSection::System,
                 offset: 0,
@@ -325,6 +331,7 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
         assert_eq!(*seq, original_seq);
     }
     assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(handle.evidence(summary_request).await.unwrap().tool_summary_text().unwrap(), expected_summary);
     assert!(running.shutdown().await.is_clean());
     server.abort();
     let _ = server.await;
@@ -399,6 +406,7 @@ async fn request_evidence_above_former_turn_budget_is_retained_and_dispatches_on
     )));
     let response = handle
         .evidence(EvidenceRead {
+            tool_summary: false,
             intent_seq: intents[0].seq(),
             section: EvidenceSection::System,
             offset: 0,

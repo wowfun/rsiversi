@@ -35,12 +35,14 @@ pub enum CompletionGroup {
 }
 /// Case-insensitive ordered subsequence match, with exact and prefix matches first.
 pub fn completion_rank(name: &str, query: &str) -> Option<u8> {
-    let name = name.to_lowercase();
-    let query = query.to_lowercase();
+    normalized_rank(&name.to_lowercase(), &query.to_lowercase())
+}
+
+fn normalized_rank(name: &str, query: &str) -> Option<u8> {
     if name == query {
         return Some(0);
     }
-    if name.starts_with(&query) {
+    if name.starts_with(query) {
         return Some(1);
     }
     let mut letters = name.chars();
@@ -50,12 +52,16 @@ pub fn completion_rank(name: &str, query: &str) -> Option<u8> {
         .then_some(2)
 }
 /// Filters and ranks candidates without filesystem or Session work.
-pub fn rank_completions(entries: &[InputCompletion], query: &str) -> Vec<InputCompletion> {
+pub fn rank_completions<'a>(
+    entries: impl IntoIterator<Item = &'a InputCompletion>,
+    query: &str,
+) -> Vec<&'a InputCompletion> {
+    let query = query.to_lowercase();
     let mut result: Vec<_> = entries
-        .iter()
+        .into_iter()
         .filter_map(|entry| {
-            completion_rank(&entry.name, query)
-                .map(|rank| (entry.group, rank, entry.name.to_lowercase(), entry.clone()))
+            let name = entry.name.to_lowercase();
+            normalized_rank(&name, &query).map(|rank| (entry.group, rank, name, entry))
         })
         .collect();
     result.sort_by(|left, right| {
@@ -251,5 +257,26 @@ mod tests {
         assert_eq!(completion_rank("ReviewCode", "reviewcode"), Some(0));
         assert_eq!(completion_rank("ReviewCode", "erw"), None);
         assert_eq!(completion_rank("中文评审", "中审"), Some(2));
+    }
+
+    #[test]
+    fn ranking_returns_catalog_entries_in_group_and_match_order() {
+        let entries = [
+            ("compact", CompletionGroup::Skill),
+            ("Compute", CompletionGroup::Command),
+            ("CMPT", CompletionGroup::Command),
+            ("export", CompletionGroup::Command),
+        ]
+        .map(|(name, group)| InputCompletion {
+            name: name.into(),
+            group,
+            description: String::new(),
+            replacement: name.into(),
+            resource: None,
+            composer_input: None,
+        });
+        let ranked = rank_completions(&entries, "cmpt");
+        assert_eq!(ranked, [&entries[2], &entries[1], &entries[0]]);
+        assert!(std::ptr::eq(ranked[0], &raw const entries[2]));
     }
 }

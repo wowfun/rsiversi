@@ -426,6 +426,31 @@ impl SessionService for SessionClient {
             .map_err(|_| malformed(Operation::Recent))?;
         Ok(page)
     }
+    async fn observe_scheduled_tasks(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ScheduleCatalogStream> {
+        super::client_stream::scheduled_tasks(&self.state).await
+    }
+    async fn delete_scheduled_task(
+        &self,
+        task: rsi_session_protocol::ScheduledTaskId,
+    ) -> rsi_session_protocol::Result<bool> {
+        self.state.call(Operation::DeleteScheduledTask, &task).await
+    }
+
+    async fn scheduled_tasks(
+        &self,
+        after: Option<&RecentSessionCursor>,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::ScheduleCatalogPage> {
+        if let Some(cursor) = after {
+            cursor.validate()?;
+        }
+        let page: rsi_session_protocol::ScheduleCatalogPage =
+            self.state.call(Operation::ScheduledTasks, &after).await?;
+        page.validate(after)
+            .map_err(|_| malformed(Operation::ScheduledTasks))?;
+        Ok(page)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -746,6 +771,31 @@ impl SessionHandle for Handle {
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
         self.call(Operation::Commands, &()).await
+    }
+    async fn message_feedback(
+        &self,
+        message: std::num::NonZeroU64,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_session_protocol::SavedMessageFeedback>>
+    {
+        self.call(Operation::MessageFeedback, &message).await
+    }
+    async fn change_message_feedback(
+        &self,
+        change: rsi_agent_session_protocol::MessageFeedbackChange,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::MessageFeedbackOutcome> {
+        self.call(Operation::ChangeMessageFeedback, &change).await
+    }
+    async fn compact_status(
+        &self,
+        command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_turn_protocol::CompactionOutcome>> {
+        self.call(Operation::CompactStatus, &command).await
+    }
+    async fn compact(
+        &self,
+        command: rsi_agent_session_protocol::DomainRequestId,
+    ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::CompactionOutcome> {
+        self.call(Operation::Compact, &command).await
     }
     async fn execute_command(
         &self,

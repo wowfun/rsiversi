@@ -7,9 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rsi-agent-schedule = { path = "../../rsi-agent/schedule" }
 rsi-spill = { path = "../../rsi-spill/core" }
 getrandom.workspace = true
 hex.workspace = true
+sha2.workspace = true
 rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 rsi-agent-context = { path = "../../rsi-agent/context" }
@@ -21,6 +23,7 @@ rsi-agent-references = { path = "../../rsi-agent/references" }
 rsi-conversation = { path = "../conversation" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
 rsi-goal = { path = "../goal" }
+rsi-navigation = { path = "../navigation" }
 rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 bytes.workspace = true
@@ -28,7 +31,7 @@ rsi-meta = { path = "../../rsi-meta/core" }
 rsi-session-protocol = { path = "../session-protocol" }
 async-stream.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 futures-util.workspace = true
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 async-trait.workspace = true

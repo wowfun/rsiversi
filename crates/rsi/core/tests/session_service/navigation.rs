@@ -3,7 +3,7 @@ use rsi_api_protocol::{ApiError, ApiOutput, ByteBudget, CallOrigin};
 use rsi_navigation_api::{NavigationFilter, NavigationOperation, NavigationPage, SessionMetadata};
 use serde_json::{Value, json};
 
-async fn wire(
+pub(super) async fn wire(
     running: &RunningRsi,
     origin: CallOrigin,
     operation: NavigationOperation,

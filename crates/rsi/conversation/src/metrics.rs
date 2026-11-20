@@ -28,7 +28,7 @@ pub struct SessionTiming {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptMetrics {
-    pub turn: TurnId,
+    pub turn: Option<TurnId>,
     pub effect: EffectId,
     pub model: ModelRef,
     pub config_generation: u64,
@@ -157,7 +157,7 @@ impl SessionMetrics {
 #[derive(Clone, Debug, Serialize)]
 struct OpenAttempt {
     description: Option<rsi_ai_protocol::LanguageModelDescription>,
-    turn: TurnId,
+    turn: Option<TurnId>,
     effect: EffectId,
     model: ModelRef,
     config_generation: u64,
@@ -209,7 +209,8 @@ impl MetricsReducer {
         }
         if !matches!(
             fact.body(),
-            SessionFactBody::ModelIntent { .. }
+            SessionFactBody::ManualCompaction { .. }
+                | SessionFactBody::ModelIntent { .. }
                 | SessionFactBody::ModelStarted { .. }
                 | SessionFactBody::ModelAttemptSettled { .. }
                 | SessionFactBody::TurnTerminal { .. }
@@ -229,7 +230,7 @@ impl MetricsReducer {
 
     fn model_event(
         &mut self,
-        turn_id: &TurnId,
+        turn_id: Option<&TurnId>,
         effect_id: &EffectId,
         purpose: ModelEventPurpose,
         event: &LanguageEvent,
@@ -309,6 +310,72 @@ impl MetricsReducer {
 
     #[allow(clippy::too_many_lines)] // One ordered reducer handles each stage of the same request.
     fn apply(&mut self, fact: &SessionFact) -> Result<(), &'static str> {
+        use rsi_agent_session_protocol::{LanguageAttemptFact, LanguageAttemptStage as Stage};
+        if let Some(LanguageAttemptFact {
+            turn,
+            effect,
+            stage,
+        }) = fact.body().language_attempt()
+        {
+            match stage {
+                Stage::Prepared(snapshot, purpose, price_quote) => {
+                    if self
+                        .open
+                        .as_ref()
+                        .is_some_and(|previous| previous.turn.is_none())
+                    {
+                        self.open = None;
+                    }
+                    if self.open.is_some() {
+                        return Err("interleaved Session model attempts");
+                    }
+                    self.summary.attempts = add(self.summary.attempts, 1)?;
+                    self.summary.configured_cost.intent(price_quote)?;
+                    self.open = Some(OpenAttempt {
+                        description: rsi_ai_protocol::LanguageModelDescription::from_snapshot(
+                            snapshot,
+                        )
+                        .ok(),
+                        price_quote: price_quote.cloned(),
+                        turn: turn.cloned(),
+                        effect: effect.clone(),
+                        model: ModelRef::new(&snapshot.deployment_id, &snapshot.model)
+                            .map_err(|_| "invalid prepared model")?,
+                        config_generation: snapshot.config_generation,
+                        settings: snapshot.language_settings.clone(),
+                        started_ms: None,
+                        first_token_ms: None,
+                        usage: None,
+                        purpose,
+                    });
+                }
+                Stage::Started => {
+                    let open = self.exact(turn, effect)?;
+                    if open.started_ms.replace(fact.timestamp_ms()).is_some() {
+                        return Err("duplicate model start");
+                    }
+                }
+                Stage::Settled(attempt, purpose) => {
+                    let start = self
+                        .exact(turn, effect)?
+                        .started_ms
+                        .unwrap_or(fact.timestamp_ms());
+                    for item in attempt.events() {
+                        let (elapsed, event) =
+                            item.map_err(|_| "invalid model attempt evidence")?;
+                        self.model_event(
+                            turn,
+                            effect,
+                            purpose,
+                            &event,
+                            fact.seq(),
+                            start.saturating_add(elapsed),
+                        )?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         match fact.body() {
             SessionFactBody::TurnAccepted { turn_id, .. }
             | SessionFactBody::MessageTurnAccepted { turn_id, .. }
@@ -322,65 +389,12 @@ impl MetricsReducer {
                         .insert(turn_id.clone(), fact.timestamp_ms());
                 }
             }
-            SessionFactBody::ModelIntent {
-                turn_id,
-                effect_id,
-                snapshot,
-                purpose,
-                price_quote,
-                ..
-            } => {
-                if self.open.is_some() {
-                    return Err("interleaved Session model attempts");
-                }
-                self.summary.attempts = add(self.summary.attempts, 1)?;
-                self.summary.configured_cost.intent(price_quote.as_ref())?;
-                self.open = Some(OpenAttempt {
-                    description: rsi_ai_protocol::LanguageModelDescription::from_snapshot(snapshot)
-                        .ok(),
-                    price_quote: price_quote.clone(),
-                    turn: turn_id.clone(),
-                    effect: effect_id.clone(),
-                    model: ModelRef::new(&snapshot.deployment_id, &snapshot.model)
-                        .map_err(|_| "invalid prepared model")?,
-                    config_generation: snapshot.config_generation,
-                    settings: snapshot.language_settings.clone(),
-                    started_ms: None,
-                    first_token_ms: None,
-                    usage: None,
-                    purpose: purpose.event_purpose(),
-                });
-            }
-            SessionFactBody::ModelStarted { turn_id, effect_id } => {
-                let open = self.exact(turn_id, effect_id)?;
-                if open.started_ms.replace(fact.timestamp_ms()).is_some() {
-                    return Err("duplicate model start");
-                }
-            }
-            SessionFactBody::ModelAttemptSettled {
-                turn_id,
-                effect_id,
-                purpose,
-                attempt,
-            } => {
-                let start = self
-                    .exact(turn_id, effect_id)?
-                    .started_ms
-                    .unwrap_or(fact.timestamp_ms());
-                for item in attempt.events() {
-                    let (elapsed, event) = item.map_err(|_| "invalid model attempt evidence")?;
-                    self.model_event(
-                        turn_id,
-                        effect_id,
-                        *purpose,
-                        &event,
-                        fact.seq(),
-                        start.saturating_add(elapsed),
-                    )?;
-                }
-            }
             SessionFactBody::TurnTerminal { turn_id, .. } => {
-                if self.open.as_ref().is_some_and(|open| &open.turn == turn_id) {
+                if self
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| open.turn.as_ref() == Some(turn_id))
+                {
                     self.open = None;
                 }
                 if let Some(start) = self.turn_starts.remove(turn_id)
@@ -397,12 +411,12 @@ impl MetricsReducer {
 
     fn exact(
         &mut self,
-        turn: &TurnId,
+        turn: Option<&TurnId>,
         effect: &EffectId,
     ) -> Result<&mut OpenAttempt, &'static str> {
         self.open
             .as_mut()
-            .filter(|open| &open.turn == turn && &open.effect == effect)
+            .filter(|open| open.turn.as_ref() == turn && &open.effect == effect)
             .ok_or("model event has no matching metrics intent")
     }
 }

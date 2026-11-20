@@ -62,6 +62,11 @@ impl SessionController {
         &self.session_id
     }
 
+    /// Shares this surface's existing Session binding with sibling UI contributions.
+    pub fn session_handle(&self) -> Arc<dyn SessionHandle> {
+        self.handle.clone()
+    }
+
     /// Admits reconciliation before returning a waiter; Drop never replays or cancels it.
     ///
     /// # Panics

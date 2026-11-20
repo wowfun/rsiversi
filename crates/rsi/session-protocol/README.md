@@ -533,3 +533,15 @@ they can create live continuation authority or commit work.
 A caller-bound directory subscription precedes its first catalog read. It invalidates that read on Kernel publication or admitted Session retirement, draft membership changes, or a change in visibility. Each new read uses current authority. Standard providers expose process-local visibility generations. A change to any grant can wake the shared observer. A provider without a generation requires periodic reconciliation.
 
 An image submission may retain publisher presentation metadata alongside its verified Media reference. The optional display name and original dimensions travel with the message through draft promotion and subsequent replay.
+The Host automation catalog pages through Sessions with edited Schedule state,
+including closed Sessions. It reads canonical reminder data without attaching
+the Session or creating an execution lease. Each published group is bound to a
+currently visible execution location and an authorized Header. Its public cursor
+is scoped to the catalog and caller. Active, paused and consumed reminders are
+included. Each group reports whether its target Session is archived under the
+current navigation owner. Without that owner, the target is eligible for delivery.
+Deleted tasks disappear from the catalog. An unsettled occurrence identifies its
+reminder so the manager can disable edits while its delivery is outstanding.
+An active observer subscribes before its initial read and rechecks caller
+visibility on domain edits, retirement, archive and policy changes. It retains a digest
+per page of visible nonempty groups. Identical visible content emits no frames.

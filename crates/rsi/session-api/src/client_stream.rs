@@ -66,6 +66,56 @@ fn retention_error(error: &TurnError) -> SessionError {
     }
 }
 
+pub(super) async fn scheduled_tasks(
+    state: &client::State,
+) -> rsi_session_protocol::Result<rsi_session_protocol::ScheduleCatalogStream> {
+    use rsi_session_protocol::ScheduleCatalogUpdate;
+    let operation = Operation::ScheduledTasksObserve;
+    let spec = operation.spec();
+    let input = state
+        .api
+        .input_budget(spec.class)
+        .encode(&(), spec.maximum_request_bytes)
+        .map_err(SessionError::Api)?;
+    let ApiOutput::Stream(mut stream) = state
+        .api
+        .call(&spec, input)
+        .await
+        .map_err(|reason| stream_error(operation, reason))?
+    else {
+        return Err(client::malformed(operation));
+    };
+    Ok(Box::pin(async_stream::try_stream! {
+        let mut available = 0u32;
+        let mut previous = None;
+        while let Some(message) = stream.next().await {
+            let message = message.map_err(|reason| stream_error(operation, reason))?;
+            if message.binary.is_some() { Err(client::malformed(operation))?; }
+            let update: ScheduleCatalogUpdate = serde_json::from_slice(message.json.as_bytes())
+                .map_err(|_| client::malformed(operation))?;
+            match &update {
+                ScheduleCatalogUpdate::Page { index, sessions } => {
+                    if *index > available || previous.is_some_and(|old| old >= *index)
+                        || sessions.is_empty() || sessions.iter().any(|group| group.reminders.is_empty())
+                        || rsi_session_protocol::ScheduledSession::validate_page(sessions, None, None).is_err() {
+                        Err(client::malformed(operation))?;
+                    }
+                    previous = Some(*index);
+                    if *index == available { available = available.checked_add(1).ok_or_else(|| client::malformed(operation))?; }
+                }
+                ScheduleCatalogUpdate::Complete { pages } => {
+                    if *pages > available || previous.is_some_and(|index| index >= *pages) { Err(client::malformed(operation))?; }
+                    available = *pages;
+                    previous = None;
+                }
+            }
+            drop(message);
+            yield update;
+        }
+        Err(client::malformed(operation))?;
+    }))
+}
+
 pub(super) async fn terminal_output(
     handle: &Handle,
     request: &rsi_session_protocol::terminal::Request,

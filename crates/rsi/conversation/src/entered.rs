@@ -43,17 +43,38 @@ pub struct EnteredInput<'a> {
 impl<'a> EnteredInput<'a> {
     /// Participant label for an attributed message, when it is not the local user.
     pub fn attribution(&self) -> Option<std::borrow::Cow<'static, str>> {
-        match self.source? {
-            InputMessageSource::Agent {
+        self.presentation().1
+    }
+
+    /// Display role and participant label derived from the recorded input source.
+    pub fn presentation(&self) -> (&'static str, Option<std::borrow::Cow<'static, str>>) {
+        let (role, title) = match self.source {
+            Some(InputMessageSource::Agent {
                 source_session_id, ..
-            } => Some(format!("Message from {source_session_id}").into()),
-            InputMessageSource::Completion {
+            }) => (
+                "trigger-agent",
+                format!("Message from {source_session_id}").into(),
+            ),
+            Some(InputMessageSource::Completion {
                 child_session_id, ..
-            } => Some(format!("Completion from {child_session_id}").into()),
-            InputMessageSource::Continuation { .. } => Some("Goal continuation".into()),
-            InputMessageSource::RuntimeContext => Some("Runtime context".into()),
-            _ => None,
-        }
+            }) => (
+                "trigger-completion",
+                format!("Completion from {child_session_id}").into(),
+            ),
+            Some(InputMessageSource::Continuation { source, .. }) => match source.domain.id() {
+                "rsi.schedule" => ("trigger-schedule", "Automation task".into()),
+                "rsi.goal" => ("trigger-goal", "Goal continuation".into()),
+                _ => ("trigger-request", "Automatic continuation".into()),
+            },
+            Some(InputMessageSource::RuntimeContext) => ("context", "Runtime context".into()),
+            Some(InputMessageSource::Command { source, .. })
+                if source.command.as_str() == "rsi.schedule.delete" =>
+            {
+                ("step-context", "Automation task".into())
+            }
+            _ => return ("user", None),
+        };
+        (role, Some(title))
     }
 
     /// Iterates blocks once without re-reading or copying their payloads.

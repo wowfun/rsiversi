@@ -103,6 +103,16 @@ async fn directory_watch_rechecks_permissions_without_a_session_write() {
         .with_protection(policy.clone())
         .with_execution(execution.clone());
     let mut changes = service.watch_directory(&device).unwrap().unwrap();
+    let mut tasks = service
+        .scoped(CallOrigin::Device(device.clone()))
+        .observe_scheduled_tasks()
+        .await
+        .unwrap();
+    assert!(matches!(
+        tasks.next().await.unwrap().unwrap(),
+        rsi_session_protocol::ScheduleCatalogUpdate::Complete { pages: 0 }
+    ));
+    assert!(tasks.next().now_or_never().is_none());
     assert!(changes.next().now_or_never().is_none());
     tokio::time::advance(Duration::from_secs(2)).await;
     assert!(changes.next().now_or_never().is_none());
@@ -112,6 +122,9 @@ async fn directory_watch_rechecks_permissions_without_a_session_write() {
     execution.granted.store(true, Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(tasks.next().now_or_never().is_none());
+    device.revoked.cancel();
+    assert!(tasks.next().await.is_none());
     drop(changes);
     fixture.stop().await;
 }

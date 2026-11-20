@@ -13,25 +13,25 @@ mod index;
 mod media;
 mod metrics;
 mod request;
-pub use request::RequestPresentation;
+pub use request::{RecordedRetry, RequestPresentation, RetryState};
 mod cost;
 pub use cost::{ConfiguredCost, CurrencyCost};
 pub use metrics::{
     AttemptMetrics, ContextUsage, MetricsReducer, SessionMetrics, SessionTiming, UsageTotals,
 };
 mod model_preview;
-pub use model_preview::{LiveModelPreview, ModelBlockPreview, ModelPreviewState, model_previews};
+pub use model_preview::{LiveModelPreview, ModelBlockPreview, ModelPreviewState, compaction_preview, model_previews};
 mod source;
 mod source_path;
 pub use source_path::{SourcePathError, ToolValuePath, select_tool_value_path};
 mod tool;
 mod window;
 pub use bytes::hex_window;
-pub use identity::BlockIdentity;
+pub use identity::{BlockIdentity, compaction_key};
 pub use index::{MAXIMUM_BLOCK_SOURCES, SourceAdmission, SourceIndex, SourceIndexError};
 pub use media::MediaSource;
 pub use source::{FactField, FieldValue, SourceRef, select_field};
-pub use tool::{OutputRef, ToolPhase, ToolState};
+pub use tool::{OutputRef, ScheduleCreation, ToolPhase, ToolState};
 pub use window::{FieldWindow, MAXIMUM_WINDOW_BYTES, WindowError};
 
 /// Distinguishes an execution error from a failed process returned by a Tool.

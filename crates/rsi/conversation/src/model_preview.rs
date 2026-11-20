@@ -114,6 +114,23 @@ pub fn model_previews(
     state
 }
 
+/// Reads visible summary text in content-block order. Reasoning never spends the display budget.
+pub fn compaction_preview(attempt: &rsi_agent_session_protocol::ModelAttemptLog, maximum: usize) -> (String, bool) {
+    let mut state = ModelPreviewState::new(maximum, maximum);
+    for (elapsed, event) in attempt.events().flatten() {
+        if matches!(&event, LanguageEvent::ContentStarted {content: ContentStart::Text, ..}
+            | LanguageEvent::ContentDelta {delta: ContentDelta::Text(_), ..}) {
+            state.push(elapsed, &event);
+        }
+    }
+    let mut text = String::new();
+    for part in state.blocks.into_values() {
+        if text.is_empty() { text = part.window.text; } else { text.push_str(&part.window.text); }
+        if part.window.more { return (text, true); }
+    }
+    (text, false)
+}
+
 /// One admitted projection and one bounded candidate awaiting its durable start.
 /// The original prefixes are never retained.
 #[derive(Clone, Debug, Default)]

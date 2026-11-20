@@ -1,5 +1,9 @@
 # rsi-client
 
+Request tool sources use the attached Session's evidence reader. Names and
+changes are a projection of the selected intent. Full schemas page through the
+canonical evidence section, including references to earlier inline captures.
+
 Native transcript preparation borrows claimed inputs from the current history
 page or the current live batch. The live batch shares observation handles until
 preparation or Turn termination, bounded by one presentation window and one
@@ -21,7 +25,8 @@ All four standard option kinds remain visible; no answer creates a local grant.
 The controller exposes completions through `SessionController::completion_catalog`,
 which assembles composer-enabled Session commands and human
 resource candidates from one Sources discovery and one List per present skill or
-Agent source. GUI filtering caches that catalog per pane generation; the Web
+Agent source. Ranking borrows matching entries from the cached catalog and
+preserves group, match quality and case-insensitive name ordering. GUI filtering caches that catalog per pane generation; the Web
 document requests a refresh on each new popup and on explicit Refresh. Fresh spawn
 definition resolution remains independent.
 Skills use one collision policy and diagnostic. Applications supply their own

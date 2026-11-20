@@ -257,6 +257,13 @@ impl Drop for Released {
 }
 #[async_trait::async_trait]
 impl SessionStore for PausedStore {
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMessageFeedback> {
+        self.inner.read_message_feedback(id, message).await
+    }
     async fn read_domain_admission(
         &self,
         id: &SessionId,
@@ -453,9 +460,10 @@ impl SessionStore for PausedStore {
         locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> StoreResult<StoreRecentSessionPage> {
         self.inner
-            .list_recent_sessions(locations, after, limit)
+            .list_recent_sessions(locations, after, limit, edited_domain)
             .await
     }
     async fn list_open_sessions(

@@ -31,35 +31,10 @@ impl ApiHandler for Handler {
         };
         let service = self.service.scoped(context.origin);
         match self.operation {
-            Operation::Export => {
-                let request: HandleRequest<rsi_session_protocol::export::ExportOptions> =
-                    serde_json::from_slice(input.as_bytes())
-                        .map_err(|_| ApiError::Invalid("invalid Session export request".into()))?;
-                request
-                    .input
-                    .validate()
-                    .map_err(|_| ApiError::Invalid("invalid export options".into()))?;
-                let result = async {
-                    handle(service.as_ref(), &request.target)
-                        .await?
-                        .export(request.input)
-                        .await
-                }
-                .await;
-                let mut source = match wire::domain(result)? {
-                    Ok(source) => source,
-                    Err(failure) => {
-                        return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
-                    }
-                };
-                Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
-                    while let Some(event) = source.next().await {
-                        let body = match wire::domain(event)? { Ok(body) => body, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
-                        let json = budget.encode(&HandleReply { target:request.target.clone(), body }, maximum)?;
-                        yield ApiMessage { json, binary:None };
-                    }
-                })))
+            Operation::ScheduledTasksObserve => {
+                scheduled_tasks(service.as_ref(), input, budget, maximum).await
             }
+            Operation::Export => export(service.as_ref(), input, budget, maximum).await,
             Operation::TerminalOutput => {
                 terminal_output(service.as_ref(), input, budget, maximum).await
             }
@@ -125,6 +100,67 @@ impl ApiHandler for Handler {
         }
     }
 }
+async fn export(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    let request: HandleRequest<rsi_session_protocol::export::ExportOptions> =
+        serde_json::from_slice(input.as_bytes())
+            .map_err(|_| ApiError::Invalid("invalid Session export request".into()))?;
+    request
+        .input
+        .validate()
+        .map_err(|_| ApiError::Invalid("invalid export options".into()))?;
+    let result = async {
+        handle(service, &request.target)
+            .await?
+            .export(request.input)
+            .await
+    }
+    .await;
+    let mut source = match wire::domain(result)? {
+        Ok(source) => source,
+        Err(failure) => {
+            return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
+        }
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        while let Some(event) = source.next().await {
+            let body = match wire::domain(event)? { Ok(body) => body, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
+            let json = budget.encode(&HandleReply { target:request.target.clone(), body }, maximum)?;
+            yield ApiMessage { json, binary:None };
+        }
+    })))
+}
+
+async fn scheduled_tasks(
+    service: &dyn SessionService,
+    input: RetainedBytes,
+    budget: rsi_api_protocol::ByteBudget,
+    maximum: usize,
+) -> rsi_api_protocol::Result<ApiOutput> {
+    serde_json::from_slice::<()>(input.as_bytes()).map_err(|_| {
+        ApiError::Invalid("invalid Schedule catalog observation".into())
+    })?;
+    let mut source = match wire::domain(service.observe_scheduled_tasks().await)? {
+        Ok(stream) => stream,
+        Err(failure) => {
+            return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
+        }
+    };
+    Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+        while let Some(update) = source.next().await {
+            let update = match wire::domain(update)? {
+                Ok(update) => update,
+                Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))?,
+            };
+            yield ApiMessage { json: budget.encode(&update, maximum)?, binary: None };
+        }
+    })))
+}
+
 async fn terminal_output(
     service: &dyn SessionService,
     input: RetainedBytes,

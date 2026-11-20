@@ -2,23 +2,56 @@
 use super::{Arc, LocalSessionHandle, LocalSessionService, Result, SessionError};
 
 impl LocalSessionService {
+    /// Installed policy providers expose generation reads for catalog invalidation.
+    pub(super) fn visibility_changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt as _;
+        let resolver = self.resolver.clone();
+        let policy = self.protection.clone();
+        if resolver.is_none() && policy.is_none() {
+            return futures_util::stream::pending().boxed();
+        }
+        let mut locations = resolver.as_ref().and_then(|r| r.visibility_revision());
+        let mut protection = policy.as_ref().and_then(|p| p.catalog_generation());
+        async_stream::stream! {
+            let interval = std::time::Duration::from_secs(1);
+            let mut grants = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            grants.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                grants.tick().await;
+                let mut changed = false;
+                if let Some(resolver) = &resolver {
+                    let current = resolver.visibility_revision();
+                    changed = current.is_none() || current != locations;
+                    locations = current;
+                }
+                if let Some(policy) = &policy {
+                    let current = policy.catalog_generation();
+                    changed |= !protection.as_ref().zip(current.as_ref())
+                        .is_some_and(|(a,b)| std::sync::Arc::ptr_eq(a,b));
+                    protection = current;
+                }
+                if changed { yield (); }
+            }
+        }.boxed()
+    }
     pub(super) fn protect_header(
         &self,
         header: &rsi_agent_session_protocol::SessionHeader,
-    ) -> Result<tokio_util::sync::CancellationToken> {
+    ) -> Result<Option<tokio_util::sync::CancellationToken>> {
         self.protect_scope(header.protection())
     }
     pub(super) fn protect_scope(
         &self,
         scope: Option<&rsi_agent_session_protocol::SessionProtectionScope>,
-    ) -> Result<tokio_util::sync::CancellationToken> {
+    ) -> Result<Option<tokio_util::sync::CancellationToken>> {
         match scope {
-            None => Ok(tokio_util::sync::CancellationToken::new()),
+            None => Ok(None),
             Some(scope) => self
                 .protection
                 .as_ref()
                 .ok_or(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))?
-                .view(scope, &self.origin),
+                .view(scope, &self.origin)
+                .map(Some),
         }
     }
 
@@ -155,28 +188,39 @@ impl LocalSessionService {
             )),
         }
     }
-    pub(super) async fn visible_recent(
+    pub(super) async fn visible_recent<T, F>(
         &self,
         after: Option<&super::RecentSessionCursor>,
         limit: usize,
-    ) -> Result<super::RecentSessionPage> {
+        edited_domain: Option<&'static str>,
+        mut project: impl FnMut(super::SessionSummary) -> F + Send,
+    ) -> Result<(Vec<T>, Option<super::RecentSessionCursor>)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
         let visibility = self.visibility()?;
         let mut cursor = match after {
             Some(after) => Some(
                 self.recent_cursors
                     .lock()
                     .map_err(|_| SessionError::Backend("recent cursors unavailable".into()))?
-                    .read(&self.origin, after)?,
+                    .read(&self.origin, after, edited_domain)?,
             ),
             None => None,
         };
         let mut sessions = Vec::new();
         let mut leases = Vec::new();
+        let mut visible = after.and_then(|cut| cut.after.clone());
         let mut more = false;
         for _ in 0..128 {
             let page = self
                 .store
-                .list_recent_sessions(visibility.locations(), cursor.as_ref(), limit)
+                .list_recent_sessions(
+                    visibility.locations(),
+                    cursor.as_ref(),
+                    limit,
+                    edited_domain,
+                )
                 .await
                 .map_err(super::map_store_error)?;
             more = page.has_more;
@@ -188,8 +232,9 @@ impl LocalSessionService {
                 cursor = Some(row.cursor());
                 match self.protect_header(&row.header) {
                     Ok(lease) => {
-                        leases.push(lease);
-                        sessions.push(row);
+                        leases.extend(lease);
+                        visible.clone_from(&cursor);
+                        sessions.push(project(row).await?);
                     }
                     Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized)) => {}
                     Err(_) => {
@@ -218,10 +263,6 @@ impl LocalSessionService {
             .map_err(|_| SessionError::Backend("recent cursors unavailable".into()))?;
         let next =
             if more {
-                let visible = sessions
-                    .last()
-                    .map(super::SessionSummary::cursor)
-                    .or_else(|| after.and_then(|c| c.after.clone()));
                 Some(book.issue(
                     &self.origin,
                     cursor.ok_or_else(|| {
@@ -229,6 +270,7 @@ impl LocalSessionService {
                     })?,
                     visible,
                     after,
+                    edited_domain,
                 )?)
             } else {
                 if let Some(after) = after {
@@ -236,11 +278,7 @@ impl LocalSessionService {
                 }
                 None
             };
-        Ok(super::RecentSessionPage {
-            sessions,
-            has_more: more,
-            next,
-        })
+        Ok((sessions, next))
     }
 }
 impl LocalSessionHandle {
@@ -341,6 +379,7 @@ pub(super) struct RecentCursors {
 }
 struct RecentCut {
     principal: String,
+    edited_domain: Option<&'static str>,
     issued: super::RecentSessionCursor,
     cut: super::StoreRecentSessionCursor,
     expires: tokio::time::Instant,
@@ -356,12 +395,15 @@ impl RecentCursors {
         &self,
         origin: &rsi_api_protocol::CallOrigin,
         cursor: &super::RecentSessionCursor,
+        edited_domain: Option<&str>,
     ) -> Result<super::StoreRecentSessionCursor> {
         cursor.validate()?;
+        let principal = Self::principal(origin);
         self.cuts
             .iter()
             .find(|c| {
-                c.principal == Self::principal(origin)
+                c.principal == principal
+                    && c.edited_domain == edited_domain
                     && &c.issued == cursor
                     && c.expires > tokio::time::Instant::now()
             })
@@ -381,26 +423,18 @@ impl RecentCursors {
         self.cuts
             .retain(|cut| cut.principal != principal || &cut.issued != cursor);
     }
-    fn release(
-        &mut self,
-        origin: &rsi_api_protocol::CallOrigin,
-        cursor: &super::RecentSessionCursor,
-    ) -> Result<()> {
-        self.read(origin, cursor)?;
-        self.retire(origin, cursor);
-        Ok(())
-    }
     fn issue(
         &mut self,
         origin: &rsi_api_protocol::CallOrigin,
         cut: super::StoreRecentSessionCursor,
         visible: Option<rsi_session_protocol::RecentSessionPosition>,
         predecessor: Option<&super::RecentSessionCursor>,
+        edited_domain: Option<&'static str>,
     ) -> Result<super::RecentSessionCursor> {
         let now = tokio::time::Instant::now();
         self.cuts.retain(|c| c.expires > now);
         if let Some(cursor) = predecessor {
-            self.read(origin, cursor)?;
+            self.read(origin, cursor, edited_domain)?;
         }
         let principal = Self::principal(origin);
         let own = self
@@ -419,7 +453,7 @@ impl RecentCursors {
             after: visible,
         };
         if let Some(cursor) = predecessor {
-            self.release(origin, cursor)?;
+            self.retire(origin, cursor);
         } else if own >= 8 || self.cuts.len() == 128 {
             let index = self
                 .cuts
@@ -430,6 +464,7 @@ impl RecentCursors {
         }
         self.cuts.push_back(RecentCut {
             principal,
+            edited_domain,
             issued: issued.clone(),
             cut,
             expires: now + std::time::Duration::from_mins(5),
@@ -458,47 +493,48 @@ mod recent_tests {
     async fn retained_cuts_enforce_principal_capacity_successors_and_expiry() {
         let mut book = RecentCursors::default();
         let owner = origin(1);
-        let first = book.issue(&owner, cut(), None, None).unwrap();
-        assert!(book.read(&origin(2), &first).is_err());
+        let first = book.issue(&owner, cut(), None, None, None).unwrap();
+        assert!(book.read(&origin(2), &first, None).is_err());
+        assert!(book.read(&owner, &first, Some("rsi.schedule")).is_err());
         let mut forged = first.clone();
         forged.after = Some(rsi_session_protocol::RecentSessionPosition {
             created_at_ms: 2,
             session_id: rsi_agent_session_protocol::SessionId::new("forged").unwrap(),
         });
-        assert!(book.read(&owner, &forged).is_err());
+        assert!(book.read(&owner, &forged, None).is_err());
         for _ in 0..8 {
-            book.issue(&owner, cut(), None, None).unwrap();
+            book.issue(&owner, cut(), None, None, None).unwrap();
         }
         assert_eq!(book.cuts.len(), 8);
-        assert!(book.read(&owner, &first).is_err());
+        assert!(book.read(&owner, &first, None).is_err());
         for id in 2..=121 {
-            book.issue(&origin(id), cut(), None, None).unwrap();
+            book.issue(&origin(id), cut(), None, None, None).unwrap();
         }
         assert_eq!(book.cuts.len(), 128);
         let retained = book.cuts.back().unwrap().issued.clone();
         assert!(matches!(
-            book.issue(&origin(122), cut(), None, None),
+            book.issue(&origin(122), cut(), None, None, None),
             Err(SessionError::Capacity)
         ));
         let next = book
-            .issue(&origin(121), cut(), None, Some(&retained))
+            .issue(&origin(121), cut(), None, Some(&retained), None)
             .unwrap();
         assert_eq!(book.cuts.len(), 128);
-        assert!(book.read(&origin(121), &retained).is_err());
-        assert!(book.read(&origin(121), &next).is_ok());
+        assert!(book.read(&origin(121), &retained, None).is_err());
+        assert!(book.read(&origin(121), &next, None).is_ok());
         tokio::time::advance(std::time::Duration::from_mins(5)).await;
-        assert!(book.read(&origin(121), &next).is_err());
-        book.issue(&origin(122), cut(), None, None).unwrap();
+        assert!(book.read(&origin(121), &next, None).is_err());
+        book.issue(&origin(122), cut(), None, None, None).unwrap();
         assert_eq!(book.cuts.len(), 1);
     }
     #[tokio::test(start_paused = true)]
     async fn completed_read_retires_an_expired_cut_without_authorizing_a_successor() {
         let mut book = RecentCursors::default();
         let owner = origin(1);
-        let token = book.issue(&owner, cut(), None, None).unwrap();
-        book.read(&owner, &token).unwrap();
+        let token = book.issue(&owner, cut(), None, None, None).unwrap();
+        book.read(&owner, &token, None).unwrap();
         tokio::time::advance(std::time::Duration::from_secs(301)).await;
-        assert!(book.read(&owner, &token).is_err());
+        assert!(book.read(&owner, &token, None).is_err());
         book.retire(&origin(2), &token);
         assert_eq!(book.cuts.len(), 1);
         book.retire(&owner, &token);

@@ -17,6 +17,33 @@ mod models;
 mod projections;
 #[path = "client_tests/resources.rs"]
 mod resources;
+
+#[tokio::test]
+async fn schedule_catalog_rejects_unseen_pages_and_incomplete_streams() {
+    let remote = Remote::new();
+    remote.stream(&[
+        json!({"kind":"complete","pages":0}),
+        json!({"kind":"complete","pages":2}),
+    ]);
+    let client = SessionClient::new(remote.clone());
+    let mut stream = client.observe_scheduled_tasks().await.unwrap();
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        rsi_session_protocol::ScheduleCatalogUpdate::Complete { pages: 0 }
+    ));
+    assert!(stream.next().await.unwrap().is_err());
+    remote.stream(&[]);
+    assert!(
+        client
+            .observe_scheduled_tasks()
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
 use futures_util::{StreamExt as _, stream};
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessageContent, AgentMessageSource,

@@ -19,6 +19,9 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::PurgeStatus
             | Operation::Create
             | Operation::Recent
+            | Operation::ScheduledTasks
+            | Operation::ScheduledTasksObserve
+            | Operation::DeleteScheduledTask
             | Operation::ReadSummary
             | Operation::WorkflowReadiness
             | Operation::ListWorkflows
@@ -31,6 +34,10 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::Attach
             | Operation::Submit
             | Operation::Commands
+            | Operation::MessageFeedback
+            | Operation::ChangeMessageFeedback
+            | Operation::Compact
+            | Operation::CompactStatus
             | Operation::ExecuteCommand
             | Operation::CommandStatus
             | Operation::DraftSnapshot

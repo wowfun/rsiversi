@@ -1,6 +1,21 @@
 # rsi-session-api
 
-Interface version 26 carries Session format 39 and typed Spill references.
+Interface version 32 exposes a caller-scoped `delete-scheduled-task` mutation
+that removes one reminder in its owning Session and reports whether it existed.
+It uses the same Session protection and mutation admission as an attached writer.
+The caller-scoped `scheduled-tasks` v2 Data read and
+`scheduled-tasks-observe` v2 Subscription. Both report the current linked
+Session archive state alongside visible reminders without
+attaching their Sessions. The subscription sends changed, zero-based pages of up
+to eight Session groups and completes each update with its page count. A shorter
+count truncates the previous catalog. The first update includes every page.
+Hidden changes with identical visible results produce no update. Target-narrowed
+clients have no access to the Host-wide catalog or its mutation.
+The attached Session exposes `message-feedback` for reading one answer and
+`change-message-feedback` for a version-checked replacement or removal. Both
+return the canonical head, including on a version conflict.
+The interface carries Session format 41, typed Spill references and
+request tool inspection through the attached Session evidence operation.
 `purge` v2 and `purge-status` v2 report independent Store, Navigation and Spill
 cleanup outcomes. `observe` v10 controls carry the committing append's Fact
 cursor, preserving historical generation-to-intent correlation.

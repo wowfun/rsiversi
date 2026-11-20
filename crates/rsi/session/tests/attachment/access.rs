@@ -234,6 +234,7 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
         .await
         .unwrap();
     let evidence = rsi_session_protocol::EvidenceRead {
+        tool_summary: false,
         intent_seq: 2,
         section: rsi_agent_session_protocol::EvidenceSection::System,
         offset: 0,

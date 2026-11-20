@@ -81,6 +81,52 @@ impl SessionController {
         let task = self.execution.spawn(self.tasks.track_future(async move {
             let _permit = permit;
             let read = async {
+                if matches!(
+                    source.field,
+                    rsi_conversation::FactField::ModelToolSummary
+                        | rsi_conversation::FactField::ModelToolSchemas
+                ) {
+                    use rsi_session_protocol::{EvidencePageContent, EvidenceRead};
+                    let summary = source.field == rsi_conversation::FactField::ModelToolSummary;
+                    let request = EvidenceRead {
+                        intent_seq: source.seq,
+                        section: rsi_agent_session_protocol::EvidenceSection::Tools,
+                        tool_summary: summary,
+                        offset: if summary {
+                            0
+                        } else {
+                            u32::try_from(start).map_err(|_| SourceReadError::Unavailable)?
+                        },
+                        maximum_bytes: u32::try_from(maximum).expect("validated source window"),
+                    };
+                    let page = crate::read_with_capacity_retry(&controller.execution, || {
+                        controller.handle.evidence(request.clone())
+                    })
+                    .await?;
+                    return match page.content {
+                        EvidencePageContent::ToolSummary { .. } => Ok(FieldWindow::text(
+                            &page.tool_summary_text().expect("summary variant"),
+                            start,
+                            maximum,
+                        )?),
+                        EvidencePageContent::Unavailable { reason } => Ok(FieldWindow::text(
+                            &format!(
+                                "Request {} · tool evidence unavailable ({reason:?})",
+                                source.seq
+                            ),
+                            start,
+                            maximum,
+                        )?),
+                        EvidencePageContent::Available {
+                            text, start, more, ..
+                        } => Ok(FieldWindow {
+                            start: start as usize,
+                            end: start as usize + text.len(),
+                            text,
+                            more,
+                        }),
+                    };
+                }
                 let page = crate::read_with_capacity_retry(&controller.execution, || {
                     controller
                         .handle

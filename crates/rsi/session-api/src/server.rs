@@ -132,6 +132,7 @@ impl SessionApi {
         }
         for operation in [
             Operation::Export,
+            Operation::ScheduledTasksObserve,
             Operation::Observe,
             Operation::ModelObserve,
             Operation::Interactions,
@@ -275,6 +276,36 @@ fn root_operations(
             }
         }),
     )?;
+    let catalog_owner = service.clone();
+    let catalog_scratch = scratch.clone();
+    let catalog = registrar.register(
+        Operation::ScheduledTasks.spec(),
+        json_handler(
+            move |context, after: Option<rsi_session_protocol::RecentSessionCursor>| {
+                let service = catalog_owner.scoped(context.origin);
+                let scratch = catalog_scratch.clone();
+                async move {
+                    let reservation = scratch.reserve(Operation::ScheduledTasks).await?;
+                    admitted(service.scheduled_tasks(after.as_ref()).await, reservation)
+                }
+            },
+        ),
+    )?;
+    let delete_owner = service.clone();
+    let delete_scratch = scratch.clone();
+    let delete = registrar.register(
+        Operation::DeleteScheduledTask.spec(),
+        json_handler(
+            move |context, task: rsi_session_protocol::ScheduledTaskId| {
+                let service = delete_owner.scoped(context.origin);
+                let scratch = delete_scratch.clone();
+                async move {
+                    let reservation = scratch.reserve(Operation::DeleteScheduledTask).await?;
+                    admitted(service.delete_scheduled_task(task).await, reservation)
+                }
+            },
+        ),
+    )?;
     let recent = registrar.register(
         Operation::Recent.spec(),
         json_handler(move |context, request: wire::Recent| {
@@ -299,7 +330,7 @@ fn root_operations(
             }
         }),
     )?;
-    maintenance.extend([create, attach, read_summary, recent]);
+    maintenance.extend([create, attach, read_summary, recent, catalog, delete]);
     Ok(maintenance)
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.
@@ -443,6 +474,23 @@ fn handle_operations(
             Commands,
             |owner, (): ()| async move { owner.commands().await }
         ),
+        add!(
+            MessageFeedback,
+            |owner, message: std::num::NonZeroU64| async move { owner.message_feedback(message).await }
+        ),
+        add!(
+            ChangeMessageFeedback,
+            |owner, change: rsi_agent_session_protocol::MessageFeedbackChange| async move {
+                owner.change_message_feedback(change).await
+            }
+        ),
+        add!(
+            CompactStatus,
+            |owner, command: DomainRequestId| async move { owner.compact_status(command).await }
+        ),
+        add!(Compact, |owner, command: DomainRequestId| async move {
+            owner.compact(command).await
+        }),
         add!(
             ExecuteCommand,
             |owner, invocation: SessionCommandInvocation| async move {

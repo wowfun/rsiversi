@@ -89,6 +89,7 @@ fn key(session: &str, seq: u64) -> Key {
 }
 fn request(seq: u64, offset: u32) -> EvidenceRead {
     EvidenceRead {
+        tool_summary: false,
         intent_seq: seq,
         section: EvidenceSection::System,
         offset,
@@ -630,6 +631,13 @@ async fn byte_capacity_is_reclaimed_only_from_idle_selected_sources() {
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 impl SessionStore for Store {
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMessageFeedback> {
+        unreachable!()
+    }
     async fn read_domain_admission(
         &self,
         id: &SessionId,
@@ -753,6 +761,7 @@ impl SessionStore for Store {
         locations: &ExecutionLocations,
         after: Option<&StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> Result<StoreRecentSessionPage> {
         unreachable!()
     }

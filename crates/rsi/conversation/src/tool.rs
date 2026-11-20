@@ -73,6 +73,50 @@ pub struct ToolState {
     pub workflow_run: Option<rsi_agent_session_protocol::ProgramRunId>,
     #[serde(skip)]
     workflow_candidate: Option<rsi_agent_session_protocol::ProgramRunId>,
+    #[serde(skip)]
+    schedule_candidate: Option<Box<ScheduleCreation>>,
+}
+
+/// Compact creation receipt displayed independently of the Tool disclosure.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScheduleCreation {
+    /// ID returned by the creating call.
+    pub id: String,
+    /// First nonempty instruction line, bounded for the transcript.
+    pub title: String,
+    /// Interval at creation. A one-shot has no interval.
+    pub interval_ms: Option<u64>,
+}
+impl ScheduleCreation {
+    fn from_result(value: &serde_json::Value) -> Option<Box<Self>> {
+        if !matches!(
+            value.get("status")?.as_str()?,
+            "created_armed" | "created_disarmed"
+        ) {
+            return None;
+        }
+        let id = value.get("request_id")?.as_str()?;
+        rsi_agent_session_protocol::validate_identifier("reminder", id).ok()?;
+        let rows = value.get("state")?.get("reminders")?.as_array()?;
+        let row = rows
+            .iter()
+            .find(|row| row.get("id").and_then(serde_json::Value::as_str) == Some(id))?;
+        let line = row
+            .get("prompt")?
+            .as_str()?
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?;
+        let interval_ms = match row.get("interval_ms")? {
+            serde_json::Value::Null => None,
+            interval => Some(interval.as_u64().filter(|ms| *ms > 0)?),
+        };
+        Some(Box::new(Self {
+            id: id.into(),
+            title: line.chars().take(128).collect(),
+            interval_ms,
+        }))
+    }
 }
 impl ToolState {
     /// Starts partial metadata from any exact Tool lifecycle Fact.
@@ -95,6 +139,7 @@ impl ToolState {
             external_candidate: None,
             workflow_run: None,
             workflow_candidate: None,
+            schedule_candidate: None,
         };
         state.observe(fact);
         Some(state)
@@ -161,6 +206,16 @@ impl ToolState {
                         seq,
                         field: FactField::ToolValue,
                     });
+                    self.schedule_candidate = if !result.is_error
+                        && self
+                            .name
+                            .as_deref()
+                            .is_none_or(|name| name == "schedule_create")
+                    {
+                        ScheduleCreation::from_result(&result.value)
+                    } else {
+                        None
+                    };
                     self.spills = result
                         .spills
                         .iter()
@@ -190,6 +245,9 @@ impl ToolState {
             if name != rsi_agent_session_protocol::RUN_WORKFLOW_TOOL_NAME {
                 self.workflow_candidate = None;
             }
+            if name != "schedule_create" {
+                self.schedule_candidate = None;
+            }
             self.origin = Some(origin.clone());
             self.argument_summary = argument_summary(name, arguments);
             self.arguments = Some(SourceRef {
@@ -205,6 +263,12 @@ impl ToolState {
         (self.name.as_deref() == Some(rsi_acp_protocol::EXTERNAL_AGENT_TOOL_NAME)
             && self.intent_present)
             .then_some(self.external_candidate.as_deref())
+            .flatten()
+    }
+    /// A creation card requires a successful result and its matching creation intent.
+    pub fn schedule_creation(&self) -> Option<&ScheduleCreation> {
+        (self.intent_present && self.name.as_deref() == Some("schedule_create"))
+            .then_some(self.schedule_candidate.as_deref())
             .flatten()
     }
     /// Shared semantic title; renderers still apply their own text safety rules.
@@ -236,6 +300,9 @@ impl ToolState {
     /// Heap capacities retained in addition to this value's inline size.
     pub fn owned_bytes(&self) -> usize {
         self.key.capacity()
+            + self.schedule_candidate.as_deref().map_or(0, |task| {
+                std::mem::size_of::<ScheduleCreation>() + task.id.capacity() + task.title.capacity()
+            })
             + self.origin.as_ref().map_or(0, |origin| match origin {
                 ToolOrigin::Model { effect_id } => effect_id.as_str().len(),
                 ToolOrigin::Program {

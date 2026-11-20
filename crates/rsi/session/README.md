@@ -28,8 +28,8 @@ publication or release. This blocks product purge while preserving source Turn
 admission. A Store validation lease alone is not collection ownership. Once the
 child Header commits, its canonical history reference retains the source instead.
 
-A manual ForkDraft authorizes the source's protection and execution location,
-captures an immutable completed-turn history boundary and prepares its transformed
+A manual ForkDraft requires an unprotected source at the authorized execution
+location. Revoking the creating device cancels preparation. The draft captures an immutable completed-turn history boundary and prepares its transformed
 domain baseline without publishing a Session. Creation retries keep that exact
 draft cut. Its first input publishes an independent root with historical provenance;
 the source's active execution, child controls and completion notices are not
@@ -79,6 +79,10 @@ reducer, including separate child tables during tree scans. It never derives a
 historical request cap from the current live model catalog.
 
 Request-evidence reads bind an exact ModelIntent sequence in the attached Session.
+Tool inspection lists the recorded function names, hosted tools and tool choice.
+It compares complete definitions against the preceding intent of the same purpose
+in that Session. It exposes the compared sequence or the recorded omission.
+Schema bytes remain available through the existing paged Tools section.
 The Session owner resolves one direct original-inline reference per selected
 section, checks its digest/length and returns at most 256 KiB aligned UTF-8 bytes.
 Reads neither reconstruct context nor acquire execution authority. The API client
