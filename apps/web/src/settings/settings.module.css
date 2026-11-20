@@ -269,6 +269,66 @@
   background: var(--dsw-alias-bg-mask-1);
   backdrop-filter: var(--dsw-mask-blur);
 }
+.presetCards {
+  list-style: none; margin: 0; padding: 0; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(268px, 100%), 1fr)); gap: 12px;
+}
+.presetCard {
+  width: 100%; height: 100%; text-align: start; display: grid; align-content: start; gap: 5px;
+  padding: 12px 16px; color: var(--ink); border-radius: var(--dsw-radius-xl);
+  border: .5px solid var(--dsw-alias-settings-card-stroke); background: var(--dsw-alias-settings-card-fill);
+}
+.presetCard[aria-pressed=true] { opacity: 1; border-color: var(--dsw-alias-border-selected); background: var(--dsw-alias-bg-module-platform); }
+.presetCard > span { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.presetCard > .presetError { color: var(--dsw-alias-state-error-primary); }
+.clientFields:global(.settings-object) {
+  border: 0;
+  padding: 0;
+}
+.clientFields:not([hidden]) {
+  display: grid;
+  gap: 16px;
+}
+.appearance {
+  display: grid;
+  gap: 8px;
+  padding: 16px 0;
+  border-bottom: .5px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+.themeOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.themeOptions button {
+  flex: 1 1 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 20px 32px;
+  border: .5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-xl);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.themeOptions button[aria-pressed="true"] {
+  background: var(--dsw-alias-bg-module-platform);
+  border-color: var(--dsw-alias-border-selected);
+}
+@media (hover: hover) {
+  .themeOptions button:hover:not([aria-pressed="true"]):enabled {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+@media (max-width: 767px) {
+  .themeOptions button { flex: 1 1 0; padding: 12px 6px; }
+}
 .panel {
   height: 100%;
   padding: 0;

@@ -9,6 +9,9 @@ test('missing provider metrics remain absent and inclusive input is not double c
   assert.equal(tokenTotal(tokens),120);
   const summary={reported_attempts:1,tokens,timing:{decode_ms:2000,decode_output_tokens:20},last_context:{input_tokens:100}};
   assert.deepEqual(usageReadings(summary,1000),{total:120,cache:80,speed:10,context:10});
+  for(const [used,expected] of [[0,0],[126,13],[1001,100],[1500,100]]){
+    assert.equal(usageReadings({...summary,last_context:{input_tokens:used}},1000).context,expected);
+  }
   assert.equal(usageReadings({...summary,timing:{decode_ms:0,decode_output_tokens:20}},1000).speed,undefined);
   assert.equal(usageReadings({...summary,tokens:{...tokens,cache_read_tokens:null}}).cache,undefined);
 });

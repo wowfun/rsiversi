@@ -3,6 +3,7 @@ import type {
   ProjectionActions,
   SessionProjections,
 } from "./projection-types.ts";
+import type { MediaLimits } from "../presentation-types.ts";
 interface Media {
   width: number;
   height: number;
@@ -16,6 +17,7 @@ interface Pending {
   images?: number;
 }
 export interface ComposerView {
+  bindingInput?: boolean;
   completionsAvailable?: boolean;
   access?: string;
   accessDisabled?: boolean;
@@ -37,19 +39,30 @@ export interface ComposerView {
   pending?: Pending;
   cleanups: { id: string; message: string; retry(): Promise<unknown> }[];
   images: Media[];
+  importingImages?: {files: File[]; next: number};
   references: { id: string; label: string }[];
   referenceDisabled: boolean;
   referenceRemovalDisabled: boolean;
   fileDisabled: boolean;
   imageDisabled: boolean;
-  mediaEnabled: boolean;
+  mediaLimits?: MediaLimits;
 }
 export interface ComposerOwner extends ProjectionActions {
+  input: HTMLTextAreaElement;
+  closeCompletions(): void;
+  imageInput: HTMLInputElement;
+  upload(files: File[]): Promise<void>;
+  showFilePicker(): unknown;
+  showHistoryPicker(): unknown;
+  showReferencePicker(): unknown;
+  exportSession(args: string): unknown;
   prepareComposer(): Promise<boolean>;
   setAccess(mode: string): void;
   clearCommand(): void;
   index: string;
   selectWorkspace(id: string): Promise<unknown> | void;
+  stagedPreset?: string;
+  selectPreset(id: string): Promise<unknown> | void;
   stopBinding?: unknown;
   composerView?: ComposerView;
   switching?: boolean;

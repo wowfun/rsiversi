@@ -2,6 +2,46 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPaneClass} from '../src/runtime/session-controller.js';
 import {mount,unmount} from '../src/runtime/session-elements.js';
+import {upload} from '../src/runtime/session-submissions.js';
+
+test('image import reports the pending files before Media replies and clears a failed batch',async()=>{
+  const files=['one.png','two.png'].map(name=>new File(['png'],name,{type:'image/png'}));
+  const editor={images:[],text:'draft',edit(_text,images){this.images=images;},async flush(){}};
+  const pane={index:'main',generation:'1',editor,renderComposer(){}};
+  let finishFirst, enterFirst, enterSecond;
+  const first=new Promise(resolve=>{enterFirst=resolve;});
+  const second=new Promise(resolve=>{enterSecond=resolve;});
+  let failSecond;
+  const context={connection:{},view:{media_limits:{images:8,upload_bytes:1024}},call(){
+    if(!finishFirst)return new Promise(resolve=>{finishFirst=resolve;enterFirst();});
+    enterSecond();return new Promise((_resolve,reject)=>{failSecond=reject;});
+  }};
+  const importing=upload(pane,context,files);
+  assert.equal(pane.uploading.files,files);
+  assert.equal(pane.uploading.next,0);
+  await first;
+  finishFirst(JSON.stringify({width:20,height:30}));
+  await second;
+  assert.deepEqual(editor.images,[{width:20,height:30}]);
+  assert.equal(pane.uploading.next,1);
+  failSecond(Error('media refused second file'));
+  await assert.rejects(importing,/media refused/);
+  assert.equal(pane.uploading,undefined);
+  assert.equal(editor.images.length,1);
+});
+
+test('visibility starts empty and clears a displayed card once when its renderer retires',async()=>{
+  const calls=[];
+  const pane=new(createPaneClass({connection:{request:async(_,body)=>calls.push(JSON.parse(body))},notify:assert.fail}))('main');
+  Object.assign(pane,{generation:'1',node:{isConnected:true},uiCards:false,visibleBlocks:{ready:true,last:()=>[['card',{sourceKey:'source'}]]}});
+  pane.syncVisible();pane.scheduleVisible();
+  assert.deepEqual(calls,[]);
+  pane.uiCards=true;pane.syncVisible();
+  pane.uiCards=false;pane.syncVisible();
+  while(pane.visibleRunning)await new Promise(resolve=>setTimeout(resolve,1));
+  pane.syncVisible();pane.scheduleVisible();
+  assert.deepEqual(calls.map(call=>call.keys),[['card'],[]]);
+});
 
 test('failed visible delivery can retry unchanged membership with a fresh sequence',async()=>{
   const calls=[],notices=[];let refuse=true;
@@ -20,7 +60,7 @@ test('transcript End navigation respects nested editing, selection and handled e
   globalThis.ResizeObserver=class{observe(){}disconnect(){}};
   t.after(()=>{if(original===undefined)delete globalThis.ResizeObserver;else globalThis.ResizeObserver=original;});
   t.after(()=>{if(originalWindow===undefined)delete globalThis.window;else globalThis.window=originalWindow;});
-  const elements=Object.fromEntries(['node','history','live','commands','transcript','bottom','input','composer','modelReceipt','imageInput','attach','addReference','exportButton','searchHistory','addFile','cancel','steer','send','protectedExport'].map(key=>[key,new Node()]));
+  const elements=Object.fromEntries(['node','history','live','commands','transcript','bottom','input','composer','modelReceipt','imageInput','cancel','steer','send','protectedExport'].map(key=>[key,new Node()]));
   let rendered=0;
   const pane={index:'main',renderComposer(){rendered++;},scheduleVisible(){},setReadingSummary(value){this.readingSummary=value;}};
   mount(pane,{TranscriptVisibility:class{dispose(){}}},elements);

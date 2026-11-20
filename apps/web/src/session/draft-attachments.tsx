@@ -76,6 +76,11 @@ export function DraftImages({ owner, state }: Props) {
             </button>
           </div>
         ))}
+        {state?.importingImages && <div role="status" aria-live="polite">
+          {state.importingImages.files.slice(state.importingImages.next).map((file,index) =>
+            <div key={index} className="draft-image-import">{file.name || "Image"} · Uploading…</div>
+          )}
+        </div>}
       </div>
       <p className="hint frozen-images">
         {state?.pending?.images

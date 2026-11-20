@@ -2,8 +2,10 @@ import {useState} from 'react';
 import {run} from '../bridge.ts';
 import type {ForkSelection} from '../presentation-types.ts';
 import type {TranscriptOwner} from './transcript.tsx';
+import {IconBranchOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 
 export function ForkTurn({turn, owner}: {turn:string;owner:TranscriptOwner}) {
+  const [open, setOpen] = useState(false);
   const [mode, setMode] = useState('all');
   const [count, setCount] = useState('1');
   const [busy, setBusy] = useState(false);
@@ -17,14 +19,14 @@ export function ForkTurn({turn, owner}: {turn:string;owner:TranscriptOwner}) {
       await owner.action('fork_conversation', {turn, turns});
     } finally { setBusy(false); }
   };
-  return <details className="source-menu fork-menu">
-    <summary>Fork conversation</summary>
-    <div className="actions source-actions">
+  return <details className="source-menu fork-menu" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary aria-label="Fork conversation" title="Fork conversation"><IconBranchOutlineRegular size={16}/></summary>
+    {open && <div className="actions source-actions">
       <label>History <select value={mode} disabled={busy} onChange={event=>setMode(event.target.value)}>
         <option value="all">Full history</option><option value="last">Recent turns</option><option value="none">No history</option>
       </select></label>
       {mode === 'last' && <label>Turns <input type="number" min="1" step="1" value={count} disabled={busy} onChange={event=>setCount(event.target.value)}/></label>}
       <button type="button" disabled={busy || !valid} onClick={()=>void run(fork)}>{busy ? 'Preparing…' : 'Create draft'}</button>
-    </div>
+    </div>}
   </details>;
 }

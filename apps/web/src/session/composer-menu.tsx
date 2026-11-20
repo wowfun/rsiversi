@@ -3,11 +3,10 @@ import {createPortal} from 'react-dom';
 import {statPosition} from '../../stat-position.js';
 import css from './composer-menu.module.css';
 
-// Children stay mounted so runtime-owned attachment controls retain their listeners.
-export function ComposerMenu({name, label, children, onOpen, className = '', disabled = false}: {
-  name: string; label: ReactNode; className?: string; disabled?: boolean;
-  onOpen?: () => Promise<unknown>;
-  children: (close: () => void, open: boolean) => ReactNode;
+export function ComposerMenu({name, label, children, onOpen, className = '', disabled = false, focusSelection = false}: {
+  focusSelection?: boolean; name: string; label: ReactNode; className?: string; disabled?: boolean;
+  onOpen?: () => void;
+  children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
@@ -27,7 +26,8 @@ export function ComposerMenu({name, label, children, onOpen, className = '', dis
       if(event.key==='Escape'&&!event.isComposing){event.preventDefault();event.stopPropagation();close();}
     };
     place();
-    panel.current?.focus({preventScroll:true});
+    const selected=focusSelection ? panel.current?.querySelector<HTMLElement>('button[aria-checked="true"]:not(:disabled)') ?? panel.current?.querySelector<HTMLElement>('button:not(:disabled)') : null;
+    (selected??panel.current)?.focus({preventScroll:true});
     const observer = new ResizeObserver(place); observer.observe(panel.current!);
     window.addEventListener('resize',place); window.addEventListener('scroll',place,true);
     document.addEventListener('pointerdown',outside); document.addEventListener('focusin',outside);
@@ -39,11 +39,11 @@ export function ComposerMenu({name, label, children, onOpen, className = '', dis
     };
   },[open]);
   return <>
-    <button type="button" ref={trigger} className={`${css.trigger} ${className}`} aria-label={name} aria-haspopup="menu" aria-expanded={open} aria-controls={id} disabled={disabled}
+    <button type="button" ref={trigger} className={`${css.trigger} ${className}`} aria-label={name} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} disabled={disabled}
       onClick={() => { if(open) close(); else { setOpen(true); void onOpen?.(); } }}>
       {label}
     </button>
-    {createPortal(<div ref={panel} id={id} role="menu" aria-label={name} tabIndex={-1} hidden={!open} className={css.panel}
+    {open && createPortal(<div ref={panel} id={id} role="menu" aria-label={name} tabIndex={-1} className={css.panel}
       onKeyDown={event => {
         if(event.defaultPrevented||event.nativeEvent.isComposing)return;
         if(event.key==='Escape') {event.preventDefault();event.stopPropagation();close();return;}
@@ -55,6 +55,6 @@ export function ComposerMenu({name, label, children, onOpen, className = '', dis
         const index=items.indexOf(document.activeElement as HTMLButtonElement);
         const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:index<0?items.length-1:(index+items.length-1)%items.length;
         items[next].focus();
-      }}>{children(close,open)}</div>,document.body)}
+      }}>{children(close)}</div>,document.body)}
   </>;
 }

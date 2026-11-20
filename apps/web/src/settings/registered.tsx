@@ -2,12 +2,19 @@ import type {SettingsField, SettingsFields} from '../runtime/settings-fields.js'
 import type {SettingsDraft} from '../runtime/settings-draft.js';
 import type {ChangeEvent, ReactNode} from 'react';
 import css from "./settings.module.css";
+import {previewThemeWrite} from "../presentation.tsx";
+import {
+  IconDarkOutlineMedium,
+  IconFollowsystemOutlineMedium,
+  IconLightOutlineMedium,
+} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { settingsFocus } from "../../settings-focus.js";
 import {
   Component,
   createRef,
   useLayoutEffect,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 import { registeredSettings, run } from "../bridge.ts";
@@ -138,6 +145,40 @@ function SchemaField({ field, editor }: {field: SettingsField; editor: SettingsF
     </div>
   );
 }
+const themes = [
+  ["light", "Light", IconLightOutlineMedium],
+  ["dark", "Dark", IconDarkOutlineMedium],
+  ["system", "System", IconFollowsystemOutlineMedium],
+] as const;
+
+function ClientPreferences({root, draft}: {root: SettingsField; draft: SettingsDraft}) {
+  const editor = draft.fields;
+  const appearance = root.kind === "object" && root.parts.find(part => part.key === "appearance")?.field;
+  const theme = appearance && appearance.kind === "object" && appearance.parts.find(part => part.key === "theme")?.field;
+  if (!theme || theme.kind !== "enum" || root.kind !== "object" || appearance.kind !== "object")
+    return <SchemaField field={root} editor={editor} />;
+  const selected = theme.schema.enum[Number(theme.value)];
+  return <>
+    <div className={css.appearance} role="group" aria-label="Appearance">
+      <span>Appearance</span>
+      <div className={css.themeOptions}>{themes.map(([id, label, Icon]) =>
+        <button type="button" key={id} aria-pressed={id === selected} onClick={() => {
+          if (id === selected) return;
+          const immediate = !draft.dirty;
+          editor.edit(theme, String(theme.schema.enum.indexOf(id)));
+          if (immediate) void previewThemeWrite(id, () => draft.save({restoreOnFailure: true}));
+        }}><Icon />{label}</button>
+      )}</div>
+    </div>
+    {appearance.parts.filter(part => part.field !== theme).map(part =>
+      <SchemaField key={part.key} field={part.field} editor={editor} />
+    )}
+    {root.parts.filter(part => part.field !== appearance).map(part =>
+      <SchemaField key={part.key} field={part.field} editor={editor} />
+    )}
+  </>;
+}
+
 class SettingsFocus extends Component<{children: ReactNode}> {
   root = createRef<HTMLDivElement>();
   getSnapshotBeforeUpdate() {
@@ -154,13 +195,49 @@ class SettingsFocus extends Component<{children: ReactNode}> {
     );
   }
 }
+function SettingsMetadata({description}: {description: SettingsDraft["current"]["description"]}) {
+  const metadata = description.metadata;
+  return (
+    <>
+      <p className="settings-applies">
+        {
+          {
+            live: "Applies live",
+            new_session: "Applies to new conversations",
+            restart: "Restart required",
+          }[metadata.applies]
+        }
+      </p>
+      <p className="hint">{metadata.description}</p>
+      {([
+        ["Schema", metadata.schema],
+        ["Defaults", description.defaults],
+      ] as const).map(([label, value]) => (
+        <details key={label} className="settings-description">
+          <summary>{label}</summary>
+          <pre>{JSON.stringify(value, null, 2)}</pre>
+        </details>
+      ))}
+      {!!metadata.sensitive_fields.length && (
+        <p className="hint">
+          Sensitive fields:{" "}
+          {metadata.sensitive_fields
+            .map((path) => path.join(" / ") || "(root)")
+            .join(", ")}
+        </p>
+      )}
+    </>
+  );
+}
+
 export function RegisteredDraft({ draft }: {draft: SettingsDraft}) {
   useSyncExternalStore(draft.subscribe, draft.getSnapshot);
   const form = useRef<HTMLFormElement>(null),
     editor = draft.fields,
     previous = useRef<boolean | undefined>(undefined),
     description = draft.current.description,
-    metadata = description.metadata;
+    [infoOpen, setInfoOpen] = useState(false),
+    client = draft.current.namespace === "rsi.client";
   // A focused action becoming disabled must leave an accessible recovery target.
   useLayoutEffect(() => {
     const root = form.current,
@@ -192,43 +269,17 @@ export function RegisteredDraft({ draft }: {draft: SettingsDraft}) {
           void draft.save();
         }}
       >
-        <p className="settings-applies">
-          {
-            {
-              live: "Applies live",
-              new_session: "Applies to new conversations",
-              restart: "Restart required",
-            }[metadata.applies]
-          }
-        </p>
-        <p className="hint">{metadata.description}</p>
-        {([
-          ["Schema", metadata.schema],
-          ["Defaults", description.defaults],
-        ] as const).map(([label, value]) => (
-          <details key={label} className="settings-description">
-            <summary>{label}</summary>
-            <pre>{JSON.stringify(value, null, 2)}</pre>
-          </details>
-        ))}
-        {!!metadata.sensitive_fields.length && (
-          <p className="hint">
-            Sensitive fields:{" "}
-            {metadata.sensitive_fields
-              .map((path) => path.join(" / ") || "(root)")
-              .join(", ")}
-          </p>
-        )}
+        {!client && <SettingsMetadata description={description} />}
         <fieldset disabled={draft.disabled}>
           <div className="settings-editor">
             <fieldset
-              className="settings-object"
+              className={client ? `settings-object ${css.clientFields}` : "settings-object"}
               hidden={editor.jsonMode}
               disabled={editor.locked}
             >
-              {editor.fields && (
-                <SchemaField field={editor.fields} editor={editor} />
-              )}
+              {editor.fields && (client
+                ? <ClientPreferences root={editor.fields} draft={draft} />
+                : <SchemaField field={editor.fields} editor={editor} />)}
             </fieldset>
             <button
               type="button"
@@ -254,7 +305,7 @@ export function RegisteredDraft({ draft }: {draft: SettingsDraft}) {
         <p className="settings-error settings-field-error" role="alert">
           {draft.error}
         </p>
-        <button type="submit" className="primary" disabled={!draft.canSave}>
+        <button type="submit" className="primary" hidden={client && !draft.dirty && !editor.jsonMode} disabled={!draft.canSave}>
           Save settings
         </button>
         <button
@@ -265,6 +316,10 @@ export function RegisteredDraft({ draft }: {draft: SettingsDraft}) {
         >
           {draft.awaiting ? "Reload settings" : "Discard edits and reload"}
         </button>
+        {client && <details className="settings-description" onToggle={event => setInfoOpen(event.currentTarget.open)}>
+          <summary>Setting details</summary>
+          {infoOpen && <SettingsMetadata description={description} />}
+        </details>}
         {!description.writable && (
           <p className="hint">Settings provider is read-only.</p>
         )}

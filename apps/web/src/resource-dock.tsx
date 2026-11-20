@@ -1,17 +1,19 @@
 import type {NativeSurface} from './presentation-types.ts';
 import css from "./resources.module.css"
-import {useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type ReactNode} from 'react'
+import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react'
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
 import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
 import {DeviceStore} from '../device-store.js'
-import {coordinate,dockIntent,emptyDock,floatingTab,dockPaneIds,displayDock,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
-import {resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
+import {coordinate,dockIntent,emptyDock,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
+import {composerInteraction,resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
 import {input,source,useSelected,useView} from './bridge.ts'
-import {presentationIdentity,useLayout,useNarrow,useViewport} from './presentation.tsx'
+import {presentationIdentity,useLayout,type Viewport} from './presentation.tsx'
 import {Terminals,type Follower} from './terminal.tsx'
 import {Button} from './button.tsx'
+import {ExternalResources, ResourceGuide} from './resources.tsx'
 import {ResourceOwner} from './resource-owner.mjs'
+import {ScheduledTaskDetail} from './session/scheduled-tasks.tsx'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',resizePane:'Resize resource panes',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>`Position ${x}, ${y} pixels. Arrow keys move; Shift changes by 50 pixels. Home and End select viewport corners.`,describeFloatSize:(w,h)=>`${w} by ${h} pixels. Arrow keys resize; Shift changes by 50 pixels. Home selects minimum size; End fills available space.`,dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
 const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
@@ -26,20 +28,15 @@ const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
   const {pane:_,generation:__,...saved}=value
   return coordinate(saved)
 }
-function ResourceBody({view}:{view:string}) {
-  const root=useRef<HTMLDivElement>(null)
-  useLayoutEffect(()=>{const host=resourceHosts.get(view);if(host&&root.current)root.current.append(host.body);return()=>{if(host?.body.isConnected)document.getElementById('resource-parking')?.append(host.body)}},[view])
-  return <div className="resource-host" ref={root}/>
-}
 interface Binding {label?:string;view?:string;open_revision?:string;opening?:ReturnType<ResourceOwner['open']>;created?:ReturnType<ResourceOwner['attachment']>;error?:string;floating?:boolean}
 export function openTerminals() { window.dispatchEvent(new Event('rsi:terminals')) }
-export function ResourceDocks({launcher}:{launcher:ReactNode}) {
+export function ResourceDocks({viewport}:{viewport:Viewport}) {
   const surfaces=useView(view=>view?.surfaces),selected=useSelected(value=>value)
   const owner=input.resourceOwner()
   const {layout}=useLayout()
   const active=surfaces?.[selected]
   const fallback=!owner||!active||active.kind==='external'
-  return <>{fallback&&<section className={`${css.scope} resource-dock`} hidden={layout.resourcesClosed} aria-label="Resource workbench"><div className="resource-launcher">{launcher}</div></section>}{owner&&Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${owner.id}:${pane}:${surface.generation}`} owner={owner} pane={pane} surface={surface} active={pane===selected} launcher={launcher}/>)}</>
+  return <>{fallback&&!layout.resourcesClosed&&active&&<section className={`${css.scope} resource-dock`} aria-label="Resource workbench">{active.kind==='external'?<ExternalResources surface={active}/>:<ResourceGuide key={active.generation} surface={active} pane={selected}/>}</section>}{owner&&Object.entries(surfaces??{}).map(([pane,surface])=>surface&&surface.kind!=='external'&&<SessionDock key={`${owner.id}:${pane}:${surface.generation}`} owner={owner} pane={pane} surface={surface} active={pane===selected} viewport={viewport}/>)}</>
 }
 export function ResourceCleanupNotice() {
   useView(view=>!!view)
@@ -48,15 +45,33 @@ export function ResourceCleanupNotice() {
   return owner&&errors.length>0&&<div className="resource-cleanup-notice" role="alert" aria-label="Resource cleanup" tabIndex={0}>Resource operations need attention.{errors.map((error:any)=><p key={error.key}><span title={error.key} data-session={error.session}>{error.label}</span>: {error.error} {error.retryable?<Button aria-label={`Retry cleanup for ${error.label} (${error.key})`} aria-disabled={error.busy} onClick={()=>owner.retry(error.key)}>Retry cleanup</Button>:<span>Disconnect and reconnect to resolve this uncertain operation.</span>}</p>)}</div>
 }
 const emptyErrors:never[]=[]
-function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;pane:string;surface:NativeSurface;active:boolean;launcher:ReactNode}) {
+function ResourceBody({view}:{view:string}) {
+  const root=useRef<HTMLDivElement>(null)
+  useLayoutEffect(()=>{
+    const host=resourceHosts.get(view)
+    if(!host||!root.current)return
+    root.current.append(host.body)
+    return ()=>{if(host.body.isConnected)document.getElementById('resource-parking')?.append(host.body)}
+  },[view])
+  return <div className="resource-host" ref={root}/>
+}
+function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;pane:string;surface:NativeSurface;active:boolean;viewport:Viewport}) {
   const identity=useSyncExternalStore(presentationIdentity.subscribe,presentationIdentity.getSnapshot)
   const hosts=useSyncExternalStore(resources.subscribe,resources.getSnapshot)
   const [doc,setDoc]=useState<DockDocument>(emptyDock),[notice,setNotice]=useState(''),[revision,changed]=useState(0)
+  const [selection,setSelection]=useState<DockIntent>()
+  const dock=useRef<HTMLElement>(null),failedChip=useRef<HTMLElement>()
   const current=useRef(doc),store=useRef<DeviceStore>(),queue=useRef(Promise.resolve()),alive=useRef(true),ready=useRef(false),generation=useRef(0)
   const bindings=useRef(new Map<TabId,Binding>()),claimed=useRef(new Set<string>()),hostList=useRef(hosts),activeRef=useRef(active)
-  const {layout,update}=useLayout(),narrow=useNarrow();activeRef.current=active;hostList.current=hosts
-  const viewport=useViewport()
+  const {layout,update}=useLayout(),narrow=viewport.width<768;activeRef.current=active;hostList.current=hosts
   const scope=`dock:${surface.session}`
+  useLayoutEffect(()=>{
+    const chip=failedChip.current
+    if(!chip)return
+    failedChip.current=undefined
+    if(!chip.isConnected&&document.activeElement===document.body)
+      dock.current?.querySelector<HTMLElement>(`[data-dockkit-tab="${chip.dataset.dockkitTab}"]`)?.focus({preventScroll:true})
+  })
   const relevant=(host:ResourceHost)=>host.entry.session===surface.session&&host.entry.pane===pane&&host.entry.generation===surface.generation||host.entry.session===null&&pane==='main'
   const command=(value:Record<string,unknown>)=>owner.call('command',JSON.stringify(value))
   const terminal=async(request:unknown)=>JSON.parse(await owner.call('terminal',JSON.stringify({pane,generation:surface.generation,request})))
@@ -68,7 +83,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
     // A failed save is reported and the previously committed layout is retained.
     try{
       let next:DockDocument
-      if(storage)next=(await storage.apply('layouts',intent,scope,(values:unknown[])=>reserved.push(...reserveRemoved(values[0] as DockDocument)))).value as DockDocument
+      if(storage)next=(await storage.apply('layouts',intent,scope,(values:unknown[])=>reserved.push(...reserveRemoved(values[0] as DockDocument)),current.current)).value as DockDocument
       else {setNotice('Resource layout is not saved on this device.');next=dockIntent(current.current,intent);reserved.push(...reserveRemoved(next))}
       for(const item of reserved)item.commit()
       return next
@@ -88,7 +103,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
   const bindHosts=()=>{
     let updated=false
     for(const host of resources.getSnapshot().filter(relevant)){
-      if(owner.suppresses(host.entry))continue
+      if(composerInteraction(host)||owner.suppresses(host.entry))continue
       for(const binding of bindings.current.values())if(binding.opening?.request===host.entry.opening_request || binding.view===host.entry.view&&binding.open_revision!==host.entry.open_revision){
         // A new explicit inspection reuses this still-open tab, never a closed one.
         binding.view=host.entry.view;binding.open_revision=host.entry.open_revision;binding.opening=undefined;binding.error=undefined
@@ -116,7 +131,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
     for(const tab of Object.values(next.state.tabs)){
       if(!valid())return
       const c=coordinate(JSON.parse(tab.contentId));let binding=bindings.current.get(tab.id)
-      if(c.action==='resources'||c.action==='terminal')continue
+      if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task')continue
       if(!binding){
         binding={label:tab.title};bindings.current.set(tab.id,binding)
         try{
@@ -136,10 +151,27 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
     }
     if(valid())changed(n=>n+1)
   }
-  const apply=(operation:string,fields:Record<string,unknown>={})=>enqueue(async valid=>{if(!ready.current)throw new Error('Resource layout is loading');await reconcile(await save({kind:'dock',operation,...fields}),valid)})
+  const apply=(operation:string,fields:Record<string,unknown>={})=>{
+    const intent:DockIntent={kind:'dock',operation,...fields}
+    if(operation==='focus')setSelection(intent)
+    enqueue(async valid=>{
+      try{
+        if(!ready.current)throw new Error('Resource layout is loading')
+        await reconcile(await save(intent),valid)
+        if(valid()&&store.current&&notice)setNotice(current=>current===notice?'':current)
+      }catch(error){
+        const chip=document.activeElement
+        if(valid()&&operation==='focus'&&chip instanceof HTMLElement&&chip.dataset.dockkitTab===intent.tab&&dock.current?.contains(chip))failedChip.current=chip
+        throw error
+      }finally{
+        if(operation==='focus'&&valid())setSelection(latest=>latest===intent?undefined:latest)
+      }
+    })
+  }
   useEffect(()=>{
+    setSelection(undefined)
     alive.current=true;ready.current=false;let live=true,owner:DeviceStore|undefined,unsubscribe:(()=>void)|undefined
-    const reload=()=>{if(live)enqueue(async valid=>{if(owner&&live){const saved=await owner.read('layouts',scope);if(live)await reconcile(saved.value as DockDocument,valid)}})}
+    const reload=()=>{if(live)enqueue(async valid=>{if(owner&&live){const saved=await owner.read('layouts',scope,current.current);if(live&&saved.value!==current.current)await reconcile(saved.value as DockDocument,valid)}})}
     enqueue(async valid=>{
       if(identity)try{
         owner=await DeviceStore.open(identity) as DeviceStore
@@ -153,7 +185,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
       ready.current=true
       await reconcile(current.current,valid)
       if(!live||!valid())return
-      if(owner){unsubscribe=owner.subscribe('layouts',scope,reload);window.addEventListener('focus',reload)}
+      if(owner){unsubscribe=owner.subscribe('layouts',scope,reload,{includeOwn:false});window.addEventListener('focus',reload)}
       adopt()
     })
     return()=>{live=false;alive.current=false;generation.current++;ready.current=false;for(const binding of bindings.current.values())release(binding)?.commit();bindings.current.clear();unsubscribe?.();window.removeEventListener('focus',reload);owner?.close();store.current=undefined}
@@ -163,6 +195,7 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
     for(const key of claimed.current){const [view,revision]=key.split(':');if(resourceHosts.get(view)?.entry.open_revision!==revision)claimed.current.delete(key)}
     const rebound=bindHosts()
     for(const host of hostList.current.filter(relevant)){
+      if(composerInteraction(host))continue
       const key=`${host.entry.view}:${host.entry.open_revision}`
       if(claimed.current.has(key)||owner.suppresses(host.entry)||owner.owns(host.entry.opening_request))continue
       claimed.current.add(key)
@@ -202,29 +235,37 @@ function SessionDock({owner,pane,surface,active,launcher}:{owner:ResourceOwner;p
     }).catch(error=>{created?.close();if(valid())setNotice(String(error))})
   }
   useEffect(()=>{const show=()=>{if(activeRef.current){apply('open',{coordinate:{action:'resources'},title:'Resources'});update({resourcesClosed:false})}};window.addEventListener('rsi:terminals',show);return()=>window.removeEventListener('rsi:terminals',show)},[])
-  const intents:DockIntents={focusTab:tab=>apply('focus',{tab}),focusPane:pane=>apply('focus-pane',{pane}),splitPane:pane=>apply('split',{pane}),addTab:pane=>apply('open',{coordinate:{action:'resources'},title:'Resources',pane,duplicate:true}),closeTab:tab=>apply('close',{tab}),duplicateTab:tab=>apply('duplicate',{tab}),floatTab:(tab,rect)=>apply('float',{tab,rect}),unfloatPane:pane=>apply('dock',{pane}),placeTab:(tab,pane,index)=>apply('place',{tab,pane,index}),dropTab:(tab,pane,zone)=>apply('drop',{tab,pane,zone}),moveFloat:(pane,x,y)=>apply('move-float',{pane,x,y}),resizeFloat:(pane,rect)=>apply('resize-float',{pane,rect}),resizeSplit:(split,sizes)=>apply('resize',{split,sizes})}
+  useEffect(()=>{
+    const show=(event:Event)=>{
+      const target=(event as CustomEvent).detail
+      if(!activeRef.current||target?.pane!==pane||target.generation!==surface.generation)return
+      apply('open',{coordinate:{action:'schedule_task',task:target.task},title:'Automation task'})
+      update({resourcesClosed:false})
+    }
+    window.addEventListener('rsi:schedule-detail',show)
+    return ()=>window.removeEventListener('rsi:schedule-detail',show)
+  },[pane,surface.generation])
+  const intents:DockIntents={focusTab:tab=>apply('focus',{tab}),focusPane:pane=>apply('focus-pane',{pane}),splitPane:pane=>apply('split',{pane}),addTab:pane=>apply('open',{coordinate:{action:'resources'},title:'Resources',pane}),closeTab:tab=>apply('close',{tab}),duplicateTab:tab=>apply('duplicate',{tab}),floatTab:(tab,rect)=>apply('float',{tab,rect}),unfloatPane:pane=>apply('dock',{pane}),placeTab:(tab,pane,index)=>apply('place',{tab,pane,index}),dropTab:(tab,pane,zone)=>apply('drop',{tab,pane,zone}),moveFloat:(pane,x,y)=>apply('move-float',{pane,x,y}),resizeFloat:(pane,rect)=>apply('resize-float',{pane,rect}),resizeSplit:(split,sizes)=>apply('resize',{split,sizes})}
+  const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow,selection?.tab as TabId|undefined),[doc.state,viewport.width,viewport.height,narrow,selection])
+  const visible=active&&!layout.resourcesClosed
+  const list=useCallback(()=>terminal({type:'list'}),[owner,pane,surface.generation])
+  const guide=<ResourceGuide surface={surface} pane={pane} terminals={{open:openTerminal,list}}/>
   const body=(tab:TabRecord)=>{
     const c=coordinate(JSON.parse(tab.contentId)),binding=bindings.current.get(tab.id)
-    if(c.action==='resources')return <div className="resource-launcher">{launcher}<TerminalList active={active&&getPane(doc.state,paneFor(doc.state,tab.id)!).activeTabId===tab.id} list={()=>terminal({type:'list'})} open={openTerminal}/></div>
-    if(c.action==='terminal')return <Terminals owner={owner} pane={pane} surface={surface} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
+    if(c.action==='schedule_task')return <ScheduledTaskDetail surface={surface} id={String(c.task)}/>
+    if(c.action==='resources')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?guide:null
+    if(c.action==='terminal')return <Terminals owner={owner} pane={pane} surface={surface} selected={visible&&getPane(displayed,displayed.activePaneId).activeTabId===tab.id} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
     if(binding?.view&&resourceHosts.has(binding.view))return <ResourceBody view={binding.view}/>
     return <div className="resource-unavailable"><p role="status">{binding?.error??(binding?.view?'This resource has retired.':'Opening resource…')}</p><Button disabled={!binding?.error&&!binding?.view} onClick={()=>enqueue(async valid=>{const old=bindings.current.get(tab.id);if(old)release(old)?.commit();bindings.current.delete(tab.id);await reconcile(current.current,valid)})}>Reopen resource</Button></div>
   }
   void revision
-  const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow),[doc.state,viewport.width,viewport.height,narrow])
   const fullscreen=doc.state.mode==='fullscreen'||narrow
-  return <section className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!active||layout.resourcesClosed} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
+  return <section ref={dock} className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!visible} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
       if(!(event.ctrlKey||event.metaKey)||event.altKey||event.nativeEvent.isComposing||(event.target as HTMLElement).closest('input,textarea,[contenteditable=true]'))return
       if(event.key.toLowerCase()==='z'){event.preventDefault();apply(event.shiftKey?'redo':'undo')}
     }}>
     {notice&&<p className="resource-notice" role="alert">{notice}</p>}
-    {!Object.keys(doc.state.tabs).length&&<div className="resource-launcher">{launcher}<TerminalList list={()=>terminal({type:'list'})} open={openTerminal}/></div>}
-    <DockLayout state={displayed} active={active&&!layout.resourcesClosed} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={()=>Object.keys(doc.state.tabs).length<16} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><><button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button><button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={<><Button size="sm" aria-label="Undo layout" disabled={!doc.history.cursor} onClick={()=>apply('undo')}>↶</Button><Button size="sm" aria-label="Redo layout" disabled={doc.history.cursor===doc.history.entries.length} onClick={()=>apply('redo')}>↷</Button><Button size="sm" aria-label={doc.state.mode==='fullscreen'?'Exit resource fullscreen':'Resource fullscreen'} onClick={()=>apply('mode',{mode:doc.state.mode==='fullscreen'?'push':'fullscreen'})}>⛶</Button><Button size="sm" aria-label="Hide resources" onClick={()=>update({resourcesClosed:true})}>×</Button></>}/>
+    {visible&&!Object.keys(doc.state.tabs).length&&guide}
+    <DockLayout state={displayed} active={visible} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={<><Button size="sm" aria-label="Undo layout" disabled={!doc.history.cursor} onClick={()=>apply('undo')}>↶</Button><Button size="sm" aria-label="Redo layout" disabled={doc.history.cursor===doc.history.entries.length} onClick={()=>apply('redo')}>↷</Button><Button size="sm" aria-label={doc.state.mode==='fullscreen'?'Exit resource fullscreen':'Resource fullscreen'} onClick={()=>apply('mode',{mode:doc.state.mode==='fullscreen'?'push':'fullscreen'})}>⛶</Button><Button size="sm" aria-label="Hide resources" onClick={()=>update({resourcesClosed:true})}>×</Button></>}/>
   </section>
-}
-function TerminalList({list,open,active=true}:{active?:boolean;list:()=>Promise<{value:{id:string;phase:{state:string}}[]}>;open:(id?:string)=>void}) {
-  const [items,setItems]=useState<{id:string;phase:{state:string}}[]>([]),[error,setError]=useState('')
-  const refresh=()=>void list().then(reply=>{setItems(reply.value);setError('')},error=>setError(String(error)))
-  useEffect(()=>{if(active)refresh()},[active])
-  return <section className="terminal-list" aria-label="Terminals"><h2>Terminals</h2><Button onClick={()=>open()}>New terminal</Button><Button onClick={refresh}>Refresh terminals</Button>{items.map((item,index)=><Button key={item.id} title={item.id} onClick={()=>open(item.id)}>Terminal {index+1} · {item.phase.state}</Button>)}{error&&<p role="alert">{error}</p>}</section>
 }

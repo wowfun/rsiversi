@@ -16,6 +16,9 @@ export interface ResourceHost {
 // recreate a presentation or derive action authority from a layout identity.
 export const resourceHosts = new Map<string,ResourceHost>()
 export const resources = observable<readonly ResourceHost[]>([])
+export function composerInteraction(host: ResourceHost) {
+  return host.entry.opening_request === null && host.entry.detail != null;
+}
 let published:readonly {host:ResourceHost;title:string;entry:PanelEntry;key:ResourceHost['key'];model:ResourceHost['model']}[]=[]
 export function publishResources() {
   const next=[...resourceHosts.values()].map(host=>({host,title:host.title,entry:host.entry,key:host.key,model:host.model}))

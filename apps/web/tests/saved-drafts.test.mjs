@@ -71,7 +71,7 @@ test('loading more starting drafts retains earlier rows and cancellable deletion
 
 test('recovery uses known conversation titles while retaining unavailable identities and full coordinates',async(t)=>{
   const {pane,scope}=fixture([record,{...record,key:['endpoint','local','main','expired-id']}]);
-  scope.view={surfaces:{main:{kind:'native',session:'saved',path:'/workspace',workspace:null}},catalog:{workspaces:[]},navigation:{entries:[{session:'saved',metadata:{title:'Research notes'}}]}};
+  scope.view={surfaces:{main:{kind:'native',session:'saved',workspace:{key:'test',coordinates:{location:{kind:'local'},path:'/workspace'},registration:{status:'unregistered'}}}},catalog:{workspaces:[]},navigation:{entries:[{session:'saved',metadata:{title:'Research notes'}}]}};
   t.mock.method(StartingDraft,'list',async()=>({rows:[{key:JSON.stringify(['endpoint','local','compare']),text:'starting'}]}));
   await pane.restoreDrafts();
   assert.equal(pane.recoveryView.rows[0].summary,'Research notes');

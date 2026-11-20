@@ -10,6 +10,7 @@ import css from './models.module.css';
 export function ModelsSettings({actions}:{actions:SetupActions}) {
   const setup=useView(view=>view?.setup);
   const models=useView(view=>view?.catalog.models??[]);
+  const first=useView(view=>view?.catalog.models_at_start);
   const more=useView(view=>view?.catalog.models_more);
   const [editing,setEditing]=useState<{entry?:Provider;revision:string;deployments:Provider[];binding:SetupBinding}>();
   const providers=setup?.providers, locked=!setup?.allowed||!setup.providers_writable||actions.busy;
@@ -32,6 +33,7 @@ export function ModelsSettings({actions}:{actions:SetupActions}) {
     })}
     {editing&&!editing.entry?<ProviderEditor key="new" binding={editing.binding} revision={editing.revision} deployments={editing.deployments} actions={actions} close={closeEditor}/>:<button type="button" className={css.add} disabled={locked||!providers} onClick={()=>edit()}><IconPlusOutlineRegular size={16}/>Add model provider</button>}
     {!!models.length&&<label className={css.defaultModel}>Default model<select aria-label="Default model" disabled={actions.busy||!setup?.settings_writable} value={setup?.agent?.default_model?JSON.stringify(setup.agent.default_model):''} onChange={event=>{if(event.target.value)actions.act(()=>actions.command({kind:'default_model',ticket:setup?.ticket,model:JSON.parse(event.target.value)}));}}><option value="">Choose a model</option>{models.map(model=><option key={`${model.deployment}:${model.model}`} value={JSON.stringify(model)}>{model.model} · {model.deployment}</option>)}</select></label>}
-    {more&&<Button size="sm" disabled={actions.busy} onClick={()=>actions.act(()=>input.command({action:"models_next"}))}>More models</Button>}
+    {!first&&<Button size="sm" disabled={actions.busy} onClick={()=>actions.act(()=>input.command({action:"models_first"}))}>First page</Button>}
+    {more&&<Button size="sm" disabled={actions.busy} onClick={()=>actions.act(()=>input.command({action:"models_next"}))}>Next page</Button>}
   </section>;
 }

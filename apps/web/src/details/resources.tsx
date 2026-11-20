@@ -2,7 +2,7 @@ import type {Command, SourceData, ResourceModel} from './model.ts';
 import type {ResourceHost} from '../resource-hosts.ts';
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { resources } from "../resource-hosts.ts";
+import { composerInteraction, resources } from "../resource-hosts.ts";
 import { run } from "../bridge.ts";
 import { ImageDetail } from "./image.tsx";
 import { InteractionDetail } from "./interaction.tsx";
@@ -80,12 +80,12 @@ function Action({ command, value, disabled = false, children, className = "quiet
     </button>
   );
 }
-function ResourceDetail({ model }: {model?: ResourceModel}) {
+function ResourceDetail({ model, session }: {model?: ResourceModel; session: string | null}) {
   if (!model) return null;
   const { kind, data, command } = model;
   if (kind === "image") return <ImageDetail data={data} />;
   if (kind === "interaction")
-    return <InteractionDetail data={data} command={command} />;
+    return <InteractionDetail data={data} command={command} session={session} />;
   if (kind === "source") return <SourceDetail data={data} command={command} />;
   if (kind === "ui")
     return !data.model || !data.binding ? (
@@ -192,7 +192,7 @@ function ResourcePresentation({ host }: {host: ResourceHost}) {
         hidden={!ui}
         ref={(node) => {host.rendererRoot = node;}}
       />
-      <ResourceDetail key={host.key} model={host.model} />
+      <ResourceDetail key={host.key} model={host.model} session={host.entry.session} />
     </>
   );
 }
@@ -201,7 +201,7 @@ export function ResourcePresentations() {
     resources.subscribe,
     resources.getSnapshot,
   );
-  return hosts.map((host) =>
+  return hosts.filter(host => !composerInteraction(host)).map((host) =>
     createPortal(
       <ResourcePresentation host={host} />,
       host.body,
