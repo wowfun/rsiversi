@@ -17,6 +17,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function connect_local() { postMessage({kind:"fixture_connected"}); }
     export function acknowledge_frame() {}
     export async function directory_input() {}
+    export async function scheduled_tasks() {}
     export async function next_view() { return ["1", "{}", "{}"]; }
     export async function commit_renderer() {
       postMessage({ kind: "fixture_commit" });
@@ -33,6 +34,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function restore_session() {}
     export async function prepare_submission() {}
     export async function read_session_resource() {}
+    export async function read_pending_interaction() {}
     export async function reference_input() {}
     export async function file_input() {}
     export async function export_input() {}

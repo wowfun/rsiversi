@@ -47,8 +47,8 @@ try {
   const deadline=Date.now()+420000;let approvals=0;
   while(Date.now()<deadline) {
     assert(await page.locator('#workbench').isVisible(),'Live browser connection was lost');
-    const review=page.locator('.pending button').filter({hasText:'Review:'});
-    if(await review.count() && await review.first().isVisible()) {await review.first().click();await page.getByRole('button',{name:'Allow once',exact:true}).click();approvals++;}
+    const review=page.locator('.pane.selected .approval-review').getByRole('button',{name:'Allow once',exact:true});
+    if(await review.count() && await review.first().isEnabled()) {await review.first().click();approvals++;}
     const status=await page.locator('.pane-status').innerText();
     if(['Completed','Failed','Interrupted','Cancelled'].includes(status)) break;
     await page.waitForTimeout(100);

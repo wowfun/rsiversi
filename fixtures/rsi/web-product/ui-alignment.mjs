@@ -1,4 +1,4 @@
-import {disconnect,saveSettings} from './controls.mjs';
+import {disconnect,themeOption} from './controls.mjs';
 import {paired} from './paired-env.mjs';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,stat} from 'node:fs/promises';
@@ -38,7 +38,10 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     checks.push({enterSend:true,composerIdentity:true,clipboard:true});
     const group=page.getByTestId('workspace-group').filter({has:page.getByRole('button',{name:'ui-folder',exact:true})});
     await group.getByRole('button',{name:'ui-folder',exact:true}).click();
-    await group.getByTestId('conversation-row').first().waitFor();await group.locator('.session-options summary').first().click();await page.getByRole('button',{name:'Pin',exact:true}).click();await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
+    const sessionRow=group.getByTestId('conversation-row').first();
+    await sessionRow.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Pin session',exact:true}).click();
+    await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
     const refreshGroup = page.getByRole('button', {name:'Refresh conversations in ui-folder',exact:true});
     await refreshGroup.waitFor();await refreshGroup.click();await refreshGroup.waitFor({state:'detached'});
     assert.equal(await page.getByTestId('workspace-group').filter({hasText:'ui-folder'}).getByTestId('conversation-row').count(),0);
@@ -47,8 +50,8 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       await page.setViewportSize({width,height:900});
       // Apply through the real Settings owner; same device preference is also used by Desktop.
       await page.getByRole('button',{name:'Commands',exact:true}).click();await page.getByRole('combobox',{name:'Search commands'}).fill('settings');await page.getByRole('option',{name:'Open Settings',exact:true}).click();await page.getByRole('button',{name:'General',exact:true}).click();
-      await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
-      await saveSettings(page);await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
+      await themeOption(page,theme).click();
+      await page.waitForFunction(theme=>document.documentElement.dataset.theme===theme,theme);await page.getByRole('button',{name:'Close settings',exact:true}).click();await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
       const options=page.locator('.pane.selected details.conversation-menu');
       if(await options.count()) {
         await options.locator('summary').click();await options.locator('summary').press('Escape');

@@ -1,6 +1,6 @@
 import {disconnect} from './controls.mjs';
 import {workspaceForm,navigationOptions,openSettings,saveSettings,openConversation} from './controls.mjs';
-import {closeDetails,details,openResource,resources,sourceInspectionGeometry} from "./controls.mjs";
+import {closeDetails,details,openResource,resourceGuide,sourceInspectionGeometry} from "./controls.mjs";
 import {detailMode,navigationFilter,navigationMode,selectSurface,sessionTools} from './controls.mjs';
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import {paired} from './paired-env.mjs';
@@ -150,8 +150,7 @@ try {
       await verifyMcp(page, left, report, name);
       await verifyRetrieval(page, left, service, report, name);
       await left.getByRole('button',{name:'Add files or run commands',exact:true}).click();
-      await page.getByRole('menuitem',{name:'Commands',exact:true}).click();
-      await page.getByRole('menuitem',{name:'/plan',exact:true}).click();
+      await page.getByRole('option',{name:'/plan',exact:true}).click();
       assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "/plan ");
       await left.getByRole("textbox", { name: "Main message" }).fill("/plan on");
       await left.getByTestId("composer-send").click();
@@ -215,7 +214,7 @@ try {
       await left.getByRole("textbox", { name: "Main message" }).fill("Please ask a question about the workspace");
       await left.getByTestId("composer-send").click();
       await navigationFilter(page,"attention");await page.getByRole("region", {name:"Needs attention",exact:true}).getByRole("button", {name:"Answer question 1",exact:true}).click();
-      await page.getByRole("button", { name: "Teal", exact: true }).click();
+      await page.getByRole("radio", { name: "Teal", exact: true }).click();
       await page.getByRole("textbox", { name: "What matters for this change?" }).fill("Preserve independent drafts and explicit ownership.");
       await page.screenshot({ path: join(report, `${name}-question.png`) });
       await page.getByRole("button", { name: "Send answers", exact: true }).click();
@@ -422,7 +421,7 @@ try {
       await openSettings(page);
       await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("button", { name: "rsi.client", exact: true }).click();
-      await page.locator(".registered-settings .hint").filter({ hasText: "GUI preferences apply live across this Profile" }).waitFor();
+      await page.getByRole("group",{name:"Appearance",exact:true}).waitFor();
       const preferenceEditor = page.getByRole("combobox", { name: "Settings / web / submit_key",exact:true });
       await preferenceEditor.selectOption({label:"enter"});
       await saveSettings(page);
@@ -442,10 +441,11 @@ try {
       await selectSurface(page,"main");
       await page.locator("#workspaces [data-testid=workspace-open]").first().click();
       await left.locator(".composer-hint").filter({ hasText: "Enter to send · Shift Enter for a new line" }).waitFor();
-      await resources(page);
-      if(!await page.getByRole("button", { name: "Workspace files", exact: true }).isVisible())await page.getByRole("button", {name:"Open resources",exact:true}).click();
-      await page.getByRole("button", { name: "Workspace files", exact: true }).waitFor();
-      await page.getByRole("button", { name: "Session details", exact: true }).waitFor();
+      const guide=await resourceGuide(page);
+      await guide.getByRole("button", { name: "Workspace files", exact: true }).waitFor();
+      await guide.getByRole("button", { name: "More tools", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Session details", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
       const input = left.getByRole("textbox", { name: "Main message" });
       await input.fill("Preference applies");
       await input.press("Shift+Enter");

@@ -29,11 +29,23 @@ export async function verifyDraftMigration(browser, root) {
         const local = await store.edit(await store.ensure('main','session','b'.repeat(64)), 'local retained input', []);
         const device = await DraftStore.open('a'.repeat(32),{kind:'device',device_id:'c'.repeat(32)});
         const isolated = !await device.get('main','session') && local.key[1]==='local';
+        await device.edit(await device.ensure('main','session','b'.repeat(64)), 'device retained input', []);
+        const keys = await new Promise((resolve,reject)=>{
+          const rows=[], request=store.db.transaction('drafts').objectStore('drafts').openCursor();
+          request.onerror=()=>reject(request.error);
+          request.onsuccess=()=>{
+            const cursor=request.result;
+            if(!cursor){resolve(rows);return;}
+            rows.push([cursor.key[0].byteLength,cursor.key[1].byteLength,cursor.key[2],cursor.key[3],Object.hasOwn(cursor.value,'key')]);
+            cursor.continue();
+          };
+        });
         await store.verify();
         const actual=store.database.version;store.database.close();device.database.close();
-        return {rejected,version:actual,isolated};
+        return {rejected,version:actual,isolated,keys};
       }, version);
-      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:8,isolated:true});
+      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:10,isolated:true,
+        keys:[[16,0,'main','session',false],[16,16,'main','session',false]]});
       reports.push(report);
     } finally {await context.close();}
   }
@@ -102,6 +114,7 @@ export async function verifyDraftUpgradeErrors(browser, root) {
         const store=new DraftStore(undefined,...namespace);
         const first=starting?{revision:1,text:'retained',workspace:null}:{...store.blank('a','session','b'.repeat(64)),version:7};
         const invalid=starting?{revision:-1,text:'also retained',workspace:null}:{...store.blank('z','session','b'.repeat(64)),version:7,text:123};
+        if(!starting){first.scope=first.key.slice(0,3);invalid.scope=invalid.key.slice(0,3);}
         await new Promise((resolve,reject)=>{
           const request=indexedDB.open(name,version);
           request.onupgradeneeded=()=>{
@@ -138,32 +151,34 @@ export async function verifyDraftUpgradeErrors(browser, root) {
   return reports;
 }
 
-export async function verifyComposerWriterFence(browser, root) {
+export async function verifyComposerWriterFence(browser, root, version = 9) {
   const files=new Map(await Promise.all(['drafts.js','draft-databases.js'].map(async name=>[name,await readFile(join(root,'apps/web',name),'utf8')])));
   const context=await browser.newContext();
   await context.route('http://localhost:37918/**',route=>route.fulfill({contentType:'text/javascript',body:files.get(new URL(route.request().url()).pathname.slice(1))??''}));
   try {
     const old=await context.newPage(),current=await context.newPage();
     await old.goto('http://localhost:37918/');await current.goto('http://localhost:37918/');
-    const before=await old.evaluate(async()=>{
+    const before=await old.evaluate(async version=>{
       const {DraftStore}=await import('/drafts.js'),store=new DraftStore(undefined,'a'.repeat(32),'local');
-      const record={...store.blank('main','session','b'.repeat(64)),version:7,text:'retained',editRevision:3,
+      const record={...store.blank('main','session','b'.repeat(64)),version,text:'retained',editRevision:3,
         pending:{kind:'command',id:'original-command',opaque:'opaque',text_bytes:0,images:0,captures:[],phase:'unknown',editRevision:3,preserve_editor:true}};
+      if(version<9) record.scope=record.key.slice(0,3);
       await new Promise((resolve,reject)=>{
-        const request=indexedDB.open('rsi.composer',7);
-        request.onupgradeneeded=()=>{const records=request.result.createObjectStore('drafts',{keyPath:'key'});records.createIndex('scope','scope');records.put(record);request.result.createObjectStore('usage').put([1,8,0,6],'aggregate');};
+        const request=indexedDB.open('rsi.composer',version);
+        request.onupgradeneeded=()=>{const records=request.result.createObjectStore('drafts',{keyPath:'key'});if(version<9) records.createIndex('scope','scope');records.put(record);request.result.createObjectStore('usage').put([1,8,0,6],'aggregate');};
         request.onsuccess=()=>{window.oldDb=request.result;oldDb.onversionchange=()=>{window.versionChanged=true;oldDb.close();};resolve();};request.onerror=()=>reject(request.error);
       });return record;
-    });
+    },version);
     const after=await current.evaluate(async()=>{
       const {DraftStore}=await import('/drafts.js'),store=await DraftStore.open('a'.repeat(32),{kind:'local'});
       return store.get('main','session');
     });
-    assert.deepEqual(after,{...before,version:8});
-    const oldWriter=await old.evaluate(async()=>({versionChanged:window.versionChanged,reopen:await new Promise(resolve=>{
-      const request=indexedDB.open('rsi.composer',7);
+    const {scope,...retained}=before;
+    assert.deepEqual(after,{...retained,version:10});
+    const oldWriter=await old.evaluate(async version=>({versionChanged:window.versionChanged,reopen:await new Promise(resolve=>{
+      const request=indexedDB.open('rsi.composer',version);
       request.onerror=()=>resolve(request.error.name);request.onsuccess=()=>{request.result.close();resolve('opened');};
-    })}));
+    })}),version);
     assert.deepEqual(oldWriter,{versionChanged:true,reopen:'VersionError'});
     return {pendingIdentityPreserved:true,recordUpgraded:true,...oldWriter};
   } finally {await context.close();}

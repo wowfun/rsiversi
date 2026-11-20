@@ -18,7 +18,8 @@ export function DirectoryPickerHost() {
 }
 function DirectoryPicker({close}:{close:()=>void}) {
   const [selected,setSelected]=useState('local')
-  const targets=useView(view=>view?.plugins?.ssh?.catalog?.targets)
+  const ssh=useView(view=>view?.plugins?.ssh)
+  const targets=ssh?.available ? ssh.catalog?.targets.filter(target=>target.permissions.use_target) : undefined
   const location:ExecutionLocation=selected==='local'?{kind:'local'}:{kind:'ssh',target:selected}
   const [columns,setColumns]=useState<Listing[]>([]),[path,setPath]=useState(''),[editing,setEditing]=useState(false)
   const [hidden,setHidden]=useState(false),[available,setAvailable]=useState(false),[status,setStatus]=useState('Checking location…')
@@ -49,7 +50,9 @@ function DirectoryPicker({close}:{close:()=>void}) {
     })()
     return()=>{alive.current=false;request.current++;if(readId.current)void input.directory({action:'cancel',request_id:readId.current}).catch(()=>{})}
   },[selected])
-  useEffect(()=>{void input.command({action:'plugins',command:{kind:'ssh',command:{kind:'read'}}}).catch(()=>{})},[])
+  useEffect(()=>{
+    if(ssh?.available)void input.command({action:'plugins',command:{kind:'ssh',command:{kind:'read'}}}).catch(()=>{})
+  },[ssh?.available])
   async function create() {
     if(!current||busy||uncertain)return
     setBusy('create');setStatus('')
@@ -79,7 +82,7 @@ function DirectoryPicker({close}:{close:()=>void}) {
   const crumbs=current?[{label:root,path:root},...current.breadcrumbs.map((label,index)=>({label,path:root+current.breadcrumbs.slice(0,index+1).join('/')}))]:[]
   return <Modal label="Select workspace directory" className={`directory-picker ${css.scope}`} close={closing} initialFocus='[aria-label="Directory path"]'>
     <header><h2>Select workspace directory</h2>
-      <label>Execution location<select aria-label="Execution location" value={selected} disabled={!!busy} onChange={event=>setSelected(event.target.value)}><option value="local">Local Service</option>{selected!=='local'&&!targets?.some(target=>target.candidate.target===selected&&target.permissions.use_target)&&<option value={selected}>Selected SSH target · unavailable</option>}{targets?.filter(target=>target.permissions.use_target).map(target=><option key={target.candidate.target} value={target.candidate.target}>{target.candidate.name}{target.connected?'':' · disconnected'}</option>)}</select></label>
+      {(!!targets?.length || selected!=='local') && <label>Execution location<select aria-label="Execution location" value={selected} disabled={!!busy} onChange={event=>setSelected(event.target.value)}><option value="local">Local Service</option>{selected!=='local'&&!targets?.some(target=>target.candidate.target===selected)&&<option value={selected}>Selected SSH target · unavailable</option>}{targets?.map(target=><option key={target.candidate.target} value={target.candidate.target}>{target.candidate.name}{target.connected?'':' · disconnected'}</option>)}</select></label>}
       {editing?<form className="directory-path" onSubmit={event=>{event.preventDefault();if(available)void browse(path);else void open()}}><input autoFocus aria-label="Directory path" value={path} onChange={event=>setPath(event.target.value)} maxLength={16384} placeholder="/path/to/project"/><Button type="submit" disabled={!!busy}>{available?'Go':'Open'}</Button></form>:<div className="directory-location"><nav className="directory-breadcrumbs" aria-label="Directory breadcrumbs">
         {current?.home&&<button disabled={!!busy} onClick={()=>void browse(current.home)}>Home</button>}
         {crumbs.map(crumb=><button key={crumb.path} title={crumb.path} disabled={!!busy} onClick={()=>void browse(crumb.path)}>{crumb.label}</button>)}

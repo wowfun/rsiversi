@@ -97,19 +97,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await page.locator(`[data-testid="conversation-row"][data-session-id="${root}"]`).getByTestId('conversation-open').click();
     await page.waitForFunction(root=>document.querySelector('[aria-label="Main conversation"]')?.getAttribute('data-session-id')===root&&!document.querySelector('[aria-label="Main message"]')?.disabled,root);
     await resources(page);
-    // Restored Dock tabs can move the same connected launcher into a hidden tab
-    // during mount. Resolve and hit-test the current control before a real click.
-    let workflowPoint;
-    await waitUntil(async()=>{
-      workflowPoint=await page.evaluate(()=>{
-        const b=[...document.querySelectorAll('.resource-dock .resource-launcher button')].find(b=>b.textContent==='Workflows'&&b.getBoundingClientRect().width>0&&b.getBoundingClientRect().height>0);
-        if(!b||b.disabled)return null;
-        b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect();
-        const x=r.x+r.width/2,y=r.y+r.height/2;
-        return b.contains(document.elementFromPoint(x,y))?{x,y}:null;
-      });return !!workflowPoint;
-    },'current cold Workflows launcher');
-    await page.mouse.click(workflowPoint.x,workflowPoint.y);
+    await openResource(page,'Workflows');
     await clickDetails(page,'Open workflow');
     await waitUntil(async()=>/State: Completed/.test(await details(page).innerText()),'canonical completed view');
     await page.setViewportSize({width:420,height:900});

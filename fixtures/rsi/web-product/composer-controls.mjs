@@ -6,16 +6,19 @@ import {sourceFixture} from './source-fixture.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR??'.local/notes/1027/composer-controls');await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
 fixture.base=structuredClone(fixture.view.surfaces.main);fixture.view.surfaces.main=null;
+fixture.view.setup.agent.default_reasoning_effort='high';
+fixture.view.setup.default_model_description={model:fixture.view.setup.agent.default_model,profile:{reasoning_efforts:{supported:['off','high'],default:'off'}}};
 fixture.view.catalog.workspaces[0].id='f'.repeat(64);
-fixture.creates=0;fixture.prepared=[];fixture.view.has_media=true;
+fixture.creates=0;fixture.commandReads=0;fixture.modelWrites=0;fixture.prepared=[];fixture.view.has_media=true;
 fixture.view.catalog.models.push({deployment:'fixture',model:'other'});
 fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
+ if(command.action==='commands')fixture.commandReads++;
  if(command.action==='create'){
-  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true,composer_input:{kind:'text',hint:'on | off | toggle'}}]}};
+  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true,composer_input:{kind:'text',hint:'on | off | toggle'}}]}};
  }
  const data=fixture.view.surfaces.main;
- if(command.action==='model'){data.model=command.model;data.reasoning_effort=command.reasoning_effort;}
+ if(command.action==='model'){fixture.modelWrites++;data.model=command.model;data.reasoning_effort=command.reasoning_effort;}
  await fixture.frame();return '{}';
 });
 fixture.setReply('prepare_submission',payload=>{const input=JSON.parse(payload);fixture.prepared.push(input);return JSON.stringify({kind:'message',id:'request-'+fixture.prepared.length,opaque:'opaque',text_bytes:input.text.length,images:0,captures: []});});
@@ -27,13 +30,35 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
  page.on('pageerror',error=>errors.push(error.message));
  try{
   await page.goto(scene.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+  const startingModel=page.getByRole('button',{name:/^Select model.*reasoning effort High/});
+  await startingModel.waitFor();
+  await page.evaluate(()=>{delete fixture.view.setup.agent.default_reasoning_effort;return fixture.frame();});
+  await page.getByRole('button',{name:/^Select model.*reasoning effort Off/}).waitFor();
+  await page.evaluate(()=>{fixture.view.setup.agent.default_reasoning_effort='high';return fixture.frame();});
+  await startingModel.waitFor();
   const input=page.locator('.composer textarea');await input.fill('Draft survives opening controls');await input.press('End');
-  await page.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'File',exact:true}).waitFor();
-  await page.waitForFunction(()=>fixture.creates===1&&document.querySelector('[role=menu] button:not(:disabled)'));
-  assert.equal(await input.getAttribute('placeholder'),'Send a message · / commands · @ agents');
+  const add=page.getByRole('button',{name:'Add files or run commands'});
+  const menu=page.locator('[role="listbox"][aria-label="Add files or run commands"]');
+  assert.equal(await menu.count(),0);
+  await add.focus();await add.press('Enter');await page.getByRole('option',{name:'File',exact:true}).waitFor();
+  assert(await input.evaluate(node=>node===document.activeElement));
+  const card=await page.locator('.composer').boundingBox(),overlay=await menu.boundingBox();
+  assert(Math.abs(overlay.x-card.x)<2 && Math.abs(overlay.width-card.width)<2 && overlay.y+overlay.height<=card.y);
+  await input.press('ArrowDown');
+  assert.equal(await menu.getByRole('option',{selected:true}).getAttribute('id'),await input.getAttribute('aria-activedescendant'));
+  assert.deepEqual(await page.evaluate(()=>[fixture.creates,fixture.commandReads]),[0,0]);
+  assert.equal(await input.getAttribute('placeholder'),'Describe what you want to build');
   assert.equal(await input.inputValue(),'Draft survives opening controls');assert.equal(await page.evaluate(()=>fixture.prepared.length),0);
   await page.screenshot({path:join(report,name+'-plus.png')});
-  await page.getByRole('menuitem',{name:'Commands',exact:true}).click();await page.getByRole('menuitem',{name:'/plan',exact:true}).click();assert.equal(await input.inputValue(),'/plan Draft survives opening controls');
+  await page.keyboard.press('Escape');assert.equal(await menu.count(),0);
+  assert(await input.evaluate(node=>node===document.activeElement));
+  await add.click();
+  await input.press('Shift+Tab');assert.equal(await menu.count(),0);assert(await input.evaluate(node=>node===document.activeElement));
+  await add.click();await input.press('ArrowUp');
+  assert.equal(await menu.getByRole('option',{selected:true}).getAttribute('aria-label'),'Commands');
+  await input.press('Tab');
+  await page.getByRole('option',{name:'/plan',exact:true}).click();assert.equal(await input.inputValue(),'/plan Draft survives opening controls');
+  assert.deepEqual(await page.evaluate(()=>[fixture.creates,fixture.commandReads]),[1,1]);
   await page.screenshot({path:join(report,name+'-command.png')});
   await page.getByRole('button',{name:'Leave command input'}).click();assert.equal(await input.inputValue(),'Draft survives opening controls');
   for(const theme of ['light','dark']){
@@ -44,12 +69,33 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   }
   await page.emulateMedia({forcedColors:'active'});await input.focus();assert.equal(await page.locator('.composer').evaluate(node=>getComputedStyle(node).outlineWidth),'2px');
   await page.screenshot({path:join(report,name+'-focus-forced.png')});await page.emulateMedia({forcedColors:'none'});
+  await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();
+  await page.getByRole('menuitemradio',{name:'High',exact:true}).click();
+  assert.equal(await page.evaluate(()=>fixture.view.surfaces.main.reasoning_effort),'high');
+  await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();
+  await page.getByRole('menuitemradio',{name:/^Default/}).click();
+  assert.equal(await page.evaluate(()=>fixture.view.surfaces.main.reasoning_effort),null);
   await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();
   await page.getByRole('button',{name:/reasoning effort Max/}).waitFor();
+  const currentModel=page.getByRole('button',{name:/^Select model.*reasoning effort Max/});
+  const writes=await page.evaluate(()=>fixture.modelWrites);
+  await currentModel.click();await page.getByRole('menuitem',{name:/^Model /}).click();
+  await page.getByRole('menuitemradio',{checked:true}).click();
+  await currentModel.click();await page.getByRole('menuitem',{name:/^Effort/}).click();
+  await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();
+  assert.equal(await page.evaluate(()=>fixture.modelWrites),writes);
   await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.screenshot({path:join(report,name+'-effort.png')});
   await page.keyboard.press('Escape');assert.equal(await page.getByRole('button',{name:/^Select model/}).evaluate(node=>node===document.activeElement),true);
-  await page.getByRole('button',{name:/^Access mode/}).click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();await page.getByText('Allow full access?',{exact:true}).waitFor();
-  await page.getByRole('menuitem',{name:'Cancel',exact:true}).click();await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
+  const access=page.getByRole('button',{name:/^Access mode/}), confirmation=page.getByRole('dialog',{name:'Enable Full access?'});
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
+  const enable=confirmation.getByRole('button',{name:'Enable Full access',exact:true}),acknowledgement=confirmation.getByRole('checkbox');
+  assert(await enable.isDisabled());assert(await acknowledgement.evaluate(node=>node===document.activeElement));
+  await acknowledgement.check();assert(await enable.isEnabled());
+  await page.screenshot({path:join(report,name+'-full-access.png')});
+  await confirmation.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert(await access.evaluate(node=>node===document.activeElement));assert.match(await access.getAttribute('aria-label'),/Workspace Write/);
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();assert(!(await acknowledgement.isChecked()));await page.keyboard.press('Escape');
+  await access.click();await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   await input.fill('permission request');await page.getByTestId('composer-send').click();await page.waitForFunction(()=>fixture.prepared.length===1);
   assert.equal(await page.evaluate(()=>fixture.prepared[0].sandbox),'read-only');

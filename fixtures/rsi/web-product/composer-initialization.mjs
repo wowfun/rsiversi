@@ -15,7 +15,7 @@ fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='initialize_workspace')return '{}';
  if(command.action==='create'){
-  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:fixture.efforts};
+  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:fixture.efforts};
  }
  await fixture.frame();return '{}';
 });
@@ -49,7 +49,11 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await model.click();await page.getByRole('menuitem',{name:/^Effort/}).waitFor();
   await page.keyboard.press('Escape');
   const after=await composer.boundingBox();
+  assert.equal(await page.evaluate(()=>fixture.creates),0,'Inspecting the model menu retains the starting draft');
   await page.screenshot({path:join(report,name+'-home.png')});
+  await model.click();await page.getByRole('menuitem',{name:/^Effort/}).click();
+  await page.getByRole('menuitemradio',{name:'Low',exact:true}).click();
+  await page.waitForFunction(()=>fixture.creates===1 && !!fixture.view.surfaces.main);
   await page.evaluate(async()=>{
    fixture.view.surfaces.main.transcript={status:'Completed',blocks:[
     {key:'u',role:'user',title:'User',text:'say hi',sources:0},

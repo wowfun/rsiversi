@@ -10,7 +10,7 @@ fixture.view.setup.agent.default_model=null;
 fixture.view.catalog.models=[];
 fixture.view.catalog.workspaces[0].id='f'.repeat(64);
 fixture.view.catalog.workspaces[0].coordinates.path='/Documents/RSIversi/default-workspace';
-fixture.setReply('command', async text=>{const command=JSON.parse(text);if(command.action==='create')await fixture.surface('created',{workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:'created',agent_preset_id:null},transcript:{blocks:[],status:'Ready'}});return '{}';});
+fixture.setReply('command', async text=>{const command=JSON.parse(text);if(command.action==='create')await fixture.surface('created',{workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:'created',agent_preset_id:null},transcript:{blocks:[],status:'Ready'}});return '{}';});
 fixture.setReply('prepare_submission',text=>JSON.stringify({kind:'message',id:'first-message',opaque:text,text_bytes:new TextEncoder().encode(JSON.parse(text).text).length,images:0,captures: []}));
 fixture.setReply('dispatch_submission',()=>JSON.stringify({status:'complete',receipt:'{}'}));
 `;
@@ -35,7 +35,7 @@ try {
    await page.evaluate(async()=>{fixture.view.surfaces.main=null;await fixture.frame();});
    await page.locator('aside.resources').waitFor({state:'hidden'});
    assert.equal(await page.getByRole('button',{name:'Toggle resources',exact:true}).count(),0);
-   await page.reload();await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+   await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
    await page.locator('aside.resources').waitFor({state:'hidden'});
    await page.evaluate(()=>fixture.surface('resource-preference'));
    await page.locator('aside.resources').waitFor({state:'visible'});
@@ -47,15 +47,16 @@ try {
    assert.equal(await input.getAttribute('placeholder'),'Describe what you want to build');
    await input.fill('A saved starting message 世界');await page.evaluate(()=>fixture.runtime.panes.get('main').flush());
    assert.equal(await page.evaluate(()=>fixture.calls.some(call=>call.method==='command'&&JSON.parse(call.payload).action==='create')),false);
-   await page.reload();await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+   await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
    await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]').value==='A saved starting message 世界');
    await page.getByRole('button',{name:'Choose model',exact:true}).click();
    assert.equal(await input.inputValue(),'A saved starting message 世界');
    await page.evaluate(()=>fixture.input.dismissSettings());
    await page.screenshot({path:join(report,name+'-starting.png')});
    await page.evaluate(async()=>{fixture.view.setup.agent.default_model={deployment:'fixture',model:'deterministic'};await fixture.frame();});
-   await page.getByTestId('composer-send').click();
+   await input.press('ControlOrMeta+Enter');
    await page.waitForFunction(()=>fixture.calls.some(call=>call.method==='dispatch_submission'));
+   assert(await input.evaluate(field=>document.activeElement===field),'first keyboard submission retains editor focus');
    const submitted=await page.evaluate(()=>JSON.parse(fixture.calls.find(call=>call.method==='prepare_submission').payload).text);
    assert.equal(submitted,'A saved starting message 世界');
    assert.equal(await page.evaluate(()=>fixture.runtime.panes.get('main').starting.text),'');
@@ -64,10 +65,15 @@ try {
       {key:'u',role:'user',title:'User',text:'say hi',sources:0},
       {key:'r',role:'reasoning',title:'Thinking',text:'A short reasoning step.',sources:0},
       {key:'a',role:'assistant',title:'Assistant',text:'Hi! Ready when you are — just let me know what you would like to work on.',sources:0}, {key:'terminal',role:'status',title:'Completed',text:'',sources:1}
-    ],turns:{entries:{turn:{id:'turn',status:'Completed',running:false,foldable:true,partial:false,blocks:['u','r','a','terminal'],terminal:'terminal',process:['r'],candidate:[],answer:['a'],elapsed_ms:2000,timestamps:{u:Date.now()-2000,a:Date.now()},usage:{input_tokens:10000,output_tokens:1300,cache_read_tokens:8700,cache_write_tokens:null,reasoning_tokens:null}}}}};
+    ],turns:{entries:{turn:{id:'turn',status:'Completed',running:false,foldable:true,partial:false,blocks:['u','r','a','terminal'],terminal:'terminal',process:['r'],candidate:[],answer:['a'],closing_prose:[2],elapsed_ms:2000,timestamps:{u:Date.now()-2000,a:Date.now()},usage:{input_tokens:10000,output_tokens:1300,cache_read_tokens:8700,cache_write_tokens:null,reasoning_tokens:null}}}}};
     await fixture.frame();
    });
    const composer=page.locator('.pane:not([hidden]) > .composer');
+   const branch=page.locator('.turn-tail').getByLabel('Fork conversation');
+   await branch.click();
+   await page.locator('.fork-menu[open]').getByRole('combobox').selectOption('last');
+   await page.getByLabel('Turns',{exact:true}).press('Escape');
+   assert.equal(await page.locator('.fork-menu').count(),1);
    const beforeMetrics=await composer.boundingBox();
    await page.screenshot({path:join(report,name+'-before-metrics.png')});
    await page.evaluate(async()=>{
@@ -86,8 +92,9 @@ try {
    assert.equal(await page.locator('.message.status').isVisible(),false);
    await page.getByRole('tab',{name:'Chat',exact:true}).press('ArrowRight');
    assert.equal(await page.getByRole('tab',{name:'Trajectory',exact:true}).getAttribute('aria-selected'),'true');
-   await page.locator('.message.reasoning').waitFor({state:'visible'});
-   await page.locator('.message.status').waitFor({state:'visible'});
+   const ledger=page.getByRole('table',{name:'Trajectory records'});
+   await ledger.getByRole('cell',{name:'reasoning',exact:true}).waitFor();
+   await ledger.getByRole('cell',{name:'status',exact:true}).waitFor();
    await page.getByRole('tab',{name:'Trajectory',exact:true}).press('ArrowLeft');
    await page.getByText('Completed in 2s', {exact:false}).waitFor();
    assert.equal(await page.locator('.message-clock').count(),2);
@@ -96,7 +103,9 @@ try {
    await page.locator('.message-usage button').click();
    await page.getByTestId('session-metrics').getByText('11.3K tok · Cache hit 87%',{exact:true}).waitFor();
    const stats=page.getByTestId('session-metrics');
-   for(const [button,title] of [[/1 turn 1 step/, 'Session statistics'],[/11.3K tok/, 'Token usage'],[/10%/, 'Context usage']]) {
+   const contextButton=stats.getByRole('button',{name:'10% of context used',exact:true});
+   assert.equal(await contextButton.locator('circle[pathLength]').getAttribute('stroke-dasharray'),'10 100');
+   for(const [button,title] of [[/1 turn 1 step/, 'Session statistics'],[/11.3K tok/, 'Token usage'],[/^10% of context used$/, 'Context usage']]) {
      await stats.getByRole('button',{name:button}).click();
      const panel=page.getByRole('dialog',{name:title,exact:true});await panel.waitFor();
      assert.equal(await page.getByRole('dialog').count(),1);
@@ -141,7 +150,7 @@ try {
     };
     await page.evaluate(async()=>{fixture.view.surfaces.main.metrics=structuredClone(fixture.completeMetrics);await fixture.frame();});
     await stats.waitFor();await stable('complete');
-    assert(await stats.getByRole('button',{name:'10%',exact:true}).evaluate(node=>node.lastElementChild.scrollWidth<=node.lastElementChild.clientWidth),'Context percentage must remain fully visible');
+    assert(await contextButton.evaluate(node=>node.lastElementChild.scrollWidth<=node.lastElementChild.clientWidth),'Context percentage must remain fully visible');
     await page.evaluate(async()=>{fixture.view.surfaces.main.metrics.complete=false;await fixture.frame();});
     await stats.getByText('Partial statistics',{exact:true}).waitFor();await stable('partial');
     await stats.getByRole('button',{name:/1 turn 1 step/}).click();
@@ -169,6 +178,19 @@ try {
    await page.setViewportSize({width:320,height:600});
    await page.waitForFunction(()=>{const panel=document.querySelector('[role=dialog][aria-label="Context usage"]');const box=panel.getBoundingClientRect();return box.x>=12&&box.right<=innerWidth-12;});
    await page.keyboard.press('Escape');
+   const settlementReads=await page.evaluate(async()=>{
+    fixture.setReply('command',()=> '{}');
+    const count=()=>fixture.calls.filter(call=>call.method==='command'&&JSON.parse(call.payload).action==='metrics').length;
+    const entries=fixture.view.surfaces.main.transcript.turns.entries;
+    const show=async()=>{await fixture.frame();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));};
+    const before=count();
+    entries.next={id:'next',status:'Running',running:true,foldable:false,partial:false,blocks:[],process:[],candidate:[],answer:[]};
+    await show();const running=count();
+    entries.next.terminal='next-terminal';entries.next.running=false;entries.next.status='Completed';
+    await show();const settled=count();
+    return {running:running-before,settled:settled-running};
+   });
+   assert.deepEqual(settlementReads,{running:0,settled:1});
    const storage=await page.evaluate(async()=>{
     const {StartingDraft}=await import('/starting-draft.js');
     const a=await StartingDraft.load(['isolated','local'],'main'), b=await StartingDraft.load(['isolated','local'],'main');
@@ -177,7 +199,7 @@ try {
     const other=await StartingDraft.load(['other','local'],'main');return {conflict,saved,newer:b.text,other:other.text};
    });
    assert.deepEqual(storage,{conflict:true,saved:'first',newer:'newer',other:''});
-   assert.deepEqual(errors,[]);results.push({browser:name,modelFreeDraft:true,reload:true,firstSend:true,tabKeyboard:true,messageAlignment:true,conflict:true,narrow:true,metricsGeometry});
+   assert.deepEqual(errors,[]);results.push({browser:name,modelFreeDraft:true,reload:true,firstSend:true,tabKeyboard:true,messageAlignment:true,conflict:true,narrow:true,metricsGeometry,settlementReads});
   } catch(error) {
    await Promise.allSettled([
     page.screenshot({path:join(report,name+'-failure.png')}),

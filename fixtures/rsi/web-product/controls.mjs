@@ -41,6 +41,10 @@ export async function saveSettings(page) {
     return form&&form.dataset.settingsTicket!==ticket&&!form.querySelector('fieldset').disabled&&!form.querySelector('[role=alert]').textContent;
   },ticket);
 }
+export function themeOption(page, theme) {
+  return page.getByRole('group',{name:'Appearance',exact:true})
+    .getByRole('button',{name:theme[0].toUpperCase()+theme.slice(1),exact:true});
+}
 import {errors} from 'playwright';
 import {assertNoNotices} from './task-checks.mjs';
 export async function navigationOptions(page) {
@@ -100,6 +104,15 @@ export async function navigationMode(page,value) {
   await navigationOptions(page);
   await page.getByRole('menuitemradio',{name:({flat:'Single list',workspace:'By workspace',workspace_tree:'By workspace tree',manual:'Manual',updated:'Recently updated'})[value],exact:true}).click();
 }
+export async function setSessionArchived(page, session, value) {
+  await navigationMode(page, 'flat');
+  await navigationFilter(page, value ? 'active' : 'all');
+  const row = page.locator('[data-testid="conversation-row"][data-session-id="' + session + '"]');
+  await row.getByTestId('conversation-open').focus();
+  await page.keyboard.press('Shift+F10');
+  await page.getByRole('menuitem', {name: value ? /^Archive session/ : /^Unarchive session/}).click();
+  if (value) await row.waitFor({state:'detached'});
+}
 export async function resources(page) {
   const toggle=page.getByRole('button',{name:'Toggle resources',exact:true});
   if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
@@ -156,15 +169,30 @@ export async function closeDetails(page) {
   await closing.locator('[data-dockkit-tab-close]').click();
   await closing.waitFor({state:'detached'});
 }
-export async function openResource(page,name) {
+export async function resourceGuide(page) {
   await resources(page);
-  const button=page.getByRole('button',{name,exact:true});
-  if(!await button.isVisible()) {
-    const count=await page.locator('[data-dockkit-tab]').count();
-    await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
-    await page.waitForFunction(count=>document.querySelectorAll('[data-dockkit-tab]').length===count+1,count);
+  const dock=page.locator('.resource-dock:visible');
+  await dock.waitFor();
+  const root=dock.locator(':scope > .resource-guide');
+  if(await root.isVisible())return root;
+  const panes=dock.locator('[data-dockkit-pane][data-dockkit-column]');
+  const active=panes.and(dock.locator('[data-dockkit-pane-active]'));
+  const target=await active.count()?active:panes.first();
+  const guide=target.locator('.resource-guide:visible');
+  if(!await guide.isVisible()){
+    const chip=target.getByRole('tab',{name:/^Resources\b/});
+    if(await chip.count())await chip.click();
+    else await target.getByRole('button',{name:'Open resources',exact:true}).click();
   }
-  await button.click();
+  await guide.waitFor();
+  return guide;
+}
+export async function openResource(page,name) {
+  const guide=await resourceGuide(page);
+  const menu=guide.getByRole('button',{name:'More tools',exact:true});
+  const button=guide.getByRole('button',{name,exact:true});
+  if(await button.isVisible())await button.click();
+  else {await menu.click();await page.getByRole('menuitem',{name,exact:true}).click();}
 }
 export async function navigationFilter(page,value) {
   await navigationOptions(page);

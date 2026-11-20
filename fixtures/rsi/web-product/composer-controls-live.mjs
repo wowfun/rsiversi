@@ -4,13 +4,14 @@ import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService} from './service.mjs';
+import {chooseStartingWorkspace} from './browser-fixture.mjs';
 import {readDeepseekKey} from './live-limits.mjs';
 const {RSI_WEB_BINARY:binary,RSI_WEB_ASSETS:assets,RSI_LIVE_ENV_FILE:env}=process.env;
 assert(binary&&assets&&env&&process.env.RSI_WEB_REPORT,'Explicit live configuration is required');
 const report=resolve(process.env.RSI_WEB_REPORT);await mkdir(report,{recursive:true});
 const key=await readDeepseekKey(env);let service,browser,page;const errors=[];
 try{
- service=await startService({binary,assets,report,deepseekKey:key,developmentHttp:true,configure:async({config})=>{
+ service=await startService({binary,assets,report,deepseekKey:key,developmentHttp:true,registrationLabel:'composer live acceptance',foregroundHost:process.platform==='win32',configure:async({config})=>{
   await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model:'deepseek-flash'}}}));
   await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),`format=1
 [[steps]]
@@ -28,14 +29,19 @@ deepseek-flash=4096
 context_window_tokens=1048576
 default_output_reserve_tokens=4096
 max_output_reserve_tokens=256000
+[steps.config.reasoning_efforts.deepseek-flash]
+supported=["off","low","high","max"]
+default="off"
 `);
  }});
  browser=await chromium.launch();page=await browser.newPage({viewport:{width:1440,height:960},colorScheme:'dark'});page.on('pageerror',error=>errors.push(error.message));
- await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register('composer live acceptance')));await page.locator('#dev-http').check();await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible',timeout:60000});
+ await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.registration));await page.locator('#dev-http').check();await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible',timeout:60000});
+ await chooseStartingWorkspace(page,service);
  const input=page.getByRole('textbox',{name:'Main message',exact:true});
  await input.fill('Reply exactly RSI_COMPOSER_OK. Do not call any tools.');
- await page.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'File',exact:true}).waitFor();
- await page.getByRole('menuitem',{name:'File',exact:true}).click();await page.getByRole('dialog',{name:'Insert workspace file path'}).waitFor();await page.screenshot({path:join(report,'file-picker.png')});await page.keyboard.press('Escape');
+ await page.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('option',{name:'File',exact:true}).waitFor();
+ assert.equal(await page.locator('.pane.selected').getAttribute('data-session-id'),'');
+ await page.getByRole('option',{name:'File',exact:true}).click();await page.getByRole('dialog',{name:'Insert workspace file path'}).waitFor();await page.screenshot({path:join(report,'file-picker.png')});await page.keyboard.press('Escape');
  await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.getByRole('menuitemradio',{name:'Max',exact:true}).click();await page.getByRole('button',{name:/reasoning effort Max/}).waitFor();
  await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.screenshot({path:join(report,'effort-menu.png')});await page.getByRole('menuitemradio',{name:'Off',exact:true}).click();await page.getByRole('button',{name:/reasoning effort Off/}).waitFor();
  await page.getByRole('button',{name:/^Access mode/}).click();await page.screenshot({path:join(report,'access-menu.png')});await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
@@ -59,5 +65,5 @@ max_output_reserve_tokens=256000
  await page.getByRole('button',{name:/^Select model/}).click();await page.getByRole('menuitem',{name:/^Effort/}).click();await page.getByRole('menuitemradio',{name:'Off',exact:true}).waitFor();await page.keyboard.press('Escape');
  assert.deepEqual(errors,[]);assert.equal(service.provider.requests.length,0);
  await writeFile(join(report,'result.json'),JSON.stringify({ok:true,platform:process.platform,browser:browser.version(),build:JSON.parse(await readFile(join(assets,'rsi-build.json'),'utf8')),checks:['starting controls preserve text without sending','real file picker','Max then Off model commands','Read Only request','real DeepSeek completion'],policyEvidence:values,errors},null,2));
-}catch(error){await page?.screenshot({path:join(report,'failure.png')}).catch(()=>{});throw new Error(String(error.stack??error).replaceAll(key,'[REDACTED]'));}
+}catch(error){await page?.screenshot({path:join(report,'failure.png')}).catch(()=>{});const cause=error.cause?.message;throw new Error([error.stack??error,cause].filter(Boolean).join('\n').replaceAll(key,'[REDACTED]'));}
 finally{await browser?.close();await service?.close();}

@@ -9,7 +9,7 @@ import { sourceFixture } from "./source-fixture.mjs";
 import { fileURLToPath } from "node:url";
 export async function verifyFrameCommit(browser, url, report, name) {
   const results = [];
-  for (const scenario of [
+  const scenarios = [
     "commit",
     "settings",
     "resources",
@@ -27,7 +27,10 @@ export async function verifyFrameCommit(browser, url, report, name) {
     "slot-error",
     "unmounted-pane",
     "replacement",
-  ]) {
+  ];
+  const selected = process.env.RSI_FRAME_SCENARIO;
+  if (selected) assert(scenarios.includes(selected), `Unknown frame scenario: ${selected}`);
+  for (const scenario of selected ? [selected] : scenarios) {
     const page = await browser.newPage({
         viewport: { width: 1440, height: 900 },
       }),
@@ -242,6 +245,31 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await page
         .getByRole("button", { name: "Allow once", exact: true })
         .waitFor();
+      const card = page.locator(".pane.selected .approval-review");
+      await card.getByRole("group", { name: "Approval details" }).waitFor();
+      assert.equal(await page.locator(".resource-dock .approval-review").count(), 0);
+      assert.equal(await page.getByRole('textbox',{name:'Main message'}).count(),0);
+      await page.evaluate(async () => {
+        const request = {...fixture.view.panels[0].detail.request, id:'other', reason:'Another waiting request'};
+        fixture.view.surfaces.main.pending = [{kind:'approval',owner:'parent',id:'other',title:request.reason,review:{kind:'approval',request}}];
+        await fixture.frame();
+      });
+      assert.equal(await page.locator('.approval-review').count(),1,'explicit selection and automatic selection share one form');
+      await card.getByText('Parent request',{exact:true}).waitFor();
+      await page.getByRole('button',{name:'Review: Another waiting request'}).waitFor();
+      await page.evaluate(async () => {fixture.view.surfaces.main.pending=[];await fixture.frame();});
+      const originalViewport = page.viewportSize();
+      await page.setViewportSize({width: 420, height: 860});
+      await card.getByText("Raw request", {exact: true}).click();
+      const scroll = card.getByRole("group", {name: "Approval details"});
+      assert(await scroll.evaluate(el => el.scrollHeight > el.clientHeight));
+      for (const name of ["Deny", "Allow once"]) {
+        const rect = await card.getByRole("button", {name, exact: true}).boundingBox();
+        assert(rect && rect.x >= 0 && rect.x + rect.width <= 420 &&
+          rect.y >= 0 && rect.y + rect.height <= 860);
+      }
+      await page.screenshot({path: join(report, `${name}-approval-narrow.png`)});
+      await page.setViewportSize(originalViewport);
       await page.evaluate(async () => {
         fixture.view.panels[0].detail.request.subject.session_id = "child";
         fixture.view.panels[0].detail.request.reason = "Child request";
@@ -255,9 +283,15 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await page.evaluate(()=>fixture.setReply('command',payload=>
         JSON.parse(payload).action==='approve'
           ? new Promise((_,reject)=>{window.rejectDecision=reject}) : '{}'));
-      await page
-        .getByRole("button", { name: "Allow once", exact: true })
-        .click();
+      await scroll.focus();
+      await scroll.press("Shift+Enter");
+      await scroll.dispatchEvent("compositionstart");
+      await scroll.press("Enter");
+      await scroll.dispatchEvent("compositionend");
+      await scroll.press("Enter");
+      assert.equal(await page.evaluate(() => fixture.calls.filter(call =>
+        call.method === "command" && JSON.parse(call.payload).action === "approve").length), 0);
+      await scroll.press("Enter");
       await page.waitForFunction(() =>
         fixture.calls.some(
           (call) =>
@@ -313,6 +347,12 @@ export async function verifyFrameCommit(browser, url, report, name) {
           .isDisabled(),
         false,
       );
+      await scroll.press("Escape");
+      await page.waitForFunction(() => fixture.calls.some(call => {
+        if (call.method !== "command") return false;
+        const decision = JSON.parse(call.payload);
+        return decision.action === "approve" && decision.owner === "child" && !decision.allow;
+      }));
       await page.evaluate(async () => {
         fixture.view.panels = [];
         await fixture.frame();
@@ -321,6 +361,95 @@ export async function verifyFrameCommit(browser, url, report, name) {
         await page.getByRole("button", { name: "Deny", exact: true }).count(),
         0,
       );
+      assert.equal(await page.getByText("This resource has retired.", {exact: true}).count(), 0);
+      const editor = page.getByRole('textbox', {name:'Main message'});
+      await editor.fill('unfinished draft');
+      await page.evaluate(async () => {
+        window.observedApproval = {id:'live-call', subject:{session_id:'child'},
+          action:'Read workspace', reason:'Current approval'};
+        fixture.view.surfaces.main.pending = [{kind:'approval',owner:'child',id:'live-call',
+          title:'Read workspace',review:{kind:'approval',request:window.observedApproval}}];
+        await fixture.frame();
+      });
+      await card.getByText('Current approval', {exact:true}).waitFor();
+      assert.equal(await editor.isVisible(),false);
+      assert.equal(await card.getByRole('button').count(),2);
+      await page.evaluate(() => fixture.setReply('command',payload => {
+        if(JSON.parse(payload).action==='approve') throw Error('lost approval reply');
+        return '{}';
+      }));
+      await card.getByRole('button',{name:'Allow once'}).click();
+      await card.getByRole('alert').filter({hasText:'outcome is unknown'}).waitFor();
+      await page.evaluate(async () => {
+        fixture.setReply('read_pending_interaction',()=>JSON.stringify({kind:'approval',request:{...window.observedApproval,reason:'Fresh pending details'}}));
+        await fixture.frame();
+      });
+      assert(await card.getByRole('button',{name:'Deny'}).isDisabled());
+      await card.getByRole('button',{name:'Refresh request'}).click();
+      await card.getByText('Fresh pending details',{exact:true}).waitFor();
+      assert(await card.getByRole('button',{name:'Deny'}).isEnabled());
+      await page.evaluate(async () => {
+        fixture.view.surfaces.main.pending = [];
+        await fixture.frame();
+      });
+      await editor.waitFor();
+      assert.equal(await editor.inputValue(),'unfinished draft');
+      assert.equal(await card.count(),0);
+      await page.evaluate(async () => {
+        const request = {id:'questions',session_id:'fixture-session',turn_id:'turn',questions:[
+          {id:'color',prompt:'Which color?',options:['Blue (Recommended)','Teal']},
+          {id:'why',prompt:'Why?',options:[]},
+        ]};
+        fixture.setReply('command',()=>'{}');
+        fixture.view.surfaces.main.pending = [{kind:'question', owner:request.session_id, id:request.id,
+          title:'Which color?', review:{kind:'question',request}}];
+        await fixture.frame();
+      });
+      const questions = page.locator('.pane.selected .question-review');
+      const savedQuestions = () => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('rsi.questions.')).length);
+      assert.equal(await savedQuestions(),0,'untouched questions leave no durable draft');
+      assert(await questions.getByRole('radio',{name:'Blue',exact:true}).isChecked());
+      await questions.getByRole('radio',{name:'Teal',exact:true}).click();
+      await questions.getByRole('textbox',{name:'Why?',exact:true}).fill('Readable contrast');
+      await questions.getByRole('button',{name:'Collapse the question card'}).click();
+      assert.equal(await questions.getByRole('textbox').count(),0);
+      await questions.getByRole('heading',{name:'Why?'}).waitFor();
+      await questions.getByRole('button',{name:'Expand the question card'}).click();
+      assert.equal(await questions.getByRole('textbox',{name:'Why?'}).inputValue(),'Readable contrast');
+      await page.evaluate(async () => {
+        window.pendingQuestions = fixture.view.surfaces.main.pending;
+        fixture.view.surfaces.main.pending = null;
+        await fixture.frame();
+      });
+      await questions.waitFor({state:'detached'});
+      assert.equal(await savedQuestions(),1,'an unobserved attachment preserves the draft');
+      await page.evaluate(async () => {
+        const reissued = structuredClone(window.pendingQuestions);
+        reissued[0].review.request.turn_id = 'another-turn';
+        fixture.view.surfaces.main.pending = reissued;
+        await fixture.frame();
+      });
+      await questions.getByRole('heading',{name:'Which color?'}).waitFor();
+      assert(await questions.getByRole('radio',{name:'Blue',exact:true}).isChecked(),'another turn cannot inherit previously typed answers');
+      await page.evaluate(async () => {
+        fixture.view.surfaces.main.pending = window.pendingQuestions;
+        await fixture.frame();
+      });
+      assert.equal(await questions.getByRole('textbox',{name:'Why?',exact:true}).inputValue(),'Readable contrast');
+      await questions.getByRole('button',{name:'Previous',exact:true}).click();
+      assert(await questions.getByRole('radio',{name:'Teal',exact:true}).isChecked());
+      await questions.getByRole('button',{name:'Next',exact:true}).click();
+      const reason = questions.getByRole('textbox',{name:'Why?',exact:true});
+      assert.equal(await reason.inputValue(),'Readable contrast');
+      await reason.press('Enter');
+      await page.waitForFunction(() => fixture.calls.some(call=>{
+        if(call.method!=='command')return false;
+        const value=JSON.parse(call.payload);
+        return value.action==='answer' && JSON.stringify(value.answers)==='["Teal","Readable contrast"]';
+      }));
+      await page.evaluate(async()=>{fixture.view.surfaces.main.pending=[];await fixture.frame();});
+      await editor.waitFor();
+      assert.equal(await savedQuestions(),0,'a confirmed settlement removes the draft');
     } else if (scenario === "external") {
       await page.evaluate(async () => {
         fixture.view.surfaces.main = {
@@ -441,7 +570,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await page.locator('textarea[aria-label="Main message"]').fill("Read @");
       await page.getByRole("button", { name: "Add files or run commands", exact: true }).click();
       await page
-        .getByRole("menuitem", { name: "File", exact: true })
+        .getByRole("option", { name: "File", exact: true })
         .click();
       const dialog = page.getByRole("dialog", {
         name: "Insert workspace file path",
@@ -464,7 +593,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       );
       await page.getByRole("button", { name: "Add files or run commands", exact: true }).click();
       await page
-        .getByRole("menuitem", { name: "File", exact: true })
+        .getByRole("option", { name: "File", exact: true })
         .click();
       await dialog
         .getByRole("button", { name: "Reference conversation", exact: true })
@@ -481,7 +610,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
     } else if (scenario === "references") {
       await page.getByRole("button", { name: "Add files or run commands", exact: true }).click();
       await page
-        .getByRole("menuitem", { name: "Conversation", exact: true })
+        .getByRole("option", { name: "Conversation", exact: true })
         .click();
       const dialog = page.getByRole("dialog", {
         name: "Reference a conversation",
@@ -548,7 +677,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       );
       await page.getByRole("button", { name: "Add files or run commands", exact: true }).click();
       await page
-        .getByRole("menuitem", { name: "Conversation", exact: true })
+        .getByRole("option", { name: "Conversation", exact: true })
         .click();
       await dialog
         .getByLabel("Source Session ID", { exact: true })
@@ -587,7 +716,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
               source_kind: "human",
               delivery_label: "Queued",
               message_id: "message",
-              read_label: "Read pending",
+              read_label: "Edit",
               editable: true,
             },
           ],
@@ -607,8 +736,8 @@ export async function verifyFrameCommit(browser, url, report, name) {
         fixture.hold();
         window.frame = fixture.frame();
       });
-      await page.locator(".queue-action").waitFor();
-      assert.equal(await page.locator(".queue-action").isDisabled(), true);
+      await page.getByRole("button", { name: "Edit queued message", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Edit queued message", exact: true }).isDisabled(), true);
       assert.equal(
         await page
           .getByRole("button", { name: "Stop", exact: true })
@@ -620,12 +749,15 @@ export async function verifyFrameCommit(browser, url, report, name) {
         await window.frame;
       });
       await page.waitForFunction(
-        () => !document.querySelector(".queue-action").disabled,
+        () => !document.querySelector('[aria-label="Edit queued message"]').disabled,
       );
       await page
-        .getByRole("button", { name: "Read pending", exact: true })
+        .getByRole("button", { name: "Edit queued message", exact: true })
         .click();
       await page.getByRole("dialog", { name: "Edit queued input" }).waitFor();
+      const retainedBlocks = await page.locator(".queue-field .hint").allTextContents();
+      assert.deepEqual(retainedBlocks, ["Attached image retained", "queue-notes.txt · 1.5KB"]);
+      await page.screenshot({ path: join(report, `${name}-queue-file.png`) });
       await page
         .getByLabel("Queued text 1", { exact: true })
         .fill("Updated queued text");
@@ -636,7 +768,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       );
       assert.equal(
         await page
-          .getByLabel("Queued text 3", { exact: true })
+          .getByLabel("Queued text 4", { exact: true })
           .evaluate((node) => node === document.activeElement),
         true,
       );
@@ -646,12 +778,12 @@ export async function verifyFrameCommit(browser, url, report, name) {
         .click();
       assert.equal(
         await page
-          .getByRole("button", { name: "Read pending", exact: true })
+          .getByRole("button", { name: "Edit queued message", exact: true })
           .evaluate((node) => node === document.activeElement),
         true,
       );
       await page
-        .getByRole("button", { name: "Read pending", exact: true })
+        .getByRole("button", { name: "Edit queued message", exact: true })
         .click();
       await page.getByRole("dialog", { name: "Edit queued input" }).waitFor();
       await page.evaluate(async () => {
@@ -682,7 +814,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
         fixture.view.surfaces.main.protected = true;
         await fixture.frame();
       });
-      assert.equal(await page.locator(".queue-action").count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Edit queued message", exact: true }).count(), 0);
       assert.equal(
         await page.locator('[data-interaction-id="question"]').count(),
         0,

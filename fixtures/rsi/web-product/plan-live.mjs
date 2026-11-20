@@ -1,5 +1,4 @@
-import {details} from "./controls.mjs";
-import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectWorkbench, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Explicit live plan handoff and structured delegation; never a default test.
 import assert from 'node:assert/strict';
@@ -13,7 +12,9 @@ const {report,model,service}=fixture;
 let page,browser;const errors=[],started=Date.now();let approvals=0;
 try {
   ({browser, page} = await openBrowserPage(chromium, errors));
-  await connectWorkbench(page, service, 'live plan and structured delegation');
+  const registration=service.register('live plan and structured delegation');
+  await registerFixtureWorkspace(page.request,service,registration);
+  await connectWorkbench(page,service,registration);
   await openWorkspace(page, service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();
@@ -21,11 +22,11 @@ try {
   await pane.getByTestId('composer-send').click();
   const deadline=Date.now()+240000;
   while(Date.now()<deadline) {
-    const answer=pane.getByRole('button',{name:/^Answer: Structured delegation verification/});
-    if(await answer.count() && await answer.isVisible()) {
-      assert.equal(approvals,0,'unexpected additional review');await answer.click();const dialog=details(page);await dialog.locator('.review-plan').waitFor();
+    const dialog=pane.locator('form').filter({has:page.locator('.review-plan')});
+    if(await dialog.isVisible()) {
+      assert.equal(approvals,0,'unexpected additional review');await dialog.locator('.review-plan').waitFor();
       const plan=await dialog.locator('.review-plan').innerText();assert.match(plan,/6\s*[*×]\s*7|42|comput|计算|delegat/i);await writeFile(join(report,'reviewed-plan.txt'),plan);await page.screenshot({path:join(report,'live-review.png')});
-      await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();approvals++;await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await answer.waitFor({state:'hidden'});
+      await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();approvals++;await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await dialog.waitFor({state:'hidden'});
     }
     const status=await pane.locator('.pane-status').innerText();if(['Completed','Failed'].includes(status))break;
     await page.waitForTimeout(100);

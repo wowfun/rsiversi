@@ -15,7 +15,7 @@ fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='create') {
   fixture.createEntered=true;await new Promise(resolve=>fixture.releaseCreate=resolve);
-  fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:command.workspace,creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',path:'C:/projects/review-workspace/',transcript:{blocks:[],status:'Ready'}};
+  fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'}};
  }
  await fixture.frame();return '{}';
 });
@@ -36,7 +36,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Main message',exact:true}).inputValue(),'Keep the starting draft');
   await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'review-workspace',exact:true}).waitFor();
-  await page.evaluate(async()=>{fixture.view.catalog.workspaces[0].name='Named workspace';await fixture.frame();});
+  await page.evaluate(async()=>{fixture.view.catalog.workspaces[0].name='Named workspace';fixture.view.surfaces.main.workspace.registration.name='Named workspace';await fixture.frame();});
   await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'Named workspace',exact:true}).waitFor();
   await page.screenshot({path:join(report,name+'-ready.png')});
   await page.evaluate(async()=>{fixture.view.surfaces.main=null;fixture.view.setup.agent.default_model=null;await fixture.frame();});

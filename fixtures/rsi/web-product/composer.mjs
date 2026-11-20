@@ -5,11 +5,13 @@ export async function verifyComposer(page) {
   const switching = await page.evaluate(async () => {
     const pane = fixture.runtime.panes.get("main"),
       store = fixture.runtime.connection.drafts;
-    await fixture.surface("saved-switch", { path: "/workspace" });
+    const workspace = fixture.attachedWorkspace("fixture");
+    workspace.coordinates.path = "/workspace";
+    await fixture.surface("saved-switch", {workspace});
     await pane.binding;
     pane.edit("Keep this draft while switching");
     await pane.flush();
-    await fixture.surface("other-switch", { path: "/workspace" });
+    await fixture.surface("other-switch", {workspace});
     await pane.binding;
     const ensure = store.ensure;
     let release;
@@ -31,7 +33,7 @@ export async function verifyComposer(page) {
     };
     await fixture.surface("saved-switch", {
       generation: "restored-switch",
-      path: "/workspace",
+      workspace,
     });
     return {
       header: pane.node.querySelector(".pane-session").textContent,
@@ -77,7 +79,7 @@ export async function verifyComposer(page) {
         const editor = pane.editor;
         if (firstMode === "query" || secondMode === "query") {
           await editor.update((record) =>
-            editor.store.freeze(record, {
+            editor.store.startDispatch(record, {
               kind: "message",
               id: session,
               opaque: "{}",
@@ -86,7 +88,6 @@ export async function verifyComposer(page) {
               captures: [],
             }),
           );
-          await editor.update((record) => editor.store.begin(record));
         }
         let entered,
           release,
@@ -181,7 +182,7 @@ export async function verifyComposer(page) {
       const store = fixture.runtime.connection.drafts,
         session = "automatic-reconcile-overlap";
       let record = await store.ensure("main", session, "c".repeat(64));
-      record = await store.freeze(record, {
+      record = await store.startDispatch(record, {
         kind: "message",
         id: session,
         opaque: "{}",
@@ -189,7 +190,6 @@ export async function verifyComposer(page) {
         images: 0,
         captures: [],
       });
-      await store.begin(record);
       DraftEditor.prototype.flush = async function () {
         entered();
         await held;

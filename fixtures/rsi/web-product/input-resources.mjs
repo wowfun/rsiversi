@@ -5,7 +5,7 @@ import {waitUntil} from './service.mjs';
 
 export async function verifyInputDialogRetirement(page, pane, kind = "reference") {
   const [button, dialog] = kind === 'file' ? ['File', 'Insert workspace file path'] : ['Conversation', 'Reference a conversation'];
-  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem', {name:button, exact:true}).click();
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('option', {name:button, exact:true}).click();
   await page.getByRole('dialog', {name:dialog, exact:true}).waitFor();
   // Retire the connection while the modal is open, as on forced disconnect.
   await disconnect(page);
@@ -19,7 +19,7 @@ export async function verifyFilePicker(page,pane,service,report,browser) {
   await input.fill('before  after');
   assert.equal(await input.inputValue(),'before  after','typing must reach the editable draft');
   await input.evaluate(element=>{element.focus();element.setSelectionRange(7,7)});
-  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'File',exact:true}).click();
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('option',{name:'File',exact:true}).click();
   assert.equal(await input.inputValue(),'before  after','opening must retain the editable draft');
   const dialog=page.getByRole('dialog',{name:'Insert workspace file path'});
   await dialog.getByLabel('Workspace-relative file path').fill('browse');
@@ -58,7 +58,7 @@ export async function verifyReferenceDraft(page,pane,sourcePane,report,browser) 
   const input=pane.getByRole('textbox',{name:'Main message',exact:true});
   const original=await input.inputValue();
   const source=(await sourcePane.getAttribute('data-session-id'));
-  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'Conversation',exact:true}).click();
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('option',{name:'Conversation',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Reference a conversation',exact:true});
   await dialog.getByRole('textbox',{name:'Source Session ID',exact:true}).fill(source);
   await dialog.getByRole('button',{name:'Capture preview',exact:true}).click();

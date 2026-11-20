@@ -41,14 +41,14 @@ async function complete(pane,prompt){
   await waitUntil(async()=>{
     if(await recoverNetwork(id,networkStart))return false;
     if(!await pane.count())return false;
-    const review=pane.locator('.pending button').filter({hasText:'Review:'});
+    const review=pane.locator('[data-interaction-owner][data-interaction-id]').filter({has:page.locator('.approval-review')});
     if(await review.count()&&await review.first().isVisible()){
       const control=await review.first().elementHandle();
       const identity=await control.evaluate(button=>[button.dataset.interactionOwner,button.dataset.interactionId]);
       assert(identity.every(value=>typeof value==='string'&&value.length>0),'exact pending interaction identity required');
       const key=JSON.stringify(identity);
       if(!approved.has(key)){
-        await control.click();await page.getByRole('button',{name:'Allow once',exact:true}).click();approved.add(key);approvals++;
+        await review.first().getByRole('button',{name:'Allow once',exact:true}).click();approved.add(key);approvals++;
         await waitUntil(()=>control.evaluate(button=>!button.isConnected),'approved interaction control retirement');
       }
       await control.dispose();
@@ -86,7 +86,7 @@ try{
   await waitUntil(()=>panel.getByAltText('Current Session browser screenshot').evaluate(img=>img.naturalWidth===1280),'canonical UI image');
   await panel.getByAltText('Current Session browser screenshot').scrollIntoViewIfNeeded();await page.screenshot({path:join(live.report,'browser-wide.png')});
   await page.setViewportSize({width:420,height:860});await page.waitForFunction(()=>document.querySelector('.resource-dock')?.classList.contains('resource-fullscreen'));await resources(page);await panel.waitFor({state:'visible'});await panel.getByAltText('Current Session browser screenshot').scrollIntoViewIfNeeded();assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:join(live.report,'browser-narrow.png')});assert(await panel.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.setViewportSize({width:1440,height:980});await closeDetails(page);
-  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('menuitem',{name:'Search history',exact:true}).click();
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();await page.getByRole('option',{name:'Search history',exact:true}).click();
   const search=page.getByRole('dialog',{name:'Search conversation text',exact:true});await search.getByLabel('History text query').fill('HISTORY_NEEDLE_1008');
   for(let step=0;step<8;step++){await search.getByRole('button',{name:'Search text',exact:true}).click();await waitUntil(()=>search.getByRole('button',{name:'Search text',exact:true}).isEnabled(),'history query');if(await search.getByRole('button',{name:'Open original',exact:true}).count())break;await search.getByRole('button',{name:'Continue indexing',exact:true}).click();await waitUntil(()=>search.getByRole('button',{name:'Search text',exact:true}).isEnabled(),'history indexing');}
   await search.getByRole('button',{name:'Open original',exact:true}).first().click();const original=search.getByLabel('Verified original text');await original.waitFor();

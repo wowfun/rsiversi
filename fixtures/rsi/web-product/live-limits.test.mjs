@@ -23,6 +23,7 @@ test('live capacities are explicit, exact and bounded without model inference',(
   }
   assert.throws(()=>liveLimits({...environment,DEEPSEEK_MAX_OUTPUT_RESERVE_TOKENS:'4095'}),/maximum output reserve/);
   const profile=deepseekProfile('model.v1',liveLimits(environment));
+  assert.match(profile,/^protocol="chat-completions"$/m);
   assert.match(profile,/language_models\."model.v1"/);
   assert.match(profile,/max_output_reserve_tokens=393216/);
   assert.match(profile,/default_output_tokens=\{"model.v1"=4096\}/);

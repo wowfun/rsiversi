@@ -77,6 +77,10 @@ non-admission while retaining the unknown-outcome fence. Its transport is script
 both browsers. It checks initial arrow navigation, model-search caret and selection,
 and scroll stability across decoded status-only frames while preserving content
 tail following and historical reading. Its transport is scripted.
+`message-feedback.test.mjs` holds the first rating read open while a user
+focuses and activates the same answer. Chromium and Firefox verify that the
+component waits for its version, retains a conflicted draft and sends a new
+write only on the user's next submission. The fixture scripts the Session API.
 The opt-in alignment live fixture uses one isolated text file and a configured
 DeepSeek model to check rendered table/code output, an actual read-only file Tool,
 Stop and a subsequent successful turn. It records durable Facts and provider usage,
@@ -84,7 +88,8 @@ checks the original file bytes, and closes its browser and Service before scanni
 text evidence for the supplied key. It requires the explicit live environment,
 model, limits and report variables used by the other live fixtures.
 Windows UI alignment verifies known-path workspace entry; native directory
-browsing/creation retains its Unix-only contract. Live DeepSeek profiles bind the
+browsing/creation retains its Unix-only contract. The shared live profile uses
+Chat Completions at the DeepSeek endpoint. Live DeepSeek profiles bind the
 request's default output cap to the explicitly supplied default output reserve,
 so a provider default cannot silently exceed the fixture's declared capacity.
 Manual inspection can explicitly select the fixture's loopback development HTTP
@@ -144,9 +149,9 @@ report terminal execution as skipped.
 The Dock fixture delays one real resize until after shell exit and verifies that
 the refused stale request leaves no terminal alert. It checks nested resource
 alerts and the unused terminal viewport background at every viewport/theme pair.
-It also asserts that creating or restoring an individual terminal tab does not
-request a hidden roster; terminal listing and refresh stay with the launcher.
-These counts begin after the launcher's own activation refresh is observed.
+It counts terminal-list calls from before the resource panel opens. The guide,
+More tools, and creating or restoring a terminal use zero. List terminals and
+Refresh terminals each issue one call, and a listed shell can be reattached.
 
 `verify.mjs` runs `worker-conformance.mjs` before the acknowledgement deadline
 probe against the published Worker and Rust/Wasm module. The fixture supplies
@@ -213,7 +218,9 @@ repository and CI fixture working directories load the same product graph.
 checks folded delegation/source actions, summary reading state, action errors,
 layout retry persistence, resource snapshot identity, disclosure dismissal and
 light/dark text contrast in Chromium and Firefox. The Markdown fixture verifies
-plain streaming code and highlighting after settlement.
+plain streaming code and settled token colors under a controlled clock. It checks
+deferred formula rendering, local math fonts, and copying a selection as TeX. These
+screenshots check presentation, not elapsed tokenizer time on the host CPU.
 `external-drafts-dom.mjs`, called by `dom.mjs`, exercises real
 composer controls, shared drafts, unknown outcomes and capacity recovery in
 desktop and narrow viewports. A MutationObserver checks that repeated frames and
@@ -231,11 +238,12 @@ clamping, injected IndexedDB write failure and the sixteen-tab bound. Product
 controls perform every layout operation; database reads inspect the committed
 document, and write faults are confined to the isolated browser context.
 
-`RSI_REPORT_DIR=/absolute/new/report node navigation-order.mjs` creates 65 durable
-Sessions through the paired product's authenticated browser and deterministic
+`RSI_REPORT_DIR=/absolute/new/report node navigation-order.mjs` registers its
+temporary workspace before first-use initialization and creates all 65 durable
+Sessions in that workspace through the authenticated browser and deterministic
 provider. It checks full-member cross-page keyboard moves, actual drag-and-drop,
 cross-window order notifications, persisted selection after responsive remount,
-nonempty row titles and internal/root overflow in eight light/dark viewports. It
+nonempty row titles and internal/root overflow at seven widths in light and dark themes. It
 also registers 65 real directories through the product and moves workspace
 siblings through the complete registry seed. Reports identify the exact build
 family and fixture provider; these are product behavior/visual observations,
@@ -512,6 +520,10 @@ Renderer verification also drops the HTTP reply after a real server commit. The
 actual WASM owner closes without replay, explicit reconnect starts a new observer,
 and the new renderer and Session send/cancel actions work before clean sign-out.
 
+On Windows the Service fixture gives native child processes a temporary user
+profile with its own roaming and local AppData directories. Interactive shell
+history and module caches belong to that profile for the lifetime of the fixture.
+
 The isolated Service fixture explicitly grants each product-test device configuration
 authority through the Local Devices application before exercising Settings writes.
 Registration itself remains unprivileged. Grant bypass and revocation tests use the
@@ -645,10 +657,35 @@ JSON/JSONL/log/text evidence files before reporting any credential match; links
 are excluded. Usage comparisons require nonempty, finite positive token counts.
 
 `schedule-live.mjs` uses the same explicit live environment as `plan-live.mjs`.
-It creates one short one-shot reminder, waits for the actual automatic Turn,
-and verifies the human/automatic provenance and retained allowance through CLI
-history. Browser screenshots inspect ordinary Tool results at wide and narrow
-widths. No repeating work is created, and fixture shutdown owns all live timers.
+It creates one one-shot reminder, closes the page, and stops the isolated Host
+before the deadline. The Host starts again after the deadline. The fixture
+waits for the actual automatic Turn's terminal Fact before reconnecting any
+client. Its isolated SQLite snapshot verifies the original reminder identity,
+one acceptance and the spent allowance. Wide and narrow browser screenshots
+show the reopened conversation. Pass `--crash-host` to terminate the fixture's
+foreground Host process before its deadline and exercise recovery from an
+unclean stop with the same storage and browser identity.
+Use `--archive` for delivery after unarchive, `--without-navigation` for
+recovery without the navigation owner, or `--pending-restart` to edit the
+running Host's Profile while an archived task detail is open and restart
+after verifying that the overdue reminder is still deferred.
+The shared SQLite evidence reader resolves a compact mailbox claim through its
+accepted control in the same snapshot. Both physical rows count toward its read limit.
+
+`schedule-catalog.mjs` checks manager filters, recommendations, page replacement,
+linked Session titles and ID fallbacks, and keyboard focus in Chromium and Firefox.
+`schedule-claimed-restart.mjs` uses the fixture provider to hold the response to
+an already claimed reminder. It terminates the foreground Host while that request
+is outstanding and checks the original message, provider calls and terminal
+outcome after restart, with the browser closed.
+`schedule-product.mjs` runs the released Host, Worker and Web against the fixture provider and uses
+`RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and `RSI_REPORT_DIR`. It opens a recommended draft, creates
+a weekly task, observes it from an independently authenticated device with the catalog already
+open, reopens its original Session from the global catalog and preserves edited starting text.
+
+`schedule-view.mjs` exercises the conversation clock and the real resource dock
+in Chromium and Firefox. It checks single-task activation, the multi-task list,
+keyboard dismissal, updated and removed tasks, and narrow-screen layout.
 
 `program-live.mjs` additionally requires an absolute `RSI_TEST_NODE`. Its isolated
 Host enables the configured Node runtime and selects the builtin `workflow`
@@ -690,8 +727,10 @@ cleanup. Run it with explicit
 It owns temporary HOME/XDG paths and uses no live model provider.
 
 The default queue scenario holds an actual Rust Turn at its deterministic provider,
+checks the single row and the keyboard-operated count button for multiple rows,
 replaces one queued input, reads its replacement back from the queue editor, and
 requires waiting inputs to remain outside the transcript until durable preparation.
+The document projection fixture checks filename and size in a mixed-block edit.
 It verifies that its explicit access policy prevents
 conversion into steering, withdraws it and
 then stops the original Turn. It checks that a second queued input actually
@@ -699,6 +738,13 @@ executes and that the ordinary draft survives. IndexedDB probes independently
 verify opaque queue requests across an unknown reply and reopen. Native addon
 probes must use an `RSI_NATIVE_UI_ARTIFACT` built with the same build-family manifest
 as a frozen `RSI_WEB_BINARY`; artifacts from a different family are rejected.
+
+The service fixture's optional `close(afterStop)` callback observes the isolated
+store after the Host and Web service exit, before temporary files are removed.
+It can checkpoint and measure a pending queue without restarting its scheduler.
+
+The live reminder archive scenario checks that the task catalog names the
+archived linked Session and disables its open action before restarting the Host.
 
 `ui-alignment.mjs` drives directory validation, physical folder creation, complete
 pins, primary Enter/Queue, Stop draft retention, code copying and browser refresh
@@ -1019,3 +1065,13 @@ per edit with stable attachment identity. Its release endpoint is fault injected
 collection are verified separately by `rsi-agent-references --test references`.
 The schema-refusal fixture includes version 6 and checks that rejection preserves
 its version and records before the user explicitly discards them.
+
+## Model retry in the shipping Web client
+
+`retry-schedule.mjs` drives a loopback 429 through the DeepSeek adapter.
+The default run compares the started chat row with the reserved effect and
+provider calls. With `--exhaust` it checks every allowed retry in the same
+open chat disclosure and the terminal refusal. With `--cancel-reopen` it stops the Turn during backoff, restarts
+the Host on the same store and checks the reopened chat and provider count
+after the original retry deadline. Set `RSI_WEB_BINARY`, `RSI_WEB_ASSETS`
+and a fresh `RSI_WEB_REPORT` directory for each run.

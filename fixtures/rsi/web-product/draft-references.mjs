@@ -27,8 +27,7 @@ export async function verifyDraftReferences(browser, root) {
       try {await store.edit(replacement,'bad',[],[reference])} catch(error) {refusedBinding = error.message.includes('another draft Header')}
       record = await store.get('main','target');
       const original = JSON.stringify({large:'18446744073709551615',references:[reference]});
-      record = await store.freeze(record,{kind:'message',id:'stable-input',opaque:original,text_bytes:17,images:0,captures:[{target:reference.metadata.target,snapshot:reference.snapshot}]});
-      record = await store.begin(record);
+      record = await store.startDispatch(record,{kind:'message',id:'stable-input',opaque:original,text_bytes:17,images:0,captures:[{target:reference.metadata.target,snapshot:reference.snapshot}]});
       record = await store.edit(record,'Next draft',[],[]);
       const frozen = record.pending.opaque === original && record.pending.captures.length === 1;
       record = await store.settle(record,{status:'unknown'});

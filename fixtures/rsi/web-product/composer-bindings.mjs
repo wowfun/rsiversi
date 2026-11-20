@@ -209,7 +209,7 @@ export async function verifyComposerBindings(page, report, name) {
         await pane.flush();
         const editor = pane.editor;
         await editor.update((record) =>
-          editor.store.freeze(record, {
+          editor.store.startDispatch(record, {
             kind: "message",
             id: `retry-${text.length}`,
             opaque: "{}",
@@ -218,7 +218,6 @@ export async function verifyComposerBindings(page, report, name) {
             captures: [],
           }),
         );
-        await editor.update((record) => editor.store.begin(record));
         if (text !== "original") {
           pane.edit(text);
           await pane.flush();

@@ -1,6 +1,6 @@
 const owners = new Set([
    'worker.js', 'admission.js', 'document-connection.js',
-  'mounts.js', 'drafts.js', 'draft-databases.js', 'starting-draft.js', 'device-store.js', 'presentation-store.js',
+  'mounts.js', 'drafts.js', 'draft-databases.js', 'storage-namespace.js', 'starting-draft.js', 'device-store.js', 'presentation-store.js',
   'presentation-layout.js', 'settings-dialog.js',
   'src/main.tsx', 'src/workbench-root.tsx', 'src/frame-commit.tsx', 'src/slots.tsx', 'src/bridge.ts', 'src/native.ts',
   'src/session/state.ts', 'src/presentation.tsx', 'src/resource-owner.mjs', 'src/resource-hosts.ts',

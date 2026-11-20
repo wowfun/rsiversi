@@ -8,8 +8,8 @@ export async function verifyTerminals(page,service,report,name){
  const stylesBefore=await page.evaluate(()=>document.adoptedStyleSheets.length);
  const panel=page.getByRole('region',{name:'Session terminals'});
  await resources(page);
- const roster=page.getByRole('region',{name:'Terminals',exact:true});
- await roster.getByRole('button',{name:'New terminal',exact:true}).click();
+ const more=page.getByRole('button',{name:'More tools',exact:true});
+ await page.getByRole('button',{name:'New terminal',exact:true}).click();
  await panel.getByRole('status').filter({hasText:'You have control'}).waitFor();
  const typography=await panel.locator('.xterm-rows').evaluate(element=>{const style=getComputedStyle(element);return {family:style.fontFamily,size:style.fontSize,space:style.whiteSpace}});
  assert.match(typography.family,/monospace/,'terminal dynamic CSS did not apply under the product CSP');
@@ -37,7 +37,8 @@ export async function verifyTerminals(page,service,report,name){
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();
  await waitUntil(async()=>await page.evaluate(()=>document.adoptedStyleSheets.length)===stylesBefore,'terminal styles disposed');
  await resources(page);
- await roster.getByRole('button',{name:'Terminal 1 · running',exact:true}).click();
+ await more.click();await page.getByRole('menuitem',{name:'List terminals',exact:true}).click();
+ await page.getByRole('menuitem',{name:'Terminal 1 · running',exact:true}).click();
  await panel.getByRole('status').filter({hasText:'Read only'}).waitFor();
  await waitUntil(async()=>(await panel.locator('.xterm-rows').innerText()).includes('hidden-linkAFTER-SHORT-CONTROLS'),'reattached snapshot actually rendered');
  await page.screenshot({path:join(report,`${name}-terminal-readonly.png`)});
@@ -61,7 +62,9 @@ export async function verifyTerminals(page,service,report,name){
  await panel.getByRole('button',{name:'Terminate terminal',exact:true}).click();
  await panel.locator('.terminal-empty').waitFor();
  await panel.getByRole('button',{name:'Hide terminal panel'}).click();
- await roster.getByRole('button',{name:'Refresh terminals',exact:true}).click();
- await waitUntil(async()=>await roster.getByRole('button',{name:/^Terminal \d+ ·/}).count()===0,'terminal roster refreshed after close');
+ await more.click();await page.getByRole('menuitem',{name:'List terminals',exact:true}).click();
+ await page.getByRole('menuitem',{name:'Refresh terminals',exact:true}).click();
+ await page.getByRole('menuitem',{name:'Refresh terminals',exact:true}).and(page.locator(':enabled')).waitFor();
+ assert.equal(await page.getByRole('menuitem',{name:/^Terminal \d+ ·/}).count(),0);
  await writeFile(join(report,`${name}-terminal.json`),JSON.stringify({native_shell:true,unicode:true,admission_backpressure_recovered:true,takeover_resized:true,bridge_controls_filtered:true,oversized_osc_filtered:true,short_application_controls_filtered:true,readonly_reattach:true,explicit_takeover:true,shell_environment_retained:true,resize:true,exit_code:7,explicit_close:true},null,2));
 }

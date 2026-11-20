@@ -2,7 +2,7 @@ import {workspaceForm,navigationMode} from './controls.mjs';
 // Product path: authenticated browser, Rust Worker, Host, Store and 65 durable Sessions.
 import {paired} from './paired-env.mjs';
 import {startService} from './service.mjs';
-import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
+import {connectWorkbench,openWorkspace,registerFixtureWorkspace} from './browser-fixture.mjs';
 import {chromium} from 'playwright';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -15,7 +15,7 @@ async function mode(label,value) {
   await navigationMode(page,value);
 }
 try{
-  service=await startService({binary:paired.binary,assets:paired.assets,report});
+  service=await startService({binary:paired.binary,assets:paired.assets,report,registrationLabel:'Indexed navigation'});
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},deviceScaleFactor:1});
   await context.addInitScript(()=>{
     const NativeWorker=window.Worker;window.bridgeErrors=[];
@@ -28,11 +28,12 @@ try{
     };
   });
   page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
-  await connectWorkbench(page,service,'Indexed navigation');await openWorkspace(page,service);
+  await registerFixtureWorkspace(context.request,service);
+  await connectWorkbench(page,service,service.registration);await openWorkspace(page,service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true});
   for(let index=0;index<65;index++){
     if(index){
-      await page.getByTestId('workspace-open').first().click();
+      await page.getByRole('button',{name:'New conversation in workspace',exact:true}).click();
       await page.waitForFunction(previous=>{
         const pane=document.querySelector('.pane.selected');
         return pane?.dataset.sessionId && pane.dataset.sessionId!==previous && !pane.querySelector('textarea').disabled;
@@ -70,12 +71,13 @@ try{
   await peer.close();
   for(const theme of ['light','dark'])for(const [width,height] of [[1440,900],[1024,768],[1023,900],[900,900],[768,900],[767,900],[390,844]]){
     await page.emulateMedia({colorScheme:theme});await page.setViewportSize({width,height});
-    if(width<1024){await page.getByRole('button',{name:width<768?'Toggle navigation':'Expand navigation',exact:true}).click();await page.getByRole('dialog',{name:'Workspace navigation',exact:true}).waitFor();}
+    if(width<1024){await page.getByRole('button',{name:width<768?'Toggle navigation':'Expand navigation',exact:true}).click();await page.getByRole('button',{name:'Collapse navigation',exact:true}).waitFor();}
     await page.waitForFunction(()=>document.querySelector('.manual-pagination') && document.querySelectorAll('#sessions [data-testid=conversation-row]').length===64);
     const geometry=await page.evaluate(()=>{const list=document.querySelector('#sessions'),sidebar=list.closest('.sidebar');return {overflow:document.documentElement.scrollWidth-innerWidth,sidebarOverflow:sidebar.scrollWidth-sidebar.clientWidth,listOverflow:list.scrollWidth-list.clientWidth,direction:getComputedStyle(list).flexDirection,manualRows:list.querySelectorAll('[data-testid=conversation-row]').length,blankTitles:[...list.querySelectorAll('[data-testid=conversation-open] strong')].filter(row=>!row.textContent.trim()).length};});
     assert(geometry.overflow<=1,JSON.stringify(geometry));assert.equal(geometry.manualRows,64);assert.equal(geometry.blankTitles,0);assert.equal(geometry.direction,'column');assert(geometry.sidebarOverflow<=1,JSON.stringify(geometry));assert(geometry.listOverflow<=1,JSON.stringify(geometry));
     await page.screenshot({path:join(report,`navigation-${width}-${theme}.png`)});checks.push({width,height,theme,...geometry});
-    if(width<1024)await page.keyboard.press('Escape');
+    if(width<768)await page.keyboard.press('Escape');
+    else if(width<1024)await page.getByRole('button',{name:'Collapse navigation',exact:true}).click();
   }
   await page.setViewportSize({width:1440,height:900});
   await mode('Conversation order','updated');

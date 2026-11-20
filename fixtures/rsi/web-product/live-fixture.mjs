@@ -7,7 +7,7 @@ import {join} from 'node:path';
 import {startService} from './service.mjs';
 import {redactEvidence} from './evidence.mjs';
 import {cleanupAll} from './cleanup.mjs';
-export async function liveFixture({configure}={}) {
+export async function liveFixture({configure, foregroundHost = false, developmentHttp = false}={}) {
   const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS,model=process.env.RSI_LIVE_MODEL;
   assert(report && assets && model && process.env.RSI_LIVE_ENV_FILE,'explicit live environment, model and report required');
   const limits=liveLimits();
@@ -23,7 +23,7 @@ export async function liveFixture({configure}={}) {
   }
 
   try {
-  service=await startService({binary,assets,report,deepseekKey:key,configure:async({config,workspace})=>{
+  service=await startService({binary,assets,report,deepseekKey:key,foregroundHost,developmentHttp,configure:async({config,workspace})=>{
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},default_reasoning_effort:'off'}}));
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits));
     await configure?.({config,workspace});

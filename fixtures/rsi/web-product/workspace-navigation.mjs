@@ -13,11 +13,20 @@ fixture.view.setup.agent.default_model=null;
 fixture.view.catalog.models=[];
 const activeRow={session:'active',created_at_ms:'1',last_activity_ms:String(Date.now()-3600000),path:'/fixture',location:{kind:'local'},workspace:'fixture',metadata:{title:'Active conversation',archived:false,pinned:false}};
 const archivedRow={...activeRow,session:'archived',metadata:{title:'Archived conversation',archived:true,pinned:false}};
-fixture.view.navigation={ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[activeRow],more:false,scanned:1,diagnostic:null};
+fixture.view.navigation={ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[activeRow],more:false,continued:true,scanned:1,diagnostic:null};
+fixture.queries=[];
 fixture.setReply('command',async text=>{
  const command=JSON.parse(text);const nav=fixture.view.navigation;
  if(command.action==='navigate'&&command.command.kind==='query'){
-   nav.filter=command.command.filter;nav.entries=[activeRow,archivedRow].filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);await fixture.frame();
+   nav.filter=command.command.filter;
+   nav.continued=false;
+   fixture.queries.push(nav.filter.query);
+   nav.entries=[activeRow,archivedRow].filter(row=>(nav.filter.archived===null||row.metadata.archived===nav.filter.archived)&&row.metadata.title.toLowerCase().includes(nav.filter.query.toLowerCase()));
+   await fixture.frame();
+ } else if(command.action==='navigate'&&command.command.kind==='replace'&&command.command.session==='archived'){
+   archivedRow.metadata=command.command.metadata;
+   nav.entries=nav.entries.filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);
+   await fixture.frame();
  }
  return '{}';
 });
@@ -47,6 +56,47 @@ try {
    assert.equal(await page.getByRole('button',{name:'Toggle navigation',exact:true}).count(),0);
    assert.equal(await page.locator('#connection-state').isVisible(),false);
    assert.equal(await page.locator('.setup-prompt:visible,.pane-status:visible').count(),0);
+   const searchButton=page.getByRole('button',{name:'Search conversations',exact:true});
+   const searchInput=page.getByRole('textbox',{name:'Search conversations'});
+   await searchButton.click();
+   assert(await searchInput.evaluate(node=>node===document.activeElement));
+   await page.locator('#workbench').click({position:{x:1,y:1}});
+   await searchButton.waitFor();
+   assert.deepEqual(await page.evaluate(()=>fixture.queries),[]);
+   await searchButton.click();
+   await searchInput.evaluate(input=>{
+    // Both edits must arrive inside the debounce window even on a busy test host.
+    const setValue=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+    for(const text of ['zz','  Zz none  ']){
+     setValue.call(input,text);
+     input.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+   });
+   await page.getByText('No matching conversations.',{exact:true}).waitFor();
+   assert.deepEqual(await page.evaluate(()=>fixture.queries),['Zz none']);
+   await searchInput.fill('active');
+   await searchInput.press('Enter');
+   await page.getByTestId('conversation-row').filter({hasText:'Active conversation'}).waitFor();
+   await searchInput.press('Escape');
+   await page.waitForFunction(()=>fixture.queries.at(-1)==='');
+   assert.deepEqual(await page.evaluate(()=>fixture.queries),['Zz none','active','']);
+   await searchButton.click();
+   await searchInput.fill('no active row has this name');
+   await page.getByText('No matching conversations.',{exact:true}).waitFor();
+   await searchInput.fill('ACTIVE');
+   const matchingSearchRow=page.getByTestId('conversation-row').filter({hasText:'Active conversation'});
+   await matchingSearchRow.waitFor();
+   for(const term of ['conv ac','Áctive','active fixture']){
+     await searchInput.fill(term);
+     await matchingSearchRow.waitFor();
+   }
+   assert((await matchingSearchRow.locator('small').innerText()).trim().length>0);
+   await page.screenshot({path:join(report,name+'-session-search.png')});
+   await searchInput.press('Enter');
+   await searchInput.fill('界'.repeat(499)+'🌿');
+   assert.equal(await searchInput.inputValue(),'界'.repeat(499));
+   await searchInput.press('Escape');
+   assert.deepEqual(await page.evaluate(()=>fixture.queries),['Zz none','active','']);
    await navigationOptions(page);
    await page.getByRole('menuitemradio',{name:'By workspace',exact:true}).waitFor();
    for(const theme of ['dark','light']) {
@@ -66,9 +116,107 @@ try {
    await navigationFilter(page,'archived');
    await page.getByTestId('conversation-row').filter({hasText:'Active conversation'}).waitFor({state:'detached'});
    assert.equal(await page.getByTestId('conversation-row').count(),1);
+   await searchButton.click();await searchInput.fill('archived');
+   const archivedResult=page.getByTestId('conversation-row').filter({hasText:'Archived conversation'});
+   await archivedResult.getByTestId('conversation-open').click();
+   await page.getByText('Unarchive this session to open it.',{exact:true}).waitFor();
+   await archivedResult.getByRole('button',{name:'Unarchive session',exact:true}).click();
+   await archivedResult.waitFor({state:'detached'});
+   await page.getByText('No matching conversations.',{exact:true}).waitFor();
+   await searchInput.press('Escape');
    await navigationFilter(page,'active');
+   const sessionRow=page.getByTestId('conversation-row').filter({hasText:'Active conversation'});
+   const sessionOpen=sessionRow.getByTestId('conversation-open');
+   await page.setViewportSize({width:390,height:844});
+   const opener=page.getByRole('button',{name:'Toggle navigation',exact:true});
+   const drawer=page.getByRole('dialog',{name:'Workspace navigation',exact:true});
+   await opener.click();await drawer.waitFor();
+   await sessionOpen.focus();await sessionOpen.press('Shift+F10');
+   const mobilePin=drawer.getByRole('menuitem',{name:'Pin session',exact:true});
+   await mobilePin.waitFor();
+   assert(await mobilePin.evaluate(node=>node===document.activeElement));
+   await mobilePin.press('Escape');await mobilePin.waitFor({state:'detached'});
+   assert(await drawer.isVisible());
+   await sessionOpen.click();await drawer.waitFor({state:'hidden'});
+   await opener.click();await drawer.getByRole('button',{name:'Open plugins',exact:true}).click();
+   await drawer.waitFor({state:'hidden'});
+   const pluginSettings=page.getByRole('dialog',{name:'Settings',exact:true});
+   await pluginSettings.waitFor();await page.keyboard.press('Escape');await pluginSettings.waitFor({state:'hidden'});
+   await page.setViewportSize({width:1440,height:900});
+   await sessionOpen.waitFor();
+   assert.equal(await sessionRow.getByRole('menuitem',{includeHidden:true}).count(),0);
+   await sessionOpen.focus();
+   await page.keyboard.press('Shift+F10');
+   const pin=page.getByRole('menuitem',{name:'Pin session',exact:true});
+   await pin.waitFor();
+   await page.waitForFunction(()=>document.activeElement?.textContent==='Pin session');
+   await page.keyboard.press('End');
+   await page.waitForFunction(()=>document.activeElement?.textContent==='Archive session');
+   await page.keyboard.press('Escape');
+   await pin.waitFor({state:'detached'});
+   assert(await sessionOpen.evaluate(node=>document.activeElement===node));
+   await sessionOpen.click({button:'right'});
+   await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+   const rename=page.getByRole('dialog',{name:'Rename session',exact:true});
+   await rename.waitFor();
+   assert(await rename.getByLabel('Session name').evaluate(node=>document.activeElement===node));
+   assert(await rename.evaluate(node=>!getComputedStyle(node).backgroundColor.startsWith('rgba(')),'the rename dialog must have an opaque background');
+   const nameField=rename.getByLabel('Session name');
+   const closeRename=rename.getByRole('button',{name:'Close rename session'}),saveRename=rename.getByRole('button',{name:'Rename',exact:true});
+   await closeRename.focus();await page.keyboard.press('Shift+Tab');
+   assert(await saveRename.evaluate(el=>el===document.activeElement),'backward Tab wraps inside the rename dialog');
+   await page.keyboard.press('Tab');
+   assert(await closeRename.evaluate(el=>el===document.activeElement),'forward Tab wraps inside the rename dialog');
+   await nameField.dispatchEvent('compositionstart');
+   await nameField.press('Enter');
+   assert(await rename.isVisible(),'committing composition must keep the dialog open');
+   await nameField.dispatchEvent('compositionend');
+   await page.screenshot({path:join(report,name+'-rename-session.png')});
+   await page.keyboard.press('Escape');
+   await rename.waitFor({state:'hidden'});
+   assert(await sessionOpen.evaluate(node=>document.activeElement===node));
+   await sessionOpen.press('ContextMenu');
+   await pin.waitFor();
+   assert(await pin.evaluate(node=>[...node.querySelectorAll('use')].every(icon=>document.querySelector(icon.getAttribute('href')))));
+   await page.screenshot({path:join(report,name+'-session-actions.png')});
+   await page.keyboard.press('Escape');
+   const actions=sessionRow.getByRole('button',{name:/Session actions for/});
+   await actions.click();await pin.waitFor();
+   await actions.click();await pin.waitFor({state:'detached'});
+   await page.evaluate(async()=>{
+     fixture.view.navigation.attention={entries:[{position:{conversation:{kind:'native',id:'active'},epoch:'fixture',sequence:'1'},status:'running',targets:[]}],truncated:false};
+     await fixture.frame();
+   });
+   const indicator=sessionRow.getByRole('img',{name:'Running'});
+   await indicator.waitFor();
+   assert(await sessionRow.evaluate(node=>node.querySelector('.session-activity').getBoundingClientRect().right<=node.querySelector('strong').getBoundingClientRect().left),'flat row activity must clear the title');
+
    await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
    const dialog=page.getByRole('dialog',{name:'Select workspace directory',exact:true});
+   const location=dialog.getByLabel('Execution location',{exact:true});
+   const reads=()=>page.evaluate(()=>fixture.calls.filter(call=>{
+     if(call.method!=='command')return false;
+     const input=JSON.parse(call.payload);
+     return input.action==='plugins'&&input.command.kind==='ssh'&&input.command.command.kind==='read';
+   }).length);
+   await dialog.getByRole('button',{name:'demo',exact:false}).waitFor();
+   assert.equal(await reads(),0);
+   assert.equal(await location.count(),0);
+   await page.evaluate(async()=>{
+     fixture.previousPlugins=fixture.view.plugins;
+     fixture.view.plugins={...fixture.view.plugins,ssh:{available:true,catalog:{targets:[
+       {candidate:{target:'remote',name:'Remote fixture'},permissions:{use_target:true},connected:true},
+       {candidate:{target:'hidden',name:'Unavailable fixture'},permissions:{use_target:false},connected:true},
+     ]}}};
+     await fixture.frame();
+   });
+   await location.selectOption('remote');
+   assert.equal(await reads(),1);
+   assert.equal(await location.getByRole('option',{name:'Unavailable fixture'}).count(),0);
+   await page.evaluate(async()=>{fixture.view.plugins=fixture.previousPlugins;await fixture.frame()});
+   await location.getByRole('option',{name:'Selected SSH target · unavailable'}).waitFor({state:'attached'});
+   await location.selectOption('local');
+   await location.waitFor({state:'detached'});assert.equal(await reads(),1);
    await dialog.getByRole('button',{name:'demo',exact:false}).click();
    await dialog.getByRole('navigation',{name:'Directory breadcrumbs'}).getByRole('button',{name:'C:/',exact:true}).waitFor();
    await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();
@@ -104,7 +252,7 @@ try {
    await group.getByRole('button',{name:'Show 1 more session',exact:true}).waitFor();
    await page.evaluate(async()=>{
     fixture.view.navigation.groups.fixture.entries=window.allRows;
-    fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',workspace:'fixture'};
+    fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',workspace:fixture.attachedWorkspace('fixture')};
     fixture.view.navigation.attention={entries:[{position:{conversation:{kind:'native',id:'row-7'},epoch:'fixture',sequence:'1'},status:'running',targets:[]}],truncated:false};
     await fixture.frame();
    });
@@ -116,7 +264,48 @@ try {
    });
    assert.deepEqual(alignment,{aligned:true,compact:true,active:true});
    await page.screenshot({path:join(report,name+'-workspace-rows.png')});
-   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,archiveFilters:true,modelFreeRegistration:true,resourceFallback:true});
+   await page.evaluate(async()=>{
+     fixture.view.surfaces.main={...fixture.savedMain,session:'fresh-session',draft:true};
+     await fixture.frame();
+   });
+   const fresh=group.getByRole('button',{name:'New session',exact:true});
+   await fresh.waitFor();
+   assert.equal(await fresh.getAttribute('aria-current'),'true');
+   const editor=page.getByRole('textbox',{name:'Main message'});
+   await editor.fill('Still editing');
+   await fresh.press('Enter');
+   await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Main message');
+   assert.equal(await editor.inputValue(),'Still editing');
+   await page.evaluate(async()=>{
+     fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',draft:false};
+     await fixture.frame();
+   });
+   await fresh.waitFor({state:'detached'});
+   await page.evaluate(()=>{
+     window.groupOpens=0;
+     fixture.setReply('command',async text=>{
+       const request=JSON.parse(text).command;
+       if(request?.kind==='close_group'){
+         delete fixture.view.navigation.groups.fixture;
+         await fixture.frame();
+         await new Promise(resolve=>{window.finishClose=resolve;});
+       }
+       if(request?.kind==='group')window.groupOpens++;
+       return '{}';
+     });
+   });
+   const toggle=group.locator('.workspace-toggle');
+   await toggle.click();
+   await page.waitForFunction(()=>!!window.finishClose);
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+   await page.evaluate(()=>window.finishClose());
+   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+   assert.equal(await page.evaluate(()=>window.groupOpens),0,'closing the active workspace must not enqueue an automatic reopen');
+   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
+  } catch (error) {
+   await page.screenshot({path:join(report,name+'-failure.png')});
+   await writeFile(join(report,name+'-failure.txt'),[error.stack,...errors,await page.locator('body').innerText()].join('\n'));
+   throw error;
   } finally {await browser.close()}
  }
  await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));

@@ -5,7 +5,7 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {waitUntil} from './service.mjs';
-import {detailMode,resources} from './controls.mjs';
+import {detailMode,openResource,resources} from './controls.mjs';
 export async function verifySshSession({page,service,report,dialog,target,checks}) {
   const workspace=join(service.workspace,'picked-on-target');
   const marker=`SSH_PROJECT_${target.candidate.target}`;
@@ -52,15 +52,13 @@ export async function verifySshSession({page,service,report,dialog,target,checks
   await content.getByRole('button',{name:'Read file',exact:true}).click();
   await content.locator('pre').filter({hasText:'after-ssh'}).waitFor();
   await page.screenshot({path:join(report,'ssh-session-files.png')});
-  await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
-  await page.getByRole('button',{name:'Workspace changes',exact:true}).click();
+  await openResource(page,'Workspace changes');
   await content.getByRole('button',{name:'Review workspace changes',exact:true}).click();
   await content.getByRole('button',{name:'Open interval files',exact:true}).first().click();
   await content.getByRole('button',{name:'Open file diff',exact:true}).first().click();
   await content.locator('pre').waitFor();
   assert.match(await content.locator('pre').innerText(),/after-ssh|ssh-bash-ok/);
   await page.screenshot({path:join(report,'ssh-session-review.png')});
-  await page.getByRole('button',{name:'Open resources',exact:true}).first().click();
   checks.push('SSH Session Files and Review render target bytes and settled diff');
   const options=page.locator('.conversation-menu');if(!await options.evaluate(node=>node.open))await options.locator('summary').click();
   await page.getByRole('button',{name:'Terminal',exact:true}).click();await options.locator('summary').click();

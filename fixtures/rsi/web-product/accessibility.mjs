@@ -40,7 +40,7 @@ createRoot(document.getElementById('root')).render(<main id="workbench" classNam
     for(const [theme,forcedColors] of [['light','none'],['dark','none'],['light','active']]) {
       await page.emulateMedia({colorScheme:theme,forcedColors});
       await page.getByLabel('Message',{exact:true}).focus();
-      const focus=await page.getByLabel('Message',{exact:true}).evaluate(node=>({focused:document.activeElement===node,style:getComputedStyle(node).outlineStyle,width:parseFloat(getComputedStyle(node).outlineWidth),border:parseFloat(getComputedStyle(node).borderWidth),caret:getComputedStyle(node).caretColor}));
+      const focus=await page.getByLabel('Message',{exact:true}).evaluate(node=>({focused:document.activeElement===node,style:getComputedStyle(node.closest(".composer")).outlineStyle,width:parseFloat(getComputedStyle(node.closest(".composer")).outlineWidth),border:parseFloat(getComputedStyle(node).borderWidth),caret:getComputedStyle(node).caretColor}));
       assert(focus.focused,JSON.stringify(focus));
       if(forcedColors==='active')assert(focus.style==='solid'&&focus.width>=2,JSON.stringify(focus));
       else assert(focus.style==='none'&&focus.border===0,JSON.stringify(focus));

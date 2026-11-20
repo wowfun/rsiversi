@@ -24,13 +24,13 @@ import {Notices} from './src/notices.tsx';
 import {DeviceStore,applyIntent} from './device-store.js';
 import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
-import {emptyDock,dockIntent} from './src/dock-state.ts';
-import {presentationIdentity,LayoutContext,usePresentation,useViewport,useNarrow,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
+import {emptyDock,dockIntent,savedDock} from './src/dock-state.ts';
+import {presentationIdentity,LayoutContext,usePresentation,useViewport,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {ConversationWidthControls} from './src/conversation-width.tsx';
 import {source,installActions,settingsPanel,settingsMounted,registeredSettings} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
-window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,resources,resourceHosts,publishResources,clearResources};
+window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,savedDock,resources,resourceHosts,publishResources,clearResources};
 window.mountConversationWidth=()=>{
  const node=document.createElement('div');node.style.cssText="position:fixed;inset:0;z-index:9999";document.body.append(node);const root=createRoot(node);window.widthIntents=[];
  function Scene(){const [layout,setLayout]=React.useState({...defaultLayout,conversationWidth:1200}),[container,setContainer]=React.useState(null);
@@ -144,7 +144,7 @@ window.mountCleanupFlood=async()=>{
 };
 window.mountDisclosures=()=>{
  const node=document.createElement('section');document.body.append(node);const root=createRoot(node),stop=installDisclosures(document);
- root.render(<><details className="session-options"><summary>Conversation options</summary><Button onClick={()=>{node.querySelector('output').textContent='action received'}}>Pin conversation</Button><Button onClick={()=>new Promise(resolve=>{window.finishMenuAction=resolve})}>Slow action</Button><Button onClick={async()=>{throw Error("Action failed")}}>Failing action</Button><select aria-label="Menu selection" defaultValue="a"><option value="a">A</option><option value="b">B</option></select></details><Notices/><input aria-label="Outside menu"/><output>no action</output><div className="mode-verbose"><details className="source-menu" open><summary style={{display:'none'}}>Inline sources</summary><Button onClick={()=>{node.querySelector('output').textContent='inline one'}}>Inline one</Button><Button onClick={()=>{node.querySelector('output').textContent='inline two'}}>Inline two</Button></details></div><dialog id="verbose-dialog"><button>Modal action</button></dialog></>);
+ root.render(<><details className="navigation-options"><summary>Conversation options</summary><Button onClick={()=>{node.querySelector('output').textContent='action received'}}>Pin conversation</Button><Button onClick={()=>new Promise(resolve=>{window.finishMenuAction=resolve})}>Slow action</Button><Button onClick={async()=>{throw Error("Action failed")}}>Failing action</Button><select aria-label="Menu selection" defaultValue="a"><option value="a">A</option><option value="b">B</option></select></details><Notices/><input aria-label="Outside menu"/><output>no action</output><div className="mode-verbose"><details className="source-menu" open><summary style={{display:'none'}}>Inline sources</summary><Button onClick={()=>{node.querySelector('output').textContent='inline one'}}>Inline one</Button><Button onClick={()=>{node.querySelector('output').textContent='inline two'}}>Inline two</Button></details></div><dialog id="verbose-dialog"><button>Modal action</button></dialog></>);
  return ()=>{stop();root.unmount();node.remove()};
 };
 window.stalePresentationReply=async(mode)=>{
@@ -214,13 +214,13 @@ window.staleNavigationRead=async(kind)=>{
 };
 window.mountResize=()=>{
  const node=document.createElement('main');node.id='workbench';document.body.append(node);const root=createRoot(node);
- function Resizer(){const viewport=useViewport();const [ratio,setRatio]=React.useState(.45);return <section style={{width:ratio*viewport.width,height:40,position:'relative'}}><output>{ratio}</output><ResizeHandle name="resources" value={ratio*viewport.width} min={300} max={viewport.width*.7} reverse onChange={value=>setRatio(value/viewport.width)}/></section>}
+ function Resizer(){const viewport=useViewport();const [preferred,setWidth]=React.useState(630);const width=Math.min(preferred,viewport.width*.7);return <section style={{width,height:40,position:'relative'}}><output>{preferred}</output><ResizeHandle name="resources" value={width} min={300} max={viewport.width*.7} reverse onChange={setWidth}/></section>}
  root.render(<Resizer/>);return ()=>{root.unmount();node.remove()};
 };
 window.mountVisibility=()=>{
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);window.visibilityWrites=[];
  function Visibility(){
-  const narrow=useNarrow();const [saved,setSaved]=React.useState(defaultLayout);
+  const narrow=useViewport().width<768;const [saved,setSaved]=React.useState(defaultLayout);
   const {layout,update}=useResourceVisibility(saved,patch=>{window.visibilityWrites.push(patch);setSaved(value=>({...value,...patch}))},narrow);
   React.useEffect(()=>{window.oldVisibilityCallback=update},[]);
   return <output data-narrow={narrow} data-closed={layout.resourcesClosed} data-saved={saved.resourcesClosed}/>;
@@ -228,21 +228,21 @@ window.mountVisibility=()=>{
  root.render(<Visibility/>);window.unmountVisibility=()=>{root.unmount();node.remove()};
 };
 window.lifecycle=async(stage)=>{
- const events={reads:0,subscribed:0,closed:0,focus:0,applies:0,detaches:0};let release,entered;
+ const events={reads:0,subscribed:0,closed:0,focus:0,applies:0,detaches:0,viewportSubscriptions:0};let release,entered;
  const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);
  const pause=async name=>{if(stage===name){entered();await gate}};
  const saved=dockIntent(emptyDock(),{kind:'dock',operation:'open',coordinate:stage==='terminal'?{action:'resources'}:{action:'ui_block',key:'example'},title:'Example'});
  const original=DeviceStore.open;
  DeviceStore.open=async()=>{await pause('open');return {read:async()=>{events.reads++;await pause('read');return {value:saved}},apply:async()=>{events.applies++;return {value:saved}},subscribe:()=>{events.subscribed++;return()=>events.subscribed--},close:()=>events.closed++}};
  const add=window.addEventListener,remove=window.removeEventListener;
- const listeners=new Set();window.addEventListener=function(type,fn,...args){if(type==='focus')listeners.add(fn);return add.call(this,type,fn,...args)};
+ const listeners=new Set();window.addEventListener=function(type,fn,...args){if(type==='focus')listeners.add(fn);if(type==='resize')events.viewportSubscriptions++;return add.call(this,type,fn,...args)};
  window.removeEventListener=function(type,fn,...args){if(type==='focus')listeners.delete(fn);return remove.call(this,type,fn,...args)};
  const resourceOwner=new ResourceOwner(async(method,payload)=>{const data=JSON.parse(payload);if(method==='resource_open'){await pause('reopen');return JSON.stringify({status:'opened',request:data.opening_request,view:'1',open_revision:'1'})}if(method==='command')return '{}';const request=data.request;if(request.type==='create'){await pause('terminal');return JSON.stringify({value:{id:'attachment',terminal:{id:'created'}}})}if(request.type==='detach')events.detaches++;return JSON.stringify({value:[]})});
  installActions({resources:()=>resourceOwner,command:async()=>{},call:resourceOwner.call,open:async()=>{},select(){},closeSurface:async()=>{},addSurface:async()=>{}});
  presentationIdentity.set('lifecycle:'+stage);
  source.set({surfaces:{main:{kind:'native',session:'test',generation:'1',ui_surfaces:[]}},application_surfaces:[]});
- const node=document.createElement('div');document.body.append(node);const root=createRoot(node);root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks launcher={<span>Resources</span>}/></LayoutContext.Provider>);
- if(stage==='terminal'){for(let attempt=0;attempt<100&&!node.querySelector('.terminal-list');attempt++)await new Promise(resolve=>setTimeout(resolve,10));[...node.querySelectorAll('button')].find(button=>button.textContent==='New terminal').click()}
+ const node=document.createElement('div');document.body.append(node);const root=createRoot(node);root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks viewport={{width:innerWidth,height:innerHeight}}/></LayoutContext.Provider>);
+ if(stage==='terminal'){for(let attempt=0;attempt<100&&!node.querySelector('.resource-guide');attempt++)await new Promise(resolve=>setTimeout(resolve,10));[...node.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')==='New terminal').click()}
  await Promise.race([started,new Promise((_,reject)=>setTimeout(()=>reject(Error("lifecycle did not reach "+stage)),10000))]);root.unmount();release();await new Promise(resolve=>setTimeout(resolve,30));
  window.dispatchEvent(new Event('focus'));await new Promise(resolve=>setTimeout(resolve,30));
  events.focus=listeners.size;DeviceStore.open=original;window.addEventListener=add;window.removeEventListener=remove;node.remove();return events;
@@ -258,7 +258,7 @@ window.mountExtension=async(action,seed)=>{
  const item={bundle:'fixture',reference,title:'Fixture card'};
  source.set({surfaces:{main:{kind:'native',session:'extension-session',generation:'17',ui_surfaces:[item]}},application_surfaces:[item]});
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
- root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks launcher={<span>Resources</span>}/></LayoutContext.Provider>);
+ root.render(<LayoutContext.Provider value={{layout:{...defaultLayout,resourcesClosed:false},update(){},expand(){}}}><ResourceDocks viewport={{width:innerWidth,height:innerHeight}}/></LayoutContext.Provider>);
  window.unmountExtension=()=>{root.unmount();node.remove()};
 };
 if(new URLSearchParams(location.search).has('cleanup'))await window.mountCleanupFlood();
@@ -316,6 +316,7 @@ try{
  }
  for(const stage of ['open','read','reopen','terminal']){
   const result=await page.evaluate(stage=>window.lifecycle(stage),stage);
+  assert.equal(result.viewportSubscriptions,0,`Session dock registered ${result.viewportSubscriptions} window resize listener(s) during ${stage}`);
   assert.equal(result.subscribed,0);assert.equal(result.focus,0);assert.equal(result.closed,1);assert.equal(result.reads,stage==='open'?0:1);assert.equal(result.applies,0);assert.equal(result.detaches,stage==='terminal'?1:0);checks.push({stage,...result});
  }
  const hosts=await page.evaluate(()=>{
@@ -341,10 +342,10 @@ try{
   const {DeviceStore,emptyDock,dockIntent}=modules,a=await DeviceStore.open('noops'),b=await DeviceStore.open('noops'),scope='dock:capped';
   const act=(doc,operation,extra={})=>dockIntent(doc,{kind:'dock',operation,...extra});
   let doc=emptyDock();
-  for(let i=0;i<6;i++)doc=act(doc,'open',{coordinate:{action:'resources'},title:`Resource ${i}`,duplicate:true});
+  for(let i=0;i<6;i++)doc=act(doc,'open',{coordinate:{action:'ui_block',key:'example'},title:`Resource ${i}`,duplicate:true});
   doc=act(doc,'split',{pane:doc.state.activePaneId});
   for(const tab of Object.keys(doc.state.tabs).slice(0,4))doc=act(doc,'float',{tab});
-  await new Promise((resolve,reject)=>{const tx=a.database.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:a.scopedKey(scope),value:doc,revision:'7',used:1});tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error)});
+  await new Promise((resolve,reject)=>{const tx=a.database.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:a.scopedKey(scope),value:modules.savedDock(doc),revision:'7',used:1});tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error)});
   const before=await b.read('layouts',scope),tab=Object.keys(doc.state.tabs).at(-1);
   let puts=0,deletes=0,broadcasts=0,notifications=0;
   const put=IDBObjectStore.prototype.put,del=IDBObjectStore.prototype.delete,post=BroadcastChannel.prototype.postMessage;
@@ -359,6 +360,9 @@ try{
    await a.apply('layouts',{kind:'dock',operation:'split',pane:doc.state.activePaneId},scope);
    await a.apply('layouts',{kind:'dock',operation:'float',tab},scope);
    await a.apply('layouts',{kind:'dock',operation:'drop',tab,pane:doc.state.activePaneId,zone:'outside'},scope);
+   const active=doc.state.nodes[doc.state.activePaneId];
+   await a.apply('layouts',{kind:'dock',operation:'focus',tab:active.activeTabId},scope);
+   await a.apply('layouts',{kind:'dock',operation:'focus-pane',pane:active.id},scope);
   }finally{IDBObjectStore.prototype.put=put;IDBObjectStore.prototype.delete=del;BroadcastChannel.prototype.postMessage=post}
   const after=await b.read('layouts',scope);await new Promise(resolve=>setTimeout(resolve,20));
   stops.forEach(stop=>stop());a.close();b.close();
@@ -368,20 +372,21 @@ try{
  const history=await page.evaluate(async()=>{
   const {DeviceStore,emptyDock,dockIntent}=modules,a=await DeviceStore.open('history'),b=await DeviceStore.open('history'),scope='dock:session';
   let doc=emptyDock();
-  for(let i=0;i<16;i++)doc=dockIntent(doc,{kind:'dock',operation:'open',coordinate:{action:'resources'},title:`Resource ${i}`,duplicate:true});
+  for(let i=0;i<16;i++)doc=dockIntent(doc,{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'example'},title:`Resource ${i}`,duplicate:true});
   for(let i=0;i<64;i++)doc=dockIntent(doc,{kind:'dock',operation:'mode',mode:i%2?'push':'fullscreen'});
   const write=record=>new Promise((resolve,reject)=>{const tx=b.database.transaction('layouts','readwrite');tx.objectStore('layouts').put(record);tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error)});
-  await write({key:a.scopedKey(scope),value:doc,revision:'1',used:1});
+  await write({key:a.scopedKey(scope),value:modules.savedDock(doc),revision:'1',used:1});
   const intent={kind:'dock',operation:'mode',mode:'fullscreen'},clone=globalThis.structuredClone;
   let copies=0,expected,once,actual;
   globalThis.structuredClone=(...args)=>{copies++;return clone(...args)};
-  try{expected=dockIntent(doc,intent);once=copies;copies=0;actual=(await a.apply('layouts',intent,scope)).value}
+  try{expected=dockIntent(doc,intent);once=copies;copies=0;actual=(await a.apply('layouts',intent,scope,undefined,doc)).value}
   finally{globalThis.structuredClone=clone}
   const equal=JSON.stringify(actual)===JSON.stringify(expected),saved=await b.read('layouts',scope);
   const timing=[];
   for(let i=0;i<30;i++){const start=performance.now();await a.apply('layouts',{...intent,mode:i%2?'push':'fullscreen'},scope);if(i>=5)timing.push(performance.now()-start)}
   timing.sort((x,y)=>x-y);
-  const bad=clone(saved.value);bad.history.entries[0].inverse=[{type:'openTab',paneId:bad.state.activePaneId,tab:{id:'tab999',kind:'rsi',contentId:'null',title:'bad'},index:0}];
+  if(saved.value.history.entries.length!==0)throw Error('Another window inherited undo entries');
+  const bad=clone(modules.savedDock(saved.value));bad.state.nodes[bad.state.activePaneId].activeTabId='tab999';
   await write({key:b.scopedKey(scope),value:bad,revision:'99',used:2});
   let rejected=false;try{await a.apply('layouts',intent,scope)}catch(error){rejected=String(error).includes('Invalid resource layout')}
   const retained=await new Promise((resolve,reject)=>{const tx=b.database.transaction('layouts','readonly'),read=tx.objectStore('layouts').get(b.scopedKey(scope));tx.oncomplete=()=>resolve(read.result.revision);tx.onerror=()=>reject(tx.error)});
@@ -397,7 +402,7 @@ try{
    try{saved=await owner.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'inspect_source',source:{payload:'x'.repeat(12000),id:i}},title:'Large source',duplicate:true},scope);accepted++}
    catch(error){if(!String(error).includes('too large'))throw error;rejected=true;break}
   }
-  const after=await owner.read('layouts',scope),preserved=JSON.stringify(saved)===JSON.stringify(after);
+  const after=await owner.read('layouts',scope),preserved=saved.revision===after.revision&&JSON.stringify(modules.savedDock(saved.value))===JSON.stringify(modules.savedDock(after.value));
   const tab=Object.keys(after.value.state.tabs)[0];
   const closed=await owner.apply('layouts',{kind:'dock',operation:'close',tab},scope);
   owner.close();return {accepted,rejected,preserved,closedTabs:Object.keys(closed.value.state.tabs).length};
@@ -425,14 +430,21 @@ try{
  try{await widthHandle.waitFor({timeout:5000})}catch(error){await mkdir(report,{recursive:true});await writeFile(join(report,'width-failure.json'),JSON.stringify(await page.evaluate(()=>({html:document.querySelector('#width-column')?.outerHTML,rect:document.querySelector('#width-column')?.getBoundingClientRect().toJSON(),text:document.body.innerText})),null,2));throw error}
  const widthValue=()=>page.locator('#width-column').evaluate(node=>parseFloat(node.style.getPropertyValue('--conversation-width')));
  assert.equal(await widthValue(),1200);
+ assert.equal((await widthHandle.boundingBox()).width,10);
  await widthHandle.click();assert.equal(await page.evaluate(()=>widthIntents.length),0);
  await page.setViewportSize({width:1000,height:800});
- await page.waitForFunction(()=>parseFloat(document.querySelector('#width-column').style.getPropertyValue('--conversation-width'))===1000);
+ await page.waitForFunction(()=>parseFloat(document.querySelector('#width-column').style.getPropertyValue('--conversation-width'))===824);
+ await widthHandle.click();assert.equal(await page.evaluate(()=>widthIntents.length),0);
  assert.equal(await page.evaluate(()=>widthIntents.length),0);
  await page.setViewportSize({width:1400,height:900});await page.waitForFunction(()=>document.querySelector('#width-column').style.getPropertyValue('--conversation-width')==='1200px');
  await widthHandle.focus();await widthHandle.press('Home');assert.equal(await widthValue(),640);
  await widthHandle.press('ArrowRight');assert.equal(await widthValue(),650);
- const widthBox=await widthHandle.boundingBox();await page.mouse.move(widthBox.x+widthBox.width/2,widthBox.y+20);await page.mouse.down();await page.mouse.move(widthBox.x+widthBox.width/2+40,widthBox.y+20);await page.mouse.up();
+ const widthBox=await widthHandle.boundingBox();
+ await page.mouse.move(widthBox.x+widthBox.width/2,widthBox.y+20);await page.mouse.down();
+ const priorDragWrites=await page.evaluate(()=>widthIntents.length);
+ await widthHandle.dispatchEvent('pointerup',{pointerId:77,pointerType:'touch'});
+ assert.equal(await page.evaluate(()=>widthIntents.length),priorDragWrites);
+ await page.mouse.move(widthBox.x+widthBox.width/2+40,widthBox.y+20);await page.mouse.up();
  await page.waitForFunction(()=>widthIntents.at(-1).conversationWidth===730);
  const committed=await page.evaluate(()=>widthIntents.length);
  const cancelBox=await widthHandle.boundingBox();await page.mouse.move(cancelBox.x+cancelBox.width/2,cancelBox.y+20);await page.mouse.down();await page.mouse.move(cancelBox.x+cancelBox.width/2+25,cancelBox.y+20);await widthHandle.press('Escape');await page.mouse.up();
@@ -443,21 +455,21 @@ try{
  await page.evaluate(()=>{window.unmountResize=window.mountResize()});
  const handle=page.getByRole('separator',{name:'Resize resources'});
  await page.waitForFunction(()=>document.querySelector('[aria-label="Resize resources"]')?.getAttribute('aria-valuenow')==='630');
- await page.setViewportSize({width:1200,height:800});
- await page.waitForFunction(()=>document.querySelector('[aria-label="Resize resources"]')?.getAttribute('aria-valuenow')==='540');
- await handle.focus();await page.keyboard.press('ArrowLeft');
- await page.waitForFunction(()=>Math.abs(Number(document.querySelector('output').textContent)-550/1200)<1e-9);
- checks.push({viewportResize:{before:630,after:540,keyboard:550}});
+ await page.setViewportSize({width:800,height:800});
+ await page.waitForFunction(()=>document.querySelector('[aria-label="Resize resources"]')?.getAttribute('aria-valuenow')==='560');
+ await handle.focus();await page.keyboard.press('ArrowRight');
+ await page.waitForFunction(()=>Number(document.querySelector('output').textContent)===550);
+ checks.push({viewportResize:{before:630,after:560,keyboard:550}});
  await page.evaluate(()=>window.unmountResize());
  await page.evaluate(()=>{window.unmountDisclosures=window.mountDisclosures()});
- const menu=page.locator('details.session-options'),summary=menu.locator('summary');
+ const menu=page.locator('details.navigation-options'),summary=menu.locator('summary');
  await summary.click();await menu.getByRole('button',{name:'Pin conversation',exact:true}).click();
  assert.equal(await page.locator('output').innerText(),'action received');
  assert.equal(await menu.getAttribute('open'),null);
  await summary.click();await summary.press('Escape');assert.equal(await menu.getAttribute('open'),null);
  assert(await summary.evaluate(node=>node===document.activeElement));
  await summary.click();await page.getByRole('textbox',{name:'Outside menu'}).focus();assert.equal(await menu.getAttribute('open'),null);
- await page.evaluate(()=>{document.activeElement.blur();document.querySelector('details.session-options').open=true});
+ await page.evaluate(()=>{document.activeElement.blur();document.querySelector('details.navigation-options').open=true});
  await page.keyboard.press('Escape');assert.equal(await menu.getAttribute('open'),null);assert(await summary.evaluate(node=>node===document.activeElement));
  await summary.click();await menu.getByRole('button',{name:'Slow action',exact:true}).click();
  assert.equal(await menu.getAttribute('open'),null);await page.evaluate(()=>window.finishMenuAction());

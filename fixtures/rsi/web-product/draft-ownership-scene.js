@@ -13,12 +13,12 @@ export async function verifySettlementCapacity() {
       target:capture(i+retired).target,source:{kind:'native',binding:{session_id:'source',header_sha256:'b'.repeat(64)}},
       capture:{kind:'suffix',interval:{through_seq:'1',scanned_after_seq:'0',retained_after_seq:'0',retained_through_seq:'1',fact_prefix_sha256:'c'.repeat(64),scanned_bytes:100,omissions:[]}},text_bytes:9}}));
     record=await store.edit(record,'submit at capacity',[],references);
-    record=await store.freeze(record,{kind:'message',id:'capacity',opaque:'frozen',text_bytes:18,images:0,captures:references.map(captureOf)});
+    record=await store.startDispatch(record,{kind:'message',id:'capacity',opaque:'frozen',text_bytes:18,images:0,captures:references.map(captureOf)});
     if(settle) {
-      record=await store.begin(record);
       record=await store.settle(record,{status:'complete',receipt:'accepted'});
     } else {
       record=await store.edit(record,'new draft',[],[]);
+      record=await store.settle(record,{status:'not_admitted'});
       record=await store.cancelPrepared(record);
     }
     const saved=await store.get('main',id);
@@ -51,7 +51,7 @@ export async function verifyReferenceOwnership() {
   check(calls.length === 0 && (await store.get('main',id)).references.length === 1, 'failed save released persisted owner');
   store.edit = edit; await editor.resolve(true);
   const frozen = {kind:'message',id:'request',opaque:'opaque exact request',text_bytes:5,images:0,captures:[{snapshot:{byte_len:reference.snapshot.byte_len,sha256:reference.snapshot.sha256,capture_id:reference.snapshot.capture_id},target:{header_sha256:header,session_id:id}}]};
-  await editor.update(record => store.freeze(record,frozen));
+  await editor.update(record => store.startDispatch(record,frozen));
   await pane.removeReference(captureKey(captureOf(reference)));
   check(calls.length === 0 && editor.record.pending.captures.length === 1 && editor.record.releases.length === 0, 'frozen owner released');
   await editor.update(record=>store.settle(record,{status:'unknown'}));
@@ -71,7 +71,7 @@ export async function verifyReferenceOwnership() {
   reopened.edit('prepare',[],[second]); await reopened.flush();
   const stale = reopened.record;
   const other = await store.edit(stale,'other tab',[],[]);
-  await store.freeze(stale,{...frozen,captures:[captureOf(second)]}).then(()=>{throw Error('removed capture was frozen')}, error=>check(error.code==='conflict','unexpected freeze failure'));
+  await store.startDispatch(stale,{...frozen,captures:[captureOf(second)]}).then(()=>{throw Error('removed capture was frozen')}, error=>check(error.code==='conflict','unexpected freeze failure'));
   reopened.edit('stale replacement'); await reopened.flush().catch(()=>{});
   await reopened.resolve(false).then(()=>{throw Error('retired capture resurrected')}, error=>check(/removed in another tab/.test(error.message),'unexpected replacement failure'));
   const recovered = new OwnershipEditor(store,other);

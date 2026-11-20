@@ -20,7 +20,7 @@ const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 let service,browser,page;const errors=[],checks=[];
 try {
   service=await startService({binary:paired.binary,assets:paired.assets,report,deepseekKey:key,configure:async({config,workspace})=>{
-    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits).replace('deployment="live"','deployment="live"\nprotocol="chat-completions"').replace('default="off"','default="high"'));
+    await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits).replace('default="off"','default="high"'));
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},output_budgets:[{model:{deployment:'live',model},max_output_tokens:limits.default_output_reserve_tokens}]}}));
     await writeFile(join(workspace,'live-check.txt'),original);
   }});

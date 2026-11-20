@@ -33,10 +33,9 @@ try {
   await pane.getByTestId('composer-send').click();
   const deadline = Date.now() + 180000;
   while (Date.now() < deadline) {
-    const review = pane.locator('.pending button').filter({hasText:'Review:'});
-    if (await review.count() && await review.first().isVisible()) {
+    const review = pane.locator('.approval-review').getByRole('button',{name:'Allow once',exact:true});
+    if (await review.count() && await review.first().isEnabled()) {
       await review.first().click();
-      await page.getByRole('button', {name:'Allow once',exact:true}).click();
     }
     if (['Completed','Failed'].includes(await pane.locator('.pane-status').innerText())) break;
     await page.waitForTimeout(100);

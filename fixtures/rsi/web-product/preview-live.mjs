@@ -34,8 +34,8 @@ async function complete(pane,input,prompt) {
  const expires=Date.now()+180000;
  while(Date.now()<expires){
   const status=await pane.locator('.pane-status').innerText();
-  const review=pane.locator('.pending button').filter({hasText:'Review:'});
-  if(await review.count()&&await review.first().isVisible()){await review.first().click();await page.getByRole('button',{name:'Allow once',exact:true}).click();approvals++;}
+  const review=pane.locator('.approval-review').getByRole('button',{name:'Allow once',exact:true});
+  if(await review.count()&&await review.first().isEnabled()){await review.first().click();approvals++;}
   if(['Completed','Failed'].includes(status)){
    const session=await pane.getAttribute('data-session-id');
    const terminal=session&&liveTurnTerminal(facts(session),prompt,afterSeq);

@@ -105,6 +105,10 @@ async function startProvider(onRequest) {
         name = "external_agent"; argumentsValue = { operation: "start", endpoint: "sdk-agent" };
       } else if (!completedTool && prompt.includes("record a typed addon result")) {
         name = "fixture_echo"; argumentsValue = { message: "中文 · typed result <script>literal</script>" };
+      } else if (!completedTool && prompt === "Schedule the weekly review fixture.") {
+        name = "schedule_create"; argumentsValue = {prompt:"Review the weekly activity", rule:{kind:"every",interval_ms:604800000}};
+      } else if (!completedTool && prompt === "Schedule the interrupted delivery fixture.") {
+        name = "schedule_create"; argumentsValue = {prompt:"Please hold this turn for the restart fixture.",rule:{kind:"after",delay_ms:1500}};
       } else if (!completedTool && prompt.includes("record an inline patch")) {
         name = "apply_patch"; argumentsValue = { patch: "*** Begin Patch\n*** Update File: card.txt\n@@\n-before\n+after · 界\n*** End Patch\n" };
       } else if (!completedTool && prompt.includes("observe background job")) {
@@ -136,16 +140,22 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, registrationLabel, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false }) {
+export async function startService({ binary, assets, report, configure, registrationLabel, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false, foregroundHost = false }) {
   assert(!(embedded && watchAssets), "embedded fixture uses an explicit application Profile");
   const networkEnvironment = liveProxyEnvironment(networkProxy);
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
   const provider = await startProvider(onRequest);
   let child; let stopped; let hostStarted = false;
+  let hostProcess; let hostExit;
   let stderr = "";
   const workspace = join(temporary, "workspace");
   const inherited = Object.fromEntries(["PATH", "LANG", "RUSTUP_HOME", "CARGO_HOME"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
   const env = { ...inherited, ...networkEnvironment, HOME: join(temporary, "home"), XDG_CONFIG_HOME: join(temporary, "config"), XDG_DATA_HOME: join(temporary, "data"), XDG_STATE_HOME: join(temporary, "state"), XDG_CACHE_HOME: join(temporary, "cache"), XDG_RUNTIME_DIR: join(temporary, "runtime"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${temporary}/absent-session-bus`, RSI_OPENAI_COMPATIBLE_API_KEY: "isolated-fixture-secret" };
+  if (process.platform === 'win32') {
+    env.USERPROFILE = env.HOME;
+    env.APPDATA = join(env.HOME, 'AppData', 'Roaming');
+    env.LOCALAPPDATA = join(env.HOME, 'AppData', 'Local');
+  }
   const run = (args, {input, timeout = 30_000} = {}) => {
     assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 600_000, 'bounded fixture command deadline');
     if (embedded) {
@@ -169,7 +179,7 @@ export async function startService({ binary, assets, report, configure, registra
     assert.equal(typeof deepseekKey, "string"); assert(deepseekKey.length > 0 && deepseekKey.length <= 64 * 1024);
     env.DEEPSEEK_API_KEY = deepseekKey;
   }
-  async function stopProcess() {
+  async function stopProcess(crashHost = false) {
     let failure;
     try { if (child && child.exitCode === null) {
       child.kill(watchAssets && process.platform !== 'win32' ? "SIGINT" : "SIGTERM");
@@ -181,6 +191,15 @@ export async function startService({ binary, assets, report, configure, registra
       await writeFile(join(report, 'service-process-shutdown.json'), JSON.stringify({platform:process.platform,code,signal,mode:forcedWindows?'windows-terminate-process':'graceful'}));
       if (!forcedWindows && (code !== 0 || signal !== null)) throw new Error(`Service cleanup failed: exit ${code}, signal ${signal}`);
     } } catch (error) { failure = error; }
+    if (crashHost) {
+      assert(hostStarted && hostProcess && hostProcess.exitCode === null && hostProcess.signalCode === null,
+        'crash verification requires a running fixture-owned foreground Host');
+      assert(hostProcess.kill('SIGKILL'), 'fixture Host must accept termination');
+      const [code, signal] = await deadline(hostExit, 'fixture Host termination', 15_000);
+      assert.equal(signal,'SIGKILL');
+      await writeFile(join(report,'host-process-crash.json'), JSON.stringify({pid:hostProcess.pid,code,signal}));
+      hostStarted = false;
+    }
     if (hostStarted) {
       const stopHost = force => boundedRun(binary, ["host", "stop", ...(force ? ["--force"] : [])],
         {cwd:workspace,env,encoding:"utf8",timeout:45_000});
@@ -193,11 +212,16 @@ export async function startService({ binary, assets, report, configure, registra
         try { stopHost(true); hostStarted = false; } catch { /* Retain its home authorities below. */ }
       }
     }
+    if (hostProcess) {
+      try { await deadline(hostExit, 'fixture foreground Host stop', 15_000); }
+      catch (error) { hostProcess.kill(); await hostExit; failure ??= error; }
+      hostProcess = undefined;
+    }
     if (failure) throw failure;
   }
-  async function close() {
+  async function close(afterStop) {
     let failed;
-    try { await stopProcess(); } catch (error) { failed = error; }
+    try { await stopProcess(); await afterStop?.(); } catch (error) { failed = error; }
     await cleanupAll(
       () => { if (failed) throw failed; },
       () => writeFile(join(report, "service.stderr.log"), stderr),
@@ -214,6 +238,9 @@ export async function startService({ binary, assets, report, configure, registra
   }
   try {
     await mkdir(workspace); await mkdir(env.HOME);
+    if (process.platform === 'win32') {
+      await Promise.all([env.APPDATA, env.LOCALAPPDATA].map(path => mkdir(path, {recursive:true})));
+    }
     const config = join(env.XDG_CONFIG_HOME, "rsiversi");
     await mkdir(config,{recursive:true});
     if(process.platform==='win32') boundedRun('powershell.exe',['-NoProfile','-NonInteractive','-Command',`
@@ -257,6 +284,14 @@ export async function startService({ binary, assets, report, configure, registra
     }
     const startProcess = async () => {
     hostStarted = !embedded;
+    if (foregroundHost && !embedded) {
+      hostProcess = spawn(binary, ['host', 'serve', '--profile', 'fixture'], {cwd:workspace,env,stdio:'ignore',windowsHide:true});
+      hostExit = once(hostProcess, 'exit');
+      await waitUntil(() => {
+        assert.equal(hostProcess.exitCode, null, 'fixture foreground Host exited during startup');
+        return run(['host','status']).stdout.startsWith('running\t');
+      }, 'fixture foreground Host readiness');
+    }
     const argumentsValue = watchAssets
       ? ["--watch", "web", "--port", "0", "--no-open"]
       : [embedded ? "--profile" : "run", "browser-fixture", ...(embedded ? [] : ["--assets", assets]), "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
@@ -274,6 +309,7 @@ export async function startService({ binary, assets, report, configure, registra
     await startProcess();
     if(!registerBeforeStart && registrationLabel !== undefined) registration = register(registrationLabel);
     return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, register, registration, get pid() { return child.pid; },
+      get foregroundPids() { return hostProcess ? [hostProcess.pid, child.pid] : [child.pid]; },
       waitForExit: () => deadline(stopped, 'foreground service exit', 20_000),
       async readSessionFacts(session) {
         assert(typeof session==='string'&&session.length>0&&session.length<=128);
@@ -286,7 +322,7 @@ export async function startService({ binary, assets, report, configure, registra
         } finally {database.close();}
       },
       probe(program, input, args = []) { return boundedRun(program, args, {cwd: workspace, env, encoding: 'utf8', input: JSON.stringify(input)}); },
-      async restart(change) { await stopProcess(); await change?.(); await startProcess(); },
+      async restart(change, {crashHost = false} = {}) { await stopProcess(crashHost); await change?.(); await startProcess(); },
     };
   } catch (error) {
     try { await close(); }

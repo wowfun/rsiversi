@@ -8,11 +8,13 @@ const report=resolve(process.env.RSI_REPORT_DIR);await mkdir(report,{recursive:f
 const source=`
 import React from 'react';
 import {createRoot} from 'react-dom/client';
+import {source} from '/src/bridge.ts';
 import {ComposerModel} from '/src/session/composer-controls.tsx';
 import {ExternalSurface} from '/src/session/external.tsx';
 import {externalPaneClass} from '/src/runtime/external-controller.js';
 import '/styles.css';
 const models=Array.from({length:9},(_,i)=>({deployment:'fixture',model:'model-'+i}));
+source.set({catalog:{models,models_more:false,models_at_start:true}});
 const data={model:models[0],reasoning_effort:null,effort_profile:{supported:['high'],default:'high'}};
 const owner={prepareComposer:async()=>true,action:async()=>{},composerView:{pending:false}};
 const External=externalPaneClass({command:async()=>{},perform:work=>work().catch(()=>{})});
@@ -27,7 +29,7 @@ window.updateExternal=(kind)=>{
  window.frame=next;external.staged={data:next,submitKey:'enter'};external.render(next);
 };
 external.staged={data:window.frame,submitKey:'enter'};external.render(window.frame);
-createRoot(document.getElementById('root')).render(<main style={{display:'grid',gridTemplateColumns:'280px 1fr',gap:32,padding:24,height:'100vh'}}><section><h1>Model controls</h1><ComposerModel owner={owner} data={data} models={models}/></section><section style={{height:'100%',minHeight:0}}><ExternalSurface owner={external} selected={true}/></section></main>);
+createRoot(document.getElementById('root')).render(<main style={{display:'grid',gridTemplateColumns:'280px 1fr',gap:32,padding:24,height:'100vh'}}><section><h1>Model controls</h1><ComposerModel owner={owner} data={data}/></section><section style={{height:'100%',minHeight:0}}><ExternalSurface owner={external} selected={true}/></section></main>);
 `;
 const fixture=await sourceFixture({name:'composer-history',source}),results=[];
 try{
@@ -44,7 +46,7 @@ try{
    await menu.focus();await page.keyboard.press('ArrowDown');
    await check('Initial ArrowDown selects the first available item',async()=>assert.match(await page.evaluate(()=>document.activeElement.textContent),/^Model /));
    await menu.getByRole('menuitem',{name:/^Model /}).click();
-   const search=page.getByRole('textbox',{name:'Search models'});await search.fill('model');await search.evaluate(el=>el.setSelectionRange(3,3));await page.keyboard.press('ArrowLeft');
+   const search=page.getByRole('textbox',{name:'Search models on this page'});await search.fill('model');await search.evaluate(el=>el.setSelectionRange(3,3));await page.keyboard.press('ArrowLeft');
    await check('Search Left Arrow preserves the submenu and native caret',async()=>{assert(await search.isVisible());assert.deepEqual(await search.evaluate(el=>[el===document.activeElement,el.selectionStart,el.selectionEnd]),[true,2,2])});
    if(!await search.isVisible())await menu.getByRole('menuitem',{name:/^Model /}).click();
    await search.fill('model');await search.evaluate(el=>el.setSelectionRange(3,3));await page.keyboard.press('Shift+ArrowLeft');

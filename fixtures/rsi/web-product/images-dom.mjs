@@ -154,7 +154,7 @@ export async function verifyImageDom(page) {
       await pane.flush();
       const editor = pane.editor;
       await editor.update((record) =>
-        editor.store.freeze(record, {
+        editor.store.startDispatch(record, {
           kind: "message",
           id: "image-message",
           opaque: "{}",
@@ -163,7 +163,6 @@ export async function verifyImageDom(page) {
           captures: [],
         }),
       );
-      await editor.update((record) => editor.store.begin(record));
       pane.edit("same text", [image("b")]);
       await pane.flush();
       fixture.setReply("dispatch_submission", async () =>

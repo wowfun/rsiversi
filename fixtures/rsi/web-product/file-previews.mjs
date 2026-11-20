@@ -53,7 +53,7 @@ export async function verifyFilePreviews(page,service,report,browser) {
     return page.locator('.file-preview');
   };
   let preview=await open('sample.rs');await preview.locator('.file-code').filter({hasText:'fn main()'}).waitFor();
-  assert(await preview.locator('.file-token[style]').count()>0,'code syntax colors absent');assert(await preview.locator('.file-line-number').count()>=4);
+  await preview.locator('.file-token[style]').first().waitFor();assert(await preview.locator('.file-line-number').count()>=4);
   await preview.getByRole('button',{name:'Wrap lines',exact:true}).click();assert(await preview.locator('.file-code.wrap').count());
   await page.screenshot({path:join(report,`${browser}-preview-code.png`)});
   preview=await open('report.md');await preview.locator('table').waitFor();assert.equal(await preview.locator('table tbody tr').count(),1);
@@ -74,6 +74,10 @@ export async function verifyFilePreviews(page,service,report,browser) {
   assert.match(await preview.innerText(),/missing.png/);
   await page.screenshot({path:join(report,`${browser}-preview-missing.png`)});
   preview=await open('diagram.svg');await waitUntil(()=>preview.locator('img').evaluate(image=>image.complete&&image.naturalWidth===640),'SVG image decode');
+  const renderedWidth=()=>preview.locator('img').evaluate(image=>image.getBoundingClientRect().width);
+  const fitted=await renderedWidth();
+  await preview.getByRole('button',{name:'Zoom out',exact:true}).click();
+  assert(Math.abs(await renderedWidth()-Math.max(.05,(Math.ceil(fitted/640*4)-1)/4)*640)<1);
   await preview.getByRole('button',{name:'100%',exact:true}).click();assert.equal(await preview.locator('img').evaluate(image=>image.style.width),'640px');await preview.getByRole('button',{name:'Zoom in',exact:true}).click();assert.equal(await preview.locator('img').evaluate(image=>image.style.width),'800px');await preview.getByRole('button',{name:'Fit',exact:true}).click();
   await page.screenshot({path:join(report,`${browser}-preview-image.png`)});
   preview=await open('pixel.png');await waitUntil(()=>preview.locator('img').evaluate(image=>image.complete&&image.naturalWidth===1),'PNG raster decode');

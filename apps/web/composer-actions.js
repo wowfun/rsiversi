@@ -1,7 +1,15 @@
 // Rust owns delivery selection; this adapter maps gestures to displayed choices.
-export function keyboardAction(event, submitKey, actions) {
-  if (event.isComposing || event.keyCode === 229 || event.key !== "Enter" || event.shiftKey || event.altKey) return undefined;
+export function composerKeydown(event, pane) {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+  const enter = event.key === "Enter";
   const modified = event.ctrlKey || event.metaKey;
-  if (submitKey === "mod_enter" && !modified) return undefined;
-  return submitKey === "enter" && modified && actions?.alternative ? "alternative" : "primary";
+  if (enter && (event.altKey || event.getModifierState?.("AltGraph") ||
+      (event.ctrlKey && event.metaKey) || (modified && event.shiftKey))) {
+    event.preventDefault();
+    return;
+  }
+  if (pane.completionKey?.(event) || !enter || event.shiftKey) return;
+  if (pane.submitKey === "mod_enter" && !modified) return;
+  event.preventDefault();
+  if (!event.repeat) return pane.submitKey !== "mod_enter" && modified && pane.composerActions?.alternative ? "alternative" : "primary";
 }

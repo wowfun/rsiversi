@@ -19,7 +19,7 @@ function Probe(){
  const region=useRef(null),editor=useRef(null),input=useRef(null),form=useRef(null);
  useSyncExternalStore(external.subscribe,external.getSnapshot);
  useEffect(()=>{
-  const controls=Object.fromEntries(['history','live','commands','bottom','composer','modelReceipt','imageInput','attach','addReference','exportButton','searchHistory','addFile','cancel','steer','send','protectedExport'].map(key=>[key,document.createElement('button')]));
+  const controls=Object.fromEntries(['history','live','commands','bottom','composer','modelReceipt','imageInput','cancel','steer','send','protectedExport'].map(key=>[key,document.createElement('button')]));
   const pane={index:'main',scheduleVisible(){},setReadingSummary(value){window.readingSummary=value},closeCompletions(){},updateCompletions(){}};
   const context={select(){},TranscriptVisibility:class{dispose(){}}};
   mount(pane,context,{...controls,node:region.current,transcript:region.current,input:document.createElement('textarea')});

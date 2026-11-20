@@ -26,7 +26,7 @@ import {flushSync} from 'react-dom';
 import {Profiler} from 'react';
 import {Conversation} from './src/conversation.tsx';
 import {publish} from './src/bridge.ts';
-let view={surfaces:{main:{kind:'native',session:'untitled',path:'',workspace:null},compare:null},catalog:{workspaces:[]}};
+let view={surfaces:{main:{kind:'native',session:'untitled',workspace:{key:'test',coordinates:{location:{kind:'local'},path:''},registration:{status:'unregistered'}}},compare:null},catalog:{workspaces:[]}};
 window.probe={commits:0,unrelated(){flushSync(()=>publish({...view,notice:'unrelated'}));},rename(){view={...view,navigation:{entries:[{session:'untitled',metadata:{title:'Renamed conversation'}}]}};flushSync(()=>publish(view));}};
 publish(view);
 createRoot(document.getElementById('root')).render(<Profiler id="conversation" onRender={()=>probe.commits++}><Conversation/></Profiler>);

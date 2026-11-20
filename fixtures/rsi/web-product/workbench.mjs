@@ -29,10 +29,32 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
   try {
     const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:980}});
     await context.addInitScript(()=>{
-      window.navigationQueries=0;const Original=Worker;
+      window.navigationQueries=0;window.paneResets=0;const Original=Worker;
       window.Worker=class extends Original {
-        constructor(...args){super(...args);this.queries=new Set();this.addEventListener('message',({data})=>{if(data.kind==='reply'&&this.queries.delete(data.id)&&!data.error)window.navigationQueries++})}
-        postMessage(data,...rest){if(data.kind==='call'&&data.method==='command'){const command=JSON.parse(data.payload);if(command.action==='navigate'&&command.command.kind==='query')this.queries.add(data.id)}super.postMessage(data,...rest)}
+        constructor(...args){
+          super(...args);this.queries=new Set();
+          this.addEventListener('message',event=>{
+            const {data}=event;
+            if(data.kind!=='reply')return;
+            if(this.queries.delete(data.id)&&!data.error)window.navigationQueries++;
+            if(data.id===this.archive){
+              this.archive=undefined;
+              event.stopImmediatePropagation();
+              window.releaseArchive=()=>this.dispatchEvent(new MessageEvent('message',{data}));
+            }
+          });
+        }
+        postMessage(data,...rest){
+          if(data.kind==='call'&&data.method==='command'){
+            const command=JSON.parse(data.payload);
+            if(command.action==='new_conversation')window.paneResets++;
+            if(command.action==='navigate'&&command.command.kind==='query')this.queries.add(data.id);
+            if(window.holdArchive&&command.action==='navigate'&&command.command.metadata?.archived){
+              this.archive=data.id;window.holdArchive=false;
+            }
+          }
+          super.postMessage(data,...rest);
+        }
       };
     });
     page=await context.newPage();page.on('pageerror',error=>{errors.push(error.stack ?? error.message);console.error('page error',error.message)});
@@ -74,24 +96,41 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     await page.waitForFunction(before=>window.navigationQueries>before,queries);
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     await row.waitFor();
-    await row.locator('.session-options summary').click();
-    await page.getByRole('button',{name:'Rename',exact:true}).click();
-    await page.getByLabel('Conversation title',{exact:true}).fill('First milestone');
-    await page.getByRole('button',{name:'Save title',exact:true}).click();
-    await page.getByLabel('Conversation title',{exact:true}).waitFor({state:'hidden'});
-    await page.getByRole('button',{name:'Refresh conversations in workspace',exact:true}).click();
+    await row.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+    await page.getByLabel('Session name',{exact:true}).fill('First milestone');
+    await page.getByRole('dialog',{name:'Rename session'}).getByRole('button',{name:'Rename',exact:true}).click();
+    await page.getByLabel('Session name',{exact:true}).waitFor({state:'hidden'});
     await row.locator('strong').filter({hasText:'First milestone'}).waitFor();
-    const options=row.locator('.session-options');
-    if(!await options.evaluate(node=>node.open))await options.locator('summary').click();
-    await page.getByRole('button',{name:'Archive',exact:true}).click();
+    await input.fill('Unsent before archiving the current conversation');
+    await row.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Archive session',exact:true}).click();
     await row.waitFor({state:'detached'});
-    assert(await input.isEnabled(),'archive must leave the attached conversation usable');
-    await navigationFilter(page,'archived');
+    await page.locator('.pane.selected[data-session-id=""]').waitFor();
+    assert.equal(await input.inputValue(),'');
+    await page.screenshot({path:join(directory,'archived-current.png')});
+    await navigationFilter(page,'all');
     await row.locator('strong').filter({hasText:'First milestone'}).waitFor();
+    assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+    await row.getByTestId('conversation-open').click();
+    await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]')?.value==='Unsent before archiving the current conversation');
     await page.locator('.conversation-menu>summary').click();await page.locator('#add-surface').click();await page.locator('.conversation-menu>summary').click();
     await page.locator('#pane-tab-compare').waitFor({state:'attached'});
     await row.getByTestId('conversation-open').click();
     await page.getByLabel('Compare message',{exact:true}).fill('Separate saved compare draft');
+    await row.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Unarchive session',exact:true}).click();
+    await navigationFilter(page,'active');await row.waitFor();
+    const resets=await page.evaluate(()=>{window.holdArchive=true;return window.paneResets;});
+    await row.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Archive session',exact:true}).click();
+    await page.waitForFunction(()=>typeof window.releaseArchive==='function');
+    await selectSurface(page,'main');
+    await page.evaluate(()=>{window.releaseArchive();return new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));});
+    assert.equal(await page.evaluate(()=>window.paneResets),resets,'an archive reply after switching tabs must not clear the new selection');
+    assert.equal(await input.inputValue(),'Unsent before archiving the current conversation');
+    await selectSurface(page,'compare');
+    assert.equal(await page.getByLabel('Compare message',{exact:true}).inputValue(),'Separate saved compare draft');
     // A wide viewport can still have a narrow conversation column beside resources.
     await page.setViewportSize({width:1024,height:768});
     await page.getByRole('button',{name:'Toggle resources',exact:true}).click();
@@ -116,7 +155,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     await disconnect(page);
     await page.locator('#login').waitFor({state:'visible'});
     assert.deepEqual(errors,[]);
-    await writeFile(join(directory,'result.json'),JSON.stringify({browser:browser.version(),emptyConfiguration:!staleDefault,staleDefaultRecovery:staleDefault,providerApply:true,defaultModel:true,conversation:true,rename:true,archiveDoesNotDetach:true,keyedCompare:true,responsiveHitTesting:true,errors}));
+    await writeFile(join(directory,'result.json'),JSON.stringify({browser:browser.version(),emptyConfiguration:!staleDefault,staleDefaultRecovery:staleDefault,providerApply:true,defaultModel:true,conversation:true,rename:true,archiveClearsCurrent:true,archivePreservesDraft:true,lateArchivePreservesSelection:true,keyedCompare:true,responsiveHitTesting:true,errors}));
   } catch(error) {if(page){await page.screenshot({path:join(directory,'failure.png')}).catch(()=>{});await writeFile(join(directory,'failure.html'),await page.content()).catch(()=>{})}await writeFile(join(directory,'errors.json'),JSON.stringify({error:String(error),pageErrors:errors}));throw error}
   finally {await browser.close();await service.close()}
 }

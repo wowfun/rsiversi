@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 
 // Real document, Worker, authenticated API, durable Session and streamed download.
 export async function verifyExport(page,service,report,name) {
-  const input=page.getByRole('textbox',{name:'Main message',exact:true});
+  const input=page.getByRole('region',{name:'Main conversation',exact:true}).locator('.composer textarea');
   await input.fill('Export Unicode 界 🦀');
   await page.getByTestId('composer-send').click();
   await page.waitForFunction(()=>document.querySelector('.pane-status')?.textContent==='Completed');
@@ -17,7 +17,7 @@ export async function verifyExport(page,service,report,name) {
     if(args){await input.fill(`/export ${args}`);await page.getByTestId('composer-send').click();}
     else {
       if(await extras.getAttribute('aria-expanded')!=='true')await extras.click();
-      await page.getByRole('menuitem',{name:'Export',exact:true}).click();
+      await page.getByRole('option',{name:'Export',exact:true}).click();
     }
     const download=await promised;
     assert.equal(await download.failure(),null);
@@ -28,7 +28,9 @@ export async function verifyExport(page,service,report,name) {
     if(args){const artifact=JSON.parse(text);assert.equal(artifact.last_provider_request.availability,'available');assert.equal(artifact.last_provider_request.effect_id,artifact.last_provider_response.effect_id);assert.equal(artifact.last_provider_response.raw,false);assert.deepEqual(Object.keys(artifact).sort(),['header','last_provider_request','last_provider_response','messages','provider_input_evidence']);}
     await download.saveAs(join(report,`${name}-${args?'all.json':'messages.md'}`));
     evidence.push({filename:download.suggestedFilename(),bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
-    await page.getByRole('menuitem',{name:'Export',exact:true,includeHidden:true}).waitFor({state:'attached'});
+    await extras.click();
+    await page.getByRole('option',{name:'Export',exact:true}).waitFor();
+    await page.keyboard.press('Escape');
   }
   assert.equal(service.provider.requests.length,before,'export must not submit a model request');
   assert.equal(await page.evaluate(()=>navigator.serviceWorker.controller),null,'download worker must not control the application');

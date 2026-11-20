@@ -18,6 +18,55 @@ try {
     page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
     try {
       await page.goto(server.url,{timeout:90000});await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+      const palette=[];
+      for(const [preference,os,expected] of [['system','light','light'],['system','dark','dark'],['light','dark','light'],['light','light','light'],['dark','light','dark']]){
+        await page.emulateMedia({colorScheme:os});
+        await page.evaluate(async theme=>{fixture.view.appearance={theme,content_font_size:14};await fixture.frame();await fixture.tick();},preference);
+        await page.waitForFunction(scheme=>{
+          const root=getComputedStyle(document.documentElement),meta=document.head.querySelectorAll('meta[name=theme-color]');
+          return root.colorScheme===scheme && meta.length===1 && meta[0].content===root.backgroundColor;
+        },expected);
+        palette.push({preference,os,expected,color:await page.locator('meta[name=theme-color]').getAttribute('content')});
+      }
+      assert.notEqual(palette[0].color,palette[1].color);await writeFile(join(report,name+'-theme.json'),JSON.stringify(palette,null,2));
+      await page.evaluate(async()=>{fixture.view.surfaces.main.model={deployment:'fixture',model:'DeepSeek-V4.1-Flash'};await fixture.frame()});
+      const toolbar=[];
+      for(const width of [1440,420,390,320]){
+        await page.setViewportSize({width,height:900});
+        const bar=page.locator('.pane.selected .composer-bar');
+        const access=bar.getByRole('button',{name:/^Access mode, current:/});
+        const model=bar.getByRole('button',{name:/^(Select model, current|Choose model)/});
+        const send=bar.getByTestId('composer-send'),add=bar.getByRole('button',{name:'Add files or run commands'});
+        const [m,s,a]=await Promise.all([model.boundingBox(),send.boundingBox(),add.boundingBox()]);
+        const labelVisible=await access.locator('span').isVisible();
+        assert.equal(labelVisible,width===1440);
+        assert(Math.abs(m.y+m.height/2-s.y-s.height/2)<2,'model stays with send');
+        assert(Math.abs(a.y+a.height/2-s.y-s.height/2)<2,'all standard actions share the row');
+        if(width===320){
+          assert(await model.locator('[data-icon="dsw-icon-data-outline-regular"]').isVisible());
+          assert((await model.getAttribute('aria-label')).includes('DeepSeek-V4.1-Flash'));
+          await page.evaluate(async()=>{fixture.view.surfaces.main.model={deployment:'fixture',model:'X'};await fixture.frame()});
+          await model.locator('span').filter({hasText:'X'}).first().waitFor();
+        }
+        await add.click();
+        const menu=page.getByRole('listbox',{name:'Add files or run commands'}),box=await menu.boundingBox(),form=await bar.locator('..').boundingBox();
+        assert(box&&box.y+box.height<=form.y+1,'add menu clears the composer');
+        await page.keyboard.press('Escape');await menu.waitFor({state:'hidden'});
+        toolbar.push({width,labelVisible,add:a,model:m,send:s});
+      }
+      await writeFile(join(report,name+'-toolbar.json'),JSON.stringify(toolbar,null,2));
+      await page.evaluate(async()=>{
+        fixture.view.catalog.models=Array.from({length:8},(_,i)=>({deployment:'fixture',model:'route-'+i}));
+        await fixture.frame();
+      });
+      await page.getByRole('button',{name:/^Select model, current/}).click();
+      await page.getByRole('menuitem',{name:/^Model/}).click();
+      const search=page.getByRole('textbox',{name:'Search models on this page'});
+      await search.fill('ROUTE-7');
+      assert.deepEqual(await page.getByRole('menuitemradio').allTextContents(),['route-7fixture']);
+      await search.fill('');
+      assert.equal(await page.getByRole('menuitemradio').count(),9,'current model remains available outside the page');
+      await search.press('Escape');
       for(const width of [320,390])for(const size of [12,14,17])for(const mode of ['light','dark','forced']) {
         await page.setViewportSize({width,height:844});
         await page.emulateMedia({colorScheme:mode==='dark'?'dark':'light',forcedColors:mode==='forced'?'active':'none',reducedMotion:'reduce'});
@@ -49,7 +98,9 @@ try {
       await page.evaluate(()=>fixture.surface('terminal-session'));
       const options=page.getByLabel('Conversation options',{exact:true});await options.focus();await options.press('Enter');
       const terminal=page.getByRole('button',{name:'Terminal',exact:true});await terminal.focus();await terminal.press('Enter');
-      const refresh=page.getByRole('button',{name:'Refresh terminals',exact:true});await refresh.waitFor();await refresh.focus();await refresh.press('Enter');
+      const more=page.getByRole('button',{name:'More tools',exact:true});await more.focus();await more.press('Enter');
+      const list=page.getByRole('menuitem',{name:'List terminals',exact:true});await list.focus();await list.press('Enter');
+      const refresh=page.getByRole('menuitem',{name:'Refresh terminals',exact:true}).and(page.locator(':enabled'));await refresh.waitFor();await refresh.focus();await refresh.press('Enter');
       await page.waitForFunction(()=>fixture.calls.some(call=>call.method==='terminal'&&JSON.parse(call.payload).request.type==='list'));
       await page.screenshot({path:join(report,`${name}-terminal-controls.png`)});
       await page.evaluate(()=>fixture.runtime.connection.fail(new Error('Injected connection failure')));

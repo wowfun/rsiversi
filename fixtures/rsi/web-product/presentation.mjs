@@ -1,5 +1,4 @@
-import {openSettings,saveSettings} from './controls.mjs';
-import {detailMode} from './controls.mjs';
+import {detailMode,openSettings,saveSettings,themeOption} from './controls.mjs';
 import assert from 'node:assert/strict';
 import {join} from 'node:path';
 import {writeFile} from 'node:fs/promises';
@@ -14,8 +13,8 @@ export async function verifyPresentation(page, pane, service, report, name) {
   async function save(theme,size) {
     await openSettings(page);
     await page.getByRole('button',{name:'General',exact:true}).click();
-    await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).selectOption({label:theme});
     await page.getByRole('spinbutton',{name:'Settings / appearance / content_font_size',exact:true}).fill(String(size));
+    await themeOption(page,theme).click();
     await saveSettings(page);
     await page.getByRole('button',{name:'Close settings',exact:true}).click();
     await page.waitForFunction(([theme,size])=>document.documentElement.dataset.theme===theme&&document.documentElement.dataset.contentSize===String(size),[theme,size]);
@@ -47,7 +46,7 @@ export async function verifyPresentation(page, pane, service, report, name) {
     await page.getByRole('button',{name:'Commands',exact:true}).click();
     await page.getByRole('combobox',{name:'Search commands'}).fill('settings');
     await page.getByRole('combobox',{name:'Search commands'}).press('Enter');
-    await page.getByRole('combobox',{name:'Settings / appearance / theme',exact:true}).waitFor();
+    await themeOption(page,'system').waitFor();
     await page.getByRole('button',{name:'Close settings',exact:true}).click();
     await page.locator('.conversation-menu').evaluate(node=>node.open=true);await page.getByLabel('Detail level').selectOption('standard');await page.locator('.conversation-menu').evaluate(node=>node.open=false);
     await pane.locator('.turn-summary').last().click();

@@ -1,7 +1,6 @@
-import {details,resources} from "./controls.mjs";
 import {navigationFilter} from './controls.mjs';
 import {paired} from './paired-env.mjs';
-import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectWorkbench, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real document/Worker/Host closed-review acceptance; provider is deterministic.
 import assert from 'node:assert/strict';
@@ -42,18 +41,21 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await writeFile(file,(await readFile(file,'utf8')).replace(/endpoint = "[^"]+"/,`endpoint = "http://127.0.0.1:${provider.address().port}"`));
   }});
   ({browser, page} = await openBrowserPage(engine, errors));
-  await connectWorkbench(page, service, 'closed plan review');
+  const registration=service.register('closed plan review');
+  await registerFixtureWorkspace(page.request,service,registration);
+  await connectWorkbench(page,service,registration);
   await openWorkspace(page, service);
     const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
     await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
     await input.fill('Review the exact saved plan.');await pane.getByTestId('composer-send').click();
     await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true}).click();
-    const dialog=details(page);await dialog.locator('.review-plan').waitFor();
+    const dialog=pane.locator('form').filter({has:page.locator('.review-plan')});await dialog.locator('.review-plan').waitFor();
+    assert.equal(await page.locator('.review-plan').count(),1,'opening an observed plan mounts only one review');
     assert.match(await dialog.locator('.review-plan').innerText(),/<em>Literal plan text<\/em>/);assert.equal(await dialog.locator('.review-plan em').count(),0);
     assert.equal(await dialog.getByRole('button',{name:'Send answers',exact:true}).count(),0);
     for(const label of ['Approve and execute','Request changes','Decline and end turn'])assert(await dialog.getByRole('button',{name:label,exact:true}).isEnabled());
     await page.screenshot({path:join(path,'review-wide.png')});
-    await page.setViewportSize({width:420,height:860});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
+    await page.setViewportSize({width:420,height:860});await dialog.getByRole('button',{name:'Approve and execute',exact:true}).scrollIntoViewIfNeeded();
     assert(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1));await page.screenshot({path:join(path,'review-narrow.png')});
     await dialog.getByLabel('Optional review feedback',{exact:true}).fill('Verified in the actual browser.');
     await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});

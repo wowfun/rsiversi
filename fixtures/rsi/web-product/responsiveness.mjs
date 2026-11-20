@@ -8,6 +8,21 @@ const report=resolve(process.env.RSI_REPORT_DIR);
 await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
 import {chooseWorkspace} from './src/directory-picker.tsx';
+import {useState} from 'react';
+import {createRoot} from 'react-dom/client';
+import {Modal} from './src/presentation.tsx';
+window.nestedDialogs=()=>{
+ const container=document.body.appendChild(document.createElement('div'));
+ const root=createRoot(container);
+ function Nested(){
+  const [child,show]=useState(false);
+  return <Modal label="Parent" className="parent" close={()=>{root.unmount();container.remove()}}>
+   <button disabled>Unavailable</button><button onClick={()=>show(true)}>Open child</button>
+   {child&&<Modal label="Child" className="child" close={()=>show(false)}><button>Child action</button></Modal>}
+  </Modal>;
+ }
+ root.render(<Nested/>);
+};
 window.highlightMany=async()=>{
  const code='const value = 7;\\n';
  const events=Array.from({length:60},()=>[{kind:'start',element:{kind:'pre',language:'js'}},{kind:'text',text:code},{kind:'end'}]).flat();
@@ -33,16 +48,47 @@ try {
     await page.setViewportSize({width,height:900});await page.evaluate(()=>fixture.tick());
     const button=page.getByRole('button',{name:width<768?'Toggle navigation':'Expand navigation',exact:true});
     await button.click();await page.evaluate(()=>fixture.tick());
-    const opened=await page.getByRole('dialog',{name:'Workspace navigation',exact:true}).isVisible();
-    checks.navigation.push({width,opened,expanded:await button.getAttribute('aria-expanded')});
+    const drawer=page.getByRole('dialog',{name:'Workspace navigation',exact:true});
+    const collapse=page.getByRole('button',{name:'Collapse navigation',exact:true});
+    await collapse.waitFor();
+    const modal=await drawer.isVisible();
+    assert.equal(modal,width<768);
+    if(modal){
+     assert.equal(await button.getAttribute('aria-expanded'),'true');
+     assert(await collapse.evaluate(node=>document.activeElement===node));
+     await drawer.getByRole('button',{name:'Search conversations',exact:true}).click();
+     const search=drawer.getByRole('textbox',{name:'Search conversations',exact:true});
+     await search.fill('retained navigation');
+     const original=await search.elementHandle();
+     await page.mouse.click(width-5,450);
+     await drawer.waitFor({state:'hidden'});
+     assert(await button.evaluate(node=>node===document.activeElement));
+     await button.click();await drawer.waitFor();
+     assert(await search.evaluate((node,old)=>node===old,original));
+     assert.equal(await search.inputValue(),'retained navigation');
+     await original.dispose();
+    }else{
+     assert.equal(await page.locator('.workbench > .sidebar').count(),1);
+     await page.getByLabel('Main message',{exact:true}).focus();
+     assert(await page.getByLabel('Main message',{exact:true}).evaluate(node=>node===document.activeElement));
+    }
+    checks.navigation.push({width,modal,expanded:true});
     await page.screenshot({path:join(report,name+'-navigation-'+width+'.png')});
-    if(opened)await page.keyboard.press('Escape');
+    if(modal)await page.keyboard.press('Escape');else await collapse.click();
    }
    await page.setViewportSize({width:1440,height:900});await page.evaluate(()=>fixture.tick());
+   const shortcuts=page.getByRole('navigation',{name:'Workspace tools'}).getByRole('button');
+   assert.deepEqual((await shortcuts.allTextContents()).slice(0,2),['Plugins','Automation tasks']);
    const desktop=page.getByRole('button',{name:'Collapse navigation',exact:true});
    await desktop.click();await page.evaluate(()=>fixture.tick());
    assert.equal(await desktop.count(),0);
    const rail=page.locator('.workbench > .navigation-rail');
+   const plugins=rail.getByRole('button',{name:'Open plugins'});
+   assert(await plugins.evaluate(button=>button.nextElementSibling?.getAttribute('aria-label')==='Automation tasks'));
+   await plugins.click();
+   await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor();
+   await page.keyboard.press('Escape');
+   await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
    const expand=rail.getByRole('button',{name:'Expand navigation',exact:true});
    const mark=expand.locator('.brand-logo'),panel=expand.locator('svg');
    assert.equal(await mark.count(),1,'The rail logo must be inside its single expand control');
@@ -74,8 +120,7 @@ try {
    await expand.click();await page.evaluate(()=>fixture.tick());
    assert(await desktop.isVisible());
    await page.setViewportSize({width:900,height:900});await page.evaluate(()=>fixture.tick());
-   await expand.click();await page.getByRole('dialog',{name:'Workspace navigation',exact:true}).waitFor();
-   await page.keyboard.press('Escape');
+   await expand.click();await desktop.waitFor();await desktop.click();
    await page.setViewportSize({width:1440,height:900});await page.evaluate(()=>fixture.tick());
    const commands=page.getByRole('button',{name:'Commands',exact:true});
    for(const close of ['escape','button']) {
@@ -97,6 +142,19 @@ try {
    const directoryEntered=await page.getByLabel('Directory path',{exact:true}).evaluate(node=>node===document.activeElement);
    await page.keyboard.press('Escape');await page.evaluate(()=>fixture.tick());
    checks.focus.push({modal:'directory',entered:directoryEntered,restored:await commands.evaluate(node=>node===document.activeElement)});
+   await page.evaluate(()=>window.nestedDialogs());
+   const childOpener=page.getByRole('button',{name:'Open child',exact:true});
+   await childOpener.press('Enter');
+   const childAction=page.getByRole('button',{name:'Child action',exact:true});
+   await childAction.waitFor();
+   for(const key of ['Tab','Shift+Tab']){
+    await page.keyboard.press(key);
+    assert(await childAction.evaluate(el=>el===document.activeElement));
+   }
+   await page.keyboard.press('Escape');
+   await page.getByRole('dialog',{name:'Child',exact:true}).waitFor({state:'hidden'});
+   assert(await childOpener.evaluate(el=>el===document.activeElement),'closing the child returns to the still-open parent');
+   await page.keyboard.press('Escape');await page.getByRole('dialog',{name:'Parent',exact:true}).waitFor({state:'hidden'});
    checks.highlight=await page.evaluate(()=>window.highlightMany());
    await message.fill('Draft remains intact while highlighting');
    await page.locator('.code-token').first().waitFor();
@@ -109,15 +167,16 @@ try {
     const touchExpand=touch.getByRole('button',{name:'Expand navigation',exact:true});
     assert(await touchExpand.locator('.brand-logo').isVisible());
     await touchExpand.tap();
-    await touch.getByRole('dialog',{name:'Workspace navigation',exact:true}).waitFor();
-    checks.touch={logoTapOpenedDrawer:true};
+    await touch.getByRole('button',{name:'Collapse navigation',exact:true}).waitFor();
+    assert.equal(await touch.getByRole('dialog',{name:'Workspace navigation',exact:true}).count(),0);
+    checks.touch={logoTapExpandedColumn:true};
    } finally {await touch.close()}
    checks.errors=errors;results.push(checks);
   } finally {await browser.close()}
  }
  await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));
  for(const result of results) {
-  assert(result.navigation.every(item=>item.opened&&item.expanded==='true'),JSON.stringify(result.navigation));
+  assert(result.navigation.every(item=>item.expanded && item.modal===(item.width<768)),JSON.stringify(result.navigation));
   assert(result.focus.every(item=>item.entered&&item.restored),JSON.stringify(result.focus));
   assert.equal(result.highlight.blocks,60);assert.equal(result.highlight.immediateTokens,0,'Tokenization must not run in the React commit');
   assert.equal(result.highlight.acknowledgements,2);assert.equal(result.highlight.phase,'Ready');

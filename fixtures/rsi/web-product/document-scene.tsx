@@ -113,6 +113,7 @@ function defaultReply(message) {
               content: [
                 { type: "text", text: "Queued original" },
                 { type: "image", media: { fixture: "retained" } },
+                { type: "file", file: { id: "f".repeat(64), name: "queue-notes.txt", bytes: 1536 } },
               ],
             })
           : message.method === "terminal"
@@ -188,8 +189,7 @@ const view = {
       session: "fixture-session",
       header: "c".repeat(64),
       creation: null,
-      path: "/fixture",
-      workspace: "fixture",
+      workspace: {key:"fixture-key",coordinates:{location:{kind:"local"},path:"/fixture"},registration:{status:"registered",id:"fixture",name:null}},
       model,
       transcript: {
         blocks: [
@@ -231,6 +231,7 @@ const view = {
     workspace_order_seed: { kind: "available", records: [workspace] },
     models: [model],
     models_more: false,
+    models_at_start: true,
   },
   preferences: { submit_key: "mod_enter" },
   composer_actions: {
@@ -280,6 +281,11 @@ window.fixture = {
         assets: this.assets,
       },
     });
+  },
+  attachedWorkspace(id) {
+    const row = view.catalog.workspaces.find(row => row.id === id);
+    if (!row) throw new Error(`Unknown fixture workspace ${id}`);
+    return {key: id, coordinates: structuredClone(row.coordinates), registration: {status: 'registered', id, name: row.name ?? null}};
   },
   async surface(session, fields = {}) {
     view.surfaces.main = {

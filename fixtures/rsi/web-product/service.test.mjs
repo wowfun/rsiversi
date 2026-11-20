@@ -285,13 +285,19 @@ test('live Fact admission stops metadata scanning before materializing oversized
   const database = new DatabaseSync(':memory:');
   let visited = 0;
   database.function('observe', value => { visited++; return value; });
-  database.exec('CREATE TABLE durable(session_id TEXT, seq INTEGER, body TEXT, PRIMARY KEY(session_id,seq)); CREATE VIEW facts AS SELECT session_id,seq,observe(body) AS fact_json FROM durable;');
+  database.exec('CREATE TABLE durable(session_id TEXT, seq INTEGER, body TEXT, PRIMARY KEY(session_id,seq)); CREATE TABLE agent_controls(session_id TEXT, seq INTEGER, control_json TEXT, PRIMARY KEY(session_id,seq)); CREATE VIEW facts AS SELECT session_id,seq,observe(body) AS fact_json, CASE WHEN session_id=\'claim\' THEN 4 END AS acceptance_control_seq FROM durable;');
   const insert = database.prepare('INSERT INTO durable VALUES(?,?,?)');
   try {
     insert.run('accepted',2,JSON.stringify({seq:2,text:'中文'})); insert.run('accepted',1,JSON.stringify({seq:1}));
     const {facts,selection} = readFactEvidence(database,'accepted');
     assert.deepEqual(facts.map(fact=>fact.seq),[1,2]);
     assert.equal(selection.bytes,Buffer.byteLength(JSON.stringify(facts[0]))+Buffer.byteLength(JSON.stringify(facts[1])));
+    const reference={type:'input_message_claimed',seq:8,accepted_control_seq:4};
+    const message={message_id:'original',source:{type:'continuation',source:{round:1}},content:[{type:'text',text:'Reminder'}]};
+    insert.run('claim',8,JSON.stringify(reference));
+    assert.throws(()=>readFactEvidence(database,'claim'),/claim acceptance differs/);
+    database.prepare('INSERT INTO agent_controls VALUES(?,?,?)').run('claim',4,JSON.stringify({type:'message_accepted',seq:4,message}));
+    assert.deepEqual(readFactEvidence(database,'claim').facts,[{type:'input_message_claimed',seq:8,source:{...message.source,message_id:'original'},content:message.content}]);
     for(let seq=1;seq<=1000;seq++)insert.run('too-many',seq,'not JSON');
     visited=0;
     assert.throws(()=>readFactEvidence(database,'too-many'),/bounded Fact selection/);

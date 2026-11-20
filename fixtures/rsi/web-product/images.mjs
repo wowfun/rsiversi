@@ -4,6 +4,22 @@ import { png } from "./png.mjs";
 import { join } from "node:path";
 import { writeFile } from 'node:fs/promises';
 
+export async function transferImage(target, type, width, height) {
+  const bytes = Array.from(png(width, height, [34, 110, 160, 255]));
+  return target.evaluate((node, {bytes, type}) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array(bytes)], 'clipboard.png', {type:'image/png'}));
+    const options = {bubbles:true, cancelable:true, composed:true};
+    const event = type === 'paste'
+      ? new ClipboardEvent('paste', {...options,clipboardData:transfer})
+      : new DragEvent(type, {...options,dataTransfer:transfer});
+    // Firefox constructs an empty clipboard for scripted ClipboardEvents.
+    if (type === 'paste' && !event.clipboardData?.files.length)
+      Object.defineProperty(event, 'clipboardData', {value:transfer});
+    return !node.dispatchEvent(event);
+  }, {bytes, type});
+}
+
 export async function verifyImages(page, pane, service, report, name) {
   // setInputFiles bypasses the disabled attachment control; await the bound draft first.
   const input=await pane.locator('input[type="file"]').elementHandle();
@@ -11,11 +27,16 @@ export async function verifyImages(page, pane, service, report, name) {
   await input.dispose();
   const before = service.provider.requests.length;
   const picker = pane.locator('input[type="file"]');
-  await picker.setInputFiles([
-    { name: "red.png", mimeType: "image/png", buffer: png(80, 60, [180, 45, 60, 255]) },
-    { name: "blue.png", mimeType: "image/png", buffer: png(120, 80, [25, 95, 145, 255]) },
-  ]);
   const rows = pane.locator(".draft-image");
+  const editor = pane.locator('textarea[aria-label$="message"]').first();
+  await editor.focus();
+  assert(await transferImage(editor,'paste',80,60),'the focused composer admits an image paste');
+  await rows.first().waitFor();
+  assert(await transferImage(pane.locator('.transcript'),'dragenter',120,80));
+  const overlay = page.getByRole('status').filter({hasText:'Drag images here to add them'});
+  await overlay.waitFor();
+  assert(await transferImage(pane.locator('.transcript'),'drop',120,80),'the transcript admits a dropped image');
+  await overlay.waitFor({state:'detached'});
   await rows.nth(1).waitFor();
   assert.equal(service.provider.requests.length, before);
   // Both real Worker reads must reach browser HTTP dispatch before either is sent.

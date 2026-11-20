@@ -1,4 +1,5 @@
 import {disconnect,restoreDrafts} from './controls.mjs';
+import {readBrowserCaller} from './browser-fixture.mjs';
 import {workspaceForm} from './controls.mjs';
 import {closeDetails} from "./controls.mjs";
 import {paired} from './paired-env.mjs';
@@ -76,7 +77,7 @@ try {
   };
   const waitText = (tab,session,text) => waitRecord(tab,session,record=>record?.text===text);
   await connect(page,receipt);
-  const caller = await page.evaluate(async () => (await (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json()).device_id);
+  assert.deepEqual(await readBrowserCaller(page), {status:200,device:receipt.id});
   await workspaceForm(page);
       await page.getByLabel("Directory path").fill(service.workspace);
   await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
@@ -117,11 +118,19 @@ try {
   await input(page).fill("Local-only input after a failed save");
   await pane(page).getByText(/Input is not saved/).waitFor();
   await page.evaluate(()=>{window.failDraftWrites=false;});
+  const secondReceipt = service.register(`${name} saved drafts B`);
+  const deviceB = await context.newPage();
+  await deviceB.goto(service.origin);
+  await deviceB.locator('#receipt').fill(JSON.stringify(secondReceipt));
+  await deviceB.locator('#connect').click();
+  await deviceB.locator('#notice').filter({hasText:'Device registration was rejected'}).waitFor();
+  assert(await deviceB.locator('#workbench').isHidden());
   await disconnect(other);
   await other.locator("#login").waitFor({state:"visible"}); await other.close();
   // A cookie switch cannot authorize an old tab as the new device.
-  const deviceB = await context.newPage(); await connect(deviceB,service.register(`${name} saved drafts B`));
-  assert.equal(await page.evaluate(async expected => (await fetch("/api/v2/rsi-api-protocol/4/connection/caller/1/read",{method:"POST",headers:{"content-type":"application/json","X-Rsi-Expected-Device":expected},body:"{}"})).status,caller),401);
+  await connect(deviceB,secondReceipt);
+  assert.deepEqual(await readBrowserCaller(deviceB),{status:200,device:secondReceipt.id});
+  assert.deepEqual(await readBrowserCaller(page,receipt.id),{status:401,device:null});
   await openRecovery(deviceB);
   const deviceBSession = await sessionId(deviceB);
   const deviceBDrafts = await pane(deviceB).locator(".saved-draft > span").allTextContents();
