@@ -50,10 +50,12 @@ function TokenDetails({usage}: {usage: TokenUsage}) {
     {!!usage.reasoning_tokens && <><dt title="Included in output">Reasoning</dt><dd>{exactTokens(usage.reasoning_tokens)}</dd></>}
   </dl>;
 }
-export function MessageUsage({usage}: {usage: TokenUsage}) {
-  return <span className="message-usage" title="Reported usage for this model response">
-    <StatPopover name="Token usage" icon={<IconDatabaseOutlineRegular/>}
-      label={`Usage ${tokenCount(tokenTotal(usage))} tok`} headline={exactTokens(tokenTotal(usage)!)}>
+export function TurnUsage({usage}: {usage: TokenUsage}) {
+  const total = tokenTotal(usage);
+  if (total == null) return null;
+  return <span className="message-usage">
+    <StatPopover name="Turn usage" icon={<IconDatabaseOutlineRegular/>}
+      label={`Usage ${tokenCount(total)} tok`} headline={exactTokens(total)}>
       <TokenDetails usage={usage}/>
     </StatPopover>
   </span>;

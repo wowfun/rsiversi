@@ -99,7 +99,10 @@ try {
    await page.getByText('Completed in 2s', {exact:false}).waitFor();
    assert.equal(await page.locator('.message-clock').count(),2);
    await page.locator('.message-usage button').click();
-   assert.equal(await page.getByRole('dialog',{name:'Token usage',exact:true}).isVisible(),true);
+   const turnUsage=page.getByRole('dialog',{name:'Turn usage',exact:true});
+   await turnUsage.waitFor();
+   assert.match(await turnUsage.innerText(),/11,300 tok/);
+   await page.screenshot({path:join(report,name+'-Turn-usage.png')});
    await page.locator('.message-usage button').click();
    await page.getByTestId('session-metrics').getByText('11.3K tok · Cache hit 87%',{exact:true}).waitFor();
    const stats=page.getByTestId('session-metrics');

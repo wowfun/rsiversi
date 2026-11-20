@@ -3,7 +3,7 @@ import {IconApiOutlineRegular, IconClockOutlineRegular, IconContextInjectionOutl
 import {MessageFeedback} from './message-feedback.tsx';
 import {CopyButton} from "./copy-button.tsx";
 import {messageClock, elapsedLabel} from '../../message-metrics.js';
-import {MessageUsage} from './metrics.tsx';
+import {TurnUsage} from './metrics.tsx';
 import {ProcessTitle, RunningStatus} from './process-row.tsx';
 import {
   PureComponent,
@@ -469,7 +469,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
             {pane && generation && terminal.feedback_message && <MessageFeedback key={terminal.feedback_message}
               pane={pane} generation={generation} message={terminal.feedback_message}/>}
             <ForkTurn turn={terminal.id} owner={owner}/>
-            {terminal.usage && <MessageUsage usage={terminal.usage}/>}
+            {terminal.usage && <TurnUsage usage={terminal.usage}/>}
             {clock && <time className="message-clock" dateTime={clock.iso} title={clock.title}>{clock.label}</time>}
           </div>
         </div>);

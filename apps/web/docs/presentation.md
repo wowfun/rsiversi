@@ -725,7 +725,8 @@ expand/collapse control independent of server pagination.
 
 Message clocks use durable Fact timestamps; transient blocks have no fabricated time.
 Completed Turn headings show recorded elapsed time when both boundaries are known.
-Assistant action rows expose copy, source inspection and reported usage for the final model response.
+Assistant action rows expose copy, source inspection and **Turn usage** for a
+complete Turn whose conversational requests all reported token counts.
 On hover-capable devices the latest user message and the latest closing assistant
 response keep their action rows visible. Earlier rows reveal actions on hover or
 keyboard focus without shifting the transcript. Touch devices retain visible actions.
@@ -746,8 +747,10 @@ Metrics refresh when a completed turn becomes visible in the transcript; failed
 reads and unfinished reductions offer an explicit retry in the statistics details.
 
 The composer footer has separate Session statistics, Token usage and Context usage
-buttons. Each opens one nonmodal, viewport-clamped panel above its own button,
-with Escape/outside dismissal and keyboard focus restoration. Message usage uses
+buttons. Each opens one nonmodal, viewport-clamped panel above its own button.
+The menu tint overlays an opaque theme surface so transcript text stays legible
+only outside the panel. Panels support
+Escape/outside dismissal and keyboard focus restoration. Turn usage uses
 the same panel skin. Token detail partitions inclusive input by reported cache reads; cache writes
 are a supplementary subset of uncached input and reasoning is a subset of output.
 Unknown subsets are not presented as zero. Session statistics use whole-log recorded model

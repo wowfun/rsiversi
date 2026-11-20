@@ -75,7 +75,9 @@ impl RequestPresentation {
                     purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction;
             }
             LanguageAttemptStage::Started => self.started = Some(fact.timestamp_ms()),
-            LanguageAttemptStage::Settled(attempt, _) => {
+            LanguageAttemptStage::Settled(attempt, purpose) => {
+                self.compaction =
+                    purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction;
                 if let Some(retry) = attempt.scheduled_retry()
                     && let LanguageEvent::Failed { error, .. } = attempt.terminal()
                     && let Some(turn) = fact.body().turn_id()
@@ -179,6 +181,14 @@ impl RequestPresentation {
     /// Whether the history window has observed a start for this exact effect.
     pub fn has_started(&self) -> bool {
         self.started.is_some()
+    }
+    /// Whether this request prepared a context summary.
+    pub fn is_compaction(&self) -> bool {
+        self.compaction
+    }
+    /// Inclusive counts from the settled provider stream.
+    pub fn reported_usage(&self) -> Option<TokenUsage> {
+        self.usage
     }
     /// Exact intent source when that earlier history has been loaded.
     pub fn intent_seq(&self) -> Option<u64> {

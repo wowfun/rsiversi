@@ -4,7 +4,7 @@
 .pill:hover, .pill[aria-expanded=true] { background: var(--hover); color: var(--ink); }
 .pill svg { flex: none; width: 14px; height: 14px; }
 .contextPill { flex-shrink: 0; }
-.panel { position: fixed; z-index: 1100; visibility: hidden; box-sizing: border-box; width: 300px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: auto; padding: 16px; border: 0; border-radius: 16px; background: var(--dsw-specific-menu); backdrop-filter: var(--dsw-menu-backdrop-filter); box-shadow: 0 0 0 0.5px var(--dsw-alias-border-l1), 0 3px 8px 0 rgb(0 0 0 / 4%), 0 0 20px 0 rgb(0 0 0 / 5%); color: var(--muted); font-size: 12px; line-height: 18px; }
+.panel { position: fixed; z-index: 1100; visibility: hidden; box-sizing: border-box; width: 300px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); overflow: auto; padding: 16px; border: 0; border-radius: 16px; background: linear-gradient(var(--dsw-specific-menu) 0 0), var(--paper); box-shadow: 0 0 0 0.5px var(--dsw-alias-border-l1), 0 3px 8px 0 rgb(0 0 0 / 4%), 0 0 20px 0 rgb(0 0 0 / 5%); color: var(--muted); font-size: 12px; line-height: 18px; }
 .panel:focus { outline: none; }
 .title { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 8px; color: var(--ink); font-weight: 500; }
 .title > span { display: inline-flex; align-items: center; gap: 6px; }

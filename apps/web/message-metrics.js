@@ -16,7 +16,8 @@ export function tokenCount(value) {
   return `${Number((value / 1000).toFixed(1))}K`;
 }
 export function tokenTotal(usage) {
-  return usage ? usage.input_tokens + usage.output_tokens : undefined;
+  const total = usage && usage.input_tokens + usage.output_tokens;
+  return Number.isSafeInteger(total) ? total : undefined;
 }
 export function elapsedLabel(milliseconds) {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return '';

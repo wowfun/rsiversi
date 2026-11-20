@@ -260,7 +260,7 @@ impl MetricsReducer {
             self.summary.tokens = if first {
                 *usage
             } else {
-                sum(self.summary.tokens, *usage)?
+                sum_token_usage(self.summary.tokens, *usage)?
             };
             self.summary.reported_attempts = add(self.summary.reported_attempts, 1)?;
         } else if matches!(
@@ -469,7 +469,7 @@ impl UsageTotals {
             next.tokens = if next.reported_attempts == 0 {
                 summary.tokens
             } else {
-                sum(next.tokens, summary.tokens)?
+                sum_token_usage(next.tokens, summary.tokens)?
             };
         }
         next.reported_attempts = add(next.reported_attempts, summary.reported_attempts)?;
@@ -495,7 +495,8 @@ fn add(a: u64, b: u64) -> Result<u64, &'static str> {
 fn subset(a: Option<u64>, b: Option<u64>) -> Result<Option<u64>, &'static str> {
     a.zip(b).map(|(a, b)| add(a, b)).transpose()
 }
-fn sum(a: TokenUsage, b: TokenUsage) -> Result<TokenUsage, &'static str> {
+/// Adds inclusive counts, preserving a subset only if both readings reported it.
+pub fn sum_token_usage(a: TokenUsage, b: TokenUsage) -> Result<TokenUsage, &'static str> {
     TokenUsage::new(
         add(a.input_tokens(), b.input_tokens())?,
         add(a.output_tokens(), b.output_tokens())?,

@@ -7,6 +7,7 @@ test('missing provider metrics remain absent and inclusive input is not double c
   assert.deepEqual(usageReadings(undefined),{total:undefined,cache:undefined,speed:undefined,context:undefined});
   const tokens={input_tokens:100,output_tokens:20,cache_read_tokens:80};
   assert.equal(tokenTotal(tokens),120);
+  assert.equal(tokenTotal({...tokens,input_tokens:Number.MAX_SAFE_INTEGER}),undefined);
   const summary={reported_attempts:1,tokens,timing:{decode_ms:2000,decode_output_tokens:20},last_context:{input_tokens:100}};
   assert.deepEqual(usageReadings(summary,1000),{total:120,cache:80,speed:10,context:10});
   for(const [used,expected] of [[0,0],[126,13],[1001,100],[1500,100]]){

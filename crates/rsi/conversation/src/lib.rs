@@ -18,6 +18,7 @@ mod cost;
 pub use cost::{ConfiguredCost, CurrencyCost};
 pub use metrics::{
     AttemptMetrics, ContextUsage, MetricsReducer, SessionMetrics, SessionTiming, UsageTotals,
+    sum_token_usage,
 };
 mod model_preview;
 pub use model_preview::{LiveModelPreview, ModelBlockPreview, ModelPreviewState, compaction_preview, model_previews};

@@ -61,7 +61,6 @@ struct Model {
     conversation: bool,
     tools: bool,
     finished: Option<(u64, bool)>,
-    usage: Option<TokenUsage>,
 }
 #[derive(Clone, Debug, Default)]
 struct State {
@@ -152,7 +151,6 @@ impl Index {
             } = fact.body()
             {
                 for (_, event) in attempt.events().filter_map(Result::ok) {
-                    model.conversation = *purpose == ModelEventPurpose::Conversation;
                     match &event {
                         LanguageEvent::ContentStarted {
                             content: ContentStart::ToolCall { .. },
@@ -166,10 +164,10 @@ impl Index {
                             ));
                         }
                         LanguageEvent::Failed { .. } => model.finished = Some((fact.seq(), false)),
-                        LanguageEvent::Usage { usage } => model.usage = Some(*usage),
                         _ => {}
                     }
                 }
+                model.conversation = *purpose == ModelEventPurpose::Conversation;
             }
             changed |= *model != previous;
             if matches!(fact.body(), Fact::ModelStarted { .. }) && !model.started {
@@ -407,7 +405,7 @@ impl State {
                 .then_some(self.started_ms.zip(self.ended_ms))
                 .flatten()
                 .and_then(|(start, end)| end.checked_sub(start)),
-            usage: latest.and_then(|(_, model)| model.usage),
+            usage: None,
             partial,
             running: self.terminal.is_none(),
             foldable: !partial && (self.terminal.is_none() || (successful && !interrupted_model)),
@@ -423,10 +421,22 @@ impl State {
             .filter(|(_, ok)| *ok)
             .map(|(seq, _)| seq.to_string());
         let mut reservations = BTreeMap::new();
+        let mut measure_usage = !partial && self.terminal.is_some();
         for block in blocks {
             let Some(link) = self.links.get(&block.key) else {
                 continue;
             };
+            if measure_usage
+                && let Some(request) = block.request.as_ref().filter(|r| !r.is_compaction())
+            {
+                turn.usage = request
+                    .reported_usage()
+                    .and_then(|reading| match turn.usage {
+                        Some(previous) => rsi_conversation::sum_token_usage(previous, reading).ok(),
+                        None => Some(reading),
+                    });
+                measure_usage = turn.usage.is_some();
+            }
             if let Some(time) = link.timestamp_ms {
                 turn.timestamps.insert(block.key.clone(), time);
             }
@@ -1383,32 +1393,43 @@ mod tests {
             assert!(!turn(&t).answer.contains(&block.key));
         }
     }
-    #[test]
-    fn recorded_clocks_duration_and_response_usage_survive_replay() {
-        let mut transcript = ActualTranscript::default();
-        transcript.fact(&SessionFact::new(1, 1_000, accepted()).unwrap());
-        let mut response = complete("answer", "Hello");
+    fn response_with_usage(effect: &str, usage: TokenUsage) -> Fact {
+        let mut response = complete(effect, "Hello");
         if let Fact::ModelAttemptSettled { attempt, .. } = &mut response {
             let mut events: Vec<_> = attempt.events().map(Result::unwrap).collect();
-            events.insert(
-                events.len() - 1,
-                (
-                    0,
-                    LanguageEvent::Usage {
-                        usage: TokenUsage::new(100, 20, Some(80), None, None).unwrap(),
-                    },
-                ),
-            );
+            events.insert(events.len() - 1, (0, LanguageEvent::Usage { usage }));
             *attempt =
                 rsi_agent_session_protocol::ModelAttemptLog::from_events(events, true).unwrap();
         }
-        let fact = SessionFact::new(2, 2_900, response).unwrap();
+        response
+    }
+
+    #[test]
+    fn recorded_clocks_and_complete_turn_usage_survive_replay() {
+        let mut transcript = ActualTranscript::default();
+        transcript.fact(&SessionFact::new(1, 1_000, accepted()).unwrap());
+        let first = response_with_usage("step", TokenUsage::new(3, 1, None, None, None).unwrap());
+        transcript.fact(&SessionFact::new(2, 2_000, first).unwrap());
+        let response = response_with_usage(
+            "answer",
+            TokenUsage::new(100, 20, Some(80), None, None).unwrap(),
+        );
+        let fact = SessionFact::new(3, 2_900, response).unwrap();
         transcript.fact(&fact);
-        transcript.fact(&SessionFact::new(3, 3_000, terminal(TurnOutcome::Completed)).unwrap());
+        assert!(
+            transcript.turns.view.entries[&TurnId::new("turn").unwrap()]
+                .usage
+                .is_none()
+        );
+        let end = SessionFact::new(4, 3_000, terminal(TurnOutcome::Completed)).unwrap();
+        transcript.fact(&end);
         let turn = &transcript.turns.view.entries[&TurnId::new("turn").unwrap()];
         assert_eq!(turn.elapsed_ms, Some(2_000));
         assert_eq!(turn.timestamps[&turn.answer[0]], 2_900);
-        assert_eq!(turn.usage.unwrap().input_tokens(), 100);
+        assert_eq!(
+            turn.usage,
+            Some(TokenUsage::new(103, 21, None, None, None).unwrap())
+        );
         let previous = turn.clone();
         transcript.fact(&fact);
         assert_eq!(
@@ -1417,10 +1438,36 @@ mod tests {
         );
         let mut partial = ActualTranscript::default();
         partial.fact(&fact);
-        partial.fact(&SessionFact::new(3, 3_000, terminal(TurnOutcome::Completed)).unwrap());
-        assert_eq!(
-            partial.turns.view.entries[&TurnId::new("turn").unwrap()].elapsed_ms,
-            None
-        );
+        partial.fact(&end);
+        let turn = &partial.turns.view.entries[&TurnId::new("turn").unwrap()];
+        assert!(turn.elapsed_ms.is_none() && turn.usage.is_none());
+    }
+
+    #[test]
+    fn turn_usage_counts_only_conversation_attempts_and_requires_every_reading() {
+        let reading = TokenUsage::new(3, 1, Some(0), None, None).unwrap();
+        let mut summary = complete("summary", "checkpoint");
+        let Fact::ModelAttemptSettled { purpose, .. } = &mut summary else {
+            unreachable!()
+        };
+        *purpose = ModelEventPurpose::ContextCompaction;
+        for (prior, expected) in [
+            (summary, Some(reading)),
+            (complete("retry", "unmetered"), None),
+            (
+                response_with_usage(
+                    "large",
+                    TokenUsage::new(u64::MAX, 0, None, None, None).unwrap(),
+                ),
+                None,
+            ),
+        ] {
+            let mut t = Transcript::default();
+            apply(&mut t, accepted());
+            apply(&mut t, prior);
+            apply(&mut t, response_with_usage("answer", reading));
+            apply(&mut t, terminal(TurnOutcome::Completed));
+            assert_eq!(turn(&t).usage, expected);
+        }
     }
 }

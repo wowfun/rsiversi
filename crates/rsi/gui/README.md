@@ -795,9 +795,11 @@ successful turns with a retained answer, the conversation tab represents that
 terminal once in the turn heading. Activity and incomplete or unsuccessful
 turns retain the chronological terminal and its source details.
 
-The Turn index carries durable block timestamps, boundary elapsed time and reported
-usage for the latest conversation model response. This response usage is not
-presented as a complete Turn total. A generation-bound `metrics` command reads the existing
+The Turn index carries durable block timestamps and boundary elapsed time. For a
+complete, closed Turn it sums provider-reported usage once per conversational
+request, including retries. A missing reading or an unrepresentable total
+withholds the disclosure. Compaction requests have separate accounting.
+A generation-bound `metrics` command reads the existing
 Session metrics API, preserves its watermark/completeness, and publishes only to
 the still-current attachment. It does not infer whole-Session totals from loaded
 blocks or block streaming progress on a metrics read.

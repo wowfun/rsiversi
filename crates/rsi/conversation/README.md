@@ -56,7 +56,9 @@ supplies its retry limit when loaded. Attempt elapsed time excludes backoff.
 
 `RequestPresentation` folds one effect's partial lifecycle for bounded history
 windows. It preserves the prepared model/effort, reported usage, elapsed time and
-failure independently of event arrival order. It never contributes usage totals.
+failure independently of event arrival order. The Turn presentation can sum
+these per-request readings. Whole-Session accounting belongs to the ordered
+metrics reducer.
 A successful `schedule_create` result paired with its exact intent supplies the
 created reminder's ID, single-line title and recurrence. The transcript can
 reconstruct the creation from its original turn without retaining the reminders
