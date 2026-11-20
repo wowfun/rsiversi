@@ -27,9 +27,14 @@ observe peer revocation without retaining peer authority; dropping the last owne
 wakes selection. A transaction overlapping revocation still returns its canonical
 receipt, while the revoked lease remains ineligible for subsequent claims.
 
-Schedule owns bounded timer intent and total rounds, independently of Node.
-ProgramRun execution ownership is distinct from fork lineage and from a retired
-creator claim. Both restart disarmed/interrupted and never replay external work.
+The user's schedule creation is standing authority for its enabled occurrences.
+Binding one kernel owner for every future timer would let 64 distant deadlines
+exclude every later Session. The native Host retains deadlines and binds only a
+due Session. On restart it can recover the same intent from current domain
+heads, so no second scheduler database or cross-store write is needed. A prior
+acceptance keeps its original message identity and lifetime charge across
+restart. ProgramRun execution ownership remains distinct from fork lineage and
+from a retired creator claim. Interrupted Programs require fresh authority.
 
 Continuation leases survive known precommit capacity and command-revision
 contention. Schedule retries with fresh state and bounded exponential pacing;
@@ -66,6 +71,6 @@ reject incompatible old schema versions explicitly; there are no compatibility
 shims. Local Node execution remains shell-equivalent, with no VM sandbox claim.
 
 Public admission races prove human priority, no busy charge/revoke, independent
-owner lifetimes and bounded aggregate work. Repeated restart cannot arm work.
+owner lifetimes and bounded aggregate work. Restart preserves Schedule allowance.
 Program completion has an exclusive run sink; it cannot leak child results into
 ordinary parent mailboxes or chain new runs without fresh authority.

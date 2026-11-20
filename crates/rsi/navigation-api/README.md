@@ -20,7 +20,8 @@ starts a peer. The Host retains at most 4,096 read positions within 1 MiB.
 
 The authenticated navigation API reads durable Session truth and edits only
 Host-owned title/archive metadata. It never stops or deletes a Session. Titles
-are at most 256 UTF-8 bytes and queries at most 128 bytes. A query scans at most
+are at most 256 UTF-8 bytes. Search accepts up to 500 UTF-16 code units
+without control characters. A query scans at most
 256 indexed activity rows and returns at most 64 matches. Its continuation carries an opaque process-local scan token, the exact query,
 archive/workspace filter, Host generation and metadata revision. The owner keeps
 at most 128 caller-bound cuts; an evicted, altered or foreign cursor requires an

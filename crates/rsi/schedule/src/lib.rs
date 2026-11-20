@@ -9,14 +9,15 @@ use rsi_agent_schedule::{
     mutation_id, owner, request_id,
 };
 use rsi_agent_session_protocol::{
-    CommandArguments, ContinuationInput, ContributionId, DomainIdentity, DomainMutationSource,
-    DomainStateView, MessageId, SessionCommandInvocation, SessionId,
+    CommandArguments, CommandRevision, ContinuationInput, ContributionId, DomainIdentity,
+    DomainMutationSource, DomainStateView, MessageId, SessionCommandInvocation, SessionId,
 };
+use rsi_agent_store_protocol::{SessionStore, SessionStoreContract, StoreError};
 use rsi_agent_turn_protocol::{
     AgentCallerAuthority, ContinuationBinding, ContinuationLease, DomainMutationReceipt,
-    MessageState, SessionCommands, SessionCommandsContract, SessionContinuations,
-    SessionContinuationsContract, SessionProjections, SessionProjectionsContract, SubmitSession,
-    TurnError, TurnExecution, TurnExecutionContract, TurnService, TurnServiceContract,
+    MessageState, SessionContinuations, SessionContinuationsContract, SessionProjections,
+    SessionProjectionsContract, SubmitSession, TurnError, TurnExecution, TurnExecutionContract,
+    TurnService, TurnServiceContract,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use std::result::Result;
@@ -59,7 +60,7 @@ pub struct ScheduleService {
 struct Inner {
     turns: Arc<dyn TurnService>,
     execution: Arc<dyn TurnExecution>,
-    commands: Arc<dyn SessionCommands>,
+    store: Arc<dyn SessionStore>,
     continuations: Arc<dyn SessionContinuations>,
     projections: Arc<dyn SessionProjections>,
     clock: Arc<dyn ScheduleClock>,
@@ -69,9 +70,15 @@ struct Inner {
     session_gates: Mutex<BTreeMap<SessionId, Weak<AsyncMutex<()>>>>,
     arming: Arc<Semaphore>,
     failures: Mutex<BTreeMap<SessionId, String>>,
-    owners: Mutex<BTreeMap<SessionId, Arc<Live>>>,
+    calendar: Mutex<Calendar>,
+    changed: tokio::sync::Notify,
     capacity: Arc<Semaphore>,
     tasks: TaskTracker,
+}
+#[derive(Debug, Default)]
+struct Calendar {
+    pending: BTreeMap<SessionId, u64>,
+    running: BTreeMap<SessionId, Arc<Live>>,
 }
 #[derive(Debug)]
 struct Live {
@@ -81,11 +88,12 @@ struct Live {
     _capacity: tokio::sync::OwnedSemaphorePermit,
 }
 impl ScheduleService {
-    /// Builds an isolated controller with an injectable UTC clock.
+    /// Builds a controller with an injectable UTC clock. Call `start` once
+    /// its dependencies and cleanup have been registered.
     pub fn new(
         turns: Arc<dyn TurnService>,
         execution: Arc<dyn TurnExecution>,
-        commands: Arc<dyn SessionCommands>,
+        store: Arc<dyn SessionStore>,
         continuations: Arc<dyn SessionContinuations>,
         projections: Arc<dyn SessionProjections>,
         clock: Arc<dyn ScheduleClock>,
@@ -95,7 +103,7 @@ impl ScheduleService {
             inner: Arc::new(Inner {
                 turns,
                 execution,
-                commands,
+                store,
                 continuations,
                 projections,
                 clock,
@@ -105,11 +113,31 @@ impl ScheduleService {
                 session_gates: Mutex::new(BTreeMap::new()),
                 arming: Arc::new(Semaphore::new(64)),
                 failures: Mutex::new(BTreeMap::new()),
-                owners: Mutex::new(BTreeMap::new()),
+                calendar: Mutex::default(),
+                changed: tokio::sync::Notify::new(),
                 capacity: Arc::new(Semaphore::new(64)),
                 tasks: TaskTracker::new(),
             }),
         }
+    }
+    /// Runs the generation's shared timer until shutdown.
+    pub fn start(
+        self,
+        context: rsi_meta::Context,
+        startup: Option<tokio::sync::watch::Receiver<bool>>,
+    ) {
+        let dispatcher = self.clone();
+        self.inner.tasks.spawn(async move {
+            let run = async {
+                if let Some(mut ready) = startup
+                    && ready.wait_for(|started| *started).await.is_err()
+                {
+                    return;
+                }
+                dispatcher.dispatch(&context).await;
+            };
+            tokio::select! { biased; () = dispatcher.inner.stop.cancelled() => {}, () = run => {} }
+        });
     }
     /// Closes admission and joins all owned drivers before dependencies withdraw.
     ///
@@ -122,7 +150,9 @@ impl ScheduleService {
         {
             let _gate = self.inner.gate.lock().unwrap();
             self.inner.stop.cancel();
-            for live in self.inner.owners.lock().unwrap().values() {
+            let mut calendar = self.inner.calendar.lock().unwrap();
+            calendar.pending.clear();
+            for live in calendar.running.values() {
                 live.lease.revoke();
                 live.stop.cancel();
             }
@@ -131,7 +161,6 @@ impl ScheduleService {
         tokio::time::timeout(Duration::from_secs(30), self.inner.tasks.wait())
             .await
             .map_err(|_| "Schedule cleanup timed out")?;
-        self.inner.owners.lock().unwrap().clear();
         let failures = self.inner.failures.lock().unwrap();
         if failures.is_empty() {
             Ok(())
@@ -145,119 +174,125 @@ impl ScheduleService {
     async fn snapshot(
         &self,
         session: &SessionId,
-    ) -> Result<(DomainStateView, ScheduleState), TurnError> {
-        let view = self
+    ) -> Result<(DomainStateView, ScheduleState, u64), TurnError> {
+        let (control_seq, view) = self
             .inner
             .turns
-            .domain_states(session)
+            .domain_state(session, SCHEDULE_DOMAIN)
             .await?
-            .into_iter()
-            .find(|v| v.snapshot.identity().id() == SCHEDULE_DOMAIN)
             .ok_or_else(|| TurnError::Invalid("Schedule domain unavailable".into()))?;
-        if view.snapshot.identity().version() != 1 {
-            return Err(TurnError::Invalid("unsupported Schedule codec".into()));
-        }
-        let state: ScheduleState = serde_json::from_value(view.snapshot.state().value().clone())
-            .map_err(|e| TurnError::Invalid(display(e)))?;
-        state.validate().map_err(TurnError::Invalid)?;
-        Ok((view, state))
+        let state = ScheduleState::from_snapshot(&view.snapshot).map_err(TurnError::Invalid)?;
+        Ok((view, state, control_seq))
     }
     async fn command(
         &self,
         live: &Live,
-        reserve: Option<(u64, ContinuationInput)>,
-        message: Option<MessageId>,
-    ) -> Result<(), TurnError> {
-        retry_contention(|| self.command_once(live, reserve.clone(), message.clone())).await
-    }
-    async fn command_once(
-        &self,
-        live: &Live,
-        reserve: Option<(u64, ContinuationInput)>,
-        message: Option<MessageId>,
+        input: &ContinuationInput,
+        reserve: Option<(u64, u64)>,
     ) -> Result<(), TurnError> {
         let session = live.lease.session_id();
-        let revision = self
-            .inner
-            .commands
-            .list(self.inner.turns.prepare_resume(session).await?)
-            .await?
-            .revision();
-        let (command, id, arguments, input) = if let Some((now_ms, input)) = reserve {
+        let (command, operation, arguments) = if let Some((now_ms, _)) = reserve {
             (
                 SCHEDULE_RESERVE,
-                request_id(input.round, "reserve").map_err(TurnError::Invalid)?,
+                "reserve",
                 serde_json::to_value(ReserveSchedule { now_ms }).expect("bounded UTC value"),
-                Some(input),
             )
         } else {
-            let (_, state) = self.snapshot(session).await?;
             (
                 SCHEDULE_SETTLE,
-                request_id(state.allocated_rounds, "settle").map_err(TurnError::Invalid)?,
+                "settle",
                 serde_json::to_value(SettleSchedule {
-                    message_id: message.expect("settlement input"),
+                    message_id: input.message_id.clone(),
                 })
                 .expect("bounded message identity"),
-                None,
             )
         };
-        self.inner
-            .continuations
-            .execute(
-                &live.lease,
-                self.inner.turns.prepare_resume(session).await?,
-                SessionCommandInvocation {
-                    command: ContributionId::new(command)
-                        .map_err(|e| TurnError::Invalid(e.to_string()))?,
-                    request_id: id,
-                    expected_revision: revision,
-                    arguments: CommandArguments::new(arguments)
-                        .map_err(|e| TurnError::Invalid(e.to_string()))?,
-                },
-                input,
-            )
-            .await?;
-        Ok(())
+        let command =
+            ContributionId::new(command).map_err(|e| TurnError::Invalid(e.to_string()))?;
+        let request_id = request_id(input.round, operation).map_err(TurnError::Invalid)?;
+        let arguments =
+            CommandArguments::new(arguments).map_err(|e| TurnError::Invalid(e.to_string()))?;
+        retry_contention(|| async {
+            let prepared = self.inner.turns.prepare_resume(session).await?;
+            let control_seq = if let Some((_, cut)) = reserve {
+                cut
+            } else {
+                self.inner
+                    .store
+                    .read_watermarks(session)
+                    .await
+                    .map_err(|e| match e {
+                        StoreError::ReadCapacity | StoreError::ValidationBusy => {
+                            TurnError::Capacity
+                        }
+                        error => TurnError::Store(error.to_string()),
+                    })?
+                    .durable_control_seq
+            };
+            self.inner
+                .continuations
+                .execute(
+                    &live.lease,
+                    prepared,
+                    SessionCommandInvocation {
+                        command: command.clone(),
+                        request_id: request_id.clone(),
+                        expected_revision: CommandRevision::Durable { control_seq },
+                        arguments: arguments.clone(),
+                    },
+                    reserve.map(|_| input.clone()),
+                )
+                .await?;
+            Ok(())
+        })
+        .await
     }
-    async fn drive(&self, live: &Live) -> Result<(), String> {
+    async fn drive(
+        &self,
+        live: &Live,
+        mut state: ScheduleState,
+        mut control_seq: u64,
+        context: &rsi_meta::Context,
+    ) -> Result<Option<u64>, String> {
         loop {
             if live.stop.is_cancelled() {
-                return Ok(());
+                return Ok(None);
             }
-            let (_, mut state) = retry_contention(|| self.snapshot(live.lease.session_id()))
-                .await
-                .map_err(display)?;
             if let Some(reservation) = state.reservation.as_ref().filter(|r| !r.settled) {
                 self.wait_terminal(live, &reservation.input.message_id, live.stop.clone())
                     .await?;
-                self.command(live, None, Some(reservation.input.message_id.clone()))
+                self.command(live, &reservation.input, None)
                     .await
                     .map_err(display)?;
-                continue;
+            } else {
+                let Some(due) = state.next_due() else {
+                    return Ok(None);
+                };
+                let now = self.inner.clock.now_ms();
+                if now < due
+                    || context
+                        .lookup_local::<rsi_navigation::NavigationContract>()
+                        .is_some_and(|owner| {
+                            owner.archived_sessions().contains(live.lease.session_id())
+                        })
+                {
+                    return Ok(Some(due));
+                }
+                let input = state.reserve(now)?;
+                match self.command(live, &input, Some((now, control_seq))).await {
+                    Ok(()) => {}
+                    Err(TurnError::SessionBusy) => self
+                        .inner
+                        .continuations
+                        .wait_idle(&live.lease, live.stop.clone())
+                        .await
+                        .map_err(display)?,
+                    Err(error) => return Err(display(error)),
+                }
             }
-            let Some(due) = state.next_due() else {
-                return Ok(());
-            };
-            self.inner.clock.wait_until(due, live.stop.clone()).await;
-            if live.stop.is_cancelled() {
-                return Ok(());
-            }
-            let now = self.inner.clock.now_ms();
-            if now < due {
-                continue;
-            }
-            let input = state.reserve(now)?;
-            match self.command(live, Some((now, input)), None).await {
-                Ok(()) => {}
-                Err(TurnError::SessionBusy) => self
-                    .inner
-                    .continuations
-                    .wait_idle(&live.lease, live.stop.clone())
-                    .await
-                    .map_err(display)?,
-                Err(error) => return Err(display(error)),
-            }
+            (_, state, control_seq) = retry_contention(|| self.snapshot(live.lease.session_id()))
+                .await
+                .map_err(display)?;
         }
     }
     async fn validate_receipt(
@@ -335,7 +370,7 @@ impl ScheduleService {
     }
     async fn finish(&self, live: &Live) -> Result<(), String> {
         live.lease.revoke();
-        let (_, state) = retry_contention(|| self.snapshot(live.lease.session_id()))
+        let (_, state, _) = retry_contention(|| self.snapshot(live.lease.session_id()))
             .await
             .map_err(display)?;
         if let Some(reservation) = state.reservation.filter(|r| !r.settled) {
@@ -358,7 +393,7 @@ impl ScheduleService {
                 CancellationToken::new(),
             )
             .await?;
-            self.command(live, None, Some(reservation.input.message_id))
+            self.command(live, &reservation.input, None)
                 .await
                 .map_err(display)?;
         }
@@ -374,6 +409,26 @@ impl ScheduleService {
 }
 #[async_trait]
 impl ScheduleController for ScheduleService {
+    async fn refresh_pending(&self, session: &SessionId) {
+        let gate = self.session_gate(session);
+        let _session = gate.lock().await;
+        if self
+            .inner
+            .calendar
+            .lock()
+            .unwrap()
+            .pending
+            .contains_key(session)
+        {
+            match retry_contention(|| self.snapshot(session)).await {
+                Ok((_, state, _)) => {
+                    self.schedule(session, &state);
+                }
+                Err(error) => self.record_failure(session, &display(error)),
+            }
+        }
+    }
+
     fn epoch(&self) -> ScheduleEpoch {
         self.inner.epoch.clone()
     }
@@ -381,12 +436,12 @@ impl ScheduleController for ScheduleService {
         self.inner.clock.clone()
     }
     fn armed(&self, session: &SessionId) -> bool {
-        self.inner
-            .owners
-            .lock()
-            .unwrap()
-            .get(session)
-            .is_some_and(|live| live.lease.is_armed() && !live.done.is_cancelled())
+        let calendar = self.inner.calendar.lock().unwrap();
+        calendar.pending.contains_key(session)
+            || calendar
+                .running
+                .get(session)
+                .is_some_and(|live| live.lease.is_armed())
     }
     fn failure(&self, session: &SessionId) -> Option<String> {
         self.inner.failures.lock().unwrap().get(session).cloned()
@@ -399,10 +454,20 @@ impl ScheduleController for ScheduleService {
         if !epoch.same_epoch(&self.inner.epoch) || !epoch.is_open() {
             return Ok(false);
         }
-        let live = self.inner.owners.lock().unwrap().get(session).cloned();
+        let gate = self.session_gate(session);
+        let _session = gate.lock().await;
+        let live = {
+            let mut calendar = self.inner.calendar.lock().unwrap();
+            calendar.pending.remove(session);
+            let live = calendar.running.get(session).cloned();
+            if let Some(live) = &live {
+                live.lease.revoke();
+                live.stop.cancel();
+            }
+            live
+        };
+        self.inner.changed.notify_one();
         if let Some(live) = live {
-            live.lease.revoke();
-            live.stop.cancel();
             tokio::select! {
                 () = self.inner.stop.cancelled() => return Ok(false),
                 result = tokio::time::timeout(Duration::from_secs(25), live.done.cancelled()) => {
@@ -437,17 +502,7 @@ impl ScheduleController for ScheduleService {
                     .map_err(|_| "Schedule arming capacity exhausted")?,
             )
         };
-        let gate = {
-            let mut gates = self.inner.session_gates.lock().unwrap();
-            gates.retain(|_, gate| gate.strong_count() > 0);
-            if let Some(gate) = gates.get(caller.session_id()).and_then(Weak::upgrade) {
-                gate
-            } else {
-                let gate = Arc::new(AsyncMutex::new(()));
-                gates.insert(caller.session_id().clone(), Arc::downgrade(&gate));
-                gate
-            }
-        };
+        let gate = self.session_gate(caller.session_id());
         tokio::select! { biased;
             () = self.inner.stop.cancelled() => Ok(false),
             () = cancellation.cancelled() => Ok(false),
@@ -468,7 +523,7 @@ impl ScheduleService {
         cancellation: &CancellationToken,
     ) -> Result<bool, String> {
         self.validate_receipt(caller, receipt).await?;
-        let (view, state) = self.snapshot(caller.session_id()).await.map_err(display)?;
+        let (view, state, _) = self.snapshot(caller.session_id()).await.map_err(display)?;
         if receipt.commit().updates().len() != 1
             || view.snapshot.identity() != domain
             || receipt.commit().updates()[0].revision() != view.revision
@@ -476,92 +531,223 @@ impl ScheduleService {
         {
             return Ok(false);
         }
-        let old = self
-            .inner
-            .owners
-            .lock()
-            .unwrap()
-            .remove(caller.session_id());
-        if let Some(old) = old {
-            old.lease.revoke();
-            old.stop.cancel();
-            tokio::time::timeout(Duration::from_secs(25), old.done.cancelled())
-                .await
-                .map_err(|_| "previous Schedule owner did not stop")?;
-            drop(old);
-        }
-        self.inner
-            .owners
-            .lock()
-            .unwrap()
-            .retain(|_, live| !live.done.is_cancelled());
-        if !epoch.is_open()
-            || cancellation.is_cancelled()
-            || (state.next_due().is_none() && state.reservation.as_ref().is_none_or(|r| r.settled))
-        {
+        let _gate = self.inner.gate.lock().unwrap();
+        if !epoch.is_open() || cancellation.is_cancelled() {
             return Ok(false);
         }
-        let permit = self
-            .inner
-            .capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "Schedule controller capacity exhausted")?;
-        let lease = self
-            .inner
-            .continuations
-            .arm(
-                SubmitSession::Resume(
-                    self.inner
-                        .turns
-                        .prepare_resume(caller.session_id())
-                        .await
-                        .map_err(display)?,
-                ),
-                ContinuationBinding {
-                    domain: domain.clone(),
-                    owner: owner(),
-                    revision: view.revision,
-                    snapshot_sha256: view.snapshot.sha256().map_err(display)?,
-                },
-            )
+        let session = caller.session_id();
+        self.inner.failures.lock().unwrap().remove(session);
+        Ok(self.schedule(session, &state))
+    }
+
+    fn session_gate(&self, session: &SessionId) -> Arc<AsyncMutex<()>> {
+        let mut gates = self.inner.session_gates.lock().unwrap();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(session).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(AsyncMutex::new(()));
+        gates.insert(session.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
+    fn schedule(&self, session: &SessionId, state: &ScheduleState) -> bool {
+        let at = if state.reservation.as_ref().is_some_and(|r| !r.settled) {
+            Some(0)
+        } else {
+            state.next_due()
+        };
+        let mut calendar = self.inner.calendar.lock().unwrap();
+        if let Some(at) = at {
+            calendar.pending.insert(session.clone(), at);
+        } else {
+            calendar.pending.remove(session);
+        }
+        self.inner.changed.notify_one();
+        at.is_some()
+    }
+
+    async fn dispatch(&self, context: &rsi_meta::Context) {
+        loop {
+            if self.inner.calendar.lock().unwrap().pending.is_empty() {
+                self.inner.changed.notified().await;
+                continue;
+            }
+            let (next, mut archives_changed) = {
+                let navigation = context.lookup_local::<rsi_navigation::NavigationContract>();
+                let changes = navigation.as_ref().map(|owner| owner.archive_changes());
+                let archived = navigation.as_ref().map(|owner| owner.archived_sessions());
+                let calendar = self.inner.calendar.lock().unwrap();
+                let next = calendar
+                    .pending
+                    .iter()
+                    .filter(|(id, _)| archived.as_ref().is_none_or(|rows| !rows.contains(id)))
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(session, at)| (session.clone(), *at));
+                (next, changes)
+            };
+            let deadline = next.as_ref().map(|(_, at)| *at);
+            let Some((session, at)) = next.filter(|(_, at)| *at <= self.inner.clock.now_ms())
+            else {
+                tokio::select! {
+                    () = self.inner.changed.notified() => {},
+                    () = async { self.inner.clock.wait_until(deadline.expect("pending deadline"), self.inner.stop.clone()).await }, if deadline.is_some() => {},
+                    _ = async { archives_changed.as_mut().expect("navigation available").changed().await }, if archives_changed.is_some() => {},
+                }
+                continue;
+            };
+            let Ok(permit) = self.inner.capacity.clone().acquire_owned().await else {
+                return;
+            };
+            let gate = self.session_gate(&session);
+            let _session = gate.lock().await;
+            if self.inner.calendar.lock().unwrap().pending.get(&session) != Some(&at) {
+                continue;
+            }
+            if let Err(problem) = self.start_due(&session, permit, context).await {
+                self.inner.calendar.lock().unwrap().pending.remove(&session);
+                self.record_failure(&session, &problem);
+            }
+        }
+    }
+
+    async fn start_due(
+        &self,
+        session: &SessionId,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        context: &rsi_meta::Context,
+    ) -> Result<(), String> {
+        if context
+            .lookup_local::<rsi_navigation::NavigationContract>()
+            .is_some_and(|owner| owner.archived_sessions().contains(session))
+        {
+            return Ok(());
+        }
+        let (view, state, control_seq) = retry_contention(|| self.snapshot(session))
             .await
             .map_err(display)?;
+        if state.reservation.as_ref().is_none_or(|r| r.settled)
+            && state
+                .next_due()
+                .is_none_or(|at| at > self.inner.clock.now_ms())
+        {
+            self.schedule(session, &state);
+            return Ok(());
+        }
+        let binding = ContinuationBinding {
+            domain: view.snapshot.identity().clone(),
+            owner: owner(),
+            revision: view.revision,
+            snapshot_sha256: view.snapshot.sha256().map_err(display)?,
+        };
+        let recovery = state.reservation.as_ref().is_some_and(|r| !r.settled);
+        let lease = retry_contention(|| async {
+            let prepared = SubmitSession::Resume(self.inner.turns.prepare_resume(session).await?);
+            if recovery {
+                self.inner
+                    .continuations
+                    .arm_for_recovery(prepared, binding.clone())
+                    .await
+            } else {
+                self.inner
+                    .continuations
+                    .arm(prepared, binding.clone())
+                    .await
+            }
+        })
+        .await;
+        let lease = match lease {
+            Ok(lease) => lease,
+            Err(TurnError::ContinuationDisarmed) => {
+                let (current, state, _) = retry_contention(|| self.snapshot(session))
+                    .await
+                    .map_err(display)?;
+                if current.revision == view.revision {
+                    return Err(display(TurnError::ContinuationDisarmed));
+                }
+                self.schedule(session, &state);
+                return Ok(());
+            }
+            Err(error) => return Err(display(error)),
+        };
         let live = Arc::new(Live {
             lease,
             stop: self.inner.stop.child_token(),
             done: CancellationToken::new(),
             _capacity: permit,
         });
-        // Only publication and task admission share the Host stop gate.
         let _gate = self.inner.gate.lock().unwrap();
-        if !epoch.is_open() || cancellation.is_cancelled() {
+        if self.inner.stop.is_cancelled() {
             live.lease.revoke();
-            return Ok(false);
+            return Ok(());
         }
-        self.inner
-            .owners
-            .lock()
-            .unwrap()
-            .insert(caller.session_id().clone(), live.clone());
-        self.inner
-            .failures
-            .lock()
-            .unwrap()
-            .remove(caller.session_id());
+        {
+            let mut calendar = self.inner.calendar.lock().unwrap();
+            calendar.pending.remove(session);
+            calendar.running.insert(session.clone(), live.clone());
+        }
         let service = self.clone();
+        let context = context.clone();
         self.inner.tasks.spawn(async move {
-            let outcome = tokio::select! { biased; () = live.stop.cancelled() => Ok(()), result = std::panic::AssertUnwindSafe(service.drive(&live)).catch_unwind() => result.unwrap_or_else(|_| Err("Schedule driver panicked".into())) };
-            let cleanup = tokio::time::timeout(Duration::from_secs(20), service.finish(&live)).await
-                .unwrap_or_else(|_| Err("Schedule reservation cleanup timed out".into()));
-            if let Err(problem) = outcome.and(cleanup) {
-                service.record_failure(live.lease.session_id(), &problem);
+            let result = tokio::select! { biased;
+                () = live.stop.cancelled() => Ok(None),
+                result = std::panic::AssertUnwindSafe(service.drive(&live, state, control_seq, &context)).catch_unwind() =>
+                    result.unwrap_or_else(|_| Err("Schedule driver panicked".into())),
+            };
+            let cleanup = if result.is_err() || live.stop.is_cancelled() {
+                tokio::time::timeout(Duration::from_secs(20), service.finish(&live))
+                    .await
+                    .unwrap_or_else(|_| Err("Schedule reservation cleanup timed out".into()))
+            } else {
+                live.lease.revoke();
+                Ok(())
+            };
+            let session = live.lease.session_id();
+            let mut calendar = service.inner.calendar.lock().unwrap();
+            calendar.running.remove(session);
+            match result.and_then(|next| cleanup.map(|()| next)) {
+                Ok(Some(at)) if !live.stop.is_cancelled() => {
+                    calendar.pending.insert(session.clone(), at);
+                }
+                Err(problem) => service.record_failure(session, &problem),
+                _ => {}
             }
-            let done = live.done.clone();
-            drop(live);
-            done.cancel();
+            live.done.cancel();
+            service.inner.changed.notify_one();
         });
-        Ok(true)
+        Ok(())
+    }
+
+    async fn restore(&self) -> Result<(), String> {
+        let mut after = None;
+        loop {
+            let page = self
+                .inner
+                .store
+                .list_edited_domain_sessions(SCHEDULE_DOMAIN, after.as_ref(), 64)
+                .await
+                .map_err(display)?;
+            page.validate().map_err(display)?;
+            for session in page.sessions {
+                let selected =
+                    retry_contention(|| self.inner.turns.domain_state(&session, SCHEDULE_DOMAIN))
+                        .await;
+                match selected.map_err(display).and_then(|row| {
+                    row.map(|(_, row)| ScheduleState::from_snapshot(&row.snapshot))
+                        .transpose()
+                }) {
+                    Ok(Some(state)) => {
+                        self.schedule(&session, &state);
+                    }
+                    Ok(None) => {}
+                    Err(problem) => self.record_failure(&session, &problem),
+                }
+                after = Some(session);
+            }
+            if !page.has_more {
+                return Ok(());
+            }
+        }
     }
 }
 fn display(error: impl std::fmt::Display) -> String {
@@ -571,18 +757,29 @@ fn display(error: impl std::fmt::Display) -> String {
 #[derive(Clone, Debug)]
 pub struct ScheduleControllerFactory {
     clock: Arc<dyn ScheduleClock>,
+    startup: Option<tokio::sync::watch::Receiver<bool>>,
 }
 impl Default for ScheduleControllerFactory {
     fn default() -> Self {
         Self {
             clock: Arc::new(UtcClock),
+            startup: None,
         }
     }
 }
 impl ScheduleControllerFactory {
     /// Selects the exact UTC source and timer implementation for this Host.
     pub fn with_clock(clock: Arc<dyn ScheduleClock>) -> Self {
-        Self { clock }
+        Self {
+            clock,
+            startup: None,
+        }
+    }
+    /// Waits for a composed Host's startup owners before delivering retained reminders.
+    #[must_use]
+    pub fn with_startup(mut self, ready: Option<tokio::sync::watch::Receiver<bool>>) -> Self {
+        self.startup = ready;
+        self
     }
 }
 #[async_trait]
@@ -594,33 +791,37 @@ impl PluginFactory for ScheduleControllerFactory {
             ));
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
+            .requiring_local::<SessionStoreContract>()
             .requiring_local::<TurnServiceContract>()
             .requiring_local::<TurnExecutionContract>()
-            .requiring_local::<SessionCommandsContract>()
             .requiring_local::<SessionContinuationsContract>()
             .requiring_local::<SessionProjectionsContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let service = Arc::new(ScheduleService::new(
+        let service = ScheduleService::new(
             plan.local::<TurnServiceContract>()?,
             plan.local::<TurnExecutionContract>()?,
-            plan.local::<SessionCommandsContract>()?,
+            plan.local::<SessionStoreContract>()?,
             plan.local::<SessionContinuationsContract>()?,
             plan.local::<SessionProjectionsContract>()?,
             self.clock.clone(),
-        ));
+        );
+        service.restore().await.map_err(MetaError::InvalidInput)?;
         let supply = plan
             .context()
-            .provide_local::<ScheduleControllerContract>(service.clone())?;
+            .provide_local::<ScheduleControllerContract>(Arc::new(service.clone()))?;
+        let cleanup = service.clone();
         plan.defer(
             "stop Schedule controllers",
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
-                    service.stop().await
+                    cleanup.stop().await
                 })
             }),
-        )
+        )?;
+        service.start(plan.context().clone(), self.startup.clone());
+        Ok(())
     }
 }
 

@@ -4,7 +4,8 @@ fn operation_envelopes_admit_maximal_identifiers_and_escaped_small_requests() {
     use serde_json::json;
     let session = SessionId::new("s".repeat(256)).unwrap();
     let filter = NavigationFilter {
-        query: "\"".repeat(128),
+        // Three UTF-8 bytes per UTF-16 unit is the largest valid JSON string here.
+        query: "界".repeat(500),
         archived: Some(false),
         workspace: WorkspaceFilter::Registered {
             id: WorkspaceId::parse("a".repeat(64)).unwrap(),
@@ -72,6 +73,18 @@ fn operation_envelopes_admit_maximal_identifiers_and_escaped_small_requests() {
         )
         .is_err()
     );
+}
+#[test]
+fn navigation_search_bounds_unicode_at_complete_utf16_units() {
+    let mut filter = NavigationFilter {
+        query: "🌿".repeat(250),
+        ..Default::default()
+    };
+    assert!(filter.validate().is_ok());
+    filter.query.push('a');
+    assert!(filter.validate().is_err());
+    filter.query = "hidden\0suffix".into();
+    assert!(filter.validate().is_err());
 }
 fn fixture() -> (NavigationPage, NavigationFilter, HostEpoch) {
     let id = SessionId::new("session").unwrap();

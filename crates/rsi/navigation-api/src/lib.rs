@@ -19,7 +19,7 @@ pub use order::{
     OrderGroup, OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
 };
 
-/// Exact title and archive state; neither field mutates Session execution.
+/// Exact title and archive state. Archiving preserves admitted Session work.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMetadata {
@@ -101,9 +101,10 @@ impl NavigationFilter {
     }
     /// Validates bounded query input before any scan.
     pub fn validate(&self) -> Result<()> {
-        if self.query.len() > 128 || self.query.chars().any(char::is_control) {
+        if self.query.encode_utf16().nth(500).is_some() || self.query.chars().any(char::is_control)
+        {
             return Err(ApiError::Invalid(
-                "navigation query exceeds 128 bytes or contains controls".into(),
+                "navigation query exceeds 500 UTF-16 code units or contains controls".into(),
             ));
         }
         Ok(())

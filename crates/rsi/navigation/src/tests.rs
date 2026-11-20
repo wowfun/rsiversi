@@ -320,6 +320,7 @@ async fn owner() -> FixtureOwner {
         state: Mutex::new(State {
             document: Arc::new(document),
         }),
+        archive_changes: tokio::sync::watch::channel(()).0,
         writer: Arc::new(Semaphore::new(1)),
         admission: Admission::new(
             8,
@@ -437,9 +438,15 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
     );
     assert_eq!(workspaces.calls.swap(0, SeqCst), 12);
     assert_eq!(workspaces.reads.peak.load(SeqCst), 4);
-    let mut lookups = owner.workspace_lookups(coordinates.iter().map(Some));
+    let prepared = std::sync::atomic::AtomicUsize::new(0);
+    let input = coordinates.iter().map(Some).inspect(|_| {
+        prepared.fetch_add(1, SeqCst);
+    });
+    let mut lookups = owner.workspace_lookups(input);
+    assert_eq!(prepared.load(SeqCst), 0);
     lookups.next().await.unwrap().unwrap();
     drop(lookups);
+    assert!(prepared.load(SeqCst) <= 4);
     assert!(workspaces.calls.load(SeqCst) <= 4);
 }
 #[tokio::test]
@@ -1089,6 +1096,7 @@ async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_writ
     let domain = TestDomain::new(owner.domain.spec().clone()).await;
     Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let id = SessionId::new("row-001").unwrap();
+    let mut changes = owner.archive_changes();
     let apply = |id: &SessionId, intent| {
         owner
             .archive_intent(CallOrigin::Local, id.clone(), intent)
@@ -1123,6 +1131,7 @@ async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_writ
         (ArchiveIntent::Inspect, false),
         (ArchiveIntent::Archive, false),
     ] {
+        assert!(!changes.has_changed().unwrap());
         assert_eq!(
             apply(&id, intent).await.unwrap(),
             ArchiveOutcome::Applied {
@@ -1130,6 +1139,9 @@ async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_writ
                 ids: vec![id.clone()]
             }
         );
+        assert!(owner.archived_sessions().contains(&id));
+        assert_eq!(changes.has_changed().unwrap(), changed);
+        changes.borrow_and_update();
     }
     let document = owner.document();
     assert_eq!(document.revision, 2);

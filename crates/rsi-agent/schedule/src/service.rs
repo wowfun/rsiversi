@@ -48,6 +48,9 @@ pub trait ScheduleController: fmt::Debug + Send + Sync + 'static {
     fn armed(&self, session: &SessionId) -> bool;
     /// Latest bounded driver or cleanup failure for this Session, if any.
     fn failure(&self, session: &SessionId) -> Option<String>;
+    /// Recomputes an existing future timer after an operator edit. An accepted
+    /// delivery keeps its owner; this does not arm a disarmed Session.
+    async fn refresh_pending(&self, session: &SessionId);
     /// Revokes and joins the previous owner before a validated human mutation is committed.
     /// A failed mutation leaves retained intent disarmed for explicit reconciliation.
     async fn disarm_for_mutation(

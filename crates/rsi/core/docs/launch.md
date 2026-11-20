@@ -198,6 +198,8 @@ collected. Runtime publication converts OS-canonical local-drive spelling to the
 bounded native path representation before acquiring directory handles. There is
 no background updater.
 
+Import resolves managed targets from the admitted absolute home roots through the
+native root-alias resolver before checking overlap or acquiring copy ownership.
 `rsi import --config-home OLD_CONFIG --data-home OLD_DATA --state-home OLD_STATE` explicitly copies
 an existing product home set into the final homes selected by global options.
 `--dry-run` checks paths, bounds and configuration syntax, and reports selected

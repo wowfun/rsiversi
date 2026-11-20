@@ -172,6 +172,7 @@ pub struct StandardComposition {
     captured_environment: BTreeMap<String, SecretValue>,
     credential_store: Arc<dyn SecretStore>,
     pub(crate) agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
+    pub(crate) schedule_startup: Option<tokio::sync::watch::Receiver<bool>>,
     coding_tools: Option<StandardCodingTools>,
     agent_presets: Option<(AgentPresetCatalog, String)>,
     service_owner: Option<rsi_service_host::ServiceOwnerFactory>,
@@ -1004,6 +1005,7 @@ impl StandardComposition {
                 paths.data().join("credentials/credentials.json"),
             )),
             agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory::default(),
+            schedule_startup: None,
             user_home: None,
             documents_directory: None,
             paths,
@@ -1478,6 +1480,13 @@ impl StandardComposition {
             self.agent_store_factory.clone(),
             crate::application_receipts::Receipts(self.paths.clone()),
         )?;
+        register(
+            &mut builder,
+            "rsi.schedule.controller",
+            UpdateMode::RestartRequired,
+            rsi_schedule::ScheduleControllerFactory::default()
+                .with_startup(self.schedule_startup.clone()),
+        )?;
         let owner = self.service_owner_factory()?;
         builder.register_local_contract::<rsi_service_host::ServiceOwnerContract>()?;
         builder.register_local_contract::<rsi_api_protocol::HostGenerationContract>()?;
@@ -1792,12 +1801,6 @@ fn register_factories(
         SESSION_FACTORY,
         UpdateMode::RestartRequired,
         rsi_session::SessionFactory,
-    )?;
-    register(
-        builder,
-        "rsi.schedule.controller",
-        UpdateMode::RestartRequired,
-        rsi_schedule::ScheduleControllerFactory::default(),
     )?;
     register(
         builder,

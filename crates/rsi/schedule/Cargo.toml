@@ -11,8 +11,11 @@ futures-util.workspace = true
 async-trait.workspace = true
 rsi-agent-schedule = { path = "../../rsi-agent/schedule" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
+rsi-navigation = { path = "../navigation" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

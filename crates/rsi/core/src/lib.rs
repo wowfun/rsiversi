@@ -322,6 +322,8 @@ impl RunningRsi {
     ) -> Result<Self> {
         let program = program.with_watch_policy(composition.source_watch.clone());
         composition.agent_store_factory = rsi_agent_store_sqlite::SqliteStoreFactory::default();
+        let (startup, ready) = tokio::sync::watch::channel(false);
+        composition.schedule_startup = Some(ready);
         let store_diagnostic = composition.agent_store_factory.clone();
         let started = Box::pin(async {
             #[cfg(unix)]
@@ -351,7 +353,9 @@ impl RunningRsi {
                     ),
                 }
             };
-            Self::from_started_host(owner).await
+            let running = Self::from_started_host(owner).await?;
+            startup.send_replace(true);
+            Ok(running)
         })
         .await;
         started.map_err(|error| {

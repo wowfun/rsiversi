@@ -51,6 +51,9 @@ async fn state(handle: &Arc<dyn SessionHandle>) -> ScheduleState {
         .await
         .unwrap()
         .unwrap();
+    projected_state(&snapshot)
+}
+fn projected_state(snapshot: &rsi_session_protocol::ProjectionSnapshot) -> ScheduleState {
     let view = snapshot
         .snapshot()
         .entries()
@@ -61,15 +64,16 @@ async fn state(handle: &Arc<dyn SessionHandle>) -> ScheduleState {
         .unwrap();
     serde_json::from_value(view.value().clone()).unwrap()
 }
-async fn settled(handle: &Arc<dyn SessionHandle>) -> ScheduleState {
+async fn settled(handle: &Arc<dyn SessionHandle>, round: u64) -> ScheduleState {
     let mut changes = handle.observe_projections().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let state = state(handle).await;
-            if state.reservation.as_ref().is_some_and(|r| r.settled) {
+            let state = projected_state(&changes.next().await.unwrap().unwrap());
+            if state.allocated_rounds == round
+                && state.reservation.as_ref().is_some_and(|r| r.settled)
+            {
                 return state;
             }
-            changes.next().await.unwrap().unwrap();
         }
     })
     .await
@@ -108,7 +112,7 @@ async fn due_reminder_uses_normal_turn_and_cannot_create_a_successor() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(state(&handle).await.allocated_rounds, 0);
     clock.advance(1);
-    let state = settled(&handle).await;
+    let state = settled(&handle, 1).await;
     assert_eq!(state.allocated_rounds, 1);
     assert_eq!(state.reminders.len(), 1);
     assert!(state.reminders[0].consumed);
@@ -179,21 +183,69 @@ fn composition_with_clock(fixture: &Fixture, clock: Arc<ManualClock>) -> Standar
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn restart_keeps_overdue_intent_disarmed_until_selected_human_resume() {
+async fn restart_delivers_an_overdue_reminder_once_without_attaching() {
+    overdue_delivery_after_restart(RestartTarget::Active).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_leaves_an_archived_reminder_due_until_its_session_is_restored() {
+    overdue_delivery_after_restart(RestartTarget::Archived).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_without_navigation_delivers_existing_enabled_reminders() {
+    overdue_delivery_after_restart(RestartTarget::NoArchiveRegistry).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_navigation_waits_for_restart_then_delivers_an_archived_reminder_once() {
+    overdue_delivery_after_restart(RestartTarget::PendingRestart).await;
+}
+
+enum RestartTarget {
+    Active,
+    Archived,
+    NoArchiveRegistry,
+    PendingRestart,
+}
+
+fn disable_navigation(profile: &std::path::Path) {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(profile)
+        .unwrap()
+        .write_all(b"\n[[steps]]\nkind='patch'\ntarget='rsi.navigation'\nenabled=false\n")
+        .unwrap();
+}
+
+async fn set_archived(running: &RunningRsi, archived: bool) {
+    let receipt = super::navigation::wire(
+        running,
+        rsi_api_protocol::CallOrigin::Local,
+        rsi_navigation_api::NavigationOperation::Replace,
+        serde_json::json!({"session":"schedule-restart","expected_revision":if archived { "0" } else { "1" },
+            "metadata":{"title":null,"pinned":false,"archived":archived}}),
+    ).await.unwrap();
+    assert_eq!(receipt["revision"], if archived { "1" } else { "2" });
+}
+
+async fn overdue_delivery_after_restart(target: RestartTarget) {
     let calls = Arc::new(AtomicUsize::new(0));
-    let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
-    let selected = Arc::new(Mutex::new(None::<String>));
+    let delivered = Arc::new(tokio::sync::Notify::new());
     let counter = calls.clone();
-    let captured = requests.clone();
-    let choice = selected.clone();
+    let observed = delivered.clone();
     let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<serde_json::Value>| {
-        captured.lock().unwrap().push(body);
         let index = counter.fetch_add(1, Ordering::SeqCst);
-        let choice = choice.clone();
+        let observed = observed.clone();
         async move { match index {
             0 => response(Some(("create", "schedule_create", serde_json::json!({"prompt":"Check retained intent", "rule":{"kind":"after","delay_ms":1000}})))),
-            2 => response(Some(("inspect", "schedule_list", serde_json::json!({})))),
-            3 => response(Some(("resume", "schedule_resume", serde_json::json!({"ids":[choice.lock().unwrap().clone().unwrap()]})))),
+            2 => {
+                assert!(body["messages"].as_array().unwrap().iter().any(|message|
+                    message["role"] == "user" && message["content"].to_string().contains("Check retained intent")));
+                observed.notify_one();
+                response(None)
+            }
             _ => response(None),
         } }
     }));
@@ -211,13 +263,191 @@ async fn restart_keeps_overdue_intent_disarmed_until_selected_human_resume() {
     .await
     .unwrap();
     let handle = create(&running, &fixture, "schedule-restart").await;
+    let mut changes = running
+        .session_service()
+        .unwrap()
+        .observe_scheduled_tasks()
+        .await
+        .unwrap();
+    use rsi_session_protocol::ScheduleCatalogUpdate;
+    assert!(matches!(
+        changes.next().await.unwrap().unwrap(),
+        ScheduleCatalogUpdate::Complete { pages: 0 }
+    ));
     run_message_to_terminal(&handle, "create-reminder").await;
     let before = state(&handle).await;
     assert_eq!(before.allocated_rounds, 0);
-    *selected.lock().unwrap() = Some(before.reminders[0].id.to_string());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    drop(handle);
+    let catalog = running
+        .session_service()
+        .unwrap()
+        .scheduled_tasks(None)
+        .await
+        .unwrap();
+    assert_eq!(catalog.sessions.len(), 1);
+    assert_eq!(
+        catalog.sessions[0].position.session_id.as_str(),
+        "schedule-restart"
+    );
+    assert_eq!(catalog.sessions[0].reminders[0].id, before.reminders[0].id);
+    let update = tokio::time::timeout(std::time::Duration::from_secs(3), changes.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ScheduleCatalogUpdate::Page { index: 0, sessions } = update else {
+        panic!("expected new task page")
+    };
+    assert_eq!(sessions[0].reminders, catalog.sessions[0].reminders);
+    assert!(matches!(
+        changes.next().await.unwrap().unwrap(),
+        ScheduleCatalogUpdate::Complete { pages: 1 }
+    ));
+    assert!(!catalog.sessions[0].archived);
+    assert!(!catalog.sessions[0].exhausted);
+    assert!(catalog.next.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    if !matches!(target, RestartTarget::Active) {
+        set_archived(&running, true).await;
+        let update = tokio::time::timeout(std::time::Duration::from_secs(3), changes.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(update, ScheduleCatalogUpdate::Page { index: 0, sessions }
+            if sessions.len() == 1 && sessions[0].archived && sessions[0].reminders[0].id == before.reminders[0].id)
+        );
+    }
+    if matches!(target, RestartTarget::PendingRestart) {
+        disable_navigation(&fixture.profile);
+        assert!(matches!(
+            running.reload().await.unwrap(),
+            rsi_host::ReloadOutcome::RestartRequired(_)
+        ));
+        assert!(
+            running
+                .session_service()
+                .unwrap()
+                .scheduled_tasks(None)
+                .await
+                .unwrap()
+                .sessions[0]
+                .archived
+        );
+        clock.advance(5000);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), delivered.notified())
+                .await
+                .is_err()
+        );
+    }
+    drop(changes);
+    assert!(running.shutdown().await.is_clean());
+    if matches!(target, RestartTarget::NoArchiveRegistry) {
+        disable_navigation(&fixture.profile);
+    }
+    if !matches!(target, RestartTarget::PendingRestart) {
+        clock.advance(5000);
+    }
+    let restarted = RunningRsi::boot(
+        composition_with_clock(&fixture, clock.clone()),
+        &fixture.profile,
+    )
+    .await
+    .unwrap();
+    if matches!(target, RestartTarget::Archived) {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), delivered.notified())
+                .await
+                .is_err(),
+            "archived Session received its due model request"
+        );
+        set_archived(&restarted, false).await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), delivered.notified())
+        .await
+        .expect("enabled reminder must reach the provider before a user attaches");
+    let restored = restarted
+        .session_service()
+        .unwrap()
+        .scheduled_tasks(None)
+        .await
+        .unwrap();
+    assert!(!restored.sessions[0].archived);
+    let handle = restarted
+        .session_service()
+        .unwrap()
+        .attach(&SessionId::new("schedule-restart").unwrap())
+        .await
+        .unwrap();
+    let after = settled(&handle, 1).await;
+    assert_eq!(after.reminders[0].id, before.reminders[0].id);
+    assert_eq!(after.allocated_rounds, 1);
+    assert!(after.reminders[0].consumed);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    drop(handle);
+    assert!(restarted.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_coalesces_only_enabled_recurrences_at_the_original_anchor() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recurring = Arc::new(Mutex::new(None::<String>));
+    let app = Router::new().route("/v1/chat/completions", post({
+        let calls = calls.clone();
+        let recurring = recurring.clone();
+        move || {
+            let idx = calls.fetch_add(1, Ordering::SeqCst);
+            let selected = recurring.lock().unwrap().clone();
+            async move {
+                match idx {
+                    0 => response(Some(("repeat", "schedule_create", serde_json::json!({
+                        "prompt":"Check daily report", "rule":{"kind":"every","interval_ms":60000}
+                    })))),
+                    2 => response(Some(("single", "schedule_create", serde_json::json!({
+                        "prompt":"Leave this reminder disabled", "rule":{"kind":"after","delay_ms":1000}
+                    })))),
+                    4 => response(Some(("select", "schedule_resume", serde_json::json!({"ids":[selected.unwrap()]})))),
+                    _ => response(None),
+                }
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let clock = ManualClock::new();
+    select_clock_profile(&fixture);
+    let running = RunningRsi::boot(
+        composition_with_clock(&fixture, clock.clone()),
+        &fixture.profile,
+    )
+    .await
+    .unwrap();
+    let handle = create(&running, &fixture, "schedule-recurrence").await;
+    run_message_to_terminal(&handle, "create-recurring").await;
+    let original = state(&handle).await.reminders.remove(0);
+    *recurring.lock().unwrap() = Some(original.id.to_string());
+    run_message_to_terminal(&handle, "create-one-shot").await;
+    run_message_to_terminal(&handle, "enable-only-recurring").await;
+    assert_eq!(
+        state(&handle)
+            .await
+            .reminders
+            .iter()
+            .filter(|r| r.active)
+            .count(),
+        1
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
     drop(handle);
     assert!(running.shutdown().await.is_clean());
-    clock.advance(5000);
+    clock.advance(5 * 60_000 + 37);
     let restarted = RunningRsi::boot(
         composition_with_clock(&fixture, clock.clone()),
         &fixture.profile,
@@ -227,31 +457,34 @@ async fn restart_keeps_overdue_intent_disarmed_until_selected_human_resume() {
     let handle = restarted
         .session_service()
         .unwrap()
-        .attach(&SessionId::new("schedule-restart").unwrap())
+        .attach(&SessionId::new("schedule-recurrence").unwrap())
         .await
         .unwrap();
-    assert_eq!(state(&handle).await, before);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    run_message_to_terminal(&handle, "explicitly-resume-selected-reminder").await;
-    let after = settled(&handle).await;
-    assert_eq!(after.allocated_rounds, 1);
-    assert!(after.reminders[0].consumed);
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
-    {
-        let requests = requests.lock().unwrap();
-        let listed: serde_json::Value = serde_json::from_str(
-            requests[3]["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["tool_call_id"] == "inspect")
-                .unwrap()["content"]
-                .as_str()
-                .unwrap(),
-        )
+    let final_state = settled(&handle, 1).await;
+    assert_eq!(final_state.allocated_rounds, 1);
+    let receipt = final_state.reservation.unwrap();
+    assert_eq!(receipt.reminder_id, original.id);
+    assert_eq!(receipt.occurrence_ms, original.anchor_ms + 4 * 60_000);
+    let repeat = final_state
+        .reminders
+        .iter()
+        .find(|r| r.id == original.id)
         .unwrap();
-        assert_eq!(listed["armed"], false);
-    }
+    assert_eq!(repeat.due_ms, receipt.occurrence_ms + 60_000);
+    let disabled = final_state
+        .reminders
+        .iter()
+        .find(|r| r.id != original.id)
+        .unwrap();
+    assert!(!disabled.active && !disabled.consumed);
+    assert_eq!(calls.load(Ordering::SeqCst), 7);
+    clock.advance(60_000);
+    let next = settled(&handle, 2).await;
+    let second = next.reservation.unwrap();
+    assert_eq!(second.reminder_id, original.id);
+    assert_eq!(second.occurrence_ms, repeat.due_ms);
+    assert_ne!(second.input.message_id, receipt.input.message_id);
+    assert_eq!(calls.load(Ordering::SeqCst), 8);
     drop(handle);
     assert!(restarted.shutdown().await.is_clean());
     provider.abort();
@@ -272,6 +505,10 @@ struct GatedController {
 }
 #[async_trait::async_trait]
 impl rsi_agent_schedule::ScheduleController for GatedController {
+    async fn refresh_pending(&self, session: &SessionId) {
+        self.service.refresh_pending(session).await
+    }
+
     fn epoch(&self) -> rsi_agent_schedule::ScheduleEpoch {
         self.service.epoch()
     }
@@ -325,38 +562,41 @@ impl rsi_meta::PluginFactory for GatedFactory {
         &self,
         desired: &rsi_meta::ConfigValue,
     ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+        use rsi_agent_store_protocol::SessionStoreContract;
         use rsi_agent_turn_protocol::{
-            SessionCommandsContract, SessionContinuationsContract, SessionProjectionsContract,
-            TurnExecutionContract, TurnServiceContract,
+            SessionContinuationsContract, SessionProjectionsContract, TurnExecutionContract,
+            TurnServiceContract,
         };
         assert!(desired.is_null());
         Ok(
             rsi_meta::PreparedActivation::new(rsi_meta::ConfigValue::Null)
                 .requiring_local::<TurnServiceContract>()
                 .requiring_local::<TurnExecutionContract>()
-                .requiring_local::<SessionCommandsContract>()
+                .requiring_local::<SessionStoreContract>()
                 .requiring_local::<SessionContinuationsContract>()
                 .requiring_local::<SessionProjectionsContract>(),
         )
     }
     async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+        use rsi_agent_store_protocol::SessionStoreContract;
         use rsi_agent_turn_protocol::{
-            SessionCommandsContract, SessionContinuationsContract, SessionProjectionsContract,
-            TurnExecutionContract, TurnServiceContract,
+            SessionContinuationsContract, SessionProjectionsContract, TurnExecutionContract,
+            TurnServiceContract,
         };
-        let service = Arc::new(rsi_schedule::ScheduleService::new(
+        let service = rsi_schedule::ScheduleService::new(
             plan.local::<TurnServiceContract>()?,
             plan.local::<TurnExecutionContract>()?,
-            plan.local::<SessionCommandsContract>()?,
+            plan.local::<SessionStoreContract>()?,
             plan.local::<SessionContinuationsContract>()?,
             plan.local::<SessionProjectionsContract>()?,
             self.clock.clone(),
-        ));
+        );
+        let cleanup = service.clone();
         let supply = plan
             .context()
             .provide_local::<rsi_agent_schedule::ScheduleControllerContract>(Arc::new(
                 GatedController {
-                    service: service.clone(),
+                    service: Arc::new(service.clone()),
                     gate: self.gate.clone(),
                 },
             ))?;
@@ -365,10 +605,12 @@ impl rsi_meta::PluginFactory for GatedFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
-                    service.stop().await
+                    cleanup.stop().await
                 })
             }),
-        )
+        )?;
+        service.start(plan.context().clone(), None);
+        Ok(())
     }
 }
 
@@ -430,6 +672,207 @@ async fn cancellation_after_durable_create_before_arm_retains_disarmed_intent() 
     assert_eq!(state(&handle).await, before);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operator_delete_stops_future_runs_and_preserves_a_claimed_sibling() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new().route("/v1/chat/completions", post({
+        let (calls, entered, release) = (calls.clone(), entered.clone(), release.clone());
+        move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let index = calls.fetch_add(1, Ordering::SeqCst);
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                match index {
+                    0 => response(Some(("first","schedule_create",serde_json::json!({"prompt":"Skip this one","rule":{"kind":"after","delay_ms":1}})))),
+                    2 => response(Some(("second","schedule_create",serde_json::json!({"prompt":"Keep this delivery","rule":{"kind":"every","interval_ms":60000}})))),
+                    4 => {
+                        let messages = body["messages"].to_string();
+                        assert!(messages.contains("[SCHEDULE CHANGE]"));
+                        assert!(messages.contains("change: deleted") && messages.contains("Skip this one"));
+                        entered.notify_one();
+                        release.notified().await;
+                        response(None)
+                    }
+                    5 => {
+                        let messages = body["messages"].to_string();
+                        assert!(messages.matches("[SCHEDULE CHANGE]").count() >= 2);
+                        response(None)
+                    }
+                    _ => response(None),
+                }
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let clock = ManualClock::new();
+    select_clock_profile(&fixture);
+    let running = RunningRsi::boot(
+        composition_with_clock(&fixture, clock.clone()),
+        &fixture.profile,
+    )
+    .await
+    .unwrap();
+    let session_id = SessionId::new("schedule-delete").unwrap();
+    let handle = create(&running, &fixture, session_id.as_str()).await;
+    run_message_to_terminal(&handle, "create-first").await;
+    run_message_to_terminal(&handle, "create-recurring").await;
+    let service = running.session_service().unwrap();
+    let reminders = state(&handle).await.reminders;
+    let task = |prompt| rsi_session_protocol::ScheduledTaskId {
+        session_id: session_id.clone(),
+        id: reminders
+            .iter()
+            .find(|row| row.prompt == prompt)
+            .unwrap()
+            .id
+            .clone(),
+    };
+    assert!(
+        service
+            .delete_scheduled_task(task("Skip this one"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !service
+            .delete_scheduled_task(task("Skip this one"))
+            .await
+            .unwrap()
+    );
+    clock.advance(60_000);
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let accepted = state(&handle).await.reservation.unwrap();
+    assert_eq!(accepted.prompt, "Keep this delivery");
+    assert!(
+        service
+            .delete_scheduled_task(task("Keep this delivery"))
+            .await
+            .unwrap()
+    );
+    let after = state(&handle).await;
+    assert!(after.reminders.is_empty());
+    assert_eq!(after.reservation.unwrap(), accepted);
+    release.notify_one();
+    assert_eq!(
+        settled(&handle, 1).await.reservation.unwrap().input,
+        accepted.input
+    );
+    let history = handle.history_before(None, 512).await.unwrap();
+    assert_eq!(
+        history
+            .facts
+            .iter()
+            .filter(|fact| matches!(fact.body(), SessionFactBody::MessageTurnAccepted { .. }))
+            .count(),
+        3
+    );
+    assert!(history.facts.iter().all(|fact| !matches!(fact.body(),
+        SessionFactBody::TurnTerminal {outcome, ..} if !matches!(outcome,rsi_agent_session_protocol::TurnOutcome::Completed))));
+    drop((handle, service));
+    assert!(running.shutdown().await.is_clean());
+    clock.advance(60_000);
+    let restarted = RunningRsi::boot(composition_with_clock(&fixture, clock), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = restarted
+        .session_service()
+        .unwrap()
+        .attach(&session_id)
+        .await
+        .unwrap();
+    let after = state(&handle).await;
+    assert!(after.reminders.is_empty());
+    assert_eq!(after.allocated_rounds, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    drop(handle);
+    assert!(restarted.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_cold_reminder_or_one_with_a_full_inbox_does_not_enqueue_context() {
+    use rsi_agent_session_protocol::{MAXIMUM_PENDING_AGENT_MESSAGES, MessageDelivery};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let app = Router::new().route("/v1/chat/completions", post(move || {
+        let index = counter.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match index {
+                0 | 2 => response(Some((if index == 0 { "first" } else { "second" }, "schedule_create", serde_json::json!({
+                    "prompt":format!("Later {index}"),"rule":{"kind":"after","delay_ms":60000}
+                })))),
+                _ => response(None),
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let clock = ManualClock::new();
+    select_clock_profile(&fixture);
+    let run = RunningRsi::boot(
+        composition_with_clock(&fixture, clock.clone()),
+        &fixture.profile,
+    )
+    .await
+    .unwrap();
+    let session_id = SessionId::new("cold-delete").unwrap();
+    let handle = create(&run, &fixture, session_id.as_str()).await;
+    run_message_to_terminal(&handle, "create-first-reminder").await;
+    run_message_to_terminal(&handle, "create-second-reminder").await;
+    let reminders = state(&handle).await.reminders;
+    assert_eq!(reminders.len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    drop(handle);
+    assert!(run.shutdown().await.is_clean());
+
+    let restarted = RunningRsi::boot(composition_with_clock(&fixture, clock), &fixture.profile)
+        .await
+        .unwrap();
+    let service = restarted.session_service().unwrap();
+    let task = |index: usize| rsi_session_protocol::ScheduledTaskId {
+        session_id: session_id.clone(),
+        id: reminders[index].id.clone(),
+    };
+    assert!(service.delete_scheduled_task(task(0)).await.unwrap());
+    let handle = service.attach(&session_id).await.unwrap();
+    assert!(handle.inspect().await.unwrap().pending.is_empty());
+    for index in 0..MAXIMUM_PENDING_AGENT_MESSAGES {
+        handle
+            .submit(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
+                message_id: MessageId::new(format!("held-{index}")).unwrap(),
+                delivery: MessageDelivery::NextStep,
+                content: vec![SessionInput::Text {
+                    text: "Retain this context".into(),
+                }]
+                .try_into()
+                .unwrap(),
+                model: None,
+                reasoning_effort: None,
+                sandbox: None,
+            })
+            .await
+            .unwrap();
+    }
+    assert!(service.delete_scheduled_task(task(1)).await.unwrap());
+    assert!(state(&handle).await.reminders.is_empty());
+    assert_eq!(
+        handle.inspect().await.unwrap().pending.len(),
+        MAXIMUM_PENDING_AGENT_MESSAGES
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    drop((handle, service));
+    assert!(restarted.shutdown().await.is_clean());
     provider.abort();
 }
 

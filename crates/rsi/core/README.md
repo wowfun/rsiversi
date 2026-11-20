@@ -155,6 +155,9 @@ calls, and a repaired source can retry failed or absent members. Immutable Agent
 generation replacement retains its separate validation-before-publication contract.
 The ordinary [navigation owner](../navigation/README.md) stores title/archive
 metadata in backend `base` and serves authenticated bounded Session queries.
+Automatic reminders that became due while the Host was offline wait until this
+startup check finishes, so a configured navigation owner can apply the saved
+archive membership before any reminder wakes its Session.
 
 Product-owned durable values use typed Domain declarations. Profile grants use
 schema 4 with one validated global; MCP SSH configuration uses schema 2 with one

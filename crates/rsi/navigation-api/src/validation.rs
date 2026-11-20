@@ -5,7 +5,11 @@ use super::{
 use rsi_agent_session_protocol::ExecutionCoordinates;
 use std::collections::BTreeSet;
 
-pub(super) fn entry(value: &NavigationEntry, filter: &NavigationFilter) -> Result<u64> {
+pub(super) fn entry(
+    value: &NavigationEntry,
+    filter: &NavigationFilter,
+    query: &str,
+) -> Result<u64> {
     value.metadata.validate()?;
     let created = revision(&value.created_at_ms)?;
     let activity = revision(&value.last_activity_ms)?;
@@ -15,12 +19,7 @@ pub(super) fn entry(value: &NavigationEntry, filter: &NavigationFilter) -> Resul
         || activity < created
         || !filter.matches_archive(value.metadata.archived)
         || !filter.workspace.matches(value.workspace.as_ref())
-        || !matches_query(
-            &filter.query.to_lowercase(),
-            &value.session,
-            &value.metadata,
-            Some(&value.path),
-        )
+        || !matches_query(query, &value.session, &value.metadata, Some(&value.path))
     {
         return Err(ApiError::Invalid("invalid navigation match".into()));
     }
@@ -57,10 +56,11 @@ pub(super) fn page(
         ));
     }
     let mut seen = BTreeSet::new();
+    let query = filter.query.to_lowercase();
     let mut previous = after.and_then(|cursor| cursor.after.clone());
     for value in &page.entries {
         let key = ActivityCursor {
-            last_activity_ms: entry(value, filter)?,
+            last_activity_ms: entry(value, filter, &query)?,
             session_id: value.session.clone(),
         };
         if !seen.insert(&value.session)
@@ -93,10 +93,11 @@ pub(super) fn pins(page: &PinnedPage, filter: &NavigationFilter) -> Result<()> {
     }
     let mut seen = BTreeSet::new();
     let mut missing = None;
+    let query = filter.query.to_lowercase();
     for row in &page.entries {
         let (id, metadata) = match row {
             PinnedEntry::Available { entry: value } => {
-                entry(value, filter)?;
+                entry(value, filter, &query)?;
                 if missing.is_some() {
                     return Err(ApiError::Invalid("invalid pinned ordering".into()));
                 }
@@ -107,7 +108,7 @@ pub(super) fn pins(page: &PinnedPage, filter: &NavigationFilter) -> Result<()> {
                 if !filter.matches_archive(metadata.archived)
                     || filter.workspace != WorkspaceFilter::All
                     || missing.is_some_and(|previous| session >= previous)
-                    || !matches_query(&filter.query.to_lowercase(), session, metadata, None)
+                    || !matches_query(&query, session, metadata, None)
                 {
                     return Err(ApiError::Invalid("invalid missing pinned match".into()));
                 }

@@ -4,6 +4,20 @@ fn id(value: &str) -> DomainRequestId {
     DomainRequestId::new(value).unwrap()
 }
 #[test]
+fn one_minute_floor_applies_to_creation_and_durable_reminders() {
+    let mut state = ScheduleState::default();
+    let create = |state: &mut ScheduleState, interval_ms| state.create(
+        id("minute"), "Check".into(), ScheduleRule::Every { interval_ms }, 1_000,
+    );
+    assert!(create(&mut state, 59_999).is_err());
+    create(&mut state, 60_000).unwrap();
+    assert_eq!(state.next_due(), Some(61_000));
+    state.validate().unwrap();
+    state.reminders[0].interval_ms = Some(59_999);
+    assert!(state.validate().is_err());
+}
+
+#[test]
 fn delayed_fixed_rate_work_coalesces_and_keeps_its_original_anchor() {
     let mut state = ScheduleState::default();
     state
@@ -104,7 +118,7 @@ fn bounds_and_overflow_preserve_the_original_candidate() {
         ScheduleRule::After { delay_ms: 0 },
         ScheduleRule::At { at_ms: 1000 },
         ScheduleRule::Every {
-            interval_ms: 299_999,
+            interval_ms: 59_999,
         },
         ScheduleRule::After { delay_ms: u64::MAX },
     ] {

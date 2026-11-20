@@ -3,6 +3,8 @@ use rsi_agent_session_protocol::{ContinuationInput, DomainRequestId, MessageId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) const MIN_INTERVAL_MS: u64 = 60_000;
+
 /// Explicit supported UTC timer rules; no local timezone or cron interpretation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -19,7 +21,7 @@ pub enum ScheduleRule {
     },
     /// Fixed-rate occurrences anchored at creation.
     Every {
-        /// Interval, at least five minutes.
+        /// Interval, at least one minute.
         interval_ms: u64,
     },
 }
@@ -71,33 +73,64 @@ pub struct ScheduleState {
     /// Latest acceptance only; history remains in canonical controls.
     pub reservation: Option<ScheduleReservation>,
 }
+/// Validates a bounded set of reminders returned by a Store or remote catalog.
+///
+/// # Errors
+/// Rejects duplicate IDs, invalid prompts and invalid recurrence arithmetic.
+pub fn validate_reminders(reminders: &[Reminder]) -> Result<(), String> {
+    if reminders.len() > 16 {
+        return Err("invalid Schedule capacity".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for reminder in reminders {
+        prompt(&reminder.prompt)?;
+        if !ids.insert(&reminder.id)
+            || reminder.anchor_ms == 0
+            || reminder.due_ms < reminder.anchor_ms
+            || reminder.interval_ms.is_some_and(|interval| {
+                interval < MIN_INTERVAL_MS || (reminder.due_ms - reminder.anchor_ms) % interval != 0
+            })
+            || (reminder.interval_ms.is_none() && reminder.due_ms != reminder.anchor_ms)
+            || (reminder.consumed && (reminder.active || reminder.interval_ms.is_some()))
+        {
+            return Err("invalid reminder identity or anchored time".into());
+        }
+    }
+    Ok(())
+}
 impl ScheduleState {
+    /// Whether the Session has spent its lifetime automatic Turn allowance.
+    pub const fn exhausted(&self) -> bool {
+        self.allocated_rounds >= 100
+    }
+
+    /// Reads a committed snapshot with the Schedule codec.
+    ///
+    /// # Errors
+    /// Rejects a different domain, an unsupported codec and malformed state.
+    pub fn from_snapshot(
+        snapshot: &rsi_agent_session_protocol::DomainSnapshot,
+    ) -> Result<Self, String> {
+        if snapshot.identity().id() != crate::SCHEDULE_DOMAIN
+            || snapshot.identity().version() != crate::SCHEDULE_CODEC_VERSION
+        {
+            return Err("unsupported Schedule domain or codec".into());
+        }
+        let state =
+            Self::deserialize(snapshot.state().value()).map_err(|error| error.to_string())?;
+        state.validate()?;
+        Ok(state)
+    }
     /// Validates external/durable state at the owning boundary.
     ///
     /// # Errors
     /// Malformed capacity, timer arithmetic, identity or frozen input is rejected.
     pub fn validate(&self) -> Result<(), String> {
-        if self.reminders.len() > 16
-            || self.allocated_rounds > 100
-            || (self.allocated_rounds == 0) != self.reservation.is_none()
+        if self.allocated_rounds > 100 || (self.allocated_rounds == 0) != self.reservation.is_none()
         {
             return Err("invalid Schedule capacity or allocation state".into());
         }
-        let mut ids = std::collections::BTreeSet::new();
-        for reminder in &self.reminders {
-            prompt(&reminder.prompt)?;
-            if !ids.insert(&reminder.id)
-                || reminder.anchor_ms == 0
-                || reminder.due_ms < reminder.anchor_ms
-                || reminder.interval_ms.is_some_and(|interval| {
-                    interval < 300_000 || (reminder.due_ms - reminder.anchor_ms) % interval != 0
-                })
-                || (reminder.interval_ms.is_none() && reminder.due_ms != reminder.anchor_ms)
-                || (reminder.consumed && (reminder.active || reminder.interval_ms.is_some()))
-            {
-                return Err("invalid reminder identity or anchored time".into());
-            }
-        }
+        validate_reminders(&self.reminders)?;
         if let Some(reservation) = &self.reservation {
             prompt(&reservation.prompt)?;
             reservation.input.validate().map_err(|e| e.to_string())?;
@@ -130,7 +163,7 @@ impl ScheduleState {
         now_ms: u64,
     ) -> Result<(), String> {
         prompt(&text)?;
-        if self.allocated_rounds >= 100
+        if self.exhausted()
             || self.reminders.len() >= 16
             || self.reminders.iter().any(|r| r.id == id)
         {
@@ -139,8 +172,8 @@ impl ScheduleState {
         let (due_ms, interval_ms) = match rule {
             ScheduleRule::After { delay_ms } if delay_ms > 0 => (now_ms.checked_add(delay_ms).ok_or("Schedule time overflow")?, None),
             ScheduleRule::At { at_ms } if at_ms > now_ms => (at_ms, None),
-            ScheduleRule::Every { interval_ms } if interval_ms >= 300_000 => (now_ms.checked_add(interval_ms).ok_or("Schedule time overflow")?, Some(interval_ms)),
-            _ => return Err("Schedule requires a future instant, positive delay or interval of at least five minutes".into()),
+            ScheduleRule::Every { interval_ms } if interval_ms >= MIN_INTERVAL_MS => (now_ms.checked_add(interval_ms).ok_or("Schedule time overflow")?, Some(interval_ms)),
+            _ => return Err("Schedule requires a future instant, positive delay or interval of at least one minute".into()),
         };
         if due_ms == 0 {
             return Err("invalid Schedule time".into());
@@ -163,6 +196,7 @@ impl ScheduleState {
     /// selections are accepted only to clean up their unsettled reservation.
     pub fn resume(&mut self, ids: &[DomainRequestId]) -> Result<(), String> {
         let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
+        let available = !self.exhausted();
         let cleanup = self.reservation.as_ref().filter(|r| !r.settled);
         if ids.is_empty()
             || ids.len() > 16
@@ -173,7 +207,7 @@ impl ScheduleState {
                     && !self
                         .reminders
                         .iter()
-                        .any(|r| &r.id == id && !r.consumed && self.allocated_rounds < 100)
+                        .any(|r| &r.id == id && !r.consumed && available)
             })
         {
             return Err(
@@ -182,8 +216,7 @@ impl ScheduleState {
             );
         }
         for reminder in &mut self.reminders {
-            reminder.active =
-                unique.contains(&reminder.id) && !reminder.consumed && self.allocated_rounds < 100;
+            reminder.active = unique.contains(&reminder.id) && !reminder.consumed && available;
         }
         Ok(())
     }
@@ -191,18 +224,17 @@ impl ScheduleState {
     ///
     /// # Errors
     /// Rejects an unknown reminder identity.
-    pub fn delete(&mut self, id: &DomainRequestId) -> Result<(), String> {
+    pub fn delete(&mut self, id: &DomainRequestId) -> Result<Reminder, String> {
         let index = self
             .reminders
             .iter()
             .position(|r| &r.id == id)
             .ok_or("reminder not found")?;
-        self.reminders.remove(index);
-        Ok(())
+        Ok(self.reminders.remove(index))
     }
     /// Earliest eligible due time, absent while the previous accepted round is open.
     pub fn next_due(&self) -> Option<u64> {
-        if self.allocated_rounds >= 100 || self.reservation.as_ref().is_some_and(|r| !r.settled) {
+        if self.exhausted() || self.reservation.as_ref().is_some_and(|r| !r.settled) {
             return None;
         }
         self.reminders

@@ -198,6 +198,15 @@ impl Document {
 struct State {
     document: Arc<Document>,
 }
+/// A point-in-time view of archive membership in the committed navigation document.
+#[derive(Debug)]
+pub struct ArchivedSessions(Arc<Document>);
+impl ArchivedSessions {
+    /// Whether this Session was archived at the captured revision.
+    pub fn contains(&self, session: &SessionId) -> bool {
+        self.0.records.get(session).is_some_and(|row| row.archived)
+    }
+}
 /// Domain result for a pin intent on a published Session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PinOutcome {
@@ -244,10 +253,23 @@ pub struct Navigation {
     workspace: Arc<dyn WorkspaceRegistry>,
     epoch: HostEpoch,
     state: Mutex<State>,
+    archive_changes: tokio::sync::watch::Sender<()>,
     writer: Arc<Semaphore>,
     admission: Arc<Admission>,
 }
 impl Navigation {
+    /// Subscribes to committed archive membership changes, including purges.
+    pub fn archive_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.archive_changes.subscribe()
+    }
+
+    /// Reads archive membership from the current committed metadata.
+    ///
+    /// # Panics
+    /// Panics if an earlier Navigation writer poisoned the metadata lock.
+    pub fn archived_sessions(&self) -> ArchivedSessions {
+        ArchivedSessions(self.document())
+    }
     fn run_mutation<T: Send + 'static>(
         self: &Arc<Self>,
         work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
@@ -470,15 +492,14 @@ impl Navigation {
     // Shared futures retain one result per coordinate without starting unpolled lookups.
     fn workspace_lookups<'a>(
         &'a self,
-        coordinates: impl IntoIterator<Item = Option<&'a ExecutionCoordinates>>,
+        coordinates: impl Iterator<Item = Option<&'a ExecutionCoordinates>> + Send + 'a,
     ) -> stream::BoxStream<'a, Result<Option<WorkspaceId>>> {
         let mut distinct = BTreeMap::new();
-        let reads = coordinates
-            .into_iter()
-            .map(|coordinates| {
+        stream::iter(coordinates)
+            .map(move |coordinates| {
                 let read = coordinates.map(|coordinates| {
                     distinct
-                        .entry(coordinates.clone())
+                        .entry(coordinates)
                         .or_insert_with(|| self.workspace_for(coordinates).boxed().shared())
                         .clone()
                 });
@@ -488,10 +509,9 @@ impl Navigation {
                         None => Ok(None),
                     }
                 }
-                .boxed()
             })
-            .collect::<Vec<_>>();
-        stream::iter(reads).buffered(4).boxed()
+            .buffered(4)
+            .boxed()
     }
     /// Reads all pinned summaries with no attach or activity side effects.
     ///
@@ -859,7 +879,18 @@ impl Navigation {
         }
         self.domain.batch(batch).await.map_err(storage_error)?;
         let mut state = self.state.lock().expect("navigation state poisoned");
+        let archive_changed = change.records.iter().any(|(id, next)| {
+            state
+                .document
+                .records
+                .get(id)
+                .is_some_and(|row| row.archived)
+                != next.as_ref().is_some_and(|row| row.archived)
+        });
         change.apply(Arc::make_mut(&mut state.document));
+        if archive_changed {
+            self.archive_changes.send_replace(());
+        }
         Ok(state.document.clone())
     }
     async fn close(&self) {
@@ -1016,6 +1047,7 @@ impl PluginFactory for NavigationFactory {
             state: Mutex::new(State {
                 document: Arc::new(document),
             }),
+            archive_changes: tokio::sync::watch::channel(()).0,
             writer: Arc::new(Semaphore::new(1)),
             admission: Admission::new(8, plan.context().runtime().execution().clone()),
         });

@@ -11,6 +11,8 @@ pub const SCHEDULE_CODEC_VERSION: u32 = 1;
 pub const SCHEDULE_RESERVE: &str = "rsi.schedule.reserve";
 /// Internal terminal settlement command.
 pub const SCHEDULE_SETTLE: &str = "rsi.schedule.settle";
+/// Operator command to remove one reminder while preserving admitted work.
+pub const SCHEDULE_DELETE: &str = "rsi.schedule.delete";
 mod service;
 pub use service::*;
 mod plugin;

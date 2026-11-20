@@ -227,15 +227,13 @@ impl NavigationClient {
                 "summary identity or revision changed".into(),
             ));
         }
+        let all_sessions = NavigationFilter {
+            archived: None,
+            ..Default::default()
+        };
         for (id, value) in request.sessions.iter().zip(&page.entries) {
             if let Some(value) = value {
-                super::validation::entry(
-                    value,
-                    &NavigationFilter {
-                        archived: Some(value.metadata.archived),
-                        ..Default::default()
-                    },
-                )?;
+                super::validation::entry(value, &all_sessions, "")?;
                 if &value.session != id {
                     return Err(ApiError::Invalid("summary identity changed".into()));
                 }

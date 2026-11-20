@@ -83,8 +83,8 @@ nonempty page; omission never exposes that hidden identity.
 Workspace grouping resolves exact registered identities without filesystem access
 or registration side effects. Each page, pin list or exact-summary request shares
 one lookup per distinct coordinate, with at most four lookups in flight. Results
-retain input order; an ordinary page stops at its match limit without draining
-the remaining lookup queue.
+retain input order. Coordinate selection and lookup preparation advance with
+the four in-flight slots. An ordinary page stops at its match limit.
 The [wire contract](../navigation-api/README.md)
 owns external fields, bounds and client validation.
 
@@ -94,7 +94,10 @@ first-poll retirement contract above. The writer owns
 global expected-revision CAS and holds the accepted operation through durable
 commit and publication if its caller disappears. Retirement closes admission
 before draining. Authenticated devices can edit navigation without a configuration
-grant. Archive affects navigation visibility only and does not cancel execution.
+grant. Archiving hides the Session and suspends future scheduled deliveries to
+it. Already admitted work keeps its identity. Local scheduling observes the same
+committed membership that the navigation list displays. Restoring the Session
+makes its outstanding reminder eligible again.
 
 Reading positions retain at most 4,096 records / 1 MiB. Admission evicts least
 recently acknowledged positions until both bounds fit; restart seeds that order
