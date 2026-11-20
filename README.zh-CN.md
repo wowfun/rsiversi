@@ -2,9 +2,9 @@
   <img src="apps/web/public/logo.svg" alt="RSIversi" width="160">
 </p>
 
-[English](README.md) | 简体中文
-
 # RSIversi
+
+[English](README.md) | 简体中文
 
 RSIversi 是基于 Rust 的可扩展 Agentic Harness（智能体任务运行框架），
 采用 Everything is a plugin（一切皆插件）的架构。

@@ -176,7 +176,7 @@ async fn observe(
                 {
                     turn = Some(turn_id.clone());
                 }
-                if turn.as_ref() != Some(fact.body().turn_id()) {
+                if turn.as_ref() != fact.body().turn_id() {
                     continue;
                 }
                 if let Some(peer) = peer {

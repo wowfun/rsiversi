@@ -821,6 +821,12 @@ impl<'de> Deserialize<'de> for ToolResult {
 }
 
 impl ToolResult {
+    /// Encoded size for temporary result buffering. A result larger than the
+    /// available budget remains valid and can stay with its execution owner.
+    pub fn encoded_bytes_within(&self, maximum: usize) -> Option<usize> {
+        output::bounded_json_len(self, maximum, "buffered Tool result").ok()
+    }
+
     /// Creates and validates a complete Tool result.
     pub fn new(value: Value, content: Vec<ToolContent>, is_error: bool) -> Result<Self> {
         let result = Self {

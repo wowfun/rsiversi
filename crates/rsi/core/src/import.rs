@@ -763,8 +763,7 @@ fn import_targets(paths: &HostPaths) -> Result<Vec<PathBuf>> {
     let mut targets = Vec::new();
     for kind in [HomeKind::Config, HomeKind::Data, HomeKind::State] {
         let path = kind.path(paths);
-        let path = crate::normalize_launch_path(path, Path::new("."))?;
-        let path = fs::resolve_absolute_root_alias(&path, true).map_err(error)?;
+        let path = fs::resolve_absolute_root_alias(path, true).map_err(error)?;
         #[cfg(windows)]
         let path = PathBuf::from(path.to_string_lossy().to_lowercase());
         targets.extend(

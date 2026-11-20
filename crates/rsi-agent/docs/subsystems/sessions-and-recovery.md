@@ -15,6 +15,11 @@ execution/history access check one session's mechanical watermark,
 stored digest shape, and Fact/turn indexes; only the explicit offline verifier
 decodes every Fact and recomputes every canonical prefix digest.
 
+Local projections may subscribe to edits of a named domain across Sessions.
+An edit above revision one, a possibly committed edit with a lost acknowledgement,
+or retirement invalidates the subscriber's read. Ordinary message publication
+does not wake a domain observer. These coalesced hints carry no Session data.
+
 The Kernel owns an in-memory speculative suffix after the Store's durable
 prefix. It publishes nonterminal Facts immediately to live observers. Its
 durable control observations retain the committing append's final Fact cursor.

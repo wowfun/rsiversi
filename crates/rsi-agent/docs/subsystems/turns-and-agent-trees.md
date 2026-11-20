@@ -41,8 +41,11 @@ prepare immutable input -> publish ordered intent and start
 -> flush through start -> invoke -> publish outcome
 ```
 
-A parallel-safe Tool run publishes all source-ordered intents followed by all
-matching starts, then waits through the last start before invoking any member.
+A parallel-safe Tool run admits calls in source order. Each newly admitted
+group publishes its intents followed by its matching starts and waits through
+its last start before invoking any member of that group. Older calls may
+still be executing. An unresolved approval holds admission of later calls.
+Results publish in model order, and an exclusive call waits for its predecessors.
 Store batches may partition that prefix; only the complete-prefix acknowledgement
 permits invocation. A flush failure never authorizes dispatch or implicit replay.
 
@@ -162,3 +165,21 @@ fails before producing a result, every successful sibling is still published in
 source order before the first failure is propagated. An `exclusive_final` Tool
 also requires the last source-order position in its model response;
 `wait_agent` declares this scheduling class.
+
+## Idle session compaction
+
+An explicit compaction command reserves the session at prompt admission. An
+active turn or an already admitted prompt returns busy. The reservation lasts
+through the provider attempt and installation decision. A prompt arriving
+after reservation can proceed when the reservation is released. No pending
+compaction is restored on restart.
+
+Paid manual compaction has a command owner and an effect ID. Its prepared
+selection contains real source turns. Intent, start and settlement occupy the
+session's canonical sequence without opening a conversation turn. The start
+prefix must be durable before provider I/O. A start without settlement remains
+interrupted with an unknown provider result. A valid completed summary is
+installed only while its selected view and protected input still match. When
+the pinned context builder installs a summary, the same append transaction as
+the normalized settlement records an installation marker. The marker refers
+to the preceding settlement by command and effect and stores no summary text.

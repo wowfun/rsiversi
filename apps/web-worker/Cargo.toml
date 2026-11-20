@@ -35,6 +35,7 @@ crate-type = ["cdylib", "rlib"]
 rsi-workspace-review-ui = { path = "../../crates/rsi/workspace-review-ui" }
 rsi-workbench-ui = { path = "../../crates/rsi/workbench-ui" }
 async-trait.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio-util.workspace = true

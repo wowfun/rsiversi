@@ -2,9 +2,9 @@
   <img src="apps/web/public/logo.svg" alt="RSIversi" width="160">
 </p>
 
-English | [简体中文](README.zh-CN.md)
-
 # RSIversi
+
+English | [简体中文](README.zh-CN.md)
 
 RSIversi is an extensible agentic harness built in Rust, with an
 everything-is-a-plugin architecture.

@@ -16,15 +16,20 @@ not become Host requirements merely because their data types are dependencies.
 
 One same-origin authenticated connection supplies ordinary domain clients.
 Login consumes a device registration receipt and exchanges the token through the
-HttpOnly cookie owner; browser storage retains no credential. Closing the
+HttpOnly cookie owner. A rejected receipt surfaces the login diagnostic even when
+the Profile starts with its application unavailable. Switching an existing
+browser to another device requires reconnecting and disconnecting the previous
+device first. Browser storage retains no credential. Closing the
 application drains its requests and surfaces without stopping the remote Host.
 A WASM trap requires a fresh Worker and does not prove clean Rust shutdown.
 
 The document requests one coalesced frame, mounts admitted renderers and then
 acknowledges its exact frame ID. One pending frame and one acknowledgement wait
 are retained; a 30-second stalled acknowledgement retires the failed Worker
-generation through the document runtime's failure path. Domain observation cursors advance independently. Renderer offers
-wake the existing frame producer instead of adding a second frame queue.
+generation through the document runtime's failure path. Domain observation cursors
+advance independently. The waiter stays pending when an observation leaves the
+projected view unchanged. A new renderer offer wakes the same waiter and requires
+document acknowledgement even when its GUI patch is empty.
 
 Image bytes are bounded before copying into WASM. Canonical response receive
 leases remain owned until the document transfer is created. The document owns

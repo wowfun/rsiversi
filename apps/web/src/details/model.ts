@@ -12,14 +12,15 @@ export interface ImageData {
   acquire(): ImageInterest;
 }
 interface InteractionBase {pane: string; generation: string; ticket: string}
-export type InteractionData = InteractionBase & (
+export type ObservedRequest =
   {kind: 'approval'; request: {id: string; subject: {session_id: string}; action: string; reason: string; review?: {
     arguments: unknown; cwd: string; sandbox: string;
     execution?: {binding?: {location: ExecutionLocation}; workspace?: string};
   } | null}}
-  | {kind: 'question'; request: {id: string; session_id: string; questions: {id: string; prompt: string; options: string[]}[];
+  | {kind: 'question'; request: {id: string; session_id: string; turn_id: string; questions: {id: string; prompt: string; options: string[]}[];
     review?: {binding: unknown; choices: {id: string; label: string}[]} | null}}
-);
+;
+export type InteractionData = InteractionBase & ObservedRequest;
 export interface SourceData {
   owner: object;
   ticket: string; source: SourceRef; error?: string | null;
