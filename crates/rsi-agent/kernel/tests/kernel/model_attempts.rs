@@ -194,34 +194,34 @@ async fn memory_and_sqlite_enforce_model_coordinates_atomically_across_append_pa
         let before = store.read_watermarks(&session).await.unwrap();
         for duplicate in &bodies {
             let fact = Arc::new(SessionFact::new(5, 1, duplicate.clone()).unwrap());
+            let direct = store
+                .append(AppendBatch {
+                    session_id: session.clone(),
+                    expected_seq: 4,
+                    header: None,
+                    facts: vec![fact.clone()],
+                })
+                .await;
             assert!(
-                store
-                    .append(AppendBatch {
-                        session_id: session.clone(),
-                        expected_seq: 4,
-                        header: None,
-                        facts: vec![fact.clone()]
-                    })
-                    .await
-                    .is_err()
+                matches!(direct, Err(StoreError::Invalid(reason)) if reason == "duplicate model effect coordinate")
             );
             assert_eq!(store.read_watermarks(&session).await.unwrap(), before);
+            let atomic = store
+                .commit_agent(AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: session.clone(),
+                        expected_fact_seq: 4,
+                        expected_control_seq: 0,
+                        header: None,
+                        facts: vec![fact],
+                        controls: vec![],
+                    }],
+                    required_active_activations: vec![],
+                    quiescent_descendants_of: None,
+                })
+                .await;
             assert!(
-                store
-                    .commit_agent(AtomicAgentCommit {
-                        sessions: vec![AtomicSessionAppend {
-                            session_id: session.clone(),
-                            expected_fact_seq: 4,
-                            expected_control_seq: 0,
-                            header: None,
-                            facts: vec![fact],
-                            controls: vec![],
-                        }],
-                        required_active_activations: vec![],
-                        quiescent_descendants_of: None
-                    })
-                    .await
-                    .is_err()
+                matches!(atomic, Err(StoreError::Invalid(reason)) if reason == "duplicate model effect coordinate")
             );
             assert_eq!(store.read_watermarks(&session).await.unwrap(), before);
         }

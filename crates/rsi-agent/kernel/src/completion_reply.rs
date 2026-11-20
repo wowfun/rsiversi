@@ -53,7 +53,7 @@ async fn read_projection(
                 return Ok(Some(omitted()));
             }
             before = fact.seq();
-            if fact.body().turn_id() != turn {
+            if fact.body().turn_id() != Some(turn) {
                 continue;
             }
             match fact.body() {

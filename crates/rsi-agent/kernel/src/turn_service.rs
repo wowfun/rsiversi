@@ -4,6 +4,84 @@ use rsi_agent_store_protocol::MailboxRead;
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    async fn change_message_feedback(
+        &self,
+        id: &SessionId,
+        change: rsi_agent_session_protocol::MessageFeedbackChange,
+    ) -> TurnResult<rsi_agent_session_protocol::MessageFeedbackOutcome> {
+        use rsi_agent_session_protocol::{
+            FeedbackDecision, MessageFeedbackOutcome, SavedMessageFeedback,
+        };
+        let admission = self.inner.submission_admission.acquire(id).await?;
+        if change.value.is_some() {
+            // The transcript can publish a settled Fact before its writer finishes.
+            let pending = lock_state(&self.inner)
+                .sessions
+                .get(id)
+                .is_some_and(|s| change.message_seq.get() > s.durable_seq && !s.pending.is_empty());
+            if pending {
+                self.flush_resident_admitted(id).await?;
+            }
+        }
+        let snapshot = self
+            .inner
+            .store
+            .read_message_feedback(id, change.message_seq)
+            .await
+            .map_err(turn_store_error)?;
+        let current = snapshot.current;
+        match change.decide(current.as_ref()) {
+            FeedbackDecision::Conflict => return Ok(MessageFeedbackOutcome::Conflict { current }),
+            FeedbackDecision::Unchanged => return Ok(MessageFeedbackOutcome::Saved { current }),
+            FeedbackDecision::Append => {}
+        }
+        let cut = snapshot.watermarks;
+        let seq = cut
+            .durable_control_seq
+            .checked_add(1)
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or(TurnError::Capacity)?;
+        let current = change.value.clone().map(|value| SavedMessageFeedback {
+            version: seq,
+            value,
+        });
+        let record = AgentControlRecord::new(
+            seq.get(),
+            self.inner.clock.now_ms().max(1),
+            AgentControlRecordBody::MessageFeedbackChanged { change },
+        )
+        .map_err(|e| TurnError::Invalid(e.to_string()))?;
+        let append = AtomicSessionAppend {
+            session_id: cut.session_id,
+            expected_fact_seq: cut.durable_fact_seq,
+            expected_control_seq: cut.durable_control_seq,
+            header: None,
+            facts: vec![],
+            controls: vec![record],
+        };
+        let kernel = self.clone();
+        self.owned_commit(async move {
+            let _admission = admission;
+            kernel
+                .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
+                    sessions: vec![append],
+                    required_active_activations: vec![],
+                    quiescent_descendants_of: None,
+                })
+                .await?
+                .map_err(turn_store_error)?;
+            Ok(MessageFeedbackOutcome::Saved { current })
+        })
+        .await
+    }
+
+    async fn reserve_manual_compaction(
+        &self,
+        id: &SessionId,
+        command: &rsi_agent_session_protocol::DomainRequestId,
+    ) -> TurnResult<rsi_agent_turn_protocol::ManualCompactionAdmission> {
+        manual_compaction::reserve(self, id, command).await
+    }
     async fn generation_status(
         &self,
         session: &SessionId,
@@ -45,7 +123,13 @@ impl TurnService for AgentKernel {
         &self,
         request: rsi_agent_turn_protocol::PrepareFork,
     ) -> TurnResult<PreparedFreshSession> {
-        self.prepare_independent_fork(request).await
+        let cancelled = request.cancellation.clone();
+        tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(TurnError::ExecutionUnavailable),
+            () = self.inner.stop_worker.cancelled() => Err(TurnError::ShuttingDown),
+            result = self.prepare_independent_fork(request) => result,
+        }
     }
     fn prepare_retirement(
         &self,
@@ -814,6 +898,29 @@ impl TurnService for AgentKernel {
             })
             .collect())
     }
+    async fn domain_state(
+        &self,
+        session_id: &SessionId,
+        domain: &str,
+    ) -> TurnResult<Option<(u64, rsi_agent_session_protocol::DomainStateView)>> {
+        let page = observation::read_domain_state_page_bounded(
+            &self.inner,
+            session_id,
+            None,
+            Some(domain),
+        )
+        .await
+        .map_err(turn_store_error)?;
+        Ok(page.states.into_iter().next().map(|state| {
+            (
+                page.durable_control_seq,
+                rsi_agent_session_protocol::DomainStateView {
+                    revision: state.head.revision,
+                    snapshot: state.snapshot,
+                },
+            )
+        }))
+    }
     async fn domain_request(
         &self,
         session_id: &SessionId,
@@ -1329,20 +1436,33 @@ impl AgentKernel {
         }
         if let AgentMessageSource::Continuation { source } = &entry.message.source {
             let ordinary_pending = scan.has_ordinary_pending_turn;
-            if ordinary_pending
-                || !self
-                    .continuation_claim_allowed(&session_id, source, Some(&request.session))
+            let disposition = if ordinary_pending {
+                Some(MessageDiscardReason::Superseded)
+            } else {
+                match self
+                    .continuation_claim(
+                        &session_id,
+                        &request.message_id,
+                        source,
+                        Some(&request.session),
+                    )
                     .await?
-            {
+                {
+                    continuation::ContinuationClaim::Ready => None,
+                    continuation::ContinuationClaim::AwaitingOwner => {
+                        return Err(TurnError::ContinuationDisarmed);
+                    }
+                    continuation::ContinuationClaim::Disarmed => {
+                        Some(MessageDiscardReason::ContinuationDisarmed)
+                    }
+                }
+            };
+            if let Some(reason) = disposition {
                 self.discard_continuation_admitted(
                     &session_id,
                     (scan.durable_fact_seq, scan.durable_control_seq),
                     &entry,
-                    if ordinary_pending {
-                        MessageDiscardReason::Superseded
-                    } else {
-                        MessageDiscardReason::ContinuationDisarmed
-                    },
+                    reason,
                 )
                 .await?;
                 return Err(TurnError::ContinuationDisarmed);

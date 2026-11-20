@@ -5,7 +5,7 @@ use rsi_agent_session_protocol::{
 use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_turn_protocol::{ContinuationBinding, ContinuationLease, SessionContinuations};
 
-fn input() -> ContinuationInput {
+pub(super) fn input() -> ContinuationInput {
     ContinuationInput {
         owner: DomainRequestId::new("goal-one").unwrap(),
         round: 1,
@@ -361,6 +361,13 @@ async fn invocation(
 }
 
 async fn reserve(fixture: &Fixture, lease: &ContinuationLease) -> SessionCommandInvocation {
+    reserve_with(fixture, lease, "fixture.reserve").await
+}
+async fn reserve_with(
+    fixture: &Fixture,
+    lease: &ContinuationLease,
+    command: &str,
+) -> SessionCommandInvocation {
     let view = fixture
         .kernel
         .list(
@@ -373,7 +380,7 @@ async fn reserve(fixture: &Fixture, lease: &ContinuationLease) -> SessionCommand
         .await
         .unwrap();
     let invocation = SessionCommandInvocation {
-        command: ContributionId::new("fixture.reserve").unwrap(),
+        command: ContributionId::new(command).unwrap(),
         request_id: DomainRequestId::new("reservation-one").unwrap(),
         expected_revision: view.revision(),
         arguments: CommandArguments::new(true.into()).unwrap(),
@@ -412,6 +419,82 @@ async fn claim(
             step_id: StepId::new("automatic-step").unwrap(),
         })
         .await
+}
+
+#[tokio::test]
+async fn later_domain_edit_claims_only_a_retained_recoverable_input() {
+    for retained in [false, true] {
+        let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+        let lease = arm(&fixture).await;
+        reserve_with(&fixture, &lease, "fixture.recoverable-reserve").await;
+        let invocation = fixture.invocation("edit-before-claim", retained).await;
+        SessionCommands::execute(
+            &fixture.kernel,
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            invocation,
+        )
+        .await
+        .unwrap();
+        drop(lease);
+        let recovered = arm(&fixture).await;
+        if retained {
+            claim(&fixture).await.unwrap();
+        } else {
+            assert_eq!(
+                claim(&fixture).await.unwrap_err(),
+                TurnError::ContinuationDisarmed
+            );
+        }
+        drop(recovered);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn cold_pending_reservation_waits_for_an_armed_owner_then_claims_its_original_message() {
+    let mut fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
+    let lease = arm(&fixture).await;
+    let _reservation = reserve_with(&fixture, &lease, "fixture.recoverable-reserve").await;
+    let accepted = fixture
+        .kernel
+        .message_status(&fixture.session_id, &input().message_id)
+        .await
+        .unwrap();
+    assert_eq!(accepted.state, MessageState::Pending);
+    drop(lease);
+    fixture.kernel.shutdown(fixture.workers).await.unwrap();
+    fixture.kernel = AgentKernel::recover(fixture.store.clone(), fixture.composition.clone())
+        .await
+        .unwrap();
+    fixture.workers = fixture.kernel.start_workers();
+    assert_eq!(
+        claim(&fixture).await.unwrap_err(),
+        TurnError::ContinuationDisarmed
+    );
+    assert_eq!(
+        fixture
+            .kernel
+            .message_status(&fixture.session_id, &input().message_id)
+            .await
+            .unwrap()
+            .state,
+        MessageState::Pending
+    );
+    let restored = arm(&fixture).await;
+    claim(&fixture).await.unwrap();
+    let claimed = fixture
+        .kernel
+        .message_status(&fixture.session_id, &input().message_id)
+        .await
+        .unwrap();
+    assert_eq!(claimed.accepted_control_seq, accepted.accepted_control_seq);
+    assert!(matches!(claimed.state, MessageState::Claimed { .. }));
+    drop(restored);
+    fixture.stop().await;
 }
 
 #[tokio::test]
@@ -1135,6 +1218,78 @@ async fn independent_domains_share_a_session_but_not_a_second_owner_or_generatio
     );
     drop(schedule);
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn held_command_context_enters_an_automatic_turn_without_waking_or_authorizing_it() {
+    use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery};
+    for sqlite in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SessionStore> = if sqlite {
+            Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
+        } else {
+            Arc::new(MemoryStore::new())
+        };
+        let fixture = Fixture::start(store, false).await;
+        *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
+            delivery: CommandInputDelivery::Inject,
+            content: vec![AgentMessageContent::Text {
+                text: "Held task change".into(),
+            }],
+            attribution: None,
+        }];
+        let session = &fixture.session_id;
+        let receipt = SessionCommands::execute(
+            &fixture.kernel,
+            fixture.kernel.prepare_resume(session).await.unwrap(),
+            fixture.invocation("held-task-change", true).await,
+        )
+        .await
+        .unwrap();
+        let held = &receipt.commit().command_inputs()[0].message.message_id;
+        assert!(
+            fixture
+                .store
+                .list_ready_roots(None, 1)
+                .await
+                .unwrap()
+                .roots
+                .is_empty()
+        );
+        let lease = arm(&fixture).await;
+        reserve(&fixture, &lease).await;
+        let executor = fixture.kernel.register("timer".into()).unwrap();
+        let claim = fixture
+            .kernel
+            .claim("timer", CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let origin = rsi_agent_turn_protocol::initial_turn_input(&fixture.kernel, &claim)
+            .await
+            .unwrap();
+        assert!(!origin.human);
+        assert_eq!(
+            origin.continuation_domains,
+            [lease.binding().domain.clone()]
+        );
+        let entry = fixture
+            .store
+            .read_agent_message(session, held)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&entry.state, rsi_agent_store_protocol::StoreAgentMessageState::Claimed { turn_id, .. } if turn_id == claim.turn_id())
+        );
+        fixture
+            .kernel
+            .finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        drop((executor, lease));
+        fixture.stop().await;
+    }
 }
 
 #[tokio::test]

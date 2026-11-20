@@ -866,3 +866,99 @@ async fn retirement_and_abandoned_terminal_drain_never_reopen_the_old_claim() {
         kernel.shutdown(workers).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn feedback_racing_cold_writers_return_the_canonical_rating_without_waking_agent() {
+    use rsi_agent_session_protocol::{MessageFeedbackChange, MessageFeedbackOutcome};
+    let store = Arc::new(MemoryStore::new());
+    let id = SessionId::new("feedback").unwrap();
+    let turn = TurnId::new("first").unwrap();
+    let effect = EffectId::new("answer").unwrap();
+    append_creation(store.as_ref(), header(id.as_str()), accepted_fact(1, &turn)).await;
+    rsi_agent_testkit::append_history_fixture(
+        store.as_ref(),
+        AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![
+                model_intent_fact(2, &turn, &effect),
+                model_started_fact(3, &turn, &effect),
+                model_finished_fact(4, &turn, &effect),
+                SessionFact::new(
+                    5,
+                    5,
+                    SessionFactBody::TurnTerminal {
+                        turn_id: turn,
+                        outcome: TurnOutcome::Completed,
+                        result: None,
+                    },
+                )
+                .unwrap(),
+            ]
+            .into_iter()
+            .map(Arc::new)
+            .collect(),
+        },
+    )
+    .await
+    .unwrap();
+    let kernel = kernel(store.clone()).await;
+    let change = |rating: Option<&str>, version: Option<u64>| -> MessageFeedbackChange {
+        serde_json::from_value(serde_json::json!({"message_seq":4,"if_version":version,
+            "value":rating.map(|r|serde_json::json!({"rating":r}))}))
+        .unwrap()
+    };
+    let (a, b) = tokio::join!(
+        kernel.change_message_feedback(&id, change(Some("positive"), None)),
+        kernel.change_message_feedback(&id, change(Some("negative"), None))
+    );
+    let (winner, stale) = match (a.unwrap(), b.unwrap()) {
+        (
+            MessageFeedbackOutcome::Saved { current: Some(a) },
+            MessageFeedbackOutcome::Conflict { current: Some(b) },
+        )
+        | (
+            MessageFeedbackOutcome::Conflict { current: Some(b) },
+            MessageFeedbackOutcome::Saved { current: Some(a) },
+        ) => (a, b),
+        other => panic!("two creations must have one winner: {other:?}"),
+    };
+    assert_eq!(winner, stale);
+    let saved = kernel
+        .change_message_feedback(
+            &id,
+            MessageFeedbackChange {
+                message_seq: 4.try_into().unwrap(),
+                if_version: Some(winner.version),
+                value: Some(winner.value.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved,
+        MessageFeedbackOutcome::Saved {
+            current: Some(winner.clone())
+        }
+    );
+    assert_eq!(
+        store
+            .read_watermarks(&id)
+            .await
+            .unwrap()
+            .durable_control_seq,
+        winner.version.get()
+    );
+    for _ in 0..2 {
+        let result = kernel
+            .change_message_feedback(&id, change(None, Some(winner.version.get())))
+            .await
+            .unwrap();
+        assert_eq!(result, MessageFeedbackOutcome::Saved { current: None });
+    }
+    let cut = store.read_watermarks(&id).await.unwrap();
+    assert_eq!(cut.durable_fact_seq, 5);
+    assert_eq!(cut.durable_control_seq, winner.version.get() + 1);
+    assert!(kernel.generation_status(&id).await.unwrap().is_none());
+}

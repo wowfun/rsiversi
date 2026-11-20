@@ -23,6 +23,14 @@ impl AgentKernel {
         }
         let keep_inbox = matches!(target, InboxCancel::Stop { keep_inbox: true });
         let stop_turns = matches!(target, InboxCancel::Stop { .. });
+        let stopped_command = stop_turns && {
+            let key = self.inner.submission_admission.register(id);
+            key.maintenance.lock().expect("maintenance lock").as_ref().is_some_and(|command| {
+                let active = !command.is_cancelled();
+                command.cancel();
+                active
+            })
+        };
         let header = if keep_inbox {
             None
         } else {
@@ -89,7 +97,7 @@ impl AgentKernel {
         };
         if (!stop_turns || inbox.inbox_paused) && discarded.is_empty() && facts.is_empty() {
             return Ok(CancelResult {
-                accepted: false,
+                accepted: stopped_command,
                 already_terminal: false,
             });
         }

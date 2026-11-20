@@ -1219,6 +1219,9 @@ impl AgentKernel {
         let loaded = load_control_state(&self.inner.store, Some(&self.inner), header)
             .await
             .map_err(turn_kernel_error)?;
+        let header_fingerprint = header
+            .fingerprint()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let publishing = commit.is_some();
         let header = header.clone();
         let composition = composition.clone();
@@ -1240,6 +1243,7 @@ impl AgentKernel {
                 } else {
                     let mut session = SessionRuntime::new(
                         header.clone(),
+                        header_fingerprint,
                         composition.clone(),
                         loaded.fact_seq,
                         false,
@@ -1307,6 +1311,10 @@ impl AgentKernel {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission transaction keeps publication and fresh-resident rollback under the same lock"
+    )]
     pub(super) fn accept_turn(
         &self,
         session_selection: SubmitSession,
@@ -1320,6 +1328,15 @@ impl AgentKernel {
         let baseline = match &session_selection {
             SubmitSession::Fresh(prepared) => initial_controls(prepared)?,
             SubmitSession::Resume(_) => vec![],
+        };
+        let header_fingerprint = match &session_selection {
+            SubmitSession::Fresh(prepared) => Some(
+                prepared
+                    .header()
+                    .fingerprint()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            ),
+            SubmitSession::Resume(_) => None,
         };
         let mut state = lock_state(&self.inner);
         if !state.accepting {
@@ -1339,7 +1356,13 @@ impl AgentKernel {
                         "fresh submission lacks its exact resident reservation".into(),
                     ));
                 }
-                let mut resident = SessionRuntime::new(header, composition, 0, true);
+                let mut resident = SessionRuntime::new(
+                    header,
+                    header_fingerprint.expect("fresh Header fingerprint"),
+                    composition,
+                    0,
+                    true,
+                );
                 resident.pending_initial_controls = baseline;
                 resident.pending_baseline_resources = Some(resources);
                 state.sessions.insert(session_id.clone(), resident);

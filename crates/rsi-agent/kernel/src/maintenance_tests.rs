@@ -28,7 +28,13 @@ async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
         let mut running_owner = None;
         {
             let mut state = lock_state(&kernel.inner);
-            let mut session = SessionRuntime::new(header.clone(), pin.clone(), 0, false);
+            let mut session = SessionRuntime::new(
+                header.clone(),
+                header.fingerprint().unwrap(),
+                pin.clone(),
+                0,
+                false,
+            );
             match condition {
                 "loading" => {
                     state
@@ -116,9 +122,10 @@ async fn retirement_waits_for_continuations_and_releases_residency_explicitly() 
         Err(TurnError::Capacity)
     ));
     drop(lease);
-    lock_state(&kernel.inner)
-        .sessions
-        .insert(id.clone(), SessionRuntime::new(header, pin, 0, false));
+    lock_state(&kernel.inner).sessions.insert(
+        id.clone(),
+        SessionRuntime::new(header.clone(), header.fingerprint().unwrap(), pin, 0, false),
+    );
     let retirement = TurnService::prepare_retirement(&kernel, std::slice::from_ref(&id)).unwrap();
     assert!(lock_state(&kernel.inner).sessions.contains_key(&id));
     assert!(matches!(

@@ -128,6 +128,13 @@ impl SessionProjections for AgentKernel {
         self.watch_changes(self.inner.session_changes.session(session_id))
     }
 
+    fn watch_edited_domain(
+        &self,
+        domain: &str,
+    ) -> TurnResult<rsi_agent_turn_protocol::SessionProjectionChanges> {
+        self.watch_changes(self.inner.session_changes.edited_domain(domain))
+    }
+
     fn watch_activity(
         &self,
     ) -> TurnResult<Option<rsi_agent_turn_protocol::SessionProjectionChanges>> {

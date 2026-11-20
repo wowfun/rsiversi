@@ -197,7 +197,7 @@ pub(super) async fn prepare_claimed_inputs(kernel: &AgentKernel, claim: &TurnCla
             .await
             .unwrap();
         for fact in &page.facts {
-            if fact.body().turn_id() != claim.turn_id() {
+            if fact.body().turn_id() != Some(claim.turn_id()) {
                 continue;
             }
             match fact.body() {

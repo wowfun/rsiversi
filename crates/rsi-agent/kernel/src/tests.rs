@@ -102,7 +102,8 @@ async fn claim_fact_page_keeps_captured_suffix_across_flush() {
         .pin(header.agent_preset_id(), None)
         .await
         .unwrap();
-    let mut session = SessionRuntime::new(header, pin, 0, true);
+    let mut session =
+        SessionRuntime::new(header.clone(), header.fingerprint().unwrap(), pin, 0, true);
     let fact = Arc::new(
         SessionFact::new(
             1,
@@ -184,7 +185,8 @@ async fn invalid_claim_quarantines_only_its_session_and_releases_its_prepared_la
         .pin(header.agent_preset_id(), None)
         .await
         .unwrap();
-    let mut session = SessionRuntime::new(header, pin, 1, false);
+    let mut session =
+        SessionRuntime::new(header.clone(), header.fingerprint().unwrap(), pin, 1, false);
     let pool = Arc::new(Semaphore::new(1));
     let lane = Arc::new(TreeClaimLane {
         pool: pool.clone(),
@@ -227,7 +229,13 @@ async fn invalid_claim_quarantines_only_its_session_and_releases_its_prepared_la
         .pin(healthy_header.agent_preset_id(), None)
         .await
         .unwrap();
-    let mut healthy = SessionRuntime::new(healthy_header, healthy_pin, 1, false);
+    let mut healthy = SessionRuntime::new(
+        healthy_header.clone(),
+        healthy_header.fingerprint().unwrap(),
+        healthy_pin,
+        1,
+        false,
+    );
     healthy
         .turns
         .insert(turn_id.clone(), TurnControl::new(1, 1));
@@ -808,6 +816,7 @@ fn retired_submission_key_cannot_remove_its_replacement() {
         id: id.clone(),
         mutex: Arc::new(AsyncMutex::new(())),
         registry: Arc::downgrade(&admission.sessions),
+        maintenance: Mutex::default(),
     });
     sessions.insert(id.clone(), Arc::downgrade(&replacement));
     drop(sessions);
@@ -878,7 +887,8 @@ async fn store_capacity_flush_preserves_pending_bytes_and_io_failure_count() {
         .pin(header.agent_preset_id(), None)
         .await
         .unwrap();
-    let mut session = SessionRuntime::new(header, pin, 0, true);
+    let mut session =
+        SessionRuntime::new(header.clone(), header.fingerprint().unwrap(), pin, 0, true);
     let mut fact = Arc::new(
         SessionFact::new(
             1,

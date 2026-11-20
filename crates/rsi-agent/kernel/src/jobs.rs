@@ -19,12 +19,7 @@ impl AgentKernel {
             .sessions
             .get(session_id)
             .ok_or(TurnError::StaleClaim)?;
-        if session
-            .header
-            .fingerprint()
-            .map_err(|error| TurnError::Invalid(error.to_string()))?
-            != header
-        {
+        if session.header_fingerprint != header {
             return Err(TurnError::StaleClaim);
         }
         session

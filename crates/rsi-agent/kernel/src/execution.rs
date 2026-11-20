@@ -89,7 +89,7 @@ impl ClaimFactRead {
                 .map_or(after_seq, SessionFact::seq)
                 .min(live_seq);
             facts.extend(page.facts.into_iter().filter_map(|fact| {
-                (fact.seq() <= live_seq && !hidden_turns.contains(fact.body().turn_id()))
+                (fact.seq() <= live_seq && fact.body().turn_id().is_none_or(|turn| !hidden_turns.contains(turn)))
                     .then(|| Arc::new(fact))
             }));
         }
@@ -102,7 +102,7 @@ impl ClaimFactRead {
                 .take(limit - scanned)
             {
                 through_seq = fact.seq();
-                if !hidden_turns.contains(fact.body().turn_id()) {
+                if fact.body().turn_id().is_none_or(|turn| !hidden_turns.contains(turn)) {
                     facts.push(fact);
                 }
             }
@@ -1148,7 +1148,7 @@ pub(super) fn stage_execution_facts(
     let mut next_seq = base_seq;
     for body in bodies {
         validate_intent_price(claim.header(), &body)?;
-        if body.turn_id() != claim.turn_id() {
+        if body.turn_id() != Some(claim.turn_id()) {
             return Err(TurnError::Invalid(
                 "executor Fact changed the claimed turn identity".into(),
             ));

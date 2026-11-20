@@ -29,6 +29,7 @@ impl rsi_agent_turn_protocol::SessionRetirement for Retirement {
         for id in &self.ids {
             self.kernel.inner.session_changes.committed(id);
         }
+        self.kernel.inner.session_changes.domains_retired();
     }
 }
 pub(super) fn reserve(
@@ -50,7 +51,7 @@ pub(super) fn reserve(
             .map_err(|_| TurnError::Capacity)?;
         guards.push(SubmissionGuard {
             _guard: guard,
-            _key: key,
+            key,
         });
     }
     {

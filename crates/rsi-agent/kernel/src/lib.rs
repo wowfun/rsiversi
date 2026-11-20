@@ -284,6 +284,7 @@ struct SubmissionKey {
     id: SessionId,
     mutex: Arc<AsyncMutex<()>>,
     registry: Weak<SubmissionSessions>,
+    maintenance: Mutex<Option<CancellationToken>>,
 }
 
 impl Drop for SubmissionKey {
@@ -305,7 +306,7 @@ impl Drop for SubmissionKey {
 // Fields drop in declaration order: unlock before withdrawing the key owner.
 struct SubmissionGuard {
     _guard: OwnedMutexGuard<()>,
-    _key: Arc<SubmissionKey>,
+    key: Arc<SubmissionKey>,
 }
 
 struct SubmissionAdmission {
@@ -359,6 +360,7 @@ impl SubmissionAdmission {
             id: id.clone(),
             mutex: Arc::new(AsyncMutex::new(())),
             registry: Arc::downgrade(&self.sessions),
+            maintenance: Mutex::default(),
         });
         sessions.insert(id.clone(), Arc::downgrade(&key));
         key
@@ -376,7 +378,7 @@ impl SubmissionAdmission {
         let _pending = Arc::clone(&self.pending)
             .try_acquire_owned()
             .map_err(|_| TurnError::Capacity)?;
-        let deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
+        let mut deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
         let (first, second) = match parent {
             Some(parent) if parent < session => (parent, Some(session)),
             Some(parent) if parent > session => (session, Some(parent)),
@@ -385,16 +387,27 @@ impl SubmissionAdmission {
         let mut guards = Vec::with_capacity(1 + usize::from(second.is_some()));
         for id in std::iter::once(first).chain(second) {
             let key = self.register(id);
+            let waiting = Arc::clone(&key.mutex).lock_owned();
+            tokio::pin!(waiting);
             let guard = tokio::select! {
                 biased;
                 () = closed.cancelled() => return Err(TurnError::ShuttingDown),
-                result = tokio::time::timeout_at(deadline, Arc::clone(&key.mutex).lock_owned()) => {
-                    result.map_err(|_| TurnError::Capacity)?
+                guard = &mut waiting => guard,
+                () = tokio::time::sleep_until(deadline) => {
+                    if key.maintenance.lock().expect("maintenance lock").is_none() { return Err(TurnError::Capacity); }
+                    // The earlier idle command may outlive the ordinary submission deadline.
+                    // Keep this prompt's FIFO position until that exact key becomes available.
+                    let guard = tokio::select! { biased;
+                        () = closed.cancelled() => return Err(TurnError::ShuttingDown),
+                        guard = waiting => guard,
+                    };
+                    deadline = Instant::now() + DURABILITY_WAIT_TIMEOUT;
+                    guard
                 }
             };
             guards.push(SubmissionGuard {
                 _guard: guard,
-                _key: key,
+                key,
             });
         }
         let slot = tokio::select! {
@@ -579,6 +592,7 @@ impl SessionLoad {
 
 struct SessionRuntime {
     header: Arc<SessionHeader>,
+    header_fingerprint: String,
     composition: AgentCompositionPin,
     generation_rejection: Option<String>,
     generation_rebuilding: bool,
@@ -801,6 +815,7 @@ impl SessionRuntime {
 
     fn new(
         header: SessionHeader,
+        header_fingerprint: String,
         composition: AgentCompositionPin,
         durable_seq: u64,
         header_pending: bool,
@@ -815,6 +830,7 @@ impl SessionRuntime {
         });
         Self {
             header: Arc::new(header),
+            header_fingerprint,
             composition,
             generation_rejection: None,
             generation_rebuilding: false,
@@ -942,6 +958,7 @@ mod inbox;
 mod jobs;
 mod lifecycle;
 mod maintenance;
+mod manual_compaction;
 mod notifications;
 mod program;
 mod projection;

@@ -47,7 +47,8 @@ pub(super) fn apply_recovered_fact(
             order.retain(|candidate| candidate != turn_id);
         }
         body => {
-            let turn = turns.get_mut(body.turn_id()).ok_or_else(|| {
+            let Some(turn_id) = body.turn_id() else { return Ok(()) };
+            let turn = turns.get_mut(turn_id).ok_or_else(|| {
                 KernelError::Invariant("durable Fact references unknown turn".into())
             })?;
             super::execution::validate_tool_admission(header, turn, body, None)
@@ -90,6 +91,7 @@ pub(super) fn apply_executor_body(
         SessionFactBody::InputMessageClaimed { step_id, .. } => {
             apply_claimed_input(turn, step_id, seq)?;
         }
+        SessionFactBody::ManualCompaction { .. } => return Err(TurnError::Invalid("standalone maintenance cannot be published by a turn".into())),
         SessionFactBody::ModelIntent { .. }
         | SessionFactBody::ModelStarted { .. }
         | SessionFactBody::ModelAttemptSettled { .. } => apply_model_body(turn, body)?,

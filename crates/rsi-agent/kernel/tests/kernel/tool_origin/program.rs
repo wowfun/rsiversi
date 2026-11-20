@@ -333,21 +333,22 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
         .unwrap()
         .facts;
     let limits = rsi_agent_context::ContextLimits::default();
-    let mut fold = rsi_agent_context::ContextFold::with_limits(
-        claim.header().clone(),
-        limits,
-        rsi_agent_context::ContextBudget::default(),
-    )
-    .unwrap();
-    fold.apply(&prefix).unwrap();
-    let checkpoint = fold.checkpoint_bytes().unwrap();
-    let mut restored = rsi_agent_context::ContextFold::from_checkpoint(
-        claim.header().clone(),
-        limits,
-        &checkpoint,
-        rsi_agent_context::ContextBudget::default(),
-    )
-    .unwrap();
+    let open = || {
+        rsi_agent_context::ModelContextState::open(
+            Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
+            claim.header().clone(),
+            limits,
+            rsi_agent_context::ContextBudget::default(),
+        )
+        .unwrap()
+    };
+    let mut fold = open();
+    let prefix: Vec<_> = prefix.into_iter().map(Arc::new).collect();
+    fold.ingest(rsi_agent_context::ContextPage::Canonical(&prefix))
+        .unwrap();
+    let checkpoint = fold.checkpoint().unwrap();
+    let mut restored = open();
+    restored.restore(&checkpoint).unwrap();
     flush_bodies(
         &kernel,
         &claim,
@@ -404,15 +405,34 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
         .await
         .unwrap()
         .facts;
-    fold.apply(&suffix).unwrap();
-    restored.apply(&suffix).unwrap();
-    let visible = serde_json::to_string(fold.project(limits).unwrap().messages()).unwrap();
+    let suffix: Vec<_> = suffix.into_iter().map(Arc::new).collect();
+    fold.ingest(rsi_agent_context::ContextPage::Canonical(&suffix))
+        .unwrap();
+    restored
+        .ingest(rsi_agent_context::ContextPage::Canonical(&suffix))
+        .unwrap();
+    let profile = rsi_ai_protocol::LanguageProfile::new(
+        8192,
+        1024,
+        2048,
+        rsi_ai_protocol::ToolDialect::Responses,
+        false,
+        rsi_ai_protocol::ImageToolResultCapability::No,
+        vec![],
+    )
+    .unwrap();
+    let request = fold
+        .build(rsi_ai_protocol::LanguageRequestOptions::default(), &profile)
+        .unwrap();
+    let visible = serde_json::to_string(request.messages()).unwrap();
     assert!(visible.contains("CURATED_FINAL"));
     assert!(!visible.contains("INTERNAL_RESULT"));
     assert!(!visible.contains("file_read"));
     assert_eq!(
-        fold.project(limits).unwrap(),
-        restored.project(limits).unwrap()
+        request,
+        restored
+            .build(rsi_ai_protocol::LanguageRequestOptions::default(), &profile)
+            .unwrap()
     );
     drop(executor);
     kernel.shutdown(workers).await.unwrap();

@@ -523,6 +523,13 @@ impl FactReadRaceStore {
 
 #[async_trait]
 impl SessionStore for FactReadRaceStore {
+    async fn read_message_feedback(
+        &self,
+        id: &SessionId,
+        message: std::num::NonZeroU64,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMessageFeedback> {
+        self.inner.read_message_feedback(id, message).await
+    }
     async fn read_domain_admission(
         &self,
         id: &SessionId,
@@ -1196,9 +1203,10 @@ impl SessionStore for FactReadRaceStore {
         locations: &rsi_agent_store_protocol::ExecutionLocations,
         after: Option<&rsi_agent_store_protocol::StoreRecentSessionCursor>,
         limit: usize,
+        edited_domain: Option<&str>,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSessionPage> {
         self.inner
-            .list_recent_sessions(locations, after, limit)
+            .list_recent_sessions(locations, after, limit, edited_domain)
             .await
     }
 
@@ -2162,8 +2170,10 @@ fn prepared_history(facts: Vec<SessionFact>) -> Vec<SessionFact> {
     for fact in facts {
         let seq = prepared.len() as u64 + 1;
         let body = fact.into_body();
-        let turn =
-            matches!(body, SessionFactBody::TurnAccepted { .. }).then(|| body.turn_id().clone());
+        let turn = match &body {
+            SessionFactBody::TurnAccepted { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        };
         prepared.push(SessionFact::new(seq, seq, body).unwrap());
         if let Some(turn_id) = turn {
             let step_id = StepId::new("fixture-input").unwrap();

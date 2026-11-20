@@ -94,6 +94,7 @@ async fn mailbox_admission_creates_a_zero_fact_session_and_survives_restart() {
             &rsi_agent_store_protocol::ExecutionLocations::all(),
             None,
             8,
+            None,
         )
         .await
         .unwrap();

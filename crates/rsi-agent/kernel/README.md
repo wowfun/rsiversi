@@ -1,5 +1,10 @@
 # rsi-agent-kernel
 
+Resident Sessions retain their immutable Header fingerprint, computed before
+acquiring the global Kernel lock for publication. Jobs status reads compare that value
+before and after awaiting the current source; both checks retain the live claim,
+executor registration and retirement fences without reserializing the Header.
+
 Fork reconstruction captures authenticated inherited intervals once per reader,
 using the Store protocol's interval capture and retained validation leases.
 Each page still checks the issuing claim and live source availability. A reader
@@ -273,6 +278,10 @@ one Session must retain the same Header and composition generation. This allows
 independent Goal and Schedule owners without granting concurrent Session Turns. Internal command receipts freeze exact reservation data and
 domain revision. Durable reservation commands atomically commit their domain
 update and matching NextTurn message while the complete Session subtree is idle.
+On an unpaused inbox, held command context can enter the first Step of an
+independently admitted continuation. It cannot wake the Session or grant human
+authority. Other pending messages retain priority, as does a paused inbox
+holding messages. Admission still requires a free mailbox slot.
 Pre-commit contention, including capacity rejection, neither commits nor revokes
 the lease. Waiting for another owner observes revocation and last-owner release
 without retaining that owner. Mailbox claim keeps its existing

@@ -14,6 +14,12 @@ use rsi_agent_turn_protocol::{
     ContinuationBinding, ContinuationLease, DomainMutationReceipt, SessionContinuations,
 };
 
+pub(super) enum ContinuationClaim {
+    Ready,
+    AwaitingOwner,
+    Disarmed,
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum CommandAuthorization {
     Ordinary,
@@ -61,13 +67,14 @@ impl CommandAuthorization {
             Self::Continuation { lease, reservation } => {
                 kernel.validate_continuation(lease, header, composition, reservation.is_some())?;
                 match (command.continuation_kind(), reservation) {
-                    (Some(ContinuationCommand::Reserve), Some(input))
-                        if input.owner == lease.binding().owner =>
-                    {
-                        input
-                            .validate()
-                            .map_err(|error| TurnError::Invalid(error.to_string()))
-                    }
+                    (
+                        Some(
+                            ContinuationCommand::Reserve | ContinuationCommand::RecoverableReserve,
+                        ),
+                        Some(input),
+                    ) if input.owner == lease.binding().owner => input
+                        .validate()
+                        .map_err(|error| TurnError::Invalid(error.to_string())),
                     (Some(ContinuationCommand::Settle), None) => Ok(()),
                     _ => Err(TurnError::Invalid(
                         "internal command reservation contract differs".into(),
@@ -109,6 +116,16 @@ impl SessionContinuations for AgentKernel {
     ) -> TurnResult<ContinuationLease> {
         self.create_continuation_lease(session, binding, false)
             .await
+    }
+
+    async fn arm_for_recovery(
+        &self,
+        session: SubmitSession,
+        binding: ContinuationBinding,
+    ) -> TurnResult<ContinuationLease> {
+        let lease = self.arm(session, binding).await?;
+        self.request_ready_scan();
+        Ok(lease)
     }
 
     async fn reserve_initial(
@@ -468,12 +485,13 @@ impl AgentKernel {
         Ok(())
     }
 
-    pub(super) async fn continuation_claim_allowed(
+    pub(super) async fn continuation_claim(
         &self,
         session: &SessionId,
+        message: &MessageId,
         source: &ContinuationSource,
         prepared: Option<&PreparedResumeSession>,
-    ) -> TurnResult<bool> {
+    ) -> TurnResult<ContinuationClaim> {
         let lease = self
             .inner
             .continuations
@@ -481,24 +499,95 @@ impl AgentKernel {
             .expect("continuation registry poisoned")
             .get(&(session.clone(), source.domain.id().to_owned()))
             .and_then(rsi_agent_turn_protocol::WeakContinuationLease::upgrade);
-        let Some(lease) = lease.filter(ContinuationLease::is_armed) else {
-            return Ok(false);
-        };
-        if let Some(prepared) = prepared {
+        if lease.as_ref().is_some_and(|lease| !lease.is_armed()) {
+            return Ok(ContinuationClaim::Disarmed);
+        }
+        if let (Some(lease), Some(prepared)) = (&lease, prepared) {
             let (header, composition) = self.inner.resume_issuer.inspect(prepared)?;
             if self
-                .validate_continuation(&lease, header, composition, true)
+                .validate_continuation(lease, header, composition, true)
                 .is_err()
             {
-                return Ok(false);
+                return Ok(ContinuationClaim::Disarmed);
             }
         }
-        let page = observation::read_domain_states_bounded(&self.inner, session, None)
-            .await
-            .map_err(turn_store_error)?;
-        Ok(page.states.iter().any(|state| {
-            state.snapshot.identity() == &source.domain && lease.guards(source, state.head.revision)
-        }))
+        let Some((_, current)) = self.domain_state(session, source.domain.id()).await? else {
+            return Ok(ContinuationClaim::Disarmed);
+        };
+        if current.snapshot.identity() != &source.domain {
+            return Ok(ContinuationClaim::Disarmed);
+        }
+        if lease
+            .as_ref()
+            .is_some_and(|lease| lease.guards(source, current.revision))
+        {
+            return Ok(ContinuationClaim::Ready);
+        }
+        let ContinuationProvenance::Command { request_id } = &source.provenance else {
+            return Ok(ContinuationClaim::Disarmed);
+        };
+        if current.revision < source.reserved_revision {
+            return Ok(ContinuationClaim::Disarmed);
+        }
+        let Some(receipt) = self.domain_request(session, request_id).await? else {
+            return Ok(ContinuationClaim::Disarmed);
+        };
+        let DomainMutationSource::Continuation {
+            invocation,
+            domain,
+            owner,
+            reservation: Some(input),
+        } = receipt.commit().source()
+        else {
+            return Ok(ContinuationClaim::Disarmed);
+        };
+        if domain != &source.domain
+            || owner != &source.owner
+            || input.owner != source.owner
+            || &input.message_id != message
+            || input.round != source.round
+            || input.text_sha256() != source.text_sha256
+            || !receipt.commit().updates().iter().any(|update| {
+                update.revision() == source.reserved_revision
+                    && update.snapshot().identity() == domain
+                    && (current.revision != source.reserved_revision
+                        || update.snapshot() == &current.snapshot)
+            })
+        {
+            return Ok(ContinuationClaim::Disarmed);
+        }
+        let cold;
+        let selected = if let Some(prepared) = prepared {
+            prepared
+        } else {
+            cold = self.prepare_resume(session).await?;
+            &cold
+        };
+        let (_, composition) = self.inner.resume_issuer.inspect(selected)?;
+        let recoverable = composition.contributions().entries().iter().any(|entry| {
+            entry.id() == &invocation.command
+                && matches!(entry.kind(), ContributionKind::Command(command)
+                if command.continuation_kind() == Some(ContinuationCommand::RecoverableReserve)
+                    && (current.revision == source.reserved_revision
+                        || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            command.callback().retains_pending_input(&current.snapshot, input)
+                        })).unwrap_or(false)))
+        });
+        Ok(match lease {
+            _ if !recoverable => ContinuationClaim::Disarmed,
+            None => ContinuationClaim::AwaitingOwner,
+            Some(lease)
+                if lease.is_armed()
+                    && lease.binding().owner == source.owner
+                    && lease.binding().domain == source.domain
+                    && (lease.guards(source, source.reserved_revision)
+                        || (source.reserved_revision..=current.revision)
+                            .contains(&lease.binding().revision)) =>
+            {
+                ContinuationClaim::Ready
+            }
+            Some(_) => ContinuationClaim::Disarmed,
+        })
     }
 
     pub(super) async fn discard_continuation_admitted(
@@ -569,10 +658,15 @@ impl AgentKernel {
         };
         if let AgentMessageSource::Continuation { source } = &entry.message.source
             && entry.state == MessageState::Pending
-            && !self
-                .continuation_claim_allowed(session, source, None)
-                .await?
         {
+            match self
+                .continuation_claim(session, message, source, None)
+                .await?
+            {
+                ContinuationClaim::Ready => return Ok(false),
+                ContinuationClaim::AwaitingOwner => return Ok(true),
+                ContinuationClaim::Disarmed => {}
+            }
             self.discard_continuation_admitted(
                 session,
                 (scan.durable_fact_seq, scan.durable_control_seq),
@@ -656,13 +750,15 @@ impl AgentKernel {
         {
             return Ok(false);
         }
-        Ok(self
+        let inbox = self
             .inner
             .store
             .read_agent_mailbox_summary(session)
             .await
-            .map_err(turn_store_error)?
-            .pending_count
-            == 0)
+            .map_err(turn_store_error)?;
+        Ok(inbox.pending_count == 0
+            || (!inbox.inbox_paused
+                && inbox.pending_count == inbox.injected_commands
+                && inbox.pending_count < MAXIMUM_PENDING_AGENT_MESSAGES))
     }
 }

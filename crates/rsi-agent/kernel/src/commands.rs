@@ -323,13 +323,7 @@ impl AgentKernel {
         check_revision(&invocation, page.durable_control_seq)?;
         composition
             .domains()
-            .validate_complete_states(
-                &page
-                    .states
-                    .iter()
-                    .map(|state| state.snapshot.clone())
-                    .collect::<Vec<_>>(),
-            )
+            .validate_complete_states(page.states.iter().map(|state| &state.snapshot))
             .map_err(|error| turn_composition_error(error.into()))?;
         let context = SessionCommandContext {
             outcome: Some(outcome.view()),

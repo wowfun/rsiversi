@@ -11,6 +11,7 @@ enum WatchKey {
     Directory,
     Session(SessionId),
     TreeMembership(SessionId),
+    EditedDomain(String),
 }
 
 pub(super) struct SessionWatch {
@@ -49,6 +50,37 @@ impl SessionWatchHub {
 
     pub(super) fn tree(&self, id: &SessionId) -> SessionWatch {
         self.subscribe(WatchKey::TreeMembership(id.clone()))
+    }
+
+    pub(super) fn edited_domain(&self, domain: &str) -> SessionWatch {
+        self.subscribe(WatchKey::EditedDomain(domain.to_owned()))
+    }
+
+    fn domains_changed(&self, domains: BTreeSet<WatchKey>) {
+        if domains.is_empty() {
+            return;
+        }
+        let watchers = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for domain in domains {
+            if let Some(sender) = watchers.get(&domain) {
+                sender.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
+        }
+    }
+
+    pub(super) fn domains_retired(&self) {
+        let watchers = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, sender) in watchers.iter() {
+            if matches!(key, WatchKey::EditedDomain(_)) {
+                sender.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
+        }
     }
 
     fn notify(&self, key: &WatchKey) {
@@ -150,6 +182,20 @@ impl KernelInner {
             })
             .collect::<Vec<_>>();
         let revoked_programs = self.program_guard_revocations(&commit);
+        // A reader may subscribe while the Store is committing. Keep only the
+        // names needed to wake it after publication, never the snapshots.
+        let edited_domains = commit
+            .sessions
+            .iter()
+            .flat_map(|append| &append.controls)
+            .filter_map(|record| match record.body() {
+                AgentControlRecordBody::DomainStateCommitted { commit } => Some(commit.updates()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|update| update.revision().get() > 1)
+            .map(|update| WatchKey::EditedDomain(update.snapshot().identity().id().to_owned()))
+            .collect();
         let retired_messages = commit
             .sessions
             .iter()
@@ -188,6 +234,9 @@ impl KernelInner {
                 .any(|fact| matches!(fact.body(), SessionFactBody::CancelRequested { .. }));
         let proof = needs_proof.then(|| commit.clone());
         let mut result = self.store.commit_agent(commit).await;
+        if result.is_ok() || matches!(&result, Err(StoreError::Io(_))) {
+            self.session_changes.domains_changed(edited_domains);
+        }
         if matches!(&result, Err(StoreError::Io(_)))
             && let Some(proof) = &proof
         {
@@ -246,7 +295,15 @@ pub(super) fn terminal_boundary_record(
         seq,
         terminal.timestamp_ms(),
         AgentControlRecordBody::TurnBoundaryRecorded {
-            turn_id: terminal.body().turn_id().clone(),
+            turn_id: terminal
+                .body()
+                .turn_id()
+                .ok_or_else(|| {
+                    rsi_agent_session_protocol::SessionError::Invalid(
+                        "turn boundary requires a turn-owned fact".into(),
+                    )
+                })?
+                .clone(),
             terminal_fact_seq: terminal.seq(),
         },
     )
@@ -317,6 +374,24 @@ mod tests {
         drop(duplicate);
         assert_eq!(hub.0.lock().unwrap().len(), 1);
         drop(tree);
+        assert!(hub.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn domain_observations_ignore_unrelated_commits_and_wake_on_retirement() {
+        let hub = SessionWatchHub::default();
+        let mut tasks = hub.edited_domain("tasks");
+        let notes = hub.edited_domain("notes");
+        hub.committed(&SessionId::new("chat").unwrap());
+        assert!(!tasks.has_changed());
+        hub.domains_changed(BTreeSet::from([WatchKey::EditedDomain("tasks".into())]));
+        assert!(tasks.has_changed());
+        assert!(!notes.has_changed());
+        tasks.mark_seen();
+        hub.domains_retired();
+        assert!(tasks.has_changed() && notes.has_changed());
+        drop(tasks);
+        drop(notes);
         assert!(hub.0.lock().unwrap().is_empty());
     }
 }

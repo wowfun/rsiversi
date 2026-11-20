@@ -122,6 +122,14 @@ struct Toggle {
 
 #[async_trait]
 impl SessionCommand for Toggle {
+    fn retains_pending_input(
+        &self,
+        snapshot: &rsi_agent_session_protocol::DomainSnapshot,
+        input: &rsi_agent_session_protocol::ContinuationInput,
+    ) -> bool {
+        snapshot.state().value() == true && input == &continuation::input()
+    }
+
     async fn execute(
         &self,
         context: &SessionCommandContext,
@@ -290,6 +298,10 @@ impl Fixture {
             (
                 "reserve",
                 rsi_agent_composition_protocol::ContinuationCommand::Reserve,
+            ),
+            (
+                "recoverable-reserve",
+                rsi_agent_composition_protocol::ContinuationCommand::RecoverableReserve,
             ),
             (
                 "settle",
