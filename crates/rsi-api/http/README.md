@@ -42,6 +42,10 @@ pass the public Host/Origin policy and the resource's own authorization rules.
 A browser credential is never copied to the application process.
 WebSocket upgrades require the listener's exact Origin and device cookie.
 If the client sends Fetch Metadata, its site must also be same-origin.
+After authentication and application callback admission, delivery replaces its
+unclassified permit with the callback lease before waiting for endpoint publication
+or upstream headers. The lease survives response buffering and final flush;
+an upgraded socket independently retains it until the upgrade finishes.
 HTTP request/response bodies and WebSocket upgrades stream independently from
 process-extension JSON frames. Exact static files and native API/bootstrap
 routes retain their own handlers.

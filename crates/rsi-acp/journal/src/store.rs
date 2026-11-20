@@ -32,7 +32,7 @@ pub(super) fn sql(error: &rusqlite::Error) -> Error {
     }
 }
 
-pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
+pub(super) fn open(path: &Path, limits: Limits) -> Result<(Connection, bool)> {
     let empty = std::fs::metadata(path).map_err(|_| Error::Io)?.len() == 0;
     let mut connection = Connection::open_with_flags(
         path,
@@ -48,34 +48,38 @@ pub(super) fn open(path: &Path, limits: Limits) -> Result<Connection> {
     let identity: u32 = connection
         .pragma_query_value(None, "application_id", |row| row.get(0))
         .map_err(|error| sql(&error))?;
-    if !empty && (version != 1 || identity != ID) {
+    let fresh = empty && version == 0 && identity == 0;
+    if !fresh && (version != 1 || identity != ID) {
         return Err(Error::Corrupt);
     }
-    if !empty {
+    if !fresh {
         validate_schema(&connection)?;
     }
-    validate_geometry(&connection, path, empty, limits)?;
+    validate_geometry(&connection, path, fresh, limits)?;
     connection
         .execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL;",
         )
         .map_err(|error| sql(&error))?;
-    if empty {
-        let transaction = connection.transaction().map_err(|error| sql(&error))?;
-        transaction
-            .execute_batch(SCHEMA)
-            .map_err(|error| sql(&error))?;
-        transaction
-            .pragma_update(None, "application_id", ID)
-            .map_err(|error| sql(&error))?;
-        transaction
-            .pragma_update(None, "user_version", 1)
-            .map_err(|error| sql(&error))?;
-        transaction.commit().map_err(|error| sql(&error))?;
+    if !fresh {
+        recover(&mut connection, limits)?;
     }
-    validate_schema(&connection)?;
-    recover(&mut connection, limits)?;
-    Ok(connection)
+    Ok((connection, !fresh))
+}
+
+pub(super) fn initialize(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction().map_err(|error| sql(&error))?;
+    transaction
+        .execute_batch(SCHEMA)
+        .map_err(|error| sql(&error))?;
+    transaction
+        .pragma_update(None, "application_id", ID)
+        .map_err(|error| sql(&error))?;
+    transaction
+        .pragma_update(None, "user_version", 1)
+        .map_err(|error| sql(&error))?;
+    install_accounting(&transaction)?;
+    transaction.commit().map_err(|error| sql(&error))
 }
 
 fn validate_geometry(
@@ -126,6 +130,12 @@ fn recover(connection: &mut Connection, limits: Limits) -> Result<()> {
     transaction.commit().map_err(|error| sql(&error))
 }
 
+// The exclusive connection owns this counter; SQLite updates it with the rows
+// so failed writes and rollbacks preserve the quota.
+fn install_accounting(connection: &Connection) -> Result<()> {
+    connection.execute_batch("CREATE TEMP TABLE accounting(bytes INTEGER NOT NULL); INSERT INTO accounting SELECT coalesce(sum(bytes),0) FROM sessions; CREATE TEMP TRIGGER account_insert AFTER INSERT ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes; END; CREATE TEMP TRIGGER account_update AFTER UPDATE OF bytes ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes-old.bytes; END;").map_err(|error| sql(&error))
+}
+
 fn recover_conversations(connection: &rusqlite::Transaction<'_>, limits: Limits) -> Result<()> {
     let ids = {
         let mut statement = connection
@@ -141,9 +151,7 @@ fn recover_conversations(connection: &rusqlite::Transaction<'_>, limits: Limits)
         return Err(Error::Corrupt);
     }
     validate_counters(connection, limits)?;
-    // The exclusive connection owns this derived counter; temporary triggers keep
-    // it consistent with committed, rolled-back and failed mutations alike.
-    connection.execute_batch("CREATE TEMP TABLE accounting(bytes INTEGER NOT NULL); INSERT INTO accounting SELECT coalesce(sum(bytes),0) FROM sessions; CREATE TEMP TRIGGER account_insert AFTER INSERT ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes; END; CREATE TEMP TRIGGER account_update AFTER UPDATE OF bytes ON main.sessions BEGIN UPDATE accounting SET bytes=bytes+new.bytes-old.bytes; END;").map_err(|error| sql(&error))?;
+    install_accounting(connection)?;
     for id in ids {
         let id = ConversationId::new(id).map_err(|_| Error::Corrupt)?;
         discard_replay(connection, &id)?;

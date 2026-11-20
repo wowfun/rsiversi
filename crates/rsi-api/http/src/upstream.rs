@@ -429,6 +429,7 @@ impl ApplicationUpstream {
         &self,
         state: &State,
         mut incoming: Request<Incoming>,
+        delivery: &crate::delivery::Delivery,
     ) -> Result<Response<Body>> {
         if self.retired.is_cancelled() {
             return Err(ApiError::ShuttingDown);
@@ -447,7 +448,8 @@ impl ApplicationUpstream {
             .access
             .application_device(incoming.headers(), safe_read, upgrade)?;
         state.bind_browser(&mut device).await?;
-        let slot = self.open_callback(&device)?;
+        let slot = Arc::new(self.open_callback(&device)?);
+        delivery.admit(rsi_api_protocol::ApiAdmission::new(slot.clone()));
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut incoming));
         let (mut parts, body) = incoming.into_parts();
         self.prepare_request(&mut parts, state, upgrade)?;

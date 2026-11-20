@@ -35,7 +35,15 @@ struct Owner {
 }
 struct Storage {
     connection: Connection,
+    initialized: bool,
     _lease: filesystem::Lease,
+}
+impl Storage {
+    fn existing(&self) -> Result<&Connection> {
+        self.initialized
+            .then_some(&self.connection)
+            .ok_or(Error::NotFound)
+    }
 }
 impl Journal {
     /// Opens only the dedicated external journal directory, without Agent Store access.
@@ -43,10 +51,11 @@ impl Journal {
         limits.validate()?;
         tokio::task::spawn_blocking(move || {
             let (path, lease) = filesystem::prepare(&root)?;
-            let connection = store::open(&path, limits)?;
+            let (connection, initialized) = store::open(&path, limits)?;
             Ok(Self(Arc::new(Owner {
                 storage: Mutex::new(Some(Storage {
                     connection,
+                    initialized,
                     _lease: lease,
                 })),
                 closing: AtomicBool::new(false),
@@ -61,7 +70,7 @@ impl Journal {
     }
     async fn run<T: Send + 'static>(
         &self,
-        work: impl FnOnce(&mut Connection, Limits) -> Result<T> + Send + 'static,
+        work: impl FnOnce(&mut Storage, Limits) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         if self.0.closing.load(Ordering::Acquire) {
             return Err(Error::Io);
@@ -97,21 +106,25 @@ impl Journal {
         if self.0.closing.load(Ordering::Acquire) {
             return Err(Error::Io);
         }
-        self.admitted(permit, work).await
+        self.admitted(permit, move |storage, limits| {
+            if !storage.initialized {
+                store::initialize(&mut storage.connection)?;
+                storage.initialized = true;
+            }
+            work(&mut storage.connection, limits)
+        })
+        .await
     }
     async fn admitted<T: Send + 'static>(
         &self,
         permit: tokio::sync::OwnedSemaphorePermit,
-        work: impl FnOnce(&mut Connection, Limits) -> Result<T> + Send + 'static,
+        work: impl FnOnce(&mut Storage, Limits) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let owner = self.0.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut storage = owner.storage.lock().map_err(|_| Error::Io)?;
-            work(
-                &mut storage.as_mut().ok_or(Error::Io)?.connection,
-                owner.limits,
-            )
+            work(storage.as_mut().ok_or(Error::Io)?, owner.limits)
         })
         .await
         .map_err(|_| Error::Io)?
@@ -154,13 +167,19 @@ impl Journal {
     /// Reads one bounded, validated metadata record.
     pub async fn get(&self, id: &ConversationId) -> Result<Snapshot> {
         let id = id.clone();
-        self.run(move |connection, _| store::get(connection, &id))
+        self.run(move |storage, _| store::get(storage.existing()?, &id))
             .await
     }
     /// Lists at most 64 metadata records after the exact opaque local ID.
     pub async fn list(&self, after: Option<ConversationId>) -> Result<Vec<Snapshot>> {
-        self.run(move |connection, _| store::list(connection, after.as_ref()))
-            .await
+        self.run(move |storage, _| {
+            if storage.initialized {
+                store::list(&storage.connection, after.as_ref())
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .await
     }
     /// Fences old peers before starting a new explicitly requested connection.
     pub async fn connect(&self, id: &ConversationId) -> Result<Snapshot> {
@@ -275,13 +294,13 @@ impl Journal {
     /// Reads the exact visible sequence tail without materializing any payload.
     pub async fn position(&self, id: &ConversationId, epoch: u64) -> Result<u64> {
         let id = id.clone();
-        self.run(move |connection, _| store::position(connection, &id, epoch))
+        self.run(move |storage, _| store::position(storage.existing()?, &id, epoch))
             .await
     }
     /// Reads bounded source descriptors and inline payloads for one exact epoch.
     pub async fn page(&self, id: &ConversationId, epoch: u64, after: u64) -> Result<Page> {
         let id = id.clone();
-        self.run(move |connection, _| store::page(connection, &id, epoch, after))
+        self.run(move |storage, _| store::page(storage.existing()?, &id, epoch, after))
             .await
     }
     /// Reads at most 64 KiB of exact encoded record bytes at a fixed source identity.
@@ -293,7 +312,7 @@ impl Journal {
         start: usize,
     ) -> Result<Vec<u8>> {
         let id = id.clone();
-        self.run(move |connection, _| store::window(connection, &id, epoch, sequence, start))
+        self.run(move |storage, _| store::window(storage.existing()?, &id, epoch, sequence, start))
             .await
     }
 }

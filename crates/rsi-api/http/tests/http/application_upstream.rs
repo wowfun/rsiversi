@@ -5,6 +5,142 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 const KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one saturation matrix retains the same sockets through control progress, excess rejection and retirement"
+)]
+async fn stalled_applications_release_unclassified_admission() {
+    for tls in [false, true] {
+        for published in [false, true] {
+            let retired = CancellationToken::new();
+            let app = Arc::new(
+                rsi_api_http::ApplicationUpstream::preparing(
+                    SecretValue::new(KEY).unwrap(),
+                    vec!["/document".into()],
+                    retired.clone(),
+                )
+                .unwrap(),
+            );
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            if published {
+                app.publish(upstream.local_addr().unwrap(), vec!["/document".into()])
+                    .unwrap();
+            }
+            let h = Harness::start_with_surfaces(tls, None, None, Some(app.clone())).await;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .danger_accept_invalid_certs(true)
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
+            // Establish the HTTP/2 pool before concurrent streams; TLS handshake
+            // capacity is deliberately independent of application admission.
+            let warm = client
+                .post(format!("{}{}", h.origin, h.path("connection/caller")))
+                .bearer_auth(TOKEN)
+                .header("content-type", "application/json")
+                .header("x-rsi-wire-version", "2")
+                .header("x-rsi-host-epoch", h.epoch.as_str())
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            if tls {
+                assert_eq!(warm.version(), reqwest::Version::HTTP_2);
+            }
+            warm.bytes().await.unwrap();
+            let request = || {
+                client
+                    .get(format!("{}/document/", h.origin))
+                    .header("sec-fetch-site", "same-origin")
+                    .header("cookie", browser_cookie(&h.origin, TOKEN))
+            };
+            let mut requests = tokio::task::JoinSet::new();
+            for _ in 0..32 {
+                let request = request();
+                requests.spawn(async move { request.send().await });
+            }
+            let device = AuthenticatedDevice {
+                id: DeviceId::from_bytes([1; 16]),
+                revoked: CancellationToken::new(),
+            };
+            let saturated = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match app.open_callback(&device) {
+                        Ok(probe) => drop(probe),
+                        Err(ApiError::Capacity) => break,
+                        Err(error) => panic!("unexpected callback admission: {error}"),
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            if saturated.is_err() {
+                let mut replies = Vec::new();
+                while let Some(result) = requests.try_join_next() {
+                    replies.push(format!(
+                        "{:?}",
+                        result.map(|value| value.map(|reply| reply.status()))
+                    ));
+                }
+                panic!(
+                    "application lane did not fill (tls={tls}, published={published}): {replies:?}"
+                );
+            }
+            let mut sockets = Vec::new();
+            if published {
+                for _ in 0..32 {
+                    let (socket, _) =
+                        tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    sockets.push(socket);
+                }
+            }
+            let independent = reqwest::Client::builder()
+                .no_proxy()
+                .danger_accept_invalid_certs(true)
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap();
+            let response = independent
+                .post(format!("{}{}", h.origin, h.path("connection/caller")))
+                .bearer_auth(TOKEN)
+                .header("content-type", "application/json")
+                .header("x-rsi-wire-version", "2")
+                .header("x-rsi-host-epoch", h.epoch.as_str())
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "control failed with full application lane"
+            );
+            response.bytes().await.unwrap();
+            assert_eq!(
+                independent
+                    .get(format!("{}/document/", h.origin))
+                    .header("sec-fetch-site", "same-origin")
+                    .header("cookie", browser_cookie(&h.origin, TOKEN))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                429
+            );
+            retired.cancel();
+            while let Some(result) = requests.join_next().await {
+                assert_eq!(result.unwrap().unwrap().status(), 409);
+            }
+            drop(sockets);
+            h.close().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers_remain_distinct() {
     let h = Harness::start().await;
     let registration = h

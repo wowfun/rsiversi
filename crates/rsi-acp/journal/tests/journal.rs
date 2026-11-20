@@ -6,6 +6,35 @@ fn id() -> ConversationId {
 }
 
 #[tokio::test]
+async fn reading_a_fresh_journal_keeps_it_empty_until_the_first_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("observed.sqlite3");
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    assert!(journal.list(None).await.unwrap().is_empty());
+    assert_eq!(journal.get(&id()).await.unwrap_err(), Error::NotFound);
+    assert_eq!(
+        journal.position(&id(), 1).await.unwrap_err(),
+        Error::NotFound
+    );
+    journal.close().await.unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    let journal = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    let generation = create(&journal).await;
+    journal.append(&id(), generation, RecordKind::User, json!("first")).await.unwrap();
+    journal.close().await.unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    let reopened = Journal::open(root.path().to_owned(), Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(reopened.list(None).await.unwrap()[0].id, id());
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn corrupt_later_snapshot_cannot_partially_commit_startup_recovery() {
     let root = tempfile::tempdir().unwrap();
     let journal = Journal::open(root.path().to_owned(), Limits::default())

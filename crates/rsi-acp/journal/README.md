@@ -9,6 +9,9 @@ opens the Agent Store or writes native Agent Facts. The product supplies its
 dedicated `state/acp` directory. Schema 1 is exact: unknown versions and unrelated
 databases fail without migration, reset or replacement. One exclusive file lease
 covers all admitted operations, including work whose caller has disappeared.
+A fresh journal keeps its private SQLite file empty until a mutation needs it.
+Listing returns an empty page and reads of an unknown conversation return
+`NotFound`. Existing journals validate and recover before publication.
 
 The owner admits two blocking jobs. Each append batch retains at most 64 records / 1 MiB total;
 history pages contain at most 64 records and 256 KiB. A record too large for the

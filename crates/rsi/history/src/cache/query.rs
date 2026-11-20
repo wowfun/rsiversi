@@ -93,7 +93,7 @@ impl Cache {
             if revision<0{return Err(invalid("invalid content revision"));}
             let visibility=hex::encode(Sha256::digest(serde_json::to_vec(&sources.iter().map(|s|(&s.scope,&s.coverage.source,s.reference_allowed)).collect::<Vec<_>>()).map_err(invalid)?));
             let start=if let Some(cursor)=after {
-                if cursor.generation!=db.generation || cursor.revision!=revision.to_string() || cursor.caller!=caller || cursor.visibility!=visibility {return Ok(Reply::Stale{reason:"History content or visibility changed; search again".into()});}
+                if cursor.generation!=db.generation() || cursor.revision!=revision.to_string() || cursor.caller!=caller || cursor.visibility!=visibility {return Ok(Reply::Stale{reason:"History content or visibility changed; search again".into()});}
                 i64::try_from(rsi_history_api::decimal(&cursor.after)?).map_err(invalid)?
             }else{0};
             let admitted:BTreeMap<_,_>=sources.into_iter().filter(|s|s.coverage.indexed_through!="0").map(|s|(key(&s.scope),s)).collect();
@@ -126,7 +126,7 @@ impl Cache {
                 if hit.source!=source.coverage.source {return Err(invalid("cached source identity mismatch"));}
                 matches.push(Match{label:source.label.clone(),scope:source.scope.clone(),hit,reference_allowed:source.reference_allowed});
             }
-            let next=if more {Some(QueryCursor{generation:db.generation.clone(),revision:revision.to_string(),query,scope:range,caller,visibility,after:selected.last().ok_or_else(||invalid("empty query continuation"))?.0.to_string()})}else{None};
+            let next=if more {Some(QueryCursor{generation:db.generation().to_owned(),revision:revision.to_string(),query,scope:range,caller,visibility,after:selected.last().ok_or_else(||invalid("empty query continuation"))?.0.to_string()})}else{None};
             Ok(Reply::Matches{progress,matches,next})
         }).await
     }

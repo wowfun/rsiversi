@@ -441,7 +441,7 @@ impl State {
         if let Some(upstream) = self.upstream.as_ref().map(|routes| routes.current())
             && upstream.owns(request.uri().path())
         {
-            return upstream.forward(self, request).await;
+            return upstream.forward(self, request, connection).await;
         }
         if request.method() == http::Method::GET
             && let Some(assets) = &self.assets

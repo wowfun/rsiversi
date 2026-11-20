@@ -16,8 +16,15 @@ mod query;
 const MAXIMUM_PAGES: i64 = 1024 * 1024 * 1024 / 4096;
 struct Database {
     connection: Connection,
-    generation: String,
+    generation: Option<String>,
     _lease: File,
+}
+impl Database {
+    fn generation(&self) -> &str {
+        self.generation
+            .as_deref()
+            .expect("cache operation initialized the schema")
+    }
 }
 /// `SQLite` lives only behind retained owner work, including blocking completion.
 #[derive(Debug)]
@@ -118,12 +125,16 @@ fn open(path: &Path) -> Result<Connection> {
         .map_err(sql)?;
     Ok(connection)
 }
+const SCHEMA: &str = "CREATE TABLE meta(generation TEXT NOT NULL,revision INTEGER NOT NULL);CREATE TABLE catalog(key TEXT PRIMARY KEY,scope TEXT NOT NULL CHECK(length(CAST(scope AS BLOB))<=8192));CREATE TABLE sources(key TEXT PRIMARY KEY,coverage TEXT NOT NULL CHECK(length(coverage)<=8192));CREATE VIRTUAL TABLE documents USING fts5(body,source,metadata UNINDEXED,tokenize='unicode61');PRAGMA user_version=3;";
+
 fn schema(connection: &Connection) -> Result<String> {
-    connection.execute_batch("CREATE TABLE meta(generation TEXT NOT NULL,revision INTEGER NOT NULL);CREATE TABLE catalog(key TEXT PRIMARY KEY,scope TEXT NOT NULL CHECK(length(CAST(scope AS BLOB))<=8192));CREATE TABLE sources(key TEXT PRIMARY KEY,coverage TEXT NOT NULL CHECK(length(coverage)<=8192));CREATE VIRTUAL TABLE documents USING fts5(body,source,metadata UNINDEXED,tokenize='unicode61');PRAGMA user_version=3;").map_err(invalid)?;
+    let transaction = connection.unchecked_transaction().map_err(sql)?;
+    transaction.execute_batch(SCHEMA).map_err(sql)?;
     let generation = generation()?;
-    connection
+    transaction
         .execute("INSERT INTO meta VALUES (?1,0)", [&generation])
-        .map_err(invalid)?;
+        .map_err(sql)?;
+    transaction.commit().map_err(sql)?;
     Ok(generation)
 }
 fn valid(connection: &Connection) -> Result<String> {
@@ -141,7 +152,7 @@ fn valid(connection: &Connection) -> Result<String> {
     }
     // Inspect only bounded schema metadata, never the FTS contents on startup.
     let expected = Connection::open_in_memory().map_err(sql)?;
-    schema(&expected)?;
+    expected.execute_batch(SCHEMA).map_err(sql)?;
     let layout = |database: &Connection| -> Result<Vec<(String, String)>> {
         database
             .prepare("SELECT name,coalesce(sql,'') FROM sqlite_master ORDER BY name LIMIT 32")
@@ -195,7 +206,7 @@ fn clear_source(db: &mut Database, key: &str, stop: &CancellationToken) -> Resul
         return Err(ApiError::Capacity);
     }
     tx.commit().map_err(sql)?;
-    db.generation = next;
+    db.generation = Some(next);
     loop {
         check(stop)?;
         budget(&mut db.connection, stop.clone())?;
@@ -287,13 +298,24 @@ impl Cache {
             let lease = directory(&directory_path)?;
             let path = directory_path.join("history.sqlite3");
             let file = private_file(&path)?;
-            if file.metadata().map_err(invalid)?.len() > 1024 * 1024 * 1024 {
+            let bytes = file.metadata().map_err(invalid)?.len();
+            if bytes > 1024 * 1024 * 1024 {
                 return Err(invalid("history cache exceeds 1 GiB"));
             }
             drop(file);
             // Only this dedicated reconstructible cache is removed, under its lease.
+            let fresh = bytes == 0
+                && !directory_path
+                    .join("history.sqlite3-journal")
+                    .try_exists()
+                    .map_err(invalid)?;
             let existing = open(&path).and_then(|connection| {
-                valid(&connection).map(|generation| (connection, generation))
+                let generation = if fresh {
+                    None
+                } else {
+                    Some(valid(&connection)?)
+                };
+                Ok((connection, generation))
             });
             let (connection, generation) = match existing {
                 Ok(pair) => pair,
@@ -308,7 +330,7 @@ impl Cache {
                     drop(private_file(&path)?);
                     let connection = open(&path)?;
                     let generation = schema(&connection)?;
-                    (connection, generation)
+                    (connection, Some(generation))
                 }
                 Err(error) => return Err(error),
             };
@@ -334,6 +356,9 @@ impl Cache {
             check(&stop)?;
             let mut guard = inner.lock().expect("history cache");
             let database = guard.as_mut().ok_or(ApiError::ShuttingDown)?;
+            if database.generation.is_none() {
+                database.generation = Some(schema(&database.connection)?);
+            }
             budget(&mut database.connection, stop.clone())?;
             let result = work(database);
             database
@@ -381,7 +406,7 @@ impl Cache {
         tx.execute("INSERT INTO sources(key,coverage) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET coverage=excluded.coverage",params![key,serde_json::to_string(&coverage).map_err(invalid)?]).map_err(sql)?;
         let next=generation()?;
         if tx.execute("UPDATE meta SET generation=?1,revision=revision+1 WHERE revision<9223372036854775807",[&next]).map_err(sql)?!=1{return Err(ApiError::Capacity);}
-        tx.commit().map_err(sql)?;db.generation=next;Ok(Reply::Coverage{coverage})
+        tx.commit().map_err(sql)?;db.generation=Some(next);Ok(Reply::Coverage{coverage})
     }).await
     }
     pub async fn rebuild(
@@ -408,7 +433,7 @@ impl Cache {
         stop: CancellationToken,
     ) -> Result<Reply> {
         self.run(stop,move|db|{
-        let start=if let Some(after)=after{if after.generation!=db.generation{return Err(invalid("history cursor expired after rebuild"));}i64::try_from(rsi_history_api::decimal(&after.after)?).map_err(invalid)?}else{0};
+        let start=if let Some(after)=after{if after.generation!=db.generation(){return Err(invalid("history cursor expired after rebuild"));}i64::try_from(rsi_history_api::decimal(&after.after)?).map_err(invalid)?}else{0};
         if coverage.indexed_through=="0"{return Ok(Reply::Hits{coverage,hits:vec![],next:None});}
         // Quote every token; callers cannot inject operators, columns or MATCH syntax.
         let lexical=query.split_whitespace().map(|word|format!("\"{}\"",word.replace('"',"\"\""))).collect::<Vec<_>>().join(" AND ");
@@ -438,7 +463,7 @@ impl Cache {
             }
             if hits.len()!=selected.len() { return Err(invalid("cached result disappeared")); }
         }
-        let next=more.then(||Cursor{generation:db.generation.clone(),query,scope,after:last.to_string()});
+        let next=more.then(||Cursor{generation:db.generation().to_owned(),query,scope,after:last.to_string()});
         // Worst-case JSON escaping can exceed a page before its 64-hit ceiling.
         let reply=Reply::Hits{coverage,hits,next};
         if serde_json::to_vec(&reply).map_err(invalid)?.len()>256*1024 {return Err(invalid("history result byte budget exceeded"));}
@@ -713,6 +738,33 @@ mod tests {
         }).await.unwrap();
         cache.close().await;
     }
+    #[tokio::test]
+    async fn unused_cache_stays_empty_and_first_read_materializes_one_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cache");
+        let file = path.join("history.sqlite3");
+        let cache = Cache::open(path.clone()).await.unwrap();
+        assert!(Cache::open(path.clone()).await.is_err());
+        cache.close().await;
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+        let cache = Cache::open(path.clone()).await.unwrap();
+        let first = cache
+            .run(CancellationToken::new(), |db| valid(&db.connection))
+            .await
+            .unwrap();
+        cache.close().await;
+        assert!(std::fs::metadata(&file).unwrap().len() > 0);
+        let reopened = Cache::open(path).await.unwrap();
+        let second = reopened
+            .run(CancellationToken::new(), |db| {
+                Ok(db.generation().to_owned())
+            })
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        reopened.close().await;
+    }
+
     #[tokio::test]
     async fn corrupt_cache_rebuilds_under_exclusive_lease() {
         let root = tempfile::tempdir().unwrap();

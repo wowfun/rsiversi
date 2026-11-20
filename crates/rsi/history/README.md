@@ -83,6 +83,10 @@ not expose the separate human exact-source Advance/Search operations.
 Its original-text window is capped at 32 KiB so worst-case JSON escaping remains
 inside the Tools output bound; subsequent reads retain exact source coordinates.
 
+Opening a fresh cache retains its private file and directory lease. The first
+admitted cache operation creates its FTS schema and generation. Closing without
+a history operation leaves the file empty. A pre-existing populated cache or
+rollback journal goes through SQLite recovery and validation at startup.
 Routine cache opening validates the exact schema and bounded generation metadata;
 it never scans document contents or runs FTS integrity checks. Only an obsolete
 schema or confirmed malformed database triggers reconstruction. Resource limits,
