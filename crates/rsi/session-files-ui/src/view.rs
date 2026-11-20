@@ -9,6 +9,17 @@ use rsi_ui::{Result, SurfaceRenderer, UiElement, UiError, UiView};
 #[derive(Debug)]
 pub(crate) struct Card;
 impl SurfaceRenderer for Card {
+    fn model(
+        &self,
+        target: Context,
+    ) -> futures_util::future::BoxFuture<'_, Result<rsi_ui::UiModel>> {
+        Box::pin(async move {
+            let browser = target
+                .lookup_local::<FilesBrowserContract>()
+                .ok_or(UiError::Retired)?;
+            Ok(rsi_ui::UiModel::standard(browser.initial_view().await?)?)
+        })
+    }
     fn source(
         &self,
         target: rsi_ui::ActionTarget,
@@ -37,8 +48,8 @@ fn button(revision: u64, label: impl Into<String>, operation: Operation) -> UiEl
         .expect("bounded Files payload"),
     }
 }
-pub(crate) fn initial(revision: u64, opened: bool) -> UiView {
-    let mut elements = vec![
+fn path_controls(revision: u64) -> [UiElement; 3] {
+    [
         UiElement::Input {
             name: "path".into(),
             label: "Workspace-relative path".into(),
@@ -59,15 +70,21 @@ pub(crate) fn initial(revision: u64, opened: bool) -> UiView {
                 kind: FileKind::File,
             },
         ),
-        button(
-            revision,
-            "Workspace root",
-            Operation::Open {
-                path: RelativePath::default(),
-                kind: FileKind::Directory,
-            },
-        ),
-    ];
+    ]
+}
+fn workspace_root(revision: u64) -> UiElement {
+    button(
+        revision,
+        "Workspace root",
+        Operation::Open {
+            path: RelativePath::default(),
+            kind: FileKind::Directory,
+        },
+    )
+}
+pub(crate) fn initial(revision: u64, opened: bool) -> UiView {
+    let mut elements = Vec::from(path_controls(revision));
+    elements.push(workspace_root(revision));
     if opened {
         elements.push(button(
             revision,
@@ -103,30 +120,26 @@ pub(crate) fn preview(bytes: &[u8], maximum: usize) -> String {
     }
     text
 }
-fn base(revision: u64, file: &OpenedFile) -> UiView {
-    let mut view = initial(revision, true);
-    view.elements.insert(
-        0,
-        UiElement::Field {
-            label: "Path bytes (hex)".into(),
-            value: serde_json::to_value(&file.path)
-                .expect("validated path")
-                .as_str()
-                .expect("hex path")
-                .into(),
+fn exact_path(file: &OpenedFile) -> UiElement {
+    UiElement::Field {
+        label: "Path bytes (hex)".into(),
+        value: hex::encode(file.path.as_bytes()),
+    }
+}
+fn path_label(file: &OpenedFile) -> UiElement {
+    UiElement::Field {
+        label: "Path".into(),
+        value: if file.path.as_bytes().is_empty() {
+            ".".into()
+        } else {
+            preview(file.path.as_bytes(), 1024)
         },
-    );
-    view.elements.insert(
-        0,
-        UiElement::Field {
-            label: "Path".into(),
-            value: preview(file.path.as_bytes(), 1024),
-        },
-    );
-    view
+    }
 }
 pub(crate) fn file(revision: u64, file: &OpenedFile, page: &FilePage, hex: bool) -> UiView {
-    let mut view = base(revision, file);
+    let mut view = initial(revision, true);
+    view.elements
+        .splice(..0, [path_label(file), exact_path(file)]);
     view.title = "Workspace file".into();
     let bytes = decode(&page.bytes_hex);
     let end = page.offset + bytes.len() as u64;
@@ -169,13 +182,15 @@ pub(crate) fn file(revision: u64, file: &OpenedFile, page: &FilePage, hex: bool)
     view
 }
 pub(crate) fn directory(revision: u64, file: &OpenedFile, page: DirectoryPage) -> UiView {
-    let mut view = base(revision, file);
-    view.title = "Workspace directory".into();
+    let root = file.path.as_bytes().is_empty();
+    let mut view = UiView {
+        title: "Files".into(),
+        elements: vec![
+            path_label(file),
+            button(revision, "Refresh", Operation::Refresh),
+        ],
+    };
     let end = page.offset + page.entries.len();
-    view.elements.push(UiElement::Field {
-        label: "Entries".into(),
-        value: format!("{}–{} of {}", page.offset, end, page.total),
-    });
     for entry in page.entries {
         let name = preview(entry.name.as_bytes(), 256);
         if let Some(kind) = entry.kind {
@@ -197,6 +212,10 @@ pub(crate) fn directory(revision: u64, file: &OpenedFile, page: DirectoryPage) -
             });
         }
     }
+    view.elements.push(UiElement::Field {
+        label: "Entries".into(),
+        value: format!("{}–{} of {}", page.offset, end, page.total),
+    });
     if page.offset > 0 {
         view.elements.push(button(
             revision,
@@ -217,6 +236,13 @@ pub(crate) fn directory(revision: u64, file: &OpenedFile, page: DirectoryPage) -
             },
         ));
     }
+    if !root {
+        view.elements.push(workspace_root(revision));
+        view.elements.push(exact_path(file));
+    }
+    view.elements.extend(path_controls(revision));
+    view.elements
+        .push(button(revision, "Release snapshot", Operation::Release));
     view
 }
 pub(crate) fn decode(hex: &str) -> Vec<u8> {

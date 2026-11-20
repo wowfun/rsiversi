@@ -114,6 +114,7 @@ struct Reads {
     calls: AtomicUsize,
     active: Arc<AtomicUsize>,
     retiring: CancellationToken,
+    lifecycle: Arc<rsi_session_protocol::SessionLifecycle>,
 }
 struct Activity(Arc<AtomicUsize>);
 impl Drop for Activity {
@@ -143,11 +144,9 @@ impl SessionReads for Reads {
         self.active.fetch_add(1, Ordering::SeqCst);
         Ok(SessionReadLease::new(
             self.header.clone(),
-            self.retiring.clone(),
+            self.retiring.child_token(),
             Activity(self.active.clone()),
-            Arc::new(rsi_session_protocol::SessionLifecycle::default())
-                .attach()?
-                .read()?,
+            self.lifecycle.attach()?.read()?,
         ))
     }
 }
@@ -263,6 +262,7 @@ impl Harness {
             calls: AtomicUsize::new(0),
             active: Arc::new(AtomicUsize::new(0)),
             retiring: CancellationToken::new(),
+            lifecycle: Arc::new(rsi_session_protocol::SessionLifecycle::default()),
         });
         let reader = Arc::new(Reader {
             native: LocalFiles::new().unwrap(),
@@ -498,8 +498,8 @@ async fn credential_revocation_cancels_the_page_while_its_open_token_retains_a_l
     let target = harness.target();
     let read = tokio::spawn(async move { client.read(target, file, 0, 10).await });
     harness.reader.entered.acquire().await.unwrap().forget();
-    // The open token and this request independently retain their Session reads.
-    assert_eq!(harness.reads.active.load(Ordering::SeqCst), 2);
+    // Only the active request retains a read owner; the idle token retains a fence.
+    assert_eq!(harness.reads.active.load(Ordering::SeqCst), 1);
     let cancellation = harness.reader.cancellation.lock().unwrap().clone().unwrap();
     harness.auth.0.cancel();
     assert_eq!(
@@ -510,13 +510,13 @@ async fn credential_revocation_cancels_the_page_while_its_open_token_retains_a_l
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while harness.reads.active.load(Ordering::SeqCst) != 1 {
+        while harness.reads.active.load(Ordering::SeqCst) != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    // Closing the API owner releases the remaining token lease; Harness checks zero.
+    // Closing the API owner releases the remaining token fence.
     harness.close().await;
 }
 

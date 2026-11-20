@@ -16,7 +16,6 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_session_files::SessionFilesContract;
-use rsi_session_protocol::SessionContract;
 use rsi_ui::{
     ActionContribution, BlockRendererContribution, Contributions, SurfaceContribution, TargetKind,
     UiContract,
@@ -57,18 +56,17 @@ impl PluginFactory for FilesUiTargetFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         Ok(prepare(config)?
             .requiring_local::<SessionControllerContract>()
-            .requiring_local::<SessionContract>()
             .requiring_local::<SessionFilesContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let controller = plan.local::<SessionControllerContract>()?;
-        let session = plan
-            .local::<SessionContract>()?
-            .attach(controller.session_id())
-            .await
-            .map_err(meta)?;
-        let browser =
-            Arc::new(Browser::new(session, plan.local::<SessionFilesContract>()?).map_err(meta)?);
+        let browser = Arc::new(
+            Browser::new(
+                controller.session_handle(),
+                plan.local::<SessionFilesContract>()?,
+            )
+            .map_err(meta)?,
+        );
         let cleanup = browser.clone();
         plan.defer(
             "drain Files browser",

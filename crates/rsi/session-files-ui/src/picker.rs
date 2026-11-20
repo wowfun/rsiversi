@@ -1,6 +1,6 @@
 use super::{
     Browser, CancellationToken, DIRECTORY_PAGE_ENTRIES, Deserialize, FILE_PAGE_BYTES, FileKind,
-    FilesError, RelativePath, Result, Serialize, UiError, action_error, next_revision, view,
+    Opened, RelativePath, Result, Serialize, UiError, action_error, next_revision, view,
 };
 
 /// Finite human picker operation; paging never reopens a changed file.
@@ -109,11 +109,7 @@ impl Browser {
             }
             FilePickerRequest::Release { revision } => (Some(revision), 0, false),
         };
-        let _permit = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| UiError::Capacity)?;
+        let _permit = self.slot.try_acquire().map_err(|_| UiError::Capacity)?;
         if self.stop.is_cancelled() || cancel.is_cancelled() {
             return Err(UiError::Retired);
         }
@@ -131,26 +127,22 @@ impl Browser {
             () = self.stop.cancelled() => Err(UiError::Retired),
             () = cancel.cancelled() => Err(UiError::Retired),
             result = async {
-                match request {
+                let opened = match request {
                     FilePickerRequest::Open {path,file_kind} => self.open(path,file_kind).await?,
                     FilePickerRequest::Release {..} => {self.release().await;return Ok(None);}
-                    FilePickerRequest::Page {..} => {},
-                }
-                self.picker_page(revision,offset,hex).await.map(Some)
+                    FilePickerRequest::Page {..} => self.current_opened().await?,
+                };
+                self.picker_page(opened,revision,offset,hex).await.map(Some)
             } => result,
         }
     }
-    async fn picker_page(&self, revision: u64, offset: u64, hex: bool) -> Result<FilePickerPage> {
-        let opened = self
-            .state
-            .lock()
-            .expect("Files browser state poisoned")
-            .opened
-            .clone()
-            .ok_or_else(|| UiError::Invalid("Open a file or directory first".into()))?;
-        if self.target().await? != opened.target {
-            return Err(action_error(FilesError::Changed.into()));
-        }
+    async fn picker_page(
+        &self,
+        opened: Opened,
+        revision: u64,
+        offset: u64,
+        hex: bool,
+    ) -> Result<FilePickerPage> {
         let mut page = FilePickerPage {
             revision: revision.to_string(),
             path: opened.file.path.clone(),

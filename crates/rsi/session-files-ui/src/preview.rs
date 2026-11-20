@@ -359,11 +359,7 @@ impl Browser {
         offset: u64,
         maximum: usize,
     ) -> Result<Vec<u8>> {
-        let _slot = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| UiError::Capacity)?;
+        let _slot = self.slot.try_acquire().map_err(|_| UiError::Capacity)?;
         let preview = {
             let state = self.state.lock().expect("Files state");
             state.preview.clone().filter(|preview| {

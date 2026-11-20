@@ -36,7 +36,7 @@ pub struct Browser {
     session: Arc<dyn SessionHandle>,
     pub(crate) files: Arc<dyn SessionFiles>,
     pub(crate) state: Mutex<State>,
-    pub(crate) slot: Arc<Semaphore>,
+    pub(crate) slot: Semaphore,
     pub(crate) stop: CancellationToken,
 }
 impl Browser {
@@ -52,7 +52,7 @@ impl Browser {
                 opened: None,
                 preview: None,
             }),
-            slot: Arc::new(Semaphore::new(1)),
+            slot: Semaphore::new(1),
             stop: CancellationToken::new(),
         })
     }
@@ -95,7 +95,36 @@ impl Browser {
                 .map_err(|e| UiError::Action(e.to_string()))?,
         })
     }
-    async fn open(&self, path: RelativePath, kind: FileKind) -> Result<()> {
+    pub(crate) async fn initial_view(&self) -> Result<UiView> {
+        let _permit = self.slot.acquire().await.expect("browser slot stays open");
+        if self.stop.is_cancelled() {
+            return Err(UiError::Retired);
+        }
+        let (revision, directory) = {
+            let mut state = self.state.lock().expect("Files browser state poisoned");
+            if let Some(opened) = &state.opened {
+                if opened.file.kind == FileKind::File {
+                    return Ok(view::initial(state.revision, true));
+                }
+                (state.revision, Some(opened.clone()))
+            } else {
+                state.revision = next_revision()?;
+                (state.revision, None)
+            }
+        };
+        let result = tokio::select! { biased;
+            () = self.stop.cancelled() => return Err(UiError::Retired),
+            result = async {
+                let opened = match directory {
+                    Some(opened) => self.check_target(opened).await?,
+                    None => self.open(RelativePath::default(), FileKind::Directory).await?,
+                };
+                self.page(opened, 0, false, revision).await
+            } => result,
+        };
+        Ok(self.view_result(result, revision))
+    }
+    async fn open(&self, path: RelativePath, kind: FileKind) -> Result<Opened> {
         let target = self.target().await?;
         self.release().await;
         let file = self
@@ -103,13 +132,14 @@ impl Browser {
             .open(target.clone(), path, kind)
             .await
             .map_err(action_error)?;
+        let opened = Opened { target, file };
         self.state
             .lock()
             .expect("Files browser state poisoned")
-            .opened = Some(Opened { target, file });
-        Ok(())
+            .opened = Some(opened.clone());
+        Ok(opened)
     }
-    async fn page(&self, offset: u64, hex: bool, revision: u64) -> Result<UiView> {
+    async fn current_opened(&self) -> Result<Opened> {
         let opened = self
             .state
             .lock()
@@ -117,9 +147,15 @@ impl Browser {
             .opened
             .clone()
             .ok_or_else(|| UiError::Invalid("Open a file or directory first".into()))?;
+        self.check_target(opened).await
+    }
+    async fn check_target(&self, opened: Opened) -> Result<Opened> {
         if self.target().await? != opened.target {
             return Err(action_error(FilesError::Changed.into()));
         }
+        Ok(opened)
+    }
+    async fn page(&self, opened: Opened, offset: u64, hex: bool, revision: u64) -> Result<UiView> {
         match opened.file.kind {
             FileKind::File => {
                 let page = self
@@ -152,7 +188,7 @@ impl Browser {
         fields: BTreeMap<String, String>,
         revision: u64,
     ) -> Result<UiView> {
-        match operation {
+        let (path, kind) = match operation {
             Operation::Input { kind } => {
                 let text = fields.get("path").map_or("", String::as_str);
                 let bytes = if text == "." && kind == FileKind::Directory {
@@ -161,9 +197,9 @@ impl Browser {
                     text.as_bytes()
                 };
                 let path = RelativePath::new(bytes).map_err(|e| action_error(e.into()))?;
-                self.open(path, kind).await?;
+                (path, kind)
             }
-            Operation::Open { path, kind } => self.open(path, kind).await?,
+            Operation::Open { path, kind } => (path, kind),
             Operation::Presented { entry } => {
                 entry.validate()?;
                 let intent = self
@@ -177,33 +213,31 @@ impl Browser {
                     .await
                     .map_err(|error| UiError::Action(error.to_string()))?;
                 let path = crate::presented::resolve(&entry, &intent.facts, &result.facts)?;
-                self.open(path, FileKind::File).await?;
+                (path, FileKind::File)
             }
-            Operation::Page { offset, hex } => return self.page(offset, hex, revision).await,
-            Operation::Refresh => {
-                let file = self
-                    .state
-                    .lock()
-                    .expect("Files browser state poisoned")
-                    .opened
-                    .as_ref()
-                    .map(|o| o.file.clone())
-                    .ok_or_else(|| UiError::Invalid("Open a file or directory first".into()))?;
-                self.open(file.path, file.kind).await?;
+            Operation::Page { offset, hex } => {
+                return self
+                    .page(self.current_opened().await?, offset, hex, revision)
+                    .await;
             }
+            Operation::Refresh => self
+                .state
+                .lock()
+                .expect("Files browser state poisoned")
+                .opened
+                .as_ref()
+                .map(|o| (o.file.path.clone(), o.file.kind))
+                .ok_or_else(|| UiError::Invalid("Open a file or directory first".into()))?,
             Operation::Release => {
                 self.release().await;
                 return Ok(view::initial(revision, false));
             }
-        }
-        self.page(0, false, revision).await
+        };
+        let opened = self.open(path, kind).await?;
+        self.page(opened, 0, false, revision).await
     }
     pub(crate) async fn invoke(&self, target: ActionTarget, input: ActionInput) -> Result<UiView> {
-        let _permit = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| UiError::Capacity)?;
+        let _permit = self.slot.try_acquire().map_err(|_| UiError::Capacity)?;
         self.invoke_locked(target, input).await
     }
     pub(crate) async fn invoke_model(
@@ -211,11 +245,7 @@ impl Browser {
         target: ActionTarget,
         input: ActionInput,
     ) -> Result<rsi_ui::UiModel> {
-        let _permit = self
-            .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| UiError::Capacity)?;
+        let _permit = self.slot.try_acquire().map_err(|_| UiError::Capacity)?;
         let fallback = self.invoke_locked(target.clone(), input).await?;
         self.preview_model(target, fallback).await
     }
@@ -251,18 +281,18 @@ impl Browser {
             () = target.view_closed() => return Err(UiError::Retired),
             result = self.perform(request.operation, input.fields, revision) => result,
         };
-        match result {
-            Ok(view) => Ok(view),
-            Err(error) => {
-                let opened = self
-                    .state
-                    .lock()
-                    .expect("Files browser state poisoned")
-                    .opened
-                    .is_some();
-                Ok(view::failure(revision, opened, &error.to_string()))
-            }
-        }
+        Ok(self.view_result(result, revision))
+    }
+    fn view_result(&self, result: Result<UiView>, revision: u64) -> UiView {
+        result.unwrap_or_else(|error| {
+            let opened = self
+                .state
+                .lock()
+                .expect("Files browser state poisoned")
+                .opened
+                .is_some();
+            view::failure(revision, opened, &error.to_string())
+        })
     }
 }
 fn next_revision() -> Result<u64> {

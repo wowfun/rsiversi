@@ -7,12 +7,21 @@ opening then uses the current human Files binding. File declarations preserve
 paths and descriptions, not historical bytes or Tool execution authority.
 
 An ordinary UI contribution supplies a workspace browser over Session Files.
+Opening its asynchronous presentation on a surface with no captured snapshot
+loads the first page of the workspace root. Reopening a directory shows the
+first page of its retained snapshot. Reopening a file offers Current snapshot
+so the user can choose when to read it again. Root access failures
+leave path selection and retry available in the same view.
+Directory pages show the workspace-relative location, refresh action and entries
+before pagination, exact path information and direct path input. The workspace
+root is displayed as `.`.
 The TUI consumes closed cards, inputs, text/code and buttons; the GUI also
 consumes the rich model described below.
 Neither adapter implements Files authorization or reader semantics.
 
 `FilesUiTargetFactory` belongs to the actual Session surface. It depends on that
-surface's controller, the Session service and the connected Files client. It
+surface's controller and the connected Files client. It shares the controller's
+already attached Session handle for Header and history reads. It
 owns one optional opened snapshot, one nonqueued action slot and a monotonically
 fenced, process-unique view revision. Replacing only the Files provider cannot
 retarget an old action to a new browser whose Session controller stayed alive.
