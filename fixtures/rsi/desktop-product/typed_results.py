@@ -27,11 +27,11 @@ def verify(script, button, click, fill, until, screenshot, report):
     until(completed)
     click(script(r'return [...document.querySelectorAll(".message.tool")].at(-1)?.querySelector(".source-actions button")'))
     button('Recorded result')
-    until(lambda: script(r'return document.querySelector(".resource-content .ui-contribution")?.textContent.includes("rsi.profile-leaves · version 1")'))
+    until(lambda: script(r'return document.querySelector(".resource-content .ui-contribution")?.textContent.includes("rsi.profile-leaves · version 2")'))
     assert script(r'return document.querySelector(".resource-content .ui-contribution").textContent.includes("catalog")')
     assert script(r'const e=document.querySelector(".resource-content .ui-contribution");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its card'
     assert script(r'const e=document.querySelector(".resource-content");return e.scrollWidth<=e.clientWidth+1'), 'recorded metadata overflows its dialog'
     screenshot('typed-recorded-result.png')
     button('Close details')
     button('Standard')
-    (report / 'typed-results.json').write_text(json.dumps({'status':'passed','tool':'host_profile','recorded_contract':'rsi.profile-leaves','version':1,'authority':'agent catalog read only','native_bridge':True},indent=2))
+    (report / 'typed-results.json').write_text(json.dumps({'status':'passed','tool':'host_profile','recorded_contract':'rsi.profile-leaves','version':2,'authority':'agent catalog read only','native_bridge':True},indent=2))

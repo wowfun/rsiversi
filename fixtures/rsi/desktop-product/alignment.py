@@ -1,6 +1,6 @@
 """Shared GUI geometry, directory authority and native clipboard in Linux WebKitGTK."""
 import json
-from presentation import open_appearance, save_settings
+from presentation import open_appearance
 
 
 def verify(script, button, fill, until, screenshot, call, root, report, workspace, painted):
@@ -32,8 +32,8 @@ def verify(script, button, fill, until, screenshot, call, root, report, workspac
             until(lambda: script('return Boolean(document.querySelector(".command-palette:modal"))'))
             fill('[aria-label="Search commands"]','settings')
             open_appearance(script, until, lambda: (button('Open Settings'), button('General')))
-            script('const e=document.querySelector("select[aria-label=\\"Settings / appearance / theme\\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true',[theme])
-            save_settings(script, button, until);until(lambda:script('return document.documentElement.dataset.theme===arguments[0]',[theme]));button('Close settings')
+            button(theme.capitalize())
+            until(lambda:script('return document.documentElement.dataset.theme===arguments[0]',[theme]));button('Close settings')
             until(lambda:script('return !document.querySelector(".settings-modal:modal")'))
             geometry=script('const c=document.querySelector(".pane.selected .composer").getBoundingClientRect(),b=document.querySelector(".pane.selected [data-testid=\\"composer-send\\"]"),r=b.getBoundingClientRect();return {width:innerWidth,theme:document.documentElement.dataset.theme,scheme:getComputedStyle(document.documentElement).colorScheme,composer:c.toJSON(),overflow:document.documentElement.scrollWidth-innerWidth,sendHit:b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}')
             assert geometry['overflow']<=1 and geometry['sendHit'] and geometry['composer']['x']>=0,geometry

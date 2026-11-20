@@ -1,6 +1,6 @@
 """WebKitGTK geometry is measured independently of Chromium pixel baselines."""
 import json
-from presentation import open_appearance, save_settings
+from presentation import open_appearance
 
 
 def wait_terminal_fit(script, until):
@@ -13,8 +13,7 @@ def verify(script, button, until, screenshot, call, root, report):
         call('POST',root+'/window/rect',{'width':1440,'height':900})
         until(lambda: script(r'return innerWidth===1440'))
         open_appearance(script, until, lambda: (button('Settings'), button('General')))
-        script(r'const e=document.querySelector("[aria-label=\"Settings / appearance / theme\"]");e.value=[...e.options].find(o=>o.textContent===arguments[0]).value;e.dispatchEvent(new Event("change",{bubbles:true}));return true',[theme])
-        save_settings(script, button, until)
+        button(theme.capitalize())
         until(lambda: script(r'return document.documentElement.dataset.theme===arguments[0]',[theme]))
         button('Close settings')
         for width,height in ((1440,900),(1024,768),(767,900),(390,844)):

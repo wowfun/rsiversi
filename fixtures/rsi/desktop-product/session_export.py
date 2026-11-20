@@ -111,7 +111,7 @@ def verify(script, button, fill, until, screenshot, report, requests):
             "import {desktopBridgeDescriptor} from './apps/web/wire-descriptors.mjs';console.log(JSON.stringify(desktopBridgeDescriptor()))",
         ], cwd=Path(__file__).resolve().parents[3], text=True))
         script(r'''const protocol=arguments[0];window.fixtureBridge={};fixtureBridge.call=operation=>window.__TAURI_INTERNALS__.invoke('rsi_bridge',{payload:JSON.stringify({protocol,operation})});return true''', [descriptor])
-        fill('textarea[aria-label="Main message"]', '/export "suggested.json" -f json -i h,m,lpr,last-provider-response')
+        fill('[aria-label="Main conversation"] .composer textarea', '/export "suggested.json" -f json -i h,m,lpr,last-provider-response')
         button('Send')
         until(keys.chooser)
         keys.chord('Control_L', 'l'); keys.chord('Control_L','a'); keys.type(str(destination)); keys.chord('Return')
@@ -149,7 +149,7 @@ def verify(script, button, fill, until, screenshot, report, requests):
         (report / 'export-dialog-cancellation.json').write_text(json.dumps({'cancelledSelectionDiscarded':not cancelled_destination.exists(),'staleCancelPreservedReplacement':True,'replacementSaved':True},indent=2))
         assert len(requests) == count
         # Cancellation is a visible local outcome; it never becomes model input.
-        fill('textarea[aria-label="Main message"]', '')
+        fill('[aria-label="Main conversation"] .composer textarea', '')
         screenshot('export.png')
         (report / 'export.json').write_text(json.dumps({'status':'passed','bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'nativeSaveDialog':True,'cancelPreservedFile':True,'modelRequests':count},indent=2))
     finally: keys.close()

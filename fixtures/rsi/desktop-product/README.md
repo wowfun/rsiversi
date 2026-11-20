@@ -213,7 +213,7 @@ Its editable user Profile is separate from the running service source.
 and removal from Needs attention with a deterministic provider.
 
 `--typed-results` executes the real `host_profile` catalog Tool and opens its
-recorded `rsi.profile-leaves` version 1 result through the native bridge. Portable
+recorded `rsi.profile-leaves` version 2 result through the native bridge. Portable
 addon execution and the independently linked addon are covered by their own
 fixtures; this scenario establishes the desktop recorded-contract presentation.
 
