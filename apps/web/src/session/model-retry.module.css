@@ -1,0 +1,15 @@
+.row { color: var(--muted); font-size: 13px; line-height: 20px; }
+.row summary { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 2px 0; border-radius: 4px; cursor: pointer; list-style: none; overflow-wrap: anywhere; }
+.row summary::-webkit-details-marker { display: none; }
+.row summary::after { content: ''; flex: none; width: 6px; height: 6px; margin-right: 2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); }
+.row[open] summary::after { transform: rotate(45deg); }
+.row summary:hover { color: var(--ink); }
+.row summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.details { display: grid; gap: 2px; margin-top: 3px; padding-inline-start: 14px; overflow-wrap: anywhere; line-height: 18px; }
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  .row[data-active] summary span {
+    background: linear-gradient(105deg, var(--muted) 40%, var(--ink) 50%, var(--muted) 60%) 100% 0 / 250% 100%;
+    background-clip: text; color: transparent; animation: retry-shimmer 2s linear infinite;
+  }
+}
+@keyframes retry-shimmer { to { background-position: -65% 0; } }

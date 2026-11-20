@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_session_resource, export_input, reference_input, file_input, directory_input, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, directory_input, scheduled_tasks, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -75,12 +75,18 @@ async function dispatch(data) {
     result = await terminal(data.payload);
   } else if (data.method === "restore_session") {
     result = await restore_session(data.payload);
+  } else if (data.method === "read_pending_interaction") {
+    result = await read_pending_interaction(data.payload);
   } else if (data.method === "read_session_resource") {
     result = await read_session_resource(data.payload);
   } else if (data.method === "prepare_submission") {
     result = await prepare_submission(data.payload);
+  } else if (data.method === "message_feedback") {
+    result = await message_feedback(data.payload);
   } else if (data.method === "automation_artifact") {
     result = await automation_artifact(data.payload);
+  } else if (data.method === "scheduled_tasks") {
+    result = await scheduled_tasks(data.payload.action, data.payload.id);
   } else if (data.method === "directory_input") {
     result = await directory_input(data.payload);
   } else if (data.method === "file_input") {

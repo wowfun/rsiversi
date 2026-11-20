@@ -40,6 +40,8 @@ test('current visibility follows upward jumps, transcript order, edge contact an
     observers.push(observer); return observer;
   });
   const rows = Array.from({length:128},(_,i)=>[String(i), {node:{hidden:false}}]);
+  owner.update([], 'one');
+  assert.equal(observers.length,0,'an empty transcript allocates no observer');
   const send = (indices,height=1,observer=observers.at(-1)) => observer.callback(indices.map(i=>({target:rows[i][1].node,intersectionRect:{height}})));
   owner.update(rows,'one'); send([120,121,122,123,124,125]);
   assert.deepEqual(owner.last(4).map(([key])=>key), ['122','123','124','125']);

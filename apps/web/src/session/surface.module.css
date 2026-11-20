@@ -60,6 +60,51 @@
 :global(.pending:empty):where(.scope, .scope *) {
   display: none;
 }
+.approval ~ :global(.composer) { display: none; }
+.approval {
+  width: min(calc(100% - 24px), var(--conversation-width, 880px));
+  margin: 4px auto 12px;
+  border: 1px solid var(--dsw-alias-state-warn-secondary);
+  border-radius: var(--dsw-radius-xl);
+  box-shadow: var(--dsw-shadow-lv2);
+  overflow: hidden;
+  background: var(--secondary-surface);
+}
+.approval :global(.resource-content) { padding: 0; }
+.approval :global(.approval-review) { display: flex; flex-direction: column; gap: 0; }
+.approval :global(.approval-status) {
+  padding: 8px 16px;
+  color: var(--warning);
+  background: var(--warning-bg);
+  font-size: 12px;
+}
+.approval :global(.approval-scroll) {
+  max-height: min(24dvh, 180px);
+  padding: 10px 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  line-height: 1.45;
+}
+.approval :global(.approval-scroll h2) { font-size: 15px; font-weight: 500; line-height: 24px; margin: 0; }
+.approval :global(.approval-scroll p), .approval :global(.approval-scroll pre) { margin: 4px 0; }
+.approval :global(.approval-scroll h3) { font-size: 13px; margin: 6px 0 2px; }
+.approval :global(.approval-raw) { margin: 4px 0; }
+.approval :global(.approval-review .actions) { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 8px 16px 14px; }
+.approval :global(.approval-review .actions .quiet) { order: -1; margin-inline-end: auto; }
+.approval :global(.question-review) { display: flex; flex-direction: column; gap: 0; }
+.approval:has(> :global(.ordinary-question)) { border-color: var(--line); }
+.approval :global(.question-header) { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 12px 0; }
+.approval :global(.question-header:has(h2)) { padding-bottom: 8px; }
+.approval :global(.question-header h2) { min-width: 0; margin: 0 auto 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 15px; }
+.approval :global(.question-header button) { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: var(--muted); }
+.approval :global(.question-scroll) { overflow: auto; max-height: min(48dvh, 380px); padding: 12px 16px; }
+.approval :global(.question-scroll h2) { margin: 0 0 6px; font-size: 15px; line-height: 24px; }
+.approval :global(.question-choice) { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+.approval :global(.question-choice input) { accent-color: var(--dsw-alias-state-business-primary); }
+.approval :global(.question-scroll textarea) { display: block; width: 100%; margin-block-start: 6px; }
+.approval :global(.question-scroll pre) { white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval :global(.question-review .actions) { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 8px 16px 14px; }
+.approval :global(.question-review .actions > span) { margin-inline-end: auto; }
 :global(.pending button):where(.scope, .scope *) {
   background: var(--warning-bg);
   border-color: var(--line);
@@ -487,15 +532,32 @@
   }
 }
 :global(.queue-heading):where(.scope, .scope *) {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+}
+:global(.queue-heading > svg:last-child):where(.scope, .scope *) {
+  margin-inline-start: auto;
+}
+:global(.queue-list > ul):where(.scope, .scope *) {
+  max-height: 180px;
+  overflow-y: auto;
+  list-style: none;
+  padding: 0;
+  margin: 0;
 }
 :global(.queue-row):where(.scope, .scope *) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 0;
+  padding: 4px 12px;
 }
 :global(.queue-summary):where(.scope, .scope *) {
   flex: 1;
@@ -506,8 +568,39 @@
   font-size: 12px;
   color: var(--muted);
 }
+:global(.queue-actions:not([hidden])):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 :global(.queue-row button):where(.scope, .scope *) {
-  white-space: nowrap;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+}
+:global(.queue-row button:hover):where(.scope, .scope *) {
+  background: var(--secondary-surface);
+  color: var(--ink);
+}
+:global(.queue-row textarea):where(.scope, .scope *) {
+  flex: 1;
+  min-width: 0;
+  max-height: 8lh;
+  field-sizing: content;
+  resize: none;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
 }
 :global(.queue-editor):where(.scope, .scope *) {
   width: min(680px, calc(100vw - 32px));

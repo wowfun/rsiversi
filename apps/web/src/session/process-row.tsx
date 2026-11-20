@@ -3,6 +3,7 @@ import {
   IconSearchOutlineRegular, IconThinkOutlineRegular, IconChevronRightOutlineRegular,
 } from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import type {TranscriptBlock} from '../presentation-types.ts';
+import {reasoningPreview} from '../../turn-presentation.js';
 
 function toolPresentation(name: string) {
   switch (name) {
@@ -23,11 +24,11 @@ function toolPresentation(name: string) {
   }
 }
 
-export function ProcessTitle({block, open, flat, preview:showPreview, toggle}: {block: TranscriptBlock; open: boolean; flat:boolean; preview:boolean; toggle(): void}) {
+export function ProcessTitle({block, open, flat, preview:showPreview, running, toggle}: {block: TranscriptBlock; open: boolean; flat:boolean; preview:boolean; running:boolean; toggle(): void}) {
   const reasoning = block.role === 'reasoning';
   const {label, Icon} = reasoning ? {label: 'Think', Icon: IconThinkOutlineRegular}
     : toolPresentation(block.tool?.name ?? block.title);
-  const preview = reasoning ? block.text.split(/\r?\n/).find(line=>line.trim())?.replaceAll('**','')
+  const preview = reasoning ? !open && (running || showPreview) && reasoningPreview(block.text,running)
     : block.tool?.argument_summary;
   const phase = block.tool?.phase;
   const failure = phase === 'rejected' ? 'Rejected'
@@ -37,7 +38,7 @@ export function ProcessTitle({block, open, flat, preview:showPreview, toggle}: {
     title={block.title} onClick={flat ? undefined : toggle}>
     <span className="process-leading" aria-hidden="true"><Icon size={14}/>{!flat && <IconChevronRightOutlineRegular className="process-chevron" size={14}/>}</span>
     <span className="process-label">{label}</span>
-    {showPreview && !!preview && <><span className="process-separator" aria-hidden="true"/><span className="process-preview">{preview}</span></>}
+    {!!preview && (reasoning || showPreview) && <><span className="process-separator" aria-hidden="true"/><span className="process-preview">{preview}</span></>}
     {failure && <span className="process-failure">{failure}</span>}
   </Title>;
 }

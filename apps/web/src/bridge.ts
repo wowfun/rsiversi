@@ -16,9 +16,9 @@ export interface AttentionEntry {position:AttentionPosition;status:'waiting'|'ru
 export type WorkspaceFilter = {kind:'all'} | {kind:'registered';id:string} | {kind:'unregistered'}
 export interface NavigationGroup {ticket:string;workspace:WorkspaceFilter;entries:NavigationEntry[];more:boolean;scanned:number;continued:boolean;stale:boolean}
 export type PinnedEntry = {status:'available';entry:NavigationEntry} | {status:'missing';session:string;metadata:NavigationEntry['metadata']}
-export interface Navigation { order?:ManualOrder|null;newer_activity:boolean;metadata_revision:string; ticket: string; filter: {query: string; archived: boolean|null; workspace: WorkspaceFilter}; pins:PinnedEntry[]; groups:Record<string,NavigationGroup>; entries: NavigationEntry[]; more: boolean; scanned: number; diagnostic: string | null; attention?:{entries:AttentionEntry[];truncated:boolean};attention_notice?:string }
+export interface Navigation { order?:ManualOrder|null;newer_activity:boolean;metadata_revision:string; ticket: string; filter: {query: string; archived: boolean|null; workspace: WorkspaceFilter}; pins:PinnedEntry[]; groups:Record<string,NavigationGroup>; entries: NavigationEntry[]; more: boolean; continued:boolean; scanned: number; diagnostic: string | null; attention?:{entries:AttentionEntry[];truncated:boolean};attention_notice?:string }
 export interface Provider { provider: 'deepseek' | 'openai' | 'openai-compatible'; config: Record<string, unknown> }
-export interface Setup { discovery?:{request:{provider:string;endpoint:string;slot:string};models:{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]}|null; ticket: string; allowed: boolean; credentials_available: boolean; providers_writable: boolean; settings_writable: boolean; agent: {default_model?: Model; reasoning_effort?: string | null;sandbox:import('./presentation-types.ts').SandboxMode} | null; default_model_description?: {model: Model; profile: {reasoning_efforts: {supported: string[]; default?: string | null}}} | null; presets: {default?: string} | null; providers: {desired_revision: string; applied_revision: string; applying: boolean; diagnostic: string | null; deployments: Provider[]} | null; credential?: {provider: string; slot: string; status: {editable: boolean; availability: {kind: 'configured'|'missing'|'unavailable'; source?: unknown}}}; diagnostic: string | null; receipts: {operation: string; outcome: string; message: string}[] }
+export interface Setup { discovery?:{request:{provider:string;endpoint:string;slot:string};models:{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]}|null; ticket: string; allowed: boolean; credentials_available: boolean; providers_writable: boolean; settings_writable: boolean; agent: {default_model?: Model; default_reasoning_effort?: string | null;sandbox:import('./presentation-types.ts').SandboxMode} | null; default_model_description?: {model: Model; profile: {reasoning_efforts: {supported: string[]; default?: string | null}}} | null; presets: {default?: string} | null; providers: {desired_revision: string; applied_revision: string; applying: boolean; diagnostic: string | null; deployments: Provider[]} | null; credential?: {provider: string; slot: string; status: {editable: boolean; availability: {kind: 'configured'|'missing'|'unavailable'; source?: unknown}}}; diagnostic: string | null; receipts: {operation: string; outcome: string; message: string}[] }
 import type {Surface, ExternalSnapshot, MediaLimits, SettingsCatalog} from './presentation-types.ts'
 import type {PanelEntry} from './resource-hosts.ts'
 import type {SettingsProjection} from './runtime/settings-draft.js'
@@ -26,11 +26,12 @@ export interface McpCredentialTarget {server:string;reference:{owner:string;slot
 export interface McpServer {id:string;enabled:boolean;transport:'http'|'stdio'|'ssh_stdio';credential:{owner:string;slot:string}|null;epoch:string;last_verified_sha256:string|null;ready:boolean;error:string|null;tools:{name:string;selected:boolean}[]}
 export interface McpStatus {settings_pending:boolean;fresh_ready:boolean;fresh_error:string|null;servers:McpServer[]}
 export interface PluginsView {actions:string[];mcp_ssh?:import('./mcp-ssh.tsx').McpSshView;leaves?:LeafView;ssh?:SshView;target:{kind:string};guidance:string[];exa_available:boolean;exa_credential:{availability:{kind:string};editable:boolean}|null;exa_notice:string|null;mcp_available:boolean;mcp:McpStatus|null;mcp_notice:string|null;mcp_credential:{target:McpCredentialTarget;availability:{kind:string};editable:boolean}|null;ticket:string;diagnostic:string|null;page:{context:{target:{kind:string};availability:string;source_digest:string|null;preset_source:string|null};desired_revision:string;observed_revision:string;health:string|null;watcher:string|null;offset:number;total:number;next_offset:number|null;plugins:{instance:string;desired_plugin:string|null;enabled:boolean;origin:string;diagnostics:string[];observed:{plugin:string;state:string}|null}[]}|null}
+export interface AgentPreset {id:string;name:string|null;description:string|null;is_default:boolean;broken:string|null}
 export interface WorkspaceRecord {id:string;coordinates:Coordinates;name?:string|null;created_at_ms?:number|null}
 export interface View {
   media_limits:MediaLimits;has_media:boolean;panels:PanelEntry[];
   settings:SettingsProjection|null;settings_catalog:SettingsCatalog|null;settings_revision:string;
-  notice?:string; preferences?:{submit_key?:string}; composer_actions?:Record<string,unknown>; automation?:AutomationView|null; appearance?:{theme:"system"|"light"|"dark";content_font_size:number};preference_error?:string; external_catalog?:{endpoints:{id:string;enabled:boolean}[];conversations:ExternalSnapshot[];more:boolean};plugins?: PluginsView; application_surfaces: {bundle:string;title:string;reference:{name:string;[key:string]:unknown}}[]; surfaces: Record<string, Surface | null>; catalog: {workspaces: WorkspaceRecord[]; workspaces_more: boolean; workspace_order_seed:{kind:'available';records:WorkspaceRecord[]}|{kind:'too_large'}|null; models: Model[]; models_more: boolean}; navigation?: Navigation; setup?: Setup; has_remote_ui: boolean }
+  notice?:string; preferences?:{submit_key?:string}; composer_actions?:Record<string,unknown>; automation?:AutomationView|null; appearance?:{theme:"system"|"light"|"dark";content_font_size:number};preference_error?:string; external_catalog?:{endpoints:{id:string;enabled:boolean}[];conversations:ExternalSnapshot[];more:boolean};plugins?: PluginsView; application_surfaces: {bundle:string;title:string;reference:{name:string;[key:string]:unknown}}[]; surfaces: Record<string, Surface | null>; catalog: {presets?:{presets:AgentPreset[]};workspaces: WorkspaceRecord[]; workspaces_more: boolean; workspace_order_seed:{kind:'available';records:WorkspaceRecord[]}|{kind:'too_large'}|null; models: Model[]; models_more: boolean; models_at_start:boolean}; navigation?: Navigation; setup?: Setup; has_remote_ui: boolean }
 export function observable<T>(initial: T) {
   let value = initial
   const listeners = new Set<() => void>()
@@ -41,6 +42,56 @@ export const notices = observable({transient: '', storage: ''})
 export const setNotice = (message: string) => notices.set(updateNotice(notices.getSnapshot(), 'transient', message))
 export const setStorageNotice = (message: string) => notices.set(updateNotice(notices.getSnapshot(), 'storage', message))
 export const selection = observable('main')
+export const compactNavigation = observable<'drawer' | 'column' | undefined>(undefined)
+export function dismissNavigationDrawer() {
+  if (compactNavigation.getSnapshot() === 'drawer') compactNavigation.set(undefined)
+}
+export interface ScheduledGroup {position:{session_id:string};archived:boolean;exhausted:boolean;executing?:string;reminders:import('./session/scheduled-tasks.tsx').Reminder[]}
+type CatalogUpdate = {kind:'page';index:number;sessions:ScheduledGroup[]}|{kind:'complete';pages:number}
+interface CatalogView {groups?:ScheduledGroup[];error?:string}
+export const scheduleCatalog = observable<CatalogView | undefined>(undefined)
+export const catalogVisible = () => scheduleCatalog.getSnapshot() !== undefined
+let catalogId = 0
+let catalogOpen = false
+
+function stopCatalogObservation() {
+  if (catalogOpen) {
+    catalogOpen = false;
+    void actions?.call("scheduled_tasks",{action:"close",id:catalogId}).catch(() => {});
+  }
+}
+export function closeScheduleCatalog() {
+  stopCatalogObservation();
+  scheduleCatalog.set(undefined);
+}
+
+export async function loadScheduleCatalog() {
+  const id = ++catalogId;
+  catalogOpen = true;
+  scheduleCatalog.set({});
+  try {
+    if (!actions) throw new Error("Application is starting");
+    const pages: ScheduledGroup[][] = [];
+    let action = "open";
+    while (catalogOpen && id === catalogId) {
+      const value = await actions.call("scheduled_tasks",{action,id});
+      if (!catalogOpen || id !== catalogId) return;
+      if (!value) throw new Error("Task catalog connection closed");
+      const update: CatalogUpdate = JSON.parse(value as string);
+      if (update.kind === "page") pages[update.index] = update.sessions;
+      else {
+        pages.length = update.pages;
+        scheduleCatalog.set({groups:pages.flat()});
+      }
+      action = "next";
+    }
+  } catch (reason) {
+    if (catalogOpen && id === catalogId) {
+      stopCatalogObservation();
+      scheduleCatalog.set({error: reason instanceof Error ? reason.message : String(reason)});
+    }
+  }
+}
 export type SettingsSection='models'|'appearance'|'plugins'|'advanced'
 export const settingsPanel=observable<SettingsSection|undefined>(undefined)
 export const advancedSettings=observable<string|undefined>(undefined)
@@ -55,7 +106,7 @@ export const publish = source.set
 export const selectSurface = selection.set
 type Command = Record<string, unknown>
 export type {SetupBinding} from './runtime/setup-binding.ts'
-interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
+interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command, startingText?: string): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
@@ -64,10 +115,15 @@ export const input = {
   restoreDrafts() { return actions?.restoreDrafts() ?? Promise.reject(new Error('Application is starting')) },
   resourceOwner() { return actions?.resources() },
   dismissSettings() { actions?.dismissSettings();settingsPanel.set(undefined) },
+  async messageFeedback(pane: string, generation: string, message: string, action: unknown) {
+    if (!actions) throw new Error('Application is starting');
+    const response = await actions.call("message_feedback", JSON.stringify({pane,generation,message,action})) as string;
+    return JSON.parse(response) as {conflict:boolean;current:{version:string;rating:'positive'|'negative'}|null};
+  },
   automationArtifact(value: unknown): Promise<string> { return actions ? actions.call("automation_artifact",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   directory(value: unknown): Promise<string> { return actions ? actions.call("directory_input",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   command(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.command(value) },
-  open(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.open(value) },
+  async open(value: Command, startingText?: string) { if (!actions) throw new Error('Application is starting'); const result = await actions.open(value, startingText); closeScheduleCatalog(); dismissNavigationDrawer(); return result },
   select(key: string) { actions?.select(key) },
   close(key: string) { return actions?.closeSurface(key) ?? Promise.reject(new Error('Application is starting')) },
   add(key: string) { return actions?.addSurface(key) ?? Promise.reject(new Error('Application is starting')) },

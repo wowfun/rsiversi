@@ -14,12 +14,15 @@ export interface SessionProjections {
     queue_slot: { id: string };
     source_kind: string;
     delivery_label: string;
+    editable: boolean;
     message_id: string;
     read_label: string;
     withdraw_label?: string;
     convert_label?: string;
   }[];
-  pending?: { kind: string; title: string; owner: string; id: string }[];
+  pending?: { kind: string; title: string; owner: string; id: string;
+    review?: import("../details/model.ts").ObservedRequest;
+  }[] | null;
   commands?: {
     revision: { kind: string };
     commands: (ComposerCommand & {description:string;draft_safe:boolean})[];
@@ -30,7 +33,7 @@ export interface SessionProjections {
     outcome: { kind: string; revision?: string; control_seq?: string };
   };
   projections?: {
-    cursor: { kind: string };
+    cursor: { kind: string; fact_seq?: number };
     generation_rejection?: string | null;
     generation_rebuilding?: boolean;
     entries: {

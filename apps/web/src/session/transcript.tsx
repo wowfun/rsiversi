@@ -1,13 +1,15 @@
 import {DocumentContributions, DocumentTranscript} from "../document-plugins.tsx";
-import {IconCopyOutlineRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
-import {writeClipboard} from "../../mounts.js";
+import {IconApiOutlineRegular, IconClockOutlineRegular, IconContextInjectionOutlineRegular, IconChevronDownOutlineRegular, IconChevronRightOutlineRegular, IconGoalOutlineRegular, IconPaperPlaneOutlineRegular, IconUsersOutlineRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
+import {MessageFeedback} from './message-feedback.tsx';
+import {CopyButton} from "./copy-button.tsx";
 import {messageClock, elapsedLabel} from '../../message-metrics.js';
-import {MessageUsage, type TokenUsage} from './metrics.tsx';
+import {MessageUsage} from './metrics.tsx';
 import {ProcessTitle, RunningStatus} from './process-row.tsx';
 import {
   PureComponent,
   Fragment,
   memo,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -24,12 +26,14 @@ import { run } from "../bridge.ts";
 import { closeDisclosure } from "../../disclosure.js";
 import { Markdown } from "./markdown.tsx";
 import {ForkTurn} from './fork.tsx';
+import {CreatedTaskCards} from './scheduled-tasks.tsx';
+import {ModelRetryRow} from './model-retry.tsx';
+import {Trajectory, type TrajectoryMemory} from './trajectory.tsx';
 
-import type {TranscriptBlock, TranscriptView} from '../presentation-types.ts';
+import type {TranscriptBlock, TranscriptTurn, TranscriptView} from '../presentation-types.ts';
 export interface MessageHost {
   node: HTMLElement;
   inline: HTMLElement;
-  text: HTMLElement;
   sourceKey: string;
 }
 export interface TranscriptOwner {
@@ -37,6 +41,7 @@ export interface TranscriptOwner {
   readingSummary?: boolean;
   setReadingSummary(value: boolean): void;
   action(action: string, fields?: Record<string, unknown>): Promise<unknown>;
+  renderTranscript?(transcript: TranscriptView): void;
 }
 export interface InlineCard {
   model?: unknown;
@@ -44,19 +49,114 @@ export interface InlineCard {
   error?: string;
 }
 interface Props {
+  suspended?: boolean;
+  pane?: string;
   inline?: Record<string, InlineCard>;
   owner: TranscriptOwner;
   transcript: TranscriptView;
   generation?: string;
   mode: string;
+  trajectory?: boolean;
+  earlier?: boolean;
   cards: boolean;
   register: (node: HTMLElement | null) => void;
 }
 interface State {
   generation?: string;
   expanded: Set<string>;
+  trajectory: TrajectoryMemory;
+}
+const triggerIcons = {
+  schedule:IconClockOutlineRegular, goal:IconGoalOutlineRegular, agent:IconPaperPlaneOutlineRegular,
+  completion:IconUsersOutlineRegular, request:IconContextInjectionOutlineRegular,
+};
+function TurnTrigger({block,kind,time,open,toggle}: {
+  block:TranscriptBlock;kind:NonNullable<TranscriptBlock['trigger']>;time:ReactNode;open:boolean;toggle:()=>void;
+}) {
+  const bodyId = useId();
+  const Icon = triggerIcons[kind];
+  return <><button className="trigger-header" type="button" aria-expanded={open} aria-controls={open?bodyId:undefined} onClick={toggle}>
+    <Icon size={14}/><span>{block.title}</span>{time}<IconChevronDownOutlineRegular size={12}/>
+  </button>{open && <div id={bodyId} className="trigger-body">
+    <p>This notification triggered this response.</p>
+    <DocumentTranscript block={block}><div className="message-text">{block.text}</div></DocumentTranscript>
+  </div>}</>;
 }
 type Position = ReturnType<typeof readingPosition>;
+
+function EarlierHistory({owner}: {owner:TranscriptOwner}) {
+  const [loading,setLoading]=useState(false);
+  async function load(){
+    setLoading(true);
+    await run(()=>owner.action('history',{}));
+    setLoading(false);
+  }
+  return <div className="history-edge"><button type="button" className="quiet" disabled={loading} onClick={()=>void load()}>
+    {loading?'Loading earlier…':'Load earlier'}
+  </button></div>;
+}
+
+function DisclosureHeader({label,caption,icon,open,toggle}: {
+  label:string; caption:string; icon:ReactNode; open:boolean; toggle?:()=>void;
+}) {
+  return <button className="compaction-toggle" type="button" disabled={!toggle}
+      aria-expanded={toggle ? open : undefined} onClick={toggle}>
+      <span className="compaction-icon" aria-hidden="true">{icon}
+        {open ? <IconChevronDownOutlineRegular/> : <IconChevronRightOutlineRegular/>}</span>
+      <span>{label}</span><span className="compaction-separator" aria-hidden="true"/>
+      <span className="compaction-caption">{caption}</span>
+    </button>;
+}
+
+function CompactionRow({block}: {block: TranscriptBlock}) {
+  const [expanded, setExpanded] = useState(false);
+  const expandable = block.text.length > 0;
+  const open = expandable && expanded;
+  return <article className="compaction-row">
+    <DisclosureHeader label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
+      open={open} toggle={expandable ? ()=>setExpanded(value=>!value) : undefined}/>
+    {open && <div className="compaction-summary markdown">
+      {block.markdown ? <Markdown events={block.markdown}/> : block.text}
+      {block.clipped && <p className="omitted">Text shortened in this view.</p>}
+    </div>}
+  </article>;
+}
+
+function SourceMenu({block, cards, mode, action}: {
+  block: TranscriptBlock; cards: boolean; mode: string;
+  action: (label: string, name: string, fields: Record<string, unknown>) => ReactNode;
+}) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  return <details open={mode === 'verbose' || undefined} className="source-menu" onToggle={event=>setSourcesOpen(event.currentTarget.open)}>
+    <summary aria-label="Message options">···</summary>
+    {(sourcesOpen || mode === 'verbose') && <div className="actions source-actions">
+      {cards && action("Card details", "ui_block", { key: block.key })}
+      {block.request_intent_seq && <>
+        {action("Tool names and changes", "inspect_source", {source: {seq: block.request_intent_seq, field: {kind: "model_tool_summary"}}})}
+        {action("Full tool schemas and choice", "inspect_source", {source: {seq: block.request_intent_seq, field: {kind: "model_tool_schemas"}}})}
+      </>}
+      {block.sources > 0 &&
+        action("Inspect sources", "inspect_block", { key: block.key })}
+      {block.tool && (
+        <>
+          {(["arguments", "result", "rejection"] as const).map((field) =>
+            block.tool?.[field] ? (
+              <Fragment key={field}>
+                {action(`Inspect ${field}`, "inspect_source", {
+                  source: block.tool[field],
+                })}
+              </Fragment>
+            ) : null,
+          )}
+          {!block.tool.intent_present &&
+            block.tool.phase !== "rejected" && (
+              <span className="hint">Intent not loaded</span>
+            )}
+        </>
+      )}
+    </div>}
+  </details>;
+}
 
 const Message = memo(function Message({
   block,
@@ -68,7 +168,8 @@ const Message = memo(function Message({
   card,
   streaming,
   timestamp,
-  usage,
+  turnAssistant,
+  revealActions,
 }: {
   block: TranscriptBlock;
   owner: TranscriptOwner;
@@ -79,42 +180,41 @@ const Message = memo(function Message({
   card?: InlineCard;
   streaming: boolean;
   timestamp?: number;
-  usage?: TokenUsage | null;
+  turnAssistant: boolean;
+  revealActions: boolean;
 }) {
   const clock = messageClock(timestamp);
   const time = clock && <time className="message-clock" dateTime={clock.iso} title={clock.title}>{clock.label}</time>;
   const article = useRef<HTMLElement>(null),
-    inline = useRef<HTMLDivElement>(null),
-    body = useRef<HTMLDivElement>(null),
-    menu = useRef<HTMLDetailsElement>(null);
+    inline = useRef<HTMLDivElement>(null);
   const [summary, setSummary] = useState(false);
+  const context = block.role === 'context';
+  const foldable = block.role === "tool" || block.role === "reasoning";
+  const showHeader = (!(context || block.trigger) || summary) && (!hidden || !!block.external);
+  const showBody = showHeader && (!foldable || summary || expanded);
+  const sources = !!(cards || block.sources || block.tool || block.request_intent_seq);
   useLayoutEffect(() => {
     const transcript = article.current?.closest<HTMLElement>('.transcript');
     if (transcript && owner.readingSummary !== awayFromBottom(transcript)) owner.setReadingSummary(awayFromBottom(transcript));
   }, [summary]);
-  const [copiedText, setCopied] = useState<string>();
-  const copied = copiedText === block.text;
-  const sourceKey = JSON.stringify([
+  const sourceKey = cards ? JSON.stringify([
     block.tool,
     block.external,
     block.sources,
-    cards,
-  ]);
+  ]) : '';
+  const hasCardHost = cards || !!card;
   useLayoutEffect(() => {
+    if (!hasCardHost) return;
     const entry = {
       node: article.current!,
       inline: inline.current!,
-      text: body.current ?? article.current!,
       sourceKey,
     };
     owner.blocks.set(block.key, entry);
     return () => {
       if (owner.blocks.get(block.key) === entry) owner.blocks.delete(block.key);
     };
-  }, [owner, block.key, sourceKey]);
-  useLayoutEffect(() => {
-    if (menu.current) menu.current.open = mode === "verbose";
-  }, [mode]);
+  }, [owner, block.key, sourceKey, hasCardHost]);
   const action = (
     label: string,
     name: string,
@@ -131,110 +231,101 @@ const Message = memo(function Message({
       {label}
     </button>
   );
-  const foldable = block.role === "tool" || block.role === "reasoning";
   const policy = presentationPolicy(mode);
   const preview = streaming ? policy.liveDetail : block.role !== 'reasoning' || policy.reasoningPreview;
   return (
     <article
       ref={article}
-      className={`message ${block.role}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
+      data-actions-reveal={revealActions ? 'hover' : undefined}
+      className={`message ${block.role}${block.trigger ? " turn-trigger" : ""}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
       hidden={hidden && !block.external}
     >
-      <DocumentTranscript block={block}>{foldable ? (
-         <ProcessTitle block={block} open={summary || expanded} flat={expanded} preview={preview} toggle={() => setSummary(value => !value)}/>
-      ) : (
-        <p className="message-title">{block.title}</p>
-      )}
-      <div
-        ref={body}
+      {context && <DisclosureHeader label="Context injection" caption={block.title} icon={<IconContextInjectionOutlineRegular/>}
+        open={summary} toggle={()=>setSummary(value=>!value)}/>}
+      {block.trigger && <TurnTrigger block={block} kind={block.trigger} time={time} open={summary} toggle={()=>setSummary(value=>!value)}/>}
+      {showHeader && !block.trigger && <DocumentTranscript block={block}>{foldable ? (
+         <ProcessTitle block={block} open={summary || expanded} flat={expanded} preview={preview} running={streaming} toggle={() => setSummary(value => !value)}/>
+      ) : !context && <p className="message-title">{block.title}</p>}
+      {showBody && <div
         className={`message-text${block.markdown ? " markdown" : ""}`}
       >
         {block.markdown ? <Markdown events={block.markdown} streaming={streaming} /> : block.text}
-      </div></DocumentTranscript>
-      <p className="omitted" hidden={!block.clipped}>
+      </div>}</DocumentTranscript>}
+      {showBody && block.clipped && <p className="omitted">
         Text shortened in this view.
-      </p>
+      </p>}
       {card && (!card.model || !card.ticket) && (
         <p className="inline-status" role="status">
           {card.error ?? "Loading card…"}
         </p>
       )}
-      <div
+      {hasCardHost && <div
         ref={inline}
         className="inline-card"
         hidden={!card?.model || !card.ticket}
-      />
+      />}
       {!!block.external &&
         action("Open external conversation", "delegation_open", {
           key: block.key,
         })}
-      <div className="message-actions">
+      {showBody && (sources || !turnAssistant && !!(time || block.text)) && <div className="message-actions">
         {block.role === 'user' && time}
-        <button type="button" hidden={!block.text} aria-label={copied ? "Copied message" : "Copy message"} title={copied ? "Copied" : "Copy"} onClick={()=>void run(async()=>{await writeClipboard(block.text);setCopied(block.text);})}><IconCopyOutlineRegular size={16}/></button>
-      <details ref={menu} className="source-menu" hidden={!cards && !block.sources && !block.tool}>
-        <summary aria-label="Message options">···</summary>
-        <div className="actions source-actions">
-          {cards && action("Card details", "ui_block", { key: block.key })}
-          {block.sources > 0 &&
-            action("Inspect sources", "inspect_block", { key: block.key })}
-          {block.tool && (
-            <>
-              {(["arguments", "result", "rejection"] as const).map((field) =>
-                block.tool?.[field] ? (
-                  <Fragment key={field}>
-                    {action(`Inspect ${field}`, "inspect_source", {
-                      source: block.tool[field],
-                    })}
-                  </Fragment>
-                ) : null,
-              )}
-              {!block.tool.intent_present &&
-                block.tool.phase !== "rejected" && (
-                  <span className="hint">Intent not loaded</span>
-                )}
-            </>
-          )}
-        </div>
-      </details>
-      {block.role === 'assistant' && usage && <MessageUsage usage={usage}/>}
-      {block.role !== 'user' && time}
-      </div>
+        {!turnAssistant && block.text && <CopyButton text={block.text} label="Copy message"/>}
+      {sources && <SourceMenu block={block} cards={cards} mode={mode} action={action}/>}
+      {!turnAssistant && block.role !== 'user' && !block.trigger && time}
+      </div>}
     </article>
   );
 });
 
 // React's before-mutation snapshot preserves the reader's anchor across message
 // updates and turn folding. Nodes are keyed by attachment + block, never frame.
-export class Transcript extends PureComponent<Props, State, Position> {
-  state: State = { generation: this.props.generation, expanded: new Set() };
+export class Transcript extends PureComponent<Props, State, Position | undefined> {
+  state: State = { generation: this.props.generation, expanded: new Set(), trajectory:{} };
   container: HTMLDivElement | null = null;
-  preserveAnchor = false;
+  toggleHeading?: HTMLElement;
+  chatPosition: number | undefined;
+  suspendedPosition?: {generation?:string; top:number; atEnd:boolean};
   static getDerivedStateFromProps(props: Props, state: State) {
     return props.generation !== state.generation
-      ? { generation: props.generation, expanded: new Set() }
+      ? { generation: props.generation, expanded: new Set(), trajectory:{} }
       : null;
   }
   capture = (node: HTMLDivElement | null) => {
     this.container = node;
     this.props.register(node);
   };
-  getSnapshotBeforeUpdate() {
-    return readingPosition(this.container!, this.props.owner.readingSummary || this.preserveAnchor);
+  getSnapshotBeforeUpdate(previous: Props) {
+    if (this.props.suspended) {
+      if (!previous.suspended) {
+        const element = this.container!;
+        this.suspendedPosition = {generation:previous.generation,top:element.scrollTop,atEnd:!previous.trajectory && !awayFromBottom(element)};
+      }
+      return;
+    }
+    if (previous.suspended) return;
+    if (!previous.trajectory && this.props.trajectory) this.chatPosition = this.container!.scrollTop;
+    return readingPosition(this.container!, this.props.owner.readingSummary, this.toggleHeading);
   }
-  componentDidUpdate(previous: Props, _state: State, position: Position) {
+  componentDidUpdate(previous: Props, _state: State, position?: Position) {
+    if (this.props.suspended) return;
     const container = this.container!;
-    if (
-      previous.generation !== this.props.generation ||
-      (position.atEnd && container.scrollHeight !== position.previousHeight)
-    )
+    if (previous.suspended) {
+      const saved = this.suspendedPosition;
+      container.scrollTop = saved && saved.generation === this.props.generation && !saved.atEnd ? saved.top : container.scrollHeight;
+      this.suspendedPosition = undefined;
+    } else if (previous.trajectory !== this.props.trajectory) {
+      this.props.owner.renderTranscript?.(this.props.transcript);
+      container.scrollTop = this.props.trajectory ? 0 : this.chatPosition ?? container.scrollHeight;
+    } else if (previous.generation !== this.props.generation || (!this.props.trajectory && position?.atEnd))
       container.scrollTop = container.scrollHeight;
-    else if (!position.atEnd) restoreAnchor(container, position.anchors);
-    this.preserveAnchor = false;
+    else if (position && !position.atEnd) restoreAnchor(container, position.anchors);
+    this.toggleHeading = undefined;
     const away = awayFromBottom(container);
     if (this.props.owner.readingSummary !== away) this.props.owner.setReadingSummary(away);
   }
-  toggle = (id: string) => {
-    this.preserveAnchor = true;
+  toggle = (id: string, heading: HTMLElement) => {
+    this.toggleHeading = heading;
     this.setState((state) => {
       const expanded = new Set(state.expanded);
       if (expanded.has(id)) expanded.delete(id);
@@ -243,20 +334,36 @@ export class Transcript extends PureComponent<Props, State, Position> {
     });
   };
   render() {
-    const { owner, transcript, mode, cards, generation } = this.props;
+    const { owner, transcript, mode, cards, generation, pane } = this.props;
+    if (this.props.suspended) return <div ref={this.capture} className="transcript"/>;
+    if (this.props.trajectory)
+      return <div ref={this.capture} className="transcript trajectory" role="region" aria-label="Trajectory" tabIndex={0}>
+        <Trajectory key={generation} owner={owner} transcript={transcript} earlier={!!this.props.earlier} memory={this.state.trajectory}/>
+      </div>;
     const visibility = new Map<
         string,
-        { hidden: boolean; expanded: boolean; streaming: boolean; timestamp?: number; usage?: TokenUsage | null }
+        { hidden: boolean; expanded: boolean; streaming: boolean; timestamp?: number }
       >(),
       summaries = new Map<string, ReactNode>();
-    const completed = new Map<string,string>();
-    const keys = new Set(transcript.blocks.map((block) => block.key));
-    const replies = new Set(transcript.blocks.filter(block=>block.role === 'assistant').map(block=>block.key));
-    const processes = new Set(transcript.blocks.filter(block=>block.role === 'tool' || block.role === 'reasoning').map(block=>block.key));
+    const completed = new Map<string,TranscriptTurn>();
+    const blocks = new Map<string,TranscriptBlock>();
+    const replies = new Set<string>();
+    let hasCreatedTasks = false;
+    let latestUser: string | undefined, latestContent: string | undefined;
+    for (const block of transcript.blocks) {
+      blocks.set(block.key, block);
+      if (block.role === 'assistant') replies.add(block.key);
+      if (block.created_schedule) hasCreatedTasks = true;
+      if (block.role === 'user' && !block.trigger) latestUser = block.key;
+      if (block.role !== 'status' && block.role !== 'metadata') latestContent = block.key;
+    }
     for (const turn of Object.values(transcript.turns?.entries ?? {})) {
-      const process = turn.process.filter(key=>processes.has(key));
+      const process = turn.process.filter(key => {
+        const role = blocks.get(key)?.role;
+        return role === 'tool' || role === 'reasoning' || role === 'context';
+      });
       const Summary = process.length ? 'button' : 'div';
-      if (turn.terminal && !turn.running) completed.set(turn.terminal, turn.id);
+      if (turn.terminal && !turn.running) completed.set(turn.terminal, turn);
       const state = turnVisibility(
         turn,
         mode,
@@ -269,9 +376,9 @@ export class Transcript extends PureComponent<Props, State, Position> {
           expanded: state.expanded,
           streaming: turn.running,
           timestamp: turn.timestamps?.[key],
-          usage: (turn.answer.at(-1) ?? turn.candidate.at(-1)) === key ? turn.usage : undefined,
         });
-      const first = turn.process.find((key) => keys.has(key)) ?? (turn.terminal && turn.foldable && !turn.running ? turn.answer.find(key=>keys.has(key)) : undefined);
+      const first = turn.process.find(key => blocks.has(key))
+        ?? (turn.terminal && turn.foldable && !turn.running ? turn.answer.find(key => blocks.has(key)) : undefined);
       if (first && (!turn.running || mode === 'compact') && mode !== "verbose")
         summaries.set(
           first,
@@ -281,7 +388,7 @@ export class Transcript extends PureComponent<Props, State, Position> {
             className="turn-summary"
             data-turn-id={turn.id}
             aria-expanded={process.length ? !process.some(key=>state.hidden.has(key)) : undefined}
-            onClick={process.length ? () => this.toggle(turn.id) : undefined}
+            onClick={process.length ? event => this.toggle(turn.id,event.currentTarget) : undefined}
           >
             {turn.running ? "Working" : turn.status}
             {!turn.running && turn.elapsed_ms != null && ` in ${elapsedLabel(turn.elapsed_ms)}`}
@@ -289,20 +396,38 @@ export class Transcript extends PureComponent<Props, State, Position> {
             {turn.partial ? " · Partial history" : ""}
           </Summary>,
         );
+      for (const retry of turn.retries ?? []) {
+        const key = turn.blocks[retry.block];
+        summaries.set(key, <Fragment key={`retry:${turn.id}:${key}`}>
+          {summaries.get(key)}
+          <ModelRetryRow retry={retry}/>
+        </Fragment>);
+      }
     }
     const nodes: ReactNode[] = [];
-    if (transcript.omitted)
+    if (this.props.earlier)
+      nodes.push(<EarlierHistory key={`earlier:${generation}`} owner={owner}/>);
+    else if (transcript.omitted)
       nodes.push(
         <p key="omitted" className="omitted">
           Older content was omitted from this view. Open history to read earlier
           facts.
         </p>,
       );
-    const runningTail = transcript.blocks.filter(item=>visibility.get(item.key)?.streaming).at(-1)?.key;
+    let runningTail: string | undefined;
     for (const block of transcript.blocks) {
+      if (visibility.get(block.key)?.streaming) runningTail = block.key;
+    }
+    for (const block of transcript.blocks) {
+      if (block.role === "compaction") {
+        nodes.push(<CompactionRow key={`${generation}:${block.key}`} block={block}/>);
+        continue;
+      }
       if (summaries.has(block.key)) nodes.push(summaries.get(block.key));
       const state = visibility.get(block.key);
-      nodes.push(
+      const hidden = state?.hidden ?? false;
+      if (block.role !== 'metadata' || !state || !hidden &&
+        (mode === 'verbose' || state.expanded && !block.scheduled_retry)) nodes.push(
         <Message
           key={`${generation}:${block.key}`}
           block={block}
@@ -310,16 +435,45 @@ export class Transcript extends PureComponent<Props, State, Position> {
           mode={mode}
           cards={cards}
           card={this.props.inline?.[block.key]}
-          hidden={(state?.hidden ?? false) || (block.role === 'metadata' && !!state && !state.expanded && mode !== 'verbose')}
+          hidden={hidden}
           expanded={state?.expanded ?? false}
           streaming={state?.streaming ?? false}
           timestamp={state?.timestamp}
-          usage={state?.usage}
+          turnAssistant={!!state && block.role === 'assistant'}
+          revealActions={block.role === 'assistant' || (block.role === 'user' && !block.trigger && block.key !== latestUser)}
         />,
       );
       if (block.key === runningTail) nodes.push(<RunningStatus key={`running:${generation}`}/>);
       const terminal = completed.get(block.key);
-      if (terminal) nodes.push(<Fragment key={`tail:${generation}:${terminal}`}><DocumentContributions seat="turnTail" turn={terminal}/><ForkTurn turn={terminal} owner={owner}/></Fragment>);
+      if (terminal) {
+        const keys = terminal.closing_prose?.map(index => terminal.blocks[index]) ?? [];
+        const text = keys.map(key => blocks.get(key)!.text);
+        const last = keys.at(-1);
+        const clock = last && messageClock(terminal.timestamps?.[last]);
+        let taskCards: ReactNode;
+        if (hasCreatedTasks && pane && generation) {
+          const created = terminal.process.flatMap(key => {
+            const block = blocks.get(key);
+            return block?.created_schedule && block.tool?.result
+              ? [{key,task:block.created_schedule,seq:block.tool.result.seq}] : [];
+          });
+          created.sort((a,b)=>a.seq.length-b.seq.length || (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0));
+          if (created.length) taskCards = <CreatedTaskCards rows={created} pane={pane} generation={generation}/>;
+        }
+        nodes.push(<div className="turn-tail" key={`tail:${generation}:${terminal.id}`} data-turn-tail={terminal.id}
+          data-actions-reveal={last && last === latestContent && terminal.answer.includes(last) ? undefined : 'hover'}>
+          <DocumentContributions seat="turnTail" turn={terminal.id}/>
+          {taskCards}
+          <div className="message-actions">
+            {text.length > 0 && <CopyButton label="Copy message" text={text}/>}
+            {pane && generation && terminal.feedback_message && <MessageFeedback key={terminal.feedback_message}
+              pane={pane} generation={generation} message={terminal.feedback_message}/>}
+            <ForkTurn turn={terminal.id} owner={owner}/>
+            {terminal.usage && <MessageUsage usage={terminal.usage}/>}
+            {clock && <time className="message-clock" dateTime={clock.iso} title={clock.title}>{clock.label}</time>}
+          </div>
+        </div>);
+      }
     }
     return (
       <div

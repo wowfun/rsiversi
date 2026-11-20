@@ -1,0 +1,36 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink);
+}
+.toolbar, .detail header, .actions { display: flex; align-items: center; gap: 8px; }
+.toolbar { flex-wrap: wrap; padding: 5px 12px; border-bottom: 1px solid var(--line); }
+.root button { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
+.root button:disabled { opacity: .4; cursor: default; }
+.root button:focus-visible, .toolbar label:focus-within { outline: 2px solid var(--accent, Highlight); outline-offset: -2px; }
+.toolbar button, .actions button { border-radius: 5px; padding: 4px 8px; }
+.toolbar button[aria-pressed=true], .root button:hover:enabled { background: var(--hover); }
+.toolbar label { display: flex; align-items: center; gap: 4px; margin-left: auto; padding: 3px 6px; color: var(--muted); }
+.toolbar input { width: clamp(65px, 12vw, 160px); padding: 0; border: 0; background: none; color: var(--ink); outline: 0; font: inherit; }
+.ledger { min-height: 0; overflow: auto; flex: 1; }
+.ledger table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ledger th, .ledger td { padding: 0; text-align: left; }
+.ledger td { border-bottom: 1px solid var(--line); }
+.ledger col:first-child { width: clamp(74px, 12%, 144px); }
+.group button { width: 100%; padding: 6px 10px; display: flex; align-items: center; gap: 8px; text-align: start; }
+.group { background: var(--mist); }
+.group span { color: var(--muted); font-weight: normal; margin-left: auto; }
+.ledger .kind { padding: 4px 8px; font-size: 10px; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.record { width: 100%; text-align: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; }
+.ledger [data-selected=true] { background: var(--hover); }
+.ledger p { color: var(--muted); text-align: center; }
+.detail { border-top: 1px solid var(--line); min-height: 0; max-height: 46%; display: flex; flex-direction: column; }
+.detail header { justify-content: space-between; padding: 5px 12px; background: var(--mist); }
+.detail header button { min-width: 28px; font-size: 19px; }
+.body { overflow: auto; padding: 8px 12px; }
+.body pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.actions { flex-wrap: wrap; }
+.actions button { margin-block: 4px; border: 1px solid var(--line); }

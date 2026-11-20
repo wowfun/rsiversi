@@ -5,7 +5,6 @@ import type { SavedDraftsState } from "./saved-drafts.tsx";
 import type { ReferencePickerState } from "./reference-picker.tsx";
 import type { QueueEditorState } from "./queue-editor.tsx";
 import type { ComposerOwner } from "./composer-state.ts";
-import type { Model } from "../bridge.ts";
 import type {NativeSurface} from '../presentation-types.ts';
 import type {
   TranscriptOwner,
@@ -23,7 +22,6 @@ export interface SessionSurfaceOwner extends TranscriptOwner, ComposerOwner {
   index: string;
   kind?: "native";
   staged?: {
-    models: Model[];
     composerActions?: unknown;
     submitKey: string;
     data: NativeSurface | null;

@@ -30,6 +30,12 @@ struct Owner {
     assets: Option<Arc<crate::assets::Assets>>,
     asset_revision: Option<String>,
     encoded_offer: Option<(String, String)>,
+    catalog: Option<Arc<CatalogReader>>,
+}
+struct CatalogReader {
+    id: u32,
+    stop: tokio_util::sync::CancellationToken,
+    updates: tokio::sync::Mutex<futures_util::stream::BoxStream<'static, Result<String, String>>>,
 }
 thread_local! { static OWNER: RefCell<Owner> = RefCell::new(Owner::default()); }
 
@@ -105,7 +111,13 @@ impl AuthenticatedFactory {
                 }))
                 .await
                 .map_err(|_| MetaError::Activation("browser login task stopped".into()))?
-                .map_err(|error| MetaError::Activation(error.to_string()))?;
+                .map_err(|error| {
+                    let detail = match error {
+                        rsi_api_protocol::ApiError::Unauthorized => "Device registration was rejected. Check the receipt. To switch devices in this browser, reconnect with this browser and disconnect the current device first.".into(),
+                        error => error.to_string(),
+                    };
+                    MetaError::Activation(detail)
+                })?;
         }
         let client = BrowserClientFactory::connect_in(&mut plan, config).await?;
         let supplies = vec![
@@ -212,23 +224,24 @@ pub async fn connect(receipt: String, allow_loopback_http: bool) -> Result<Strin
     let endpoint = config.endpoint_id.as_str().to_owned();
     let diagnostic = Arc::new(Mutex::new(None));
     let (host, program) = prepare_profile(&config, token, diagnostic.clone())?;
-    let running = match host.start_program(program).await {
-        Ok(running) => Arc::new(running),
-        Err(error) => {
-            OWNER.with(|owner| owner.borrow_mut().failed = true);
-            let detail = diagnostic
-                .lock()
-                .expect("Web authentication diagnostic poisoned")
-                .take();
-            return Err(failure(
-                detail.unwrap_or_else(|| rsi_gui::display_error(error)),
-            ));
-        }
+    let startup_failure = |fallback: String| {
+        OWNER.with(|owner| owner.borrow_mut().failed = true);
+        let detail = diagnostic
+            .lock()
+            .expect("Web authentication diagnostic poisoned")
+            .take();
+        failure(detail.unwrap_or(fallback))
     };
+    let running = Arc::new(
+        host.start_program(program)
+            .await
+            .map_err(|error| startup_failure(rsi_gui::display_error(error)))?,
+    );
     let Some(app) = running.lookup_local::<GuiApplicationContract>() else {
         let _ = running.shutdown().await;
-        OWNER.with(|owner| owner.borrow_mut().failed = true);
-        return Err(failure("Web Profile did not publish its application"));
+        return Err(startup_failure(
+            "Web Profile did not publish its application".into(),
+        ));
     };
     let connection = running.lookup_local::<BrowserConnection>();
     let identity = serde_json::to_string(&serde_json::json!({"endpoint_id": endpoint,
@@ -467,6 +480,15 @@ pub async fn read_session_resource(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Reads the current request when recovering an uncertain approval decision.
+#[wasm_bindgen]
+pub async fn read_pending_interaction(source: String) -> Result<String, JsValue> {
+    application()?
+        .read_pending_interaction(&source)
+        .await
+        .map_err(failure)
+}
+
 /// Freezes input before the document persists its execution intent.
 #[wasm_bindgen]
 pub async fn prepare_submission(source: String) -> Result<String, JsValue> {
@@ -609,7 +631,7 @@ impl Drop for Waiting {
 #[wasm_bindgen]
 pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
     let app = application()?;
-    let revision = OWNER.with(|owner| {
+    let mut revision = OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         if owner.waiting {
             return Err(failure("A Web view waiter already exists"));
@@ -624,16 +646,24 @@ pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
     let mut offers = assets.changes();
     let previous_offer = OWNER.with(|owner| owner.borrow().asset_revision.clone());
     let mut changed = app.changes();
-    let offer = loop {
+    let (offer, revision, frame) = loop {
         let offer = offers.borrow_and_update().clone();
         if let Some(offer) = offer {
             let offer = offer.map_err(failure)?;
+            let current = *changed.borrow_and_update();
+            let renderer_changed = previous_offer.as_ref() != Some(&offer.revision);
             if base.is_none()
                 || base != app.frame_id()
-                || revision != Some(*changed.borrow_and_update())
-                || previous_offer.as_ref() != Some(&offer.revision)
+                || revision != Some(current)
+                || renderer_changed
             {
-                break offer;
+                if let Some(frame) = app
+                    .next_frame(base.as_deref(), renderer_changed)
+                    .map_err(failure)?
+                {
+                    break (offer, current, frame);
+                }
+                revision = Some(current);
             }
         }
         tokio::select! { biased;
@@ -642,8 +672,6 @@ pub async fn next_view(base: Option<String>) -> Result<JsValue, JsValue> {
             result = changed.changed() => result.map_err(failure)?,
         }
     };
-    let revision = *changed.borrow_and_update();
-    let frame = app.next_frame(base.as_deref()).map_err(failure)?;
     let text = std::str::from_utf8(frame.as_bytes()).map_err(failure)?;
     let result = js_sys::Array::of2(
         &JsValue::from_str(&app.frame_id().expect("encoded frame")),
@@ -685,6 +713,64 @@ pub async fn directory_input(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Opens, advances or closes the catalog held by one document generation.
+#[wasm_bindgen]
+pub async fn scheduled_tasks(action: String, id: u32) -> Result<Option<String>, JsValue> {
+    use futures_util::TryStreamExt as _;
+    let reader = OWNER.with(|owner| {
+        let mut owner = owner.borrow_mut();
+        if action == "open" {
+            let stop = tokio_util::sync::CancellationToken::new();
+            let updates = owner
+                .app
+                .as_ref()
+                .ok_or_else(|| failure("Application closed"))?
+                .scheduled_tasks(stop.clone());
+            let reader = Arc::new(CatalogReader {
+                id,
+                stop,
+                updates: tokio::sync::Mutex::new(updates),
+            });
+            if let Some(old) = owner.catalog.replace(reader) {
+                old.stop.cancel();
+            }
+        } else if action == "close" {
+            if owner.catalog.as_ref().is_some_and(|reader| reader.id == id)
+                && let Some(reader) = owner.catalog.take()
+            {
+                reader.stop.cancel();
+            }
+            return Ok(None);
+        } else if action != "next" {
+            return Err(failure("Unknown catalog request"));
+        }
+        owner
+            .catalog
+            .as_ref()
+            .filter(|reader| reader.id == id)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| failure("Catalog closed"))
+    })?;
+    let Some(reader) = reader else {
+        return Ok(None);
+    };
+    let mut updates = reader
+        .updates
+        .try_lock()
+        .map_err(|_| failure("Catalog read already pending"))?;
+    updates.try_next().await.map_err(failure)
+}
+
+/// Reads or changes feedback on a finalized assistant answer in the attached pane.
+#[wasm_bindgen]
+pub async fn message_feedback(source: String) -> Result<String, JsValue> {
+    application()?
+        .message_feedback(&source)
+        .await
+        .map_err(failure)
+}
+
 /// Reads one caller-scoped screenshot outside the shared frame stream.
 #[wasm_bindgen]
 pub async fn automation_artifact(source: String) -> Result<String, JsValue> {
@@ -710,6 +796,9 @@ pub async fn disconnect(sign_out: bool) -> Result<JsValue, JsValue> {
     let (running, config) = OWNER.with(|owner| {
         let mut owner = owner.borrow_mut();
         owner.app.take();
+        if let Some(reader) = owner.catalog.take() {
+            reader.stop.cancel();
+        }
         owner.assets.take();
         owner.asset_revision.take();
         owner.encoded_offer.take();
