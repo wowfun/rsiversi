@@ -52,6 +52,7 @@ fn capture_names(
     if fs::symlink_metadata(destination)?.is_symlink() {
         return Err("capture root cannot be a link".into());
     }
+    let destination = &destination.canonicalize()?;
     if let Some(previous) = previous.and_then(Value::as_object) {
         let retained: BTreeSet<_> = names.iter().collect();
         for name in previous.keys().filter(|n| !retained.contains(n)) {
@@ -393,6 +394,28 @@ pub(super) fn verify(root: &Path, records: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_retains_deeply_nested_fixture_payloads_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let output = root.path().join("capture");
+        let parts = [
+            "a".repeat(72),
+            "b".repeat(72),
+            "c".repeat(72),
+            "d".repeat(48),
+        ];
+        let relative = parts.join("/");
+        let file = input.join(&relative);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"fixture").unwrap();
+        let records =
+            capture_names(&input, &output, std::slice::from_ref(&relative), None).unwrap();
+        verify(&output, &records).unwrap();
+        assert_eq!(fs::read(output.join(relative)).unwrap(), b"fixture");
+    }
     #[test]
     fn oversized_source_is_refused_without_replacing_the_previous_capture() {
         let root = tempfile::tempdir().unwrap();

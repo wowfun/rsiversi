@@ -1,7 +1,8 @@
 # rsi-sandbox-local
 
 On Windows, absent a selected external wrapper, restricted pipes use native
-Low-integrity tokens and ACL grants. Activation creates no workspace grants or
+Low-integrity tokens and ACL grants. These children retain host networking.
+Activation creates no workspace grants or
 probe processes. Native API failures occur at preparation and keep their API,
 Win32 error and path; a failed preparation never yields an unconfined child.
 Workspace grants use the DSH per-workspace SID derivation and remain standing.

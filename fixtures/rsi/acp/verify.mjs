@@ -12,7 +12,7 @@ import { ClientSideConnection, ndJsonStream } from '@agentclientprotocol/sdk';
 
 const { values } = parseArgs({ options: {
   binary: { type: 'string', default: 'target/debug/rsi' },
-  output: { type: 'string' }, 'live-env': { type: 'string' },
+  output: { type: 'string' }, 'live-env': { type: 'string' }, 'foreground-host': { type: 'boolean' },
 } });
 assert(values.output, '--output is required');
 const output = resolve(values.output);
@@ -28,7 +28,7 @@ let endpoint;
 let model = 'fixture-model';
 let server;
 let requests = 0;
-let child;
+let child, host, hostExit;
 const live = !!values['live-env'];
 let profile;
 if (live) {
@@ -97,6 +97,17 @@ let phase = 'startup';
 const deadline = setTimeout(() => { child?.kill('SIGTERM'); }, live ? 180_000 : 90_000);
 const started = Date.now();
 try {
+  if (values['foreground-host']) {
+    host = spawn(resolve(values.binary), ['host','serve','--profile','fixture'], {cwd:workspace,env:environment,stdio:'ignore',windowsHide:true});
+    hostExit = once(host, 'exit');
+    const until = Date.now() + 30_000;
+    for (;;) {
+      assert(host.exitCode === null && Date.now() < until, 'foreground Service Host did not become ready');
+      const status = spawnSync(resolve(values.binary), ['host','status'], {cwd:workspace,env:environment,encoding:'utf8',windowsHide:true,timeout:3_000});
+      if (status.stdout?.startsWith('running\t')) break;
+      await new Promise(resolve => setTimeout(resolve,100));
+    }
+  }
   child = spawn(resolve(values.binary), ["run", 'test-acp'], { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe'] });
   const exit = once(child, 'exit');
   child.stderr.on('data', chunk => { if (stderr.length < 65536) stderr += chunk.toString(); });
@@ -174,6 +185,10 @@ try {
     report.ok = false;
     report.cleanup_error = String(hostStop.error?.message ?? hostStop.stderr).replaceAll(credential, '[REDACTED]');
     process.exitCode = 1;
+  }
+  if (host) {
+    if (hostStop.status !== 0) host.kill();
+    await hostExit;
   }
   server?.closeAllConnections();
   if (server) await new Promise(resolve => server.close(resolve));

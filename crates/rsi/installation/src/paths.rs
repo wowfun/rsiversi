@@ -64,7 +64,12 @@ impl HomeOverrides {
         let [config, data, state, cache, tmp] =
             std::array::from_fn(|index| match selected[index] {
                 Some(path) => normalize_path(path, cwd),
-                None => fallback(index),
+                None => fallback(index).and_then(|path| {
+                    if !path.is_absolute() {
+                        return Err(error("default home path must be absolute"));
+                    }
+                    normalize_path(&path, cwd)
+                }),
             });
         let paths = HostPaths::new(config?, data?, state?, cache?, tmp?).map_err(error)?;
         crate::receipts::validate_home_layout(&paths)?;
@@ -188,6 +193,25 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn default_roots_normalize_trailing_separators_without_creating_them() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = HomeOverrides::default()
+            .resolve_with(root.path(), |index| {
+                let mut path = root
+                    .path()
+                    .join(["config", "data", "state", "cache", "scratch"][index]);
+                path.push("");
+                Ok(path)
+            })
+            .unwrap();
+        assert_eq!(
+            paths.tmp().as_os_str(),
+            root.path().join("scratch").as_os_str()
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]

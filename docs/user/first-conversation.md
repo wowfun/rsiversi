@@ -32,9 +32,8 @@ Start with a text-only message, such as “Explain how you can help me review a
 project.” Send it and wait for the response to finish. The conversation appears
 in history; reopening it shows its saved messages.
 
-Windows currently supports conversation and native file access, but restricted
-shell commands are unavailable. A command refusal is not a model connection
-failure. See [platform limits and troubleshooting](troubleshooting.md).
+On Windows the agent can run PowerShell through a restricted pipe. Workspace
+writes depend on the selected access mode. See [Windows platform limits](troubleshooting.md).
 
 ## Leave and return
 

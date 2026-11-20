@@ -16,7 +16,10 @@ shell text or recursive creation command. This authority is distinct from worksp
 registration and from a model Tool approval.
 
 Unix resolves directory aliases to physical paths, then acquires retained
-no-follow directory handles. Enumeration and single mkdir use the shared native
+no-follow directory handles. Listings derive ordinary child paths from the
+retained parent's physical path and the entry kind captured by enumeration.
+Only a Unix symlink needs target resolution and a directory probe. Opening a
+selected child acquires its own directory authority. Enumeration and single mkdir use the shared native
 Files mechanics. Creating holds the parent handle and verifies its identity against
 the returned physical path. Replacement after a successful mkdir reports an
 unknown outcome; no rollback can safely delete that name. Entries with names or

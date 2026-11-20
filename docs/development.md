@@ -1,5 +1,10 @@
 # Development guide
 
+On Windows, clone with `git clone -c core.longpaths=true REPOSITORY DIRECTORY`.
+The repository retains writer fixtures whose paths exceed the legacy Windows
+path limit. Set `git config core.longpaths true` in an existing checkout before
+updating it; CI configures Git before its initial checkout.
+
 Use the ordinary `rsi` executable and application commands. Debug/release and
 `--watch` do not select different homes or a different runtime. From a checkout:
 

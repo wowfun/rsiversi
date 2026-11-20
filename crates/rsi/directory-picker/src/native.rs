@@ -193,7 +193,6 @@ pub(super) fn list(
     let path = path_text(&canonical)?;
     check(&stop)?;
     let directory = open_absolute_directory_no_follow(&canonical).map_err(io)?;
-    identity(&directory, &canonical)?;
     let home = home
         .and_then(|path| physical(&path, &stop).ok())
         .and_then(|path| path_text(&path).ok());
@@ -216,7 +215,6 @@ pub(super) fn list(
     for entry in directory.entries().map_err(io)? {
         check(&stop)?;
         let entry = entry.map_err(io)?;
-        check(&stop)?;
         let kind = entry.file_type().map_err(io)?;
         if !kind.is_dir() && !kind.is_symlink() {
             continue;
@@ -230,15 +228,21 @@ pub(super) fn list(
             listing.unrepresentable = true;
             continue;
         };
-        let target = match physical(&canonical.join(name), &stop) {
-            Ok(path) => path,
-            Err(Failure::Cancelled) => return Err(Failure::Cancelled),
-            Err(_) => continue,
-        };
-        check(&stop)?;
-        if !std::fs::metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+        let target = canonical.join(name);
+        #[cfg(windows)]
+        if rsi_files_native_fs::validate_absolute_path(&target).is_err() {
             continue;
         }
+        #[cfg(unix)]
+        let target = if kind.is_symlink() {
+            match physical(&target, &stop) {
+                Ok(path) if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) => path,
+                Err(Failure::Cancelled) => return Err(Failure::Cancelled),
+                _ => continue,
+            }
+        } else {
+            target
+        };
         let Ok(target) = path_text(&target) else {
             listing.unrepresentable = true;
             continue;
@@ -335,6 +339,8 @@ mod tests {
         let alias = root_path.join("alias");
         symlink(&physical, &alias).unwrap();
         symlink(physical.join("Alpha"), physical.join("linked")).unwrap();
+        std::fs::write(physical.join("ordinary-file"), b"fixture").unwrap();
+        symlink("ordinary-file", physical.join("file-link")).unwrap();
         symlink("cycle", physical.join("cycle")).unwrap();
         #[cfg(target_os = "linux")]
         std::fs::create_dir(physical.join(std::ffi::OsString::from_vec(vec![255]))).unwrap();

@@ -78,6 +78,9 @@ async fn restricted_pwsh_executes_through_sealed_tool_runtime() {
     assert_eq!(read.value["exit_code"], 7);
     assert_eq!(read.value["stdout"]["text"], "中文|FullLanguage");
     assert!(!read.enforcement.is_empty());
+    let denied = fixture.call_with_mode(json!({"command": "$ErrorActionPreference = 'Stop'; [IO.File]::WriteAllText((Join-Path (Get-Location) 'denied.txt'), 'denied')"}), SandboxMode::ReadOnly).await.unwrap();
+    assert_ne!(denied.value["exit_code"], 0);
+    assert!(!fixture.workspace.path().join("denied.txt").exists());
     let write = fixture.call_with_mode(json!({"command": "[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'native.txt'), '中文', [System.Text.UTF8Encoding]::new($false))"}), SandboxMode::WorkspaceWrite).await.unwrap();
     assert_eq!(write.value["exit_code"], 0);
     assert_eq!(

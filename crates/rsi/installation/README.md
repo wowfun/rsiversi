@@ -80,7 +80,9 @@ Scratch is also a protected home: no managed deletion target may contain it.
 Disposable subtrees must not overlap authored configuration subtrees, even when
 their home roots alias. Independent shared parents remain valid. Selected home
 overrides are resolved before defaults; unused environment defaults cannot reject
-an explicit root.
+an explicit root. Both selected defaults and explicit paths are lexically normalized
+before native layout admission, including OS scratch paths with trailing separators.
+Default roots must already be absolute.
 Reset/import receipt format 2 binds config, data and state authorities and records
 the owning home of every entry. Reset-state also archives data/media, preserving
 data/credentials and data/packages. Every distinct authority records the intent

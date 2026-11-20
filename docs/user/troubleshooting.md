@@ -30,9 +30,11 @@ reporting a problem; remove API keys, launch tickets and device tokens.
 Web, TUI, Desktop and ACP share the resident [Service Host](../../crates/rsi/core/README.md).
 The Web directory browser is unavailable; type the workspace path.
 
-Restricted shell execution is unavailable. The AppContainer feasibility probe is
-separate from the shipped Sandbox backend; full-access execution is not a substitute
-for a successful sandbox check. Workspace review requires a strong source reader and
+The standard agent can run restricted PowerShell commands through pipes. In
+workspace-write mode the sandbox permits writes in the selected workspace
+subject to its existing ACLs. Read-only mode denies those writes. These modes
+use a restricted token and retain host networking. Restricted interactive PTY
+execution is unavailable. Workspace review requires a strong source reader and
 is unavailable on Windows.
 
 Manual Web terminals use native PowerShell through ConPTY with the current user's

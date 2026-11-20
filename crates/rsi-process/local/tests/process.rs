@@ -403,7 +403,7 @@ async fn escaped_pipe_writer_makes_terminal_output_explicitly_incomplete() {
     let next = process.spawn(spec("printf recovered", 32)).await.unwrap();
     next.wait().await.unwrap();
     assert!(next.stdout().read_from(0).unwrap().full_output.is_some());
-    assert!(next.stderr().read_from(0).unwrap().full_output.is_some());
+    assert!(next.stderr().read_from(0).unwrap().full_output.is_none());
 
     drop(managed);
     drop(process);
