@@ -1089,6 +1089,141 @@ impl Drop for TerminalClient {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_compact_reports_protected_history_without_a_model_turn() {
+    let (endpoint, provider) = provider().await;
+    let fixture = CliFixture::new(&endpoint);
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-manual-compaction"]);
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"/compact\r");
+    terminal.until("No eligible history to compact").await;
+    terminal.send(b"return a short answer\r");
+    terminal.until("hello from daemon").await;
+    terminal.until_idle().await;
+    terminal.send(b"/compact\r");
+    terminal.until("No eligible history to compact").await;
+    terminal.send(b"\x10");
+    terminal.select_menu("Inspect requests").await;
+    terminal.until("fixture-model · request").await;
+    terminal.send(b"\r");
+    terminal.select_menu("Tool names and changes").await;
+    terminal.until("advertised functions").await;
+    terminal.send(b"\x1b");
+    terminal.absent("advertised functions").await;
+    terminal.send(b"/quit\r");
+    terminal.finish().await;
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_retry_wait_can_be_cancelled_and_reopened() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = CliFixture::new(&endpoint);
+    std::fs::write(
+        fixture.temporary.path().join("config/rsiversi/host-profiles/fixture/host.profile.toml"),
+        format!(r#"format = 1
+[[steps]]
+kind = "plugin"
+id = "fixture-provider"
+plugin = "rsi.ai.provider.deepseek"
+[steps.config]
+deployment = "fixture"
+protocol = "chat-completions"
+endpoint = "{endpoint}"
+credential = {{ owner = "rsi.ai.provider.deepseek", slot = "default" }}
+[steps.config.language_models.fixture-model]
+context_window_tokens = 128000
+default_output_reserve_tokens = 4096
+max_output_reserve_tokens = 16384
+"#),
+    ).unwrap();
+    let handler = {
+        let calls = calls.clone();
+        move |axum::Json(_): axum::Json<serde_json::Value>| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Response::builder().status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("content-type", "application/json").header("retry-after", "6")
+                    .body(Body::from(r#"{"error":{"message":"controlled rate limit"}}"#)).unwrap()
+            }
+        }
+    };
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/chat/completions", post(handler))).await.unwrap();
+    });
+    let session = "tui-retry-outcome";
+    TerminalClient::write_profile(&fixture, false);
+    let launch = |args: &[&str]| TerminalClient::launch_environment(&fixture, args, &["run", "test-tui"],
+        &[("DEEPSEEK_API_KEY", Some("isolated-loopback-fixture"))]);
+    let mut terminal = launch(&["--session-id", session]);
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"Exercise the retry wait\r");
+    terminal.until("retry 1 scheduled").await;
+    terminal.send(b"\x03");
+    terminal.until("retry 1 cancelled").await;
+    terminal.send(b"/quit\r");
+    terminal.finish().await;
+    let mut reopened = launch(&["--resume", session]);
+    reopened.until("retry 1 cancelled").await;
+    reopened.send(b"/quit\r");
+    reopened.finish().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_compact_refuses_busy_work_then_installs_an_eligible_prefix() {
+    let waiting = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = CliFixture::new(&format!("http://{}", listener.local_addr().unwrap()));
+    let handler = {
+        let (waiting, release, calls) = (waiting.clone(), release.clone(), calls.clone());
+        move |axum::Json(_request): axum::Json<serde_json::Value>| {
+            let (waiting, release, calls) = (waiting.clone(), release.clone(), calls.clone());
+            async move {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    waiting.notify_one();
+                    release.notified().await;
+                }
+                chat().await
+            }
+        }
+    };
+    let provider = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/chat/completions", post(handler))).await.unwrap();
+    });
+    let id = "tui-compact-busy";
+    let mut terminal = TerminalClient::start(&fixture, &["--session-id", id]);
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"hold the first reply\r");
+    tokio::time::timeout(Duration::from_secs(20), waiting.notified()).await.unwrap();
+    terminal.send(b"/compact\r");
+    terminal.until("Session is busy").await;
+    release.notify_one();
+    terminal.until("hello from daemon").await;
+    terminal.until_idle().await;
+    terminal.send(b"/quit\r");
+    terminal.finish().await;
+
+    for prompt in [&"a".repeat(70 * 1024), "keep recent history"] {
+        fixture.assert_success(&["run", "test-headless", "--resume", id, prompt]);
+    }
+    let mut terminal = TerminalClient::start(&fixture, &["--resume", id]);
+    terminal.until("Ctrl+J adds a line").await;
+    terminal.send(b"/compact\r");
+    terminal.until("Compacted conversation history").await;
+    terminal.capture();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    terminal.send(b"/quit\r");
+    terminal.finish().await;
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fullscreen_paste_submit_resize_model_menu_and_terminal_restore() {
     let (endpoint, provider) = provider().await;
     let fixture = CliFixture::new(&endpoint);

@@ -716,6 +716,21 @@ impl Transcript {
         } else {
             false
         };
+        if let SessionFactBody::ManualCompaction { command_id, .. } = fact.body() {
+            let outcome = rsi_agent_turn_protocol::CompactionOutcome::recorded(fact).expect("command fact");
+            let key = rsi_conversation::compaction_key(command_id);
+            let index = self.block_index(key, outcome.message(), Role::Status, fact.seq());
+            let block = &mut self.blocks[index];
+            if block.last <= fact.seq() {
+                block.title = outcome.message().into();
+                block.last = fact.seq();
+            }
+            block.first = block.first.min(fact.seq());
+            let request = block.request.get_or_insert_with(Default::default);
+            request.observe(fact);
+            block.layout_revision = std::sync::Arc::new(());
+            return;
+        }
         if !matches!(fact.body(), SessionFactBody::ModelAttemptSettled { .. }) {
             self.project_request(fact);
         }
@@ -890,43 +905,36 @@ impl Transcript {
     }
 
     fn project_request(&mut self, fact: &SessionFact) {
-        let (SessionFactBody::ModelIntent {
-            turn_id: turn,
-            effect_id: effect,
-            ..
-        }
-        | SessionFactBody::ModelStarted {
-            turn_id: turn,
-            effect_id: effect,
-        }
-        | SessionFactBody::ToolIntent {
-            turn_id: turn,
-            origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id: effect },
-            ..
-        }
-        | SessionFactBody::ImageOutput {
-            turn_id: turn,
-            effect_id: effect,
-            ..
-        }
-        | SessionFactBody::ModelAttemptSettled {
-            turn_id: turn,
-            effect_id: effect,
-            ..
-        }) = fact.body()
-        else {
-            return;
+        use rsi_agent_session_protocol::{LanguageAttemptFact, LanguageAttemptStage};
+        let attempt = fact.body().language_attempt();
+        let key = match (attempt, fact.body()) {
+            (
+                Some(LanguageAttemptFact {
+                    turn: Some(turn),
+                    effect,
+                    ..
+                }),
+                _,
+            ) => request_key(turn, effect),
+            (
+                _,
+                SessionFactBody::ToolIntent {
+                    turn_id,
+                    origin: rsi_agent_session_protocol::ToolOrigin::Model { effect_id },
+                    ..
+                }
+                | SessionFactBody::ImageOutput {
+                    turn_id, effect_id, ..
+                },
+            ) => {
+                let key = request_key(turn_id, effect_id);
+                if !self.blocks.iter().any(|block| block.key == key) {
+                    return;
+                }
+                key
+            }
+            _ => return,
         };
-        let key = request_key(turn, effect);
-        if !matches!(
-            fact.body(),
-            SessionFactBody::ModelIntent { .. }
-                | SessionFactBody::ModelStarted { .. }
-                | SessionFactBody::ModelAttemptSettled { .. }
-        ) && !self.blocks.iter().any(|block| block.key == key)
-        {
-            return;
-        }
         let last = self
             .blocks
             .iter()
@@ -945,7 +953,7 @@ impl Transcript {
             .any(|block| block.role == Role::Assistant && block.request_key.as_ref() == Some(&key));
         let index = self.block_index(key.clone(), "Request", Role::Metadata, fact.seq());
         let block = &mut self.blocks[index];
-        if let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body()
+        if let Some(LanguageAttemptStage::Settled(attempt, _)) = attempt.map(|m| m.stage)
             && let Some(outcome) = ProcessOutcome::from_model(attempt.terminal())
         {
             block.outcome = Some(outcome);
@@ -954,16 +962,14 @@ impl Transcript {
         let request = block.request.get_or_insert_with(Default::default);
         request.observe(fact);
         block.concise |= has_tools;
-        if let SessionFactBody::ModelAttemptSettled {
-            attempt, purpose, ..
-        } = fact.body()
+        if let Some(LanguageAttemptStage::Settled(attempt, purpose)) = attempt.map(|m| m.stage)
             && let LanguageEvent::Finished { reason, .. } = attempt.terminal()
         {
             block.concise |= *reason == rsi_ai_protocol::FinishReason::ToolCalls;
             block.completed = has_answer
                 && !block.concise
-                && *purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation;
-            if *purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation {
+                && purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation;
+            if purpose == rsi_agent_session_protocol::ModelEventPurpose::Conversation {
                 block.time_ms = Some(fact.timestamp_ms());
             }
         }
@@ -1120,6 +1126,14 @@ impl Transcript {
                 Piece::json(source(FactField::ToolValue), &result.value, 0),
             );
         }
+    }
+
+    /// Displays an unpaid command outcome in its current session window.
+    pub fn command_feedback(&mut self, command: &rsi_agent_session_protocol::DomainRequestId, outcome: rsi_agent_turn_protocol::CompactionOutcome) {
+        let key = rsi_conversation::compaction_key(command);
+        let seq = self.blocks.iter().map(|block| block.last).max().unwrap_or(0);
+        self.block_index(key, outcome.message(), Role::Status, seq);
+        self.trim(false);
     }
 
     fn block_index(&mut self, key: String, title: &str, role: Role, seq: u64) -> usize {

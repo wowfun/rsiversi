@@ -179,7 +179,7 @@ async fn native_tools_chat(
             .any(|tool| tool["function"]["name"] == name)
     );
     assert!(
-        !body["tools"]
+        body["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -205,6 +205,10 @@ async fn native_tools_chat(
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_pwsh_and_files_execute_through_owned_windows_acp() {
+    use rsi_agent_session_protocol::{SessionFactBody, SessionId};
+    use rsi_agent_store_protocol::{MAXIMUM_STORE_FACT_PAGE_BYTES, SessionStore as _};
+    use rsi_sandbox::{SandboxBackend, SandboxFileSystem, SandboxNetwork};
+
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -214,8 +218,9 @@ async fn native_pwsh_and_files_execute_through_owned_windows_acp() {
     let provider = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let fixture = CliFixture::new(&endpoint);
+    let fixture = CliFixture::with_sandbox(&endpoint, "workspace-write");
     profile(&fixture);
+    let host = fixture.serve_host().await;
     let (child, mut peer) = start(&fixture).await;
     let port = peer.handle();
     let session = request(
@@ -265,6 +270,41 @@ async fn native_pwsh_and_files_execute_through_owned_windows_acp() {
     )
     .await;
     stop(&fixture, peer, child).await;
+    fixture.assert_success(&["host", "stop"]);
+    let output = tokio::time::timeout(Duration::from_secs(15), host.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let store = rsi_agent_store_sqlite::SqliteStore::open(
+        fixture.temporary.path().join("state/rsiversi/agent"),
+    )
+    .unwrap();
+    let id = SessionId::new(session["sessionId"].as_str().unwrap()).unwrap();
+    let facts = store
+        .read_facts(&id, 0, 128, MAXIMUM_STORE_FACT_PAGE_BYTES)
+        .await
+        .unwrap();
+    let stamp = facts
+        .facts
+        .iter()
+        .find_map(|fact| match fact.body() {
+            SessionFactBody::ToolResult {
+                identity, result, ..
+            } if identity.call_id() == "native-0" => result.enforcement.first(),
+            _ => None,
+        })
+        .expect("the shell result records its selected sandbox");
+    assert_eq!(stamp.backend, SandboxBackend::WindowsAcl);
+    assert_eq!(
+        stamp.filesystem,
+        SandboxFileSystem::WindowsAclWorkspaceWrite
+    );
+    assert_eq!(stamp.network, SandboxNetwork::Host);
     provider.abort();
     let _ = provider.await;
 }

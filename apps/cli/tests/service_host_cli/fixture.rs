@@ -8,6 +8,17 @@ struct CliFixture {
 
 impl CliFixture {
     fn new(endpoint: &str) -> Self {
+        Self::with_sandbox(
+            endpoint,
+            if cfg!(windows) {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            },
+        )
+    }
+
+    fn with_sandbox(endpoint: &str, sandbox: &str) -> Self {
         let temporary = tempfile::tempdir_in(rsi_workspace_path::canonical_native_path(
             std::env::temp_dir().canonicalize().unwrap(),
         ))
@@ -26,7 +37,7 @@ impl CliFixture {
             config.join("settings.json"),
             serde_json::to_vec(&serde_json::json!({
                 "rsi.agent": {
-                    "sandbox": if cfg!(windows) { "danger-full-access" } else { "workspace-write" },
+                    "sandbox": sandbox,
                     "require_approval": cfg!(windows),
                     "default_model": {"deployment": "fixture", "model": "fixture-model"}
                 }
@@ -172,6 +183,31 @@ max_output_reserve_tokens = 16384
             .unwrap(),
         )
         .unwrap();
+    }
+
+    async fn serve_host(&self) -> tokio::process::Child {
+        let mut child = self
+            .tokio_command()
+            .args(["host", "serve", "--profile", "fixture"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !self
+                .run(&["host", "status"])
+                .stdout
+                .starts_with(b"running\t")
+            {
+                assert!(child.try_wait().unwrap().is_none());
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        child
     }
 
     fn run(&self, arguments: &[&str]) -> Output {

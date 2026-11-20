@@ -4,27 +4,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_diagnostic() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
-    let mut child = fixture
-        .tokio_command()
-        .args(["host", "serve", "--profile", "fixture"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while !fixture
-            .run(&["host", "status"])
-            .stdout
-            .starts_with(b"running\t")
-        {
-            assert!(child.try_wait().unwrap().is_none());
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let mut child = fixture.serve_host().await;
     for maximum in [3, 2] {
         reload_executor_and_keep_listener(&fixture, &mut child, maximum);
         fixture.assert_success(&["run", "devices", "list"]);

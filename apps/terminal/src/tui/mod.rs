@@ -245,6 +245,7 @@ enum Update {
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_spill::SpillPage),
     Notice(String),
+    Compaction(rsi_agent_session_protocol::DomainRequestId, rsi_agent_turn_protocol::CompactionOutcome),
     Approval(Option<rsi_approval_protocol::ApprovalRequest>),
     ApprovalDecided(
         rsi_approval_protocol::ApprovalRequest,
@@ -1356,7 +1357,12 @@ impl Client {
                         .iter()
                         .rev()
                         .filter_map(|fact| {
-                            let SessionFactBody::ModelIntent { snapshot, .. } = fact.body() else {
+                            let rsi_agent_session_protocol::LanguageAttemptStage::Prepared(
+                                snapshot,
+                                _,
+                                _,
+                            ) = fact.body().language_attempt()?.stage
+                            else {
                                 return None;
                             };
                             let effort = snapshot
@@ -1397,13 +1403,15 @@ impl Client {
                     items: [
                         ("Configuration", EvidenceSection::Configuration),
                         ("System instructions", EvidenceSection::System),
-                        ("Tools", EvidenceSection::Tools),
+                        ("Tool names and changes", EvidenceSection::Tools),
+                        ("Full tool schemas and choice", EvidenceSection::Tools),
                     ]
                     .into_iter()
                     .map(|(name, section)| {
                         (
                             name.into(),
                             Action::Evidence(rsi_session_protocol::EvidenceRead {
+                                tool_summary: name == "Tool names and changes",
                                 intent_seq: seq,
                                 section,
                                 offset: 0,
@@ -1435,7 +1443,7 @@ impl Client {
                         .first()
                         .filter(|fact| fact.seq() == seq)
                         .ok_or_else(|| error("Request source is unavailable"))?;
-                    let SessionFactBody::ModelIntent { evidence, .. } = fact.body() else {
+                    let Some(evidence) = fact.body().request_evidence() else {
                         return Err(error("Source is not a model request"));
                     };
                     let text = match evidence {
@@ -2004,7 +2012,18 @@ async fn run_inner(
                 if matches!(command, setup::Command::History(..) | setup::Command::HistoryAll(..) | setup::Command::HistoryWorkspace(..)) {
                     client.text_history = feature_api(&context).map(rsi_history_api::Client::new);
                 }
-                match command { setup::Command::Export(options) => {
+                match command {
+                    setup::Command::Compact => {
+                        let handle = client.handle.clone();
+                        client.spawn(async move {
+                            let command = rsi_agent_session_protocol::DomainRequestId::new(
+                                rsi_ui::fresh_identity("compact").map_err(error)?,
+                            ).map_err(error)?;
+                            let outcome = handle.compact(command.clone()).await.map_err(error)?;
+                            Ok(Update::Compaction(command, outcome))
+                        });
+                    }
+                    setup::Command::Export(options) => {
                     let handle = client.handle.clone();
                     if client.pending_requests() >= 8 { client.state.notice("Client request queue is busy; try /export again shortly"); }
                     else {
@@ -2202,6 +2221,7 @@ async fn run_inner(
                             if matches!(work.kind, WorkKind::History) { client.history.backfill = false; }
                             client.state.notice(problem.to_string());
                         },
+                        Ok(Update::Compaction(command, outcome)) => client.live_transcript.as_mut().unwrap_or(&mut client.state.transcript).command_feedback(&command, outcome),
                         Ok(Update::Notice(message)) => client.state.info(message),
                         Ok(Update::Approval(request)) => client.show_approval(request),
                         Ok(Update::ApprovalDecided(request, result)) => client.approval_decided(request, result, work.view_revision == client.state.view_revision),

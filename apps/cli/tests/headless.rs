@@ -1349,9 +1349,32 @@ async fn real_coding_tool_flow(read_structured_results: bool) {
             "wait_agent",
         ]
     );
+    let content = tool_message(&requests[1], "call-foreground-bash")["content"]
+        .as_str()
+        .unwrap();
+    let (body, footer) = content
+        .split_once("\n\n[Full output: ")
+        .expect("retained stdout locator");
     assert_eq!(
-        tool_message(&requests[1], "call-foreground-bash")["content"],
+        body,
         "foreground-complete\n[status: exited; exit code: 0; signal: none]"
+    );
+    let encoded = footer
+        .split_once("output_read: ")
+        .unwrap()
+        .1
+        .strip_suffix(']')
+        .unwrap();
+    let locator: serde_json::Value = serde_json::from_str(encoded).unwrap();
+    assert_eq!(locator["offset"], 0);
+    assert_eq!(locator["limit"], 65536);
+    let id = locator["id"].as_str().unwrap();
+    assert_eq!(id.len(), 97);
+    assert_eq!(id.as_bytes()[64], b'-');
+    assert!(
+        id.bytes()
+            .enumerate()
+            .all(|(i, b)| i == 64 || b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     );
     let job_id = background_job_id(&requests[2]).to_owned();
     assert!(

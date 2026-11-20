@@ -151,6 +151,7 @@ pub(super) fn show_tree_metrics(state: &mut State, read: &rsi_session_protocol::
 pub(super) fn show_evidence(state: &mut State, page: rsi_session_protocol::EvidencePage) {
     use rsi_session_protocol::{EvidencePageContent, EvidenceRead};
     match page.content {
+        EvidencePageContent::ToolSummary { .. } => state.open_detail(page.tool_summary_text().expect("tool summary")),
         EvidencePageContent::Unavailable { reason } => state.open_detail(
             match reason {
                 rsi_agent_session_protocol::EvidenceUnavailable::Budget => {
@@ -174,6 +175,7 @@ pub(super) fn show_evidence(state: &mut State, page: rsi_session_protocol::Evide
             state.open_detail(text);
             let action = |offset| {
                 Action::Evidence(EvidenceRead {
+                    tool_summary: false,
                     intent_seq: page.intent_seq,
                     section: page.section,
                     offset,

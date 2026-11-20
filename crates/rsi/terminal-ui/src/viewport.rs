@@ -4,6 +4,110 @@ use super::{
 };
 use std::collections::VecDeque;
 
+fn retry_title(transcript: &Transcript, block: &Block) -> Option<String> {
+    let request = block.request.as_ref()?;
+    let (retry, _) = request.scheduled_retry()?;
+    let reserved = super::request_key(&retry.turn, &retry.decision.effect_id);
+    let started = transcript
+        .blocks
+        .iter()
+        .find(|row| row.key == reserved)
+        .and_then(|row| row.request.as_ref())
+        .is_some_and(rsi_conversation::RequestPresentation::has_started);
+    let closed = !started && {
+        let terminal = rsi_conversation::BlockIdentity::Terminal { turn: &retry.turn }.key();
+        transcript.blocks.iter().any(|row| row.key == terminal)
+    };
+    Some(crate::terminal_text(&request.title_with_retry(
+        rsi_conversation::RetryState::observed(started, closed),
+    )))
+}
+
+#[cfg(test)]
+#[test]
+fn viewport_retry_outcome_uses_only_the_reserved_start_in_the_owning_turn() {
+    use rsi_agent_session_protocol::{
+        EffectId, ModelAttemptBuilder, ModelEventPurpose, ScheduledModelRetry, SessionFact,
+        SessionFactBody as Fact, TurnId, TurnOutcome,
+    };
+    use rsi_ai_protocol::{AiError, DispatchStatus, ErrorKind, ErrorPhase, LanguageEvent};
+
+    let turn = TurnId::new("owner").unwrap();
+    let reserved = EffectId::new("next").unwrap();
+    let mut attempt = ModelAttemptBuilder::new();
+    attempt
+        .push(
+            1,
+            &LanguageEvent::Failed {
+                error: AiError::new(
+                    ErrorKind::RateLimited,
+                    ErrorPhase::Stream,
+                    DispatchStatus::Dispatched,
+                    "busy",
+                )
+                .unwrap(),
+                replay: None,
+            },
+        )
+        .unwrap();
+    let decision = SessionFact::new(
+        1,
+        1,
+        Fact::ModelAttemptSettled {
+            turn_id: turn.clone(),
+            effect_id: EffectId::new("first").unwrap(),
+            purpose: ModelEventPurpose::Conversation,
+            attempt: attempt
+                .finish_with_retry(
+                    false,
+                    Some(ScheduledModelRetry {
+                        effect_id: reserved.clone(),
+                        number: 1,
+                        delay_ms: 3000,
+                    }),
+                )
+                .unwrap(),
+        },
+    )
+    .unwrap();
+    let terminal = SessionFact::new(
+        3,
+        3,
+        Fact::TurnTerminal {
+            turn_id: turn.clone(),
+            outcome: TurnOutcome::Cancelled,
+            result: None,
+        },
+    )
+    .unwrap();
+    for (owner, outcome) in [
+        (turn, "started"),
+        (TurnId::new("other").unwrap(), "cancelled"),
+    ] {
+        let started = SessionFact::new(
+            2,
+            2,
+            Fact::ModelStarted {
+                turn_id: owner,
+                effect_id: reserved.clone(),
+            },
+        )
+        .unwrap();
+        let mut transcript = Transcript::default();
+        for fact in [&terminal, &started, &decision] {
+            transcript.apply_history(fact);
+        }
+        let view = Viewport::capture(&transcript, None, 90, 20)
+            .0
+            .restore()
+            .unwrap();
+        assert!(view.blocks.iter().any(|row| {
+            row.role == Role::Notice && row.title
+                .contains(&format!("retry 1 {outcome} (planned wait 3000 ms"))
+        }));
+    }
+}
+
 /// A portable viewport keeps source coordinates while discarding controller metadata.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,10 +216,7 @@ impl Viewport {
             if let Some(document) = &prepared {
                 markdown_remaining -= document.bytes();
             }
-            let (mut pieces, fold) = if !block.transient.is_empty() {
-                if block.transient.len() > remaining {
-                    break;
-                }
+            let (pieces, fold) = if !block.transient.is_empty() {
                 (Vec::new(), None)
             } else if semantic {
                 if block.bytes() > remaining {
@@ -152,11 +253,14 @@ impl Viewport {
                 projected_top = Some(fold.from);
             }
             let (elapsed_ms, running) = block.clock.display(activity);
-            let title = match block.tool.as_ref().filter(|_| !block.completed && !running) {
+            let (role, title) = match block.tool.as_ref().filter(|_| !block.completed && !running) {
                 Some(tool) if tool.phase == rsi_conversation::ToolPhase::Running => {
-                    crate::terminal_text(&super::tool_title(tool, true))
+                    (block.role, crate::terminal_text(&super::tool_title(tool, true)))
                 }
-                _ => block.title.clone(),
+                _ => match retry_title(transcript, block) {
+                    Some(title) => (Role::Notice, title),
+                    None => (block.role, block.title.clone()),
+                },
             };
             blocks.push(WindowBlock {
                 markdown: prepared,
@@ -167,14 +271,14 @@ impl Viewport {
                     .flatten(),
                 key: block.key.clone(),
                 title,
-                role: block.role,
+                role,
                 collapsed: block.collapsed,
                 completed: block.completed,
                 concise: block.concise,
                 discarded: block.discarded,
                 transient: block.transient.clone(),
                 fold,
-                pieces: std::mem::take(&mut pieces),
+                pieces,
             });
             if remaining == 0 {
                 break;

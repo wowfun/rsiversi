@@ -32,6 +32,10 @@ Secret input is masked by the resident application before capture and never
 enters a scene.
 
 Partial transcript pages use each model attempt's authenticated purpose kind.
+A model retry in the loaded viewport shows its selected wait, ordinal and
+reason. A recorded start of the reserved effect or an earlier cancellation
+of its owning Turn supplies the outcome on the same request row.
+
 Context-compaction output is an internal status block, distinct from assistant
 answers even when the preceding model intent is outside the loaded page.
 

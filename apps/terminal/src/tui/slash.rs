@@ -5,6 +5,7 @@ use rsi_terminal_ui::scene::{ApplicationScene, Completion, Draft, Scene};
 use termina::event::KeyEvent;
 
 const BUILTINS: &[(&str, &str)] = &[
+    ("compact", "Summarize eligible history when the session is idle"),
     ("help", "Commands and keyboard shortcuts"),
     (
         "export",

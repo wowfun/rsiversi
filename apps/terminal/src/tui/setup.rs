@@ -40,6 +40,7 @@ pub(super) enum Command {
     Effort,
     Help,
     Export(rsi_client::ExportCommand),
+    Compact,
     Markdown(Option<bool>),
     Plugins,
     Workflows,
@@ -69,6 +70,8 @@ pub(super) fn command(text: &str) -> Option<Command> {
     }
     let words: Vec<_> = text.split_whitespace().collect();
     match words.as_slice() {
+        ["/compact"] => Some(Command::Compact),
+        ["/compact", ..] => Some(Command::Invalid),
         ["/automation"] => Some(Command::Automation),
         ["/workflows"] => Some(Command::Workflows),
         ["/plugins"] => Some(Command::Plugins),
@@ -2324,7 +2327,9 @@ mod tests {
             Some(Command::Invalid)
         ));
         assert!(command("/markdown\nexample").is_none());
-        for text in ["/models", "/model-extra", "/compact", "ordinary message"] {
+        assert!(matches!(command("/compact"), Some(Command::Compact)));
+        assert!(matches!(command("/compact now"), Some(Command::Invalid)));
+        for text in ["/models", "/model-extra", "/compaction", "ordinary message"] {
             assert!(command(text).is_none());
         }
     }

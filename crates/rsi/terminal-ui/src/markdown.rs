@@ -273,7 +273,7 @@ impl Writer {
                 self.document.newline()?;
                 self.style = self.style.bg(Color::Indexed(235));
             }
-            Tag::BlockQuote => {
+            Tag::BlockQuote(_) => {
                 self.document.newline()?;
                 self.document.decoration("│ ")?;
             }
@@ -310,7 +310,7 @@ impl Writer {
                     TagEnd::Paragraph
                         | TagEnd::Heading(_)
                         | TagEnd::CodeBlock
-                        | TagEnd::BlockQuote
+                        | TagEnd::BlockQuote(_)
                         | TagEnd::Item
                         | TagEnd::List(_)
                 ) {
@@ -356,6 +356,7 @@ impl Writer {
                     .decoration(if done { "[x] " } else { "[ ] " })?;
             }
             Event::FootnoteReference(_) => {}
+            Event::InlineMath(_) | Event::DisplayMath(_) => return None,
         }
         Some(())
     }
