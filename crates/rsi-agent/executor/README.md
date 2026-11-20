@@ -255,8 +255,13 @@ locks and failures cannot change execution outcomes. A synchronous stderr sink
 can still block; these diagnostics do not promise nonblocking I/O.
 For external effects, the executor follows the
 [complete-prefix ordering contract](../docs/subsystems/turns-and-agent-trees.md),
-including one ordered intent/start publication and durability wait for a
-parallel-safe run. Result publication stays
+including one ordered intent/start publication and durability wait per group
+admitted into a parallel-safe run. The executor admits at most
+`maximum_parallel_tool_calls` bodies per batch (default 10, range 1–256).
+It replenishes free slots while results awaiting ordered publication fit the
+batch's count and byte budgets. If preparation waits for a policy or human
+decision, preceding ready calls form their own durable wave. Later calls wait
+for that decision. Result publication stays
 per call because budget rejection and retained-result commit are independently
 owned by each identity.
 Every exact-prefix durability wait has a validated executor-local deadline, so
@@ -307,9 +312,18 @@ pre-marker finalizer snapshot a second time.
 The executor delegates all prompt reconstruction and compaction to
 `rsi-agent-context`; it never reads a Workspace implicitly. Effect-owned
 pre-terminal finalizers run before the sole terminal Fact.
+On an eligible provider failure the executor records the chosen delay and next
+effect identity with the failed attempt and flushes before starting its timer.
+A failed flush ends the attempt path. Cancellation interrupts the wait. A new
+intent and start are required to establish that the scheduled attempt ran.
+
 Each fresh provider retry series freezes its model profile and validated Tool
 options once. Retries borrow the same schema allocation and Context credit;
 the next fresh series releases it before admitting replacement options.
+The first ordinary attempt asks the cursor to prepare either its request or a
+summary from one call-local projection. A returned summary enters the existing
+compaction loop; retries and post-summary emission rebuild against their current
+Fact prefix. Optional planning capacity refusal retains the ordinary emission path.
 Tool options reserve conservative construction workspace before copying schemas,
 then shrink to their measured canonical weight. Those options stay charged while
 available for compaction recovery; a built request independently charges its own
@@ -320,7 +334,10 @@ effect.
 
 An unconstructible forced compaction plan reports `context.limit`; malformed
 planning state remains `context.compaction_failed`. An optional planner that
-returns no plan leaves the ordinary provider attempt eligible.
+returns no plan leaves the ordinary provider attempt eligible. If initial
+optional planning runs out of Context credit, the executor still tries the
+ordinary build unless raw pressure requires compaction. Required replanning
+propagates the capacity failure.
 Semantic compaction uses the same serial ModelIntent/Started/Event barriers as
 ordinary calls. Before a new Conversation attempt, the selected pure cursor
 receives the current described profile and may freeze a compaction plan. Summary

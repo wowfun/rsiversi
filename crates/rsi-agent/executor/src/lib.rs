@@ -7,6 +7,7 @@
 mod checkpoint;
 mod checkpoint_diagnostics;
 mod compaction;
+mod manual_compaction;
 mod controlled_work;
 mod jobs;
 mod observation;
@@ -14,7 +15,7 @@ mod observation;
 use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 
 use async_trait::async_trait;
-use futures_util::{FutureExt as _, StreamExt as _, future::join_all};
+use futures_util::{FutureExt as _, StreamExt as _};
 use rsi_agent_composition_protocol::AgentCompositionPin;
 use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::{
@@ -149,6 +150,9 @@ pub struct ExecutorConfig {
     /// Maximum turns active across distinct Sessions.
     #[serde(default = "default_maximum_active_turns")]
     pub maximum_active_turns: usize,
+    /// Maximum concurrent bodies in a model's parallel-safe Tool batch.
+    #[serde(default = "default_maximum_parallel_tool_calls")]
+    pub maximum_parallel_tool_calls: usize,
     /// Maximum projected Language messages.
     #[serde(default = "default_context_messages")]
     pub max_context_messages: usize,
@@ -178,6 +182,10 @@ const fn default_maximum_active_turns() -> usize {
     1
 }
 
+const fn default_maximum_parallel_tool_calls() -> usize {
+    10
+}
+
 const fn default_context_bytes() -> usize {
     rsi_agent_context::DEFAULT_CONTEXT_BYTES
 }
@@ -196,6 +204,12 @@ const fn default_retained_tool_wait_ms() -> u64 {
 
 impl ExecutorConfig {
     fn validate(&self) -> Result<()> {
+        if !(1..=rsi_ai_protocol::MAX_CONTENT_BLOCKS).contains(&self.maximum_parallel_tool_calls) {
+            return Err(ExecutorError::Invalid(format!(
+                "maximum_parallel_tool_calls must be within 1..={}",
+                rsi_ai_protocol::MAX_CONTENT_BLOCKS
+            )));
+        }
         if self.optional_tool_evidence_bytes > 1024 * 1024 {
             return Err(ExecutorError::Invalid(
                 "optional_tool_evidence_bytes exceeds 1 MiB".into(),
@@ -249,6 +263,7 @@ impl ExecutorConfig {
 
 #[derive(Debug)]
 struct Driver {
+    stopped: CancellationToken,
     scope: rsi_meta::Context,
     observer: Option<Arc<dyn rsi_agent_turn_protocol::ExecutionObserver>>,
     evidence: Mutex<evidence::EvidenceCache>,
@@ -323,6 +338,7 @@ mod contributions;
 mod driver;
 mod evidence;
 mod execution_support;
+mod parallel_tools;
 mod program;
 mod tool_settlement;
 
@@ -338,8 +354,14 @@ use execution_support::{
 enum ModelAttempt {
     Output(EffectId, Box<rsi_ai_protocol::LanguageOutput>),
     Incomplete,
-    Retry,
+    Retry(rsi_agent_session_protocol::ScheduledModelRetry),
     ContextLimit,
+}
+
+enum AttemptSlot {
+    First,
+    Scheduled(rsi_agent_session_protocol::ScheduledModelRetry),
+    Final,
 }
 
 struct ModelStreamContext<'a> {
@@ -348,7 +370,7 @@ struct ModelStreamContext<'a> {
     claim: &'a TurnClaim,
     effect_id: &'a EffectId,
     snapshot: &'a PreparedCallSnapshot,
-    retry_attempt: u8,
+    retry_attempt: Option<u8>,
     cancellation: &'a CancellationToken,
     stop: &'a CancellationToken,
     combined: CombinedCancellation,
@@ -670,6 +692,7 @@ fn scan_turn(
             | SessionFactBody::TurnTerminal { .. }
             | SessionFactBody::ToolContextsClaimed { .. }
             | SessionFactBody::StepInputsPrepared { .. }
+            | SessionFactBody::ManualCompaction { .. }
             | SessionFactBody::StepPrepared { .. } => {}
         }
     }
@@ -737,7 +760,9 @@ impl PluginFactory for ExecutorFactory {
             .map_err(|error| MetaError::Activation(error.to_string()))?;
         let checkpoint_turns = Arc::clone(&turns);
         let checkpoints = Arc::new(CheckpointScheduler::new());
+        let stop = CancellationToken::new();
         let driver = Arc::new(Driver {
+            stopped: stop.clone(),
             scope: plan.context().clone(),
             observer: if config.observe_execution {
                 Some(plan.local::<rsi_agent_turn_protocol::ExecutionObserverContract>()?)
@@ -761,7 +786,7 @@ impl PluginFactory for ExecutorFactory {
             context_budget,
             config,
         });
-        let stop = CancellationToken::new();
+        let compactor = plan.context().provide_local::<rsi_agent_turn_protocol::ManualCompactorContract>(driver.clone())?;
         let task_stop = stop.clone();
         let task_driver = Arc::clone(&driver);
         let mut worker = tokio::spawn(async move {
@@ -777,6 +802,7 @@ impl PluginFactory for ExecutorFactory {
             "shutdown Agent executor",
             Box::new(move || {
                 Box::pin(async move {
+                    drop(compactor);
                     stop.cancel();
                     let deadline = tokio::time::Instant::now() + EXECUTOR_SHUTDOWN_TIMEOUT;
                     let mut failures = Vec::new();

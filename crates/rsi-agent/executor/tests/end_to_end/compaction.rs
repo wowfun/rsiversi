@@ -18,15 +18,6 @@ fn long_answer(usage: Option<u64>) -> Vec<LanguageEvent> {
     }
     script
 }
-fn fixture(stack: &BaseStack, outcomes: Vec<StartOutcome>) -> Arc<LanguageFixture> {
-    Arc::new(LanguageFixture {
-        outcomes: Mutex::new(outcomes.into()),
-        requests: Mutex::new(vec![]),
-        starts: Arc::new(AtomicUsize::new(0)),
-        store: stack.store.clone(),
-        retry_policy: RetryPolicy::default(),
-    })
-}
 fn capacity_error(dispatch: DispatchStatus) -> StartOutcome {
     StartOutcome::Error(
         AiError::new(
@@ -49,7 +40,7 @@ async fn small_history_with_high_reported_usage_still_reaches_the_next_provider_
             usage: TokenUsage::new(80_000, 0, None, None, None).unwrap(),
         },
     );
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(pressured),
@@ -71,7 +62,7 @@ async fn small_history_with_high_reported_usage_still_reaches_the_next_provider_
 #[tokio::test]
 async fn pressure_summary_is_durable_before_conversation_resumes_and_charges_provider_budget() {
     let stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -131,7 +122,7 @@ async fn pressure_summary_is_durable_before_conversation_resumes_and_charges_pro
 #[tokio::test]
 async fn provider_capacity_allows_one_summary_recovery_and_one_ordinary_resubmission() {
     let stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(None)),
@@ -164,7 +155,7 @@ async fn truncated_summary_stops_without_recovery_or_an_ordinary_resubmission() 
         reason: FinishReason::MaxTokens,
         replay: None,
     };
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -232,7 +223,7 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
         index: 0,
         delta: ContentDelta::Text("VERBOSE_SUMMARY ".repeat(1000)),
     };
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![StartOutcome::Stream(earlier), StartOutcome::Stream(summary)],
     );
@@ -319,7 +310,7 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
 #[tokio::test]
 async fn unknown_capacity_outcome_never_starts_compaction_or_resubmits() {
     let stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(None)),
@@ -340,7 +331,7 @@ async fn unknown_capacity_outcome_never_starts_compaction_or_resubmits() {
 #[tokio::test]
 async fn summary_capacity_retries_once_with_a_smaller_whole_source_batch() {
     let stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -372,7 +363,7 @@ async fn summary_capacity_retries_once_with_a_smaller_whole_source_batch() {
 #[tokio::test]
 async fn summary_and_answer_have_independent_settlements() {
     let stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -447,7 +438,7 @@ impl PluginFactory for GateFactory {
 async fn executor_loss_after_summary_finished_interrupts_original_turn_and_explicit_resume_reuses_summary()
  {
     let mut stack = BaseStack::activate().await;
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -546,7 +537,7 @@ async fn interrupted_summary(finish_on_cancellation: bool) {
     let mut stack = BaseStack::activate().await;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let provider = fixture(
+    let provider = language_fixture(
         &stack,
         vec![
             StartOutcome::Stream(long_answer(Some(80_000))),
@@ -610,5 +601,282 @@ async fn interrupted_summary(finish_on_cancellation: bool) {
                 .contains("Internal context summary")
         );
     }
+    stack.dispose(language, replacement).await;
+}
+
+#[tokio::test]
+async fn idle_manual_summary_holds_later_prompt_and_replay_preserves_turn_count() {
+    use rsi_agent_session_protocol::{DomainRequestId, ModelSelection};
+    use rsi_agent_turn_protocol::{
+        CompactionOutcome, ManualCompactionAdmission, ManualCompactorContract,
+    };
+    let model = ModelSelection::baseline(header().settings());
+    let stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = language_fixture(
+        &stack,
+        vec![
+            StartOutcome::Stream(long_answer(None)),
+            StartOutcome::Stream(answer_script()),
+            StartOutcome::Stream(answer_script()), // Prepared, then refused at the durable start boundary.
+            gated_answer(&entered, &release),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.manual", provider.clone())
+        .await;
+    let executor = stack.activate_executor("manual-summary").await;
+    let (first, outcome) = stack.submit_and_wait("old task").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let id = &first.session_id;
+    let (_, outcome) = stack.resume_and_wait("keep this task", id.clone()).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    turns.wait_idle(id).await.unwrap();
+    let compactor = stack
+        .runtime
+        .root()
+        .lookup_local::<ManualCompactorContract>()
+        .unwrap();
+    let failed = DomainRequestId::new("failed-start-prefix").unwrap();
+    let ManualCompactionAdmission::Idle(lease) =
+        turns.reserve_manual_compaction(id, &failed).await.unwrap()
+    else {
+        panic!("expected idle admission");
+    };
+    stack.store.fail_next_appends(1);
+    assert!(compactor.compact(lease, model.clone()).await.is_err());
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    assert!(
+        stack
+            .store
+            .manual_compaction_fact(id, &failed)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let command = DomainRequestId::new("compact-once").unwrap();
+    let ManualCompactionAdmission::Idle(lease) =
+        turns.reserve_manual_compaction(id, &command).await.unwrap()
+    else {
+        panic!("idle cut was busy")
+    };
+    let compact = tokio::spawn(async move { compactor.compact(lease, model).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    assert!(matches!(
+        turns
+            .reserve_manual_compaction(id, &DomainRequestId::new("competing").unwrap())
+            .await
+            .unwrap(),
+        ManualCompactionAdmission::Busy
+    ));
+    let anchor = {
+        let next = stack.resume_and_wait("after the summary", id.clone());
+        tokio::pin!(next);
+        tokio::select! {
+            _ = &mut next => panic!("a later prompt overtook compaction"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(15)) => {}
+        }
+        assert_eq!(provider.starts.load(Ordering::SeqCst), 3);
+        release.notify_one();
+        assert_eq!(
+            compact.await.unwrap().unwrap(),
+            CompactionOutcome::Compacted
+        );
+        let (submitted, outcome) = next.await;
+        assert_eq!(outcome, TurnOutcome::Completed);
+        submitted.turn_id
+    };
+    turns.wait_idle(id).await.unwrap();
+    assert!(matches!(
+        turns.reserve_manual_compaction(id, &command).await.unwrap(),
+        ManualCompactionAdmission::Recorded(CompactionOutcome::Compacted)
+    ));
+    assert_summary_replay_and_fork(&stack, &turns, id, &anchor, &provider).await;
+    stack.dispose(language, executor).await;
+}
+
+async fn assert_summary_replay_and_fork(
+    stack: &BaseStack,
+    turns: &Arc<dyn rsi_agent_turn_protocol::TurnService>,
+    id: &SessionId,
+    anchor: &TurnId,
+    provider: &LanguageFixture,
+) {
+    let facts = stack
+        .store
+        .read_facts(
+            id,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|f| f.body().turn_id().is_none())
+            .count(),
+        4
+    );
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|f| matches!(f.body(), SessionFactBody::TurnTerminal { .. }))
+            .count(),
+        3
+    );
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let last = serde_json::to_string(&requests[4]).unwrap();
+        assert!(last.contains("Internal context summary") && last.contains("after the summary"));
+        assert!(!last.contains("verified earlier work"));
+    }
+    let source = stack.store.header(id).await.unwrap();
+    let fork = turns
+        .prepare_fork(rsi_agent_turn_protocol::PrepareFork {
+            agent_preset_id: source.agent_preset_id().clone(),
+            source,
+            session_id: SessionId::new("manual-summary-child").unwrap(),
+            created_at_ms: 42,
+            point: rsi_agent_session_protocol::ForkPoint::through(anchor),
+            turns: rsi_agent_session_protocol::ForkTurnSelection::All,
+            cancellation: CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+    provider
+        .outcomes
+        .lock()
+        .unwrap()
+        .push_back(StartOutcome::Stream(answer_script()));
+    let child = turns
+        .submit(SubmitTurn {
+            session: SubmitSession::Fresh(fork),
+            turn_id: client_turn_id(),
+            text: "child follows summary".into(),
+            model: None,
+            reasoning_effort: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_outcome(turns, &child).await,
+        TurnOutcome::Completed
+    );
+    let request = serde_json::to_string(provider.requests.lock().unwrap().last().unwrap()).unwrap();
+    assert!(
+        request.contains("Internal context summary") && request.contains("child follows summary")
+    );
+    assert!(!request.contains("verified earlier work"));
+}
+
+#[tokio::test]
+async fn idle_manual_stop_settles_and_reopened_start_is_never_redispatched() {
+    use rsi_agent_session_protocol::{DomainRequestId, ModelSelection};
+    use rsi_agent_turn_protocol::{
+        CancelTarget, CompactionOutcome, ManualCompactionAdmission, ManualCompactorContract,
+    };
+    let mut stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let hold = Arc::new(Notify::new());
+    let provider = language_fixture(
+        &stack,
+        vec![
+            StartOutcome::Stream(long_answer(None)),
+            StartOutcome::Stream(answer_script()),
+            gated_answer(&entered, &hold),
+            gated_answer(&entered, &hold),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.manual-stop", provider.clone())
+        .await;
+    let executor = stack.activate_executor("manual-stop").await;
+    let (first, _) = stack.submit_and_wait("old source").await;
+    let id = &first.session_id;
+    stack.resume_and_wait("protected source", id.clone()).await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let owner = stack
+        .runtime
+        .root()
+        .lookup_local::<ManualCompactorContract>()
+        .unwrap();
+    turns.wait_idle(id).await.unwrap();
+    let interrupted = DomainRequestId::new("stop-manual").unwrap();
+    let disconnected = DomainRequestId::new("disconnected-client").unwrap();
+    for command in [&interrupted, &disconnected] {
+        let ManualCompactionAdmission::Idle(lease) =
+            turns.reserve_manual_compaction(id, command).await.unwrap()
+        else {
+            panic!("expected idle");
+        };
+        let compactor = Arc::clone(&owner);
+        let run = tokio::spawn(async move {
+            compactor
+                .compact(lease, ModelSelection::baseline(header().settings()))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(4), entered.notified())
+            .await
+            .unwrap();
+        if command == &interrupted {
+            turns
+                .cancel_target(id, CancelTarget::Session { keep_inbox: true }, None)
+                .await
+                .unwrap();
+            assert_eq!(run.await.unwrap().unwrap(), CompactionOutcome::Interrupted);
+        } else {
+            run.abort();
+            assert!(run.await.unwrap_err().is_cancelled());
+        }
+    }
+    assert!(executor.dispose().await.is_clean());
+    drop((owner, turns));
+    stack.restart_kernel().await;
+    let replacement = stack.activate_executor("manual-reopen").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    for (command, expected) in [
+        (interrupted, CompactionOutcome::Interrupted),
+        (disconnected, CompactionOutcome::Started),
+    ] {
+        let ManualCompactionAdmission::Recorded(outcome) =
+            turns.reserve_manual_compaction(id, &command).await.unwrap()
+        else {
+            panic!("reopen must return the recorded effect");
+        };
+        assert_eq!(outcome, expected);
+    }
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        stack
+            .resume_and_wait("explicit continuation", id.clone())
+            .await
+            .1,
+        TurnOutcome::Completed
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 5);
+    drop(turns);
     stack.dispose(language, replacement).await;
 }

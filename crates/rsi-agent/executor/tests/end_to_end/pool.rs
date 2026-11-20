@@ -639,6 +639,178 @@ async fn interleaved_same_session_submission_does_not_fail_the_streaming_turn() 
     stack.dispose(language_fiber, executor_fiber).await;
 }
 
+#[tokio::test]
+async fn cancelling_durable_retry_wait_survives_reopen_without_starting_reserved_effect() {
+    let mut stack = BaseStack::activate().await;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([StartOutcome::Error(
+            AiError::new(
+                ErrorKind::RateLimited,
+                ErrorPhase::Connect,
+                DispatchStatus::NotDispatched,
+                "rate limit in fixture",
+            )
+            .unwrap(),
+        )])),
+        requests: Mutex::new(vec![]),
+        starts: starts.clone(),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::new(1, vec![ErrorKind::RateLimited], 60_000, 60_000, 0).unwrap(),
+    });
+    let language = stack
+        .activate_language("test.language.retry-cancel", provider)
+        .await;
+    let executor = stack.activate_executor("retry-cancel").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = stack
+        .submit_fresh(&turns, "cancel-scheduled-retry", "wait for rate limit")
+        .await;
+    let id = &submitted.session_id;
+    let scheduled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(page) = stack
+                .store
+                .read_facts(
+                    id,
+                    0,
+                    64,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+            {
+                for fact in page.facts {
+                    if let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body()
+                        && let Some(retry) = attempt.scheduled_retry()
+                    {
+                        return retry.clone();
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry decision must be durable before timer expires");
+    assert_eq!((scheduled.number, scheduled.delay_ms), (1, 60_000));
+    turns.cancel(id, &submitted.turn_id, None).await.unwrap();
+    assert_eq!(
+        wait_for_outcome(&turns, &submitted).await,
+        TurnOutcome::Cancelled
+    );
+    drop(turns);
+    assert!(executor.dispose().await.is_clean());
+    stack.restart_kernel().await;
+    let replacement = stack.activate_executor("retry-cancel-reopened").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    assert_eq!(
+        turns.outcome(id, &submitted.turn_id).await.unwrap(),
+        Some(TurnOutcome::Cancelled)
+    );
+    let facts = stack
+        .store
+        .read_facts(
+            id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    assert!(facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ModelAttemptSettled { attempt, .. } if attempt.scheduled_retry() == Some(&scheduled))));
+    assert!(!facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::ModelStarted {effect_id,..} if effect_id == &scheduled.effect_id)));
+    assert_eq!(starts.load(Ordering::Acquire), 1);
+    drop(turns);
+    stack.dispose(language, replacement).await;
+}
+
+#[tokio::test]
+async fn failed_settlement_flush_holds_retry_until_the_exact_schedule_is_durable() {
+    use futures_util::StreamExt as _;
+    let stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::GatedError {
+                entered: entered.clone(),
+                release: release.clone(),
+                error: AiError::new(
+                    ErrorKind::RateLimited,
+                    ErrorPhase::Connect,
+                    DispatchStatus::NotDispatched,
+                    "fixture refusal",
+                )
+                .unwrap(),
+            },
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::default(),
+        starts: starts.clone(),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::new(1, vec![ErrorKind::RateLimited], 1, 1, 0).unwrap(),
+    });
+    let language = stack
+        .activate_language("test.language.flush-retry", provider)
+        .await;
+    let executor = stack.activate_executor("retry-flush").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = stack
+        .submit_fresh(&turns, "flush-retry", "retry when durable")
+        .await;
+    entered.notified().await;
+    let id = &submitted.session_id;
+    let mut observed = turns.observe(id, 0).await.unwrap();
+    stack.store.fail_next_appends(2);
+    release.notify_one();
+    let scheduled = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(update) = observed.next().await {
+            if let rsi_agent_turn_protocol::TurnUpdate::Fact { fact, durable_seq } = update.unwrap()
+                && let SessionFactBody::ModelAttemptSettled { attempt, .. } = fact.body()
+                && attempt.scheduled_retry().is_some()
+            {
+                assert!(durable_seq < fact.seq());
+                return fact.seq();
+            }
+        }
+        panic!("missing live retry decision")
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        stack
+            .store
+            .session_summary(id)
+            .await
+            .unwrap()
+            .durable_fact_seq
+            < scheduled
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        wait_for_outcome(&turns, &submitted).await,
+        TurnOutcome::Completed
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    drop((observed, turns));
+    stack.dispose(language, executor).await;
+}
+
 async fn run_retry_case(
     dispatch_status: DispatchStatus,
 ) -> (TurnOutcome, Vec<SessionFactBody>, usize) {
@@ -716,6 +888,7 @@ async fn never_retries_a_dispatch_uncertain_model_attempt() {
             ..
         }
     ));
+    assert!(!facts.iter().any(|body| matches!(body, SessionFactBody::ModelAttemptSettled { attempt, .. } if attempt.scheduled_retry().is_some())));
     assert_eq!(starts, 1);
     assert_eq!(
         facts

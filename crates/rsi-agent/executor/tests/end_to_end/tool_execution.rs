@@ -1295,6 +1295,7 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             StartOutcome::Stream(tool_calls_script(&[
                 ("parallel-call-1", "parallel", r#"{"position":"first"}"#),
                 ("parallel-call-2", "parallel", r#"{"position":"second"}"#),
+                ("parallel-call-3", "parallel", r#"{"position":"third"}"#),
             ])),
             StartOutcome::Stream(answer_script()),
         ])),
@@ -1306,7 +1307,11 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
     let language_fiber = stack
         .activate_language("test.language.parallel-tools", fixture)
         .await;
-    let executor_fiber = stack.activate_executor("executor-parallel-tools").await;
+    let executor_fiber = stack
+        .activate_executor_with_config(json!({
+            "executor_id":"executor-parallel-tools", "maximum_parallel_tool_calls":2
+        }))
+        .await;
 
     let (submitted, outcome) = stack.submit_and_wait("run both tools").await;
     assert_eq!(outcome, TurnOutcome::Completed);
@@ -1333,7 +1338,7 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(intents, vec![true, true]);
+    assert_eq!(intents, vec![true, true, true]);
     let effect_markers = page
         .facts
         .iter()
@@ -1348,10 +1353,13 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             .iter()
             .map(|(marker, _)| *marker)
             .collect::<Vec<_>>(),
-        vec!["intent", "intent", "started", "started"]
+        vec![
+            "intent", "intent", "started", "started", "intent", "started"
+        ]
     );
     assert_eq!(effect_markers[0].1, effect_markers[2].1);
     assert_eq!(effect_markers[1].1, effect_markers[3].1);
+    assert_eq!(effect_markers[4].1, effect_markers[5].1);
     let results = page
         .facts
         .iter()
@@ -1362,12 +1370,152 @@ async fn adjacent_parallel_safe_tools_overlap_but_publish_results_in_source_orde
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(results, vec!["first", "second"]);
+    assert_eq!(results, vec!["first", "second", "third"]);
     assert!(!observed_lane_parking_authority.load(Ordering::Acquire));
 
     drop(tool_lease);
     drop(tools);
     stack.dispose(language_fiber, executor_fiber).await;
+}
+
+#[derive(Debug, Default)]
+struct SecondApproval {
+    asked: AtomicUsize,
+    pending: Notify,
+    answer: Notify,
+}
+#[async_trait]
+impl Approval for SecondApproval {
+    async fn ask(
+        &self,
+        request: ApprovalRequest,
+        stop: CancellationToken,
+    ) -> rsi_approval_protocol::Result<ApprovalOutcome> {
+        let index = self.asked.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.review.unwrap().arguments["index"], json!(index));
+        let decision = if index == 1 {
+            self.pending.notify_one();
+            tokio::select! {
+                () = self.answer.notified() => ApprovalDecision::Deny,
+                () = stop.cancelled() => return Err(rsi_approval_protocol::ApprovalError::Cancelled),
+            }
+        } else {
+            ApprovalDecision::AllowOnce
+        };
+        Ok(ApprovalOutcome {
+            decision,
+            answerer: "human".into(),
+            reason: None,
+        })
+    }
+}
+
+fn assert_review_progress(facts: &[SessionFact], starts: &[&str], outcomes: &[(&str, &str)]) {
+    let mut started = Vec::new();
+    let mut settled = Vec::new();
+    for fact in facts {
+        match fact.body() {
+            SessionFactBody::ToolStarted { identity, .. } => started.push(identity.call_id()),
+            SessionFactBody::ToolResult { identity, .. } => {
+                settled.push((identity.call_id(), "result"));
+            }
+            SessionFactBody::ToolRejected { identity, .. } => {
+                settled.push((identity.call_id(), "rejected"));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(started, starts);
+    assert_eq!(settled, outcomes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_ready_call_settles_while_next_approval_is_pending() {
+    use std::time::Duration;
+    let review = Arc::new(SecondApproval::default());
+    let stack = BaseStack::activate_with_answerer(review.clone()).await;
+    let registration = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("read", "read fixture", json!({"type":"object"}))
+                .unwrap()
+                .with_scheduling(ToolScheduling::ParallelSafe),
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(5),
+            ),
+            executor: Arc::new(UnevenParallelResultTool),
+        })
+        .unwrap();
+    let provider = language_fixture(
+        &stack,
+        vec![
+            StartOutcome::Stream(tool_calls_script(&[
+                ("a", "read", r#"{"index":0}"#),
+                ("b", "read", r#"{"index":1}"#),
+                ("c", "read", r#"{"index":2}"#),
+            ])),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.parallel-approval", provider)
+        .await;
+    let executor = stack.activate_executor("parallel-approval").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = turns
+        .submit(SubmitTurn {
+            reasoning_effort: None,
+            turn_id: client_turn_id(),
+            session: stack.fresh(approval_header()).await,
+            text: "run three reads".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), review.pending.notified())
+        .await
+        .unwrap();
+    let history = || {
+        stack
+            .store
+            .read_facts(&submitted.session_id, 0, 64, FACT_PAGE_BYTES)
+    };
+    let during_review = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let page = history().await.unwrap();
+            if page
+                .facts
+                .iter()
+                .any(|fact| matches!(fact.body(), SessionFactBody::ToolResult { .. }))
+            {
+                return page;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert_eq!(review.asked.load(Ordering::SeqCst), 2);
+    review.answer.notify_one();
+    assert_eq!(
+        wait_for_outcome(&turns, &submitted).await,
+        TurnOutcome::Completed
+    );
+    assert_review_progress(
+        &history().await.unwrap().facts,
+        &["a", "c"],
+        &[("a", "result"), ("b", "rejected"), ("c", "result")],
+    );
+    drop((turns, registration));
+    stack.dispose(language, executor).await;
+    let page = during_review
+        .expect("the first result must become durable while the second call awaits approval");
+    assert_review_progress(&page.facts, &["a"], &[("a", "result")]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1990,6 +2138,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::CancelRequested { .. } => "cancel",
         SessionFactBody::ToolCallsSuperseded { .. } => "tool_calls_superseded",
         SessionFactBody::StepPrepared { .. } => "step_tools_selected",
+        SessionFactBody::ManualCompaction { .. } => "manual_compaction",
         SessionFactBody::StepInputsPrepared { .. } => "step_inputs_prepared",
     }
 }
@@ -2343,5 +2492,155 @@ async fn uncertain_tool_interrupts_without_model_result_or_replay_and_retires_af
     .await
     .unwrap();
     drop(lease);
+    stack.dispose(language, executor).await;
+}
+
+#[derive(Debug, Default)]
+struct DelayedRead {
+    payload_bytes: usize,
+    starts: AtomicUsize,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    changed: Notify,
+    release_first: Notify,
+}
+
+#[async_trait]
+impl ToolExecutor for DelayedRead {
+    async fn execute(&self, args: Value, _: ToolExecution) -> ToolResultType<ToolResult> {
+        let count = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(count, Ordering::SeqCst);
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_one();
+        if args["index"] == 0 {
+            self.release_first.notified().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        if self.payload_bytes != 0 && args["index"] != 0 {
+            let value = json!({"index":args["index"],"payload":"x".repeat(self.payload_bytes)});
+            return ToolResult::new(
+                value,
+                vec![rsi_tools_protocol::ToolContent::Text {
+                    text: "read".into(),
+                }],
+                false,
+            );
+        }
+        ToolResult::new(args, vec![], false)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_first_read_bounds_started_and_unpublished_positions_at_each_cap() {
+    for limit in [2, 10, 24] {
+        run_skewed_reads(24, limit, 0, 24.min(2 * limit)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn byte_pressure_pauses_admission_and_recovers_the_retained_result_in_order() {
+    // B fits the four-MiB publication queue. C only fits in its pinned tool owner.
+    run_skewed_reads(5, 2, 2 * 1024 * 1024 + 256, 3).await;
+}
+
+async fn run_skewed_reads(call_count: usize, limit: usize, payload_bytes: usize, window: usize) {
+    let stack = BaseStack::activate().await;
+    let read = Arc::new(DelayedRead {
+        payload_bytes,
+        ..Default::default()
+    });
+    let registration = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("skew_read", "read fixture", json!({"type":"object"}))
+                .unwrap()
+                .with_scheduling(ToolScheduling::ParallelSafe),
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                std::time::Duration::from_secs(5),
+            ),
+            executor: read.clone(),
+        })
+        .unwrap();
+    let inputs: Vec<_> = (0..call_count)
+        .map(|i| (format!("read-{i}"), json!({"index":i}).to_string()))
+        .collect();
+    let calls: Vec<_> = inputs
+        .iter()
+        .map(|(id, args)| (id.as_str(), "skew_read", args.as_str()))
+        .collect();
+    let provider = language_fixture(
+        &stack,
+        vec![
+            StartOutcome::Stream(tool_calls_script(&calls)),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.skew", provider)
+        .await;
+    let executor = stack
+        .activate_executor_with_config(
+            json!({"executor_id":"skew","maximum_parallel_tool_calls":limit}),
+        )
+        .await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let submitted = stack
+        .submit_fresh(&turns, "skew", "read independent inputs")
+        .await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while read.starts.load(Ordering::SeqCst) < window {
+            read.changed.notified().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    let held = read.starts.load(Ordering::SeqCst);
+    assert_eq!(held, window);
+    read.release_first.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        turns.wait_idle(&submitted.session_id),
+    )
+    .await
+    .expect("all admitted reads settle")
+    .unwrap();
+    assert_eq!(
+        turns
+            .outcome(&submitted.session_id, &submitted.turn_id)
+            .await
+            .unwrap(),
+        Some(TurnOutcome::Completed)
+    );
+    let peak = read.peak.load(Ordering::SeqCst);
+    assert!(peak <= limit);
+    let facts = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 256, FACT_PAGE_BYTES)
+        .await
+        .unwrap()
+        .facts;
+    let results: Vec<_> = facts
+        .iter()
+        .filter_map(|f| match f.body() {
+            SessionFactBody::ToolResult { result, .. } => result.value["index"].as_u64(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, (0..call_count as u64).collect::<Vec<_>>());
+    eprintln!(
+        "skew reads={call_count} bytes_per_result={payload_bytes} cap={limit} peak_active={peak} started_while_first_held={held} elapsed_ms={}",
+        start.elapsed().as_millis()
+    );
+    drop((turns, registration));
     stack.dispose(language, executor).await;
 }

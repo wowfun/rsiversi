@@ -910,10 +910,26 @@ impl ToolExecutor for EchoTool {
         arguments: Value,
         execution: ToolExecution,
     ) -> ToolResultType<ToolResult> {
-        assert_latest_is(&self.store, |body| {
-            matches!(body, SessionFactBody::ToolStarted { .. })
-        })
-        .await;
+        let session = self
+            .store
+            .list_sessions(None, 1)
+            .await
+            .unwrap()
+            .sessions
+            .remove(0);
+        let page = self
+            .store
+            .read_facts(
+                &session,
+                0,
+                128,
+                rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(page.facts.iter().any(|fact| matches!(fact.body(),
+            SessionFactBody::ToolStarted {identity,..} if identity.call_id() == execution.call_id
+        )), "this exact call must already have a durable start");
         let _confined = execution.confine("/bin/echo".into(), Vec::new()).await?;
         self.calls.fetch_add(1, Ordering::AcqRel);
         ToolResult::new(arguments, vec![], false)
@@ -961,20 +977,19 @@ impl ToolExecutor for ParallelTool {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            intents.len(),
-            2,
-            "the whole parallel run must be durable before either body"
-        );
+        let position = arguments["position"].as_str().unwrap();
+        assert_eq!(intents.len(), if position == "third" { 3 } else { 2 });
         assert_eq!(starts, intents);
         self.observed_lane_parking_authority.fetch_or(
             execution.extension::<ToolLaneParkingAuthority>().is_some(),
             Ordering::AcqRel,
         );
-        self.rendezvous.wait().await;
-        if arguments.get("position") == Some(&Value::String("first".into())) {
+        if position != "third" {
+            self.rendezvous.wait().await;
+        }
+        if position == "first" {
             self.release_first.notified().await;
-        } else {
+        } else if position == "third" {
             self.release_first.notify_one();
         }
         ToolResult::new(arguments, vec![], false)
@@ -1073,6 +1088,7 @@ async fn assert_latest_is(store: &MemoryStore, predicate: impl Fn(&SessionFactBo
 }
 
 async fn assert_model_started(store: &MemoryStore, expected: &PreparedCallSnapshot) {
+    use rsi_agent_session_protocol::ManualCompactionEvent;
     for session in store.list_sessions(None, 64).await.unwrap().sessions {
         let page = store
             .read_facts(
@@ -1083,6 +1099,19 @@ async fn assert_model_started(store: &MemoryStore, expected: &PreparedCallSnapsh
             )
             .await
             .unwrap();
+        if let [.., prepared, started] = page.facts.as_slice()
+            && let SessionFactBody::ManualCompaction {
+                command_id,
+                effect_id,
+                event,
+            } = prepared.body()
+            && let ManualCompactionEvent::Prepared(request) = event
+            && &request.snapshot == expected
+            && matches!(started.body(), SessionFactBody::ManualCompaction { command_id: owner, effect_id: started_id, event }
+                if owner == command_id && started_id == effect_id && matches!(event, ManualCompactionEvent::Started))
+        {
+            return;
+        }
         let Some(SessionFactBody::ModelStarted { effect_id, .. }) = page
             .facts
             .last()
@@ -1145,6 +1174,15 @@ fn tool_script() -> Vec<LanguageEvent> {
     ]
 }
 
+fn language_fixture(stack: &BaseStack, outcomes: Vec<StartOutcome>) -> Arc<LanguageFixture> {
+    Arc::new(LanguageFixture {
+        outcomes: Mutex::new(outcomes.into()),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    })
+}
 fn tool_calls_script(calls: &[(&str, &str, &str)]) -> Vec<LanguageEvent> {
     let mut events = Vec::with_capacity(calls.len().saturating_mul(3).saturating_add(1));
     for (index, (id, name, arguments)) in calls.iter().enumerate() {

@@ -355,7 +355,7 @@ impl Driver {
         mut max_tokens: bool,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
-        let mut retry_attempt = 0_u8;
+        let mut slot = AttemptSlot::First;
         let mut selection =
             rsi_agent_session_protocol::ModelSelection::baseline(claim.header().settings());
         let mut selected_tools = None;
@@ -369,7 +369,7 @@ impl Driver {
             if cancellation.is_cancelled() {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
-            if retry_attempt == 0 {
+            if matches!(slot, AttemptSlot::First) {
                 drop(prepared_options.take());
                 self.claim_step_messages(claim, fold).await?;
                 if request == ModelRequest::Stopping
@@ -447,7 +447,7 @@ impl Driver {
                         .expect("a fresh request prepares options before its retry series"),
                     fold,
                     &selection,
-                    retry_attempt,
+                    &slot,
                     &cancellation,
                     stop,
                 )
@@ -459,13 +459,13 @@ impl Driver {
                         "ordinary request exceeded context after recovery",
                     ));
                 }
-                ModelAttempt::Retry => {
-                    retry_attempt = retry_attempt.saturating_add(1);
+                ModelAttempt::Retry(retry) => {
+                    slot = AttemptSlot::Scheduled(retry);
                     continue;
                 }
                 ModelAttempt::Incomplete => {
                     max_tokens = true;
-                    retry_attempt = 0;
+                    slot = AttemptSlot::First;
                     request = ModelRequest::Stopping;
                     continue;
                 }
@@ -476,7 +476,7 @@ impl Driver {
             {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
-            retry_attempt = 0;
+            slot = AttemptSlot::First;
             if !matches!(output.finish_reason, FinishReason::ToolCalls) {
                 request = ModelRequest::Stopping;
                 continue;
@@ -819,7 +819,7 @@ impl Driver {
         fold: &mut ModelContextState,
         selection: &rsi_agent_session_protocol::ModelSelection,
         profile: &rsi_ai_protocol::LanguageProfile,
-        retry_attempt: u8,
+        slot: &AttemptSlot,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
@@ -864,7 +864,11 @@ impl Driver {
             Err(error) => return Err(ai_failure(&error)),
         };
         let snapshot = prepared.snapshot().clone();
-        let effect_id = next_effect_id().map_err(fatal)?;
+        let (effect_id, retry_attempt) = match slot {
+            AttemptSlot::Scheduled(retry) => (retry.effect_id.clone(), Some(retry.number)),
+            AttemptSlot::First => (next_effect_id().map_err(fatal)?, Some(0)),
+            AttemptSlot::Final => (next_effect_id().map_err(fatal)?, None),
+        };
         let reservation_cancel = combine_cancellation(cancellation, stop);
         let mut live = self
             .turns
@@ -1011,34 +1015,11 @@ impl Driver {
                     None => Err(model_stream_error("Language stream ended without a terminal event")),
                 },
             };
-            let mut event = received.unwrap_or_else(|error| LanguageEvent::Failed {
-                error,
-                replay: None,
-            });
             let elapsed = live.elapsed_ms();
-            if let Err(error) = assembler.push(&event) {
-                event = LanguageEvent::Failed {
-                    error: model_stream_error(&error.to_string()),
-                    replay: None,
-                };
-            }
-            if let Err(error) = evidence.push(elapsed, &event) {
+            let (event, exceeded) = record_event(&mut assembler, &mut evidence, elapsed, received).map_err(DriveFailure::Fatal)?;
+            if exceeded {
                 combined.cancel();
                 capacity = true;
-                let failure = rsi_ai_protocol::AiError::new(
-                    ErrorKind::OutputValidation,
-                    rsi_ai_protocol::ErrorPhase::Assemble,
-                    DispatchStatus::Dispatched,
-                    bounded(&error.to_string()),
-                )
-                .map_err(fatal)?
-                .with_provider_code("model_output.capacity")
-                .map_err(fatal)?;
-                event = LanguageEvent::Failed {
-                    error: failure,
-                    replay: None,
-                };
-                evidence.push(elapsed, &event).map_err(fatal)?;
             }
             live_bytes = live_bytes.saturating_add(match &event {
                 LanguageEvent::ContentDelta { delta, .. } => match delta {
@@ -1065,15 +1046,29 @@ impl Driver {
                 continue;
             }
             combined.cancel();
-            let retain_context = match &event {
-                LanguageEvent::Failed { error, .. } => {
-                    !should_retry(snapshot, error, retry_attempt)
+            let retry = match (&event, retry_attempt) {
+                (LanguageEvent::Failed { error, .. }, Some(number))
+                    if !(error.kind() == ErrorKind::ContextLimit
+                        && error.dispatch_status() != DispatchStatus::Unknown
+                        || capacity
                         || cancellation.is_cancelled()
-                        || stop.is_cancelled()
+                        || stop.is_cancelled())
+                        && should_retry(snapshot, error, number) =>
+                {
+                    Some(rsi_agent_session_protocol::ScheduledModelRetry {
+                        effect_id: next_effect_id().map_err(fatal)?,
+                        number: number + 1,
+                        delay_ms: retry_delay(snapshot, error, number)
+                            .as_millis()
+                            .try_into()
+                            .expect("retry policy bounds delay"),
+                    })
                 }
-                _ => true,
+                _ => None,
             };
-            let attempt = evidence.finish(retain_context).map_err(fatal)?;
+            let attempt = evidence
+                .finish_with_retry(retry.is_none(), retry.clone())
+                .map_err(fatal)?;
             let facts = self
                 .publish_durable(
                     claim,
@@ -1082,7 +1077,7 @@ impl Driver {
                         purpose,
                         turn_id: claim.turn_id().clone(),
                         effect_id: effect_id.clone(),
-                        attempt: attempt.clone(),
+                        attempt,
                     }],
                 )
                 .await?;
@@ -1101,43 +1096,30 @@ impl Driver {
                 return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
             }
             if let LanguageEvent::Failed { error, .. } = event {
-                return self
-                    .retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
-                    .await;
+                if let Some(retry) = retry {
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
+                        () = stop.cancelled() => return Err(DriveFailure::Stopped),
+                        () = tokio::time::sleep(Duration::from_millis(retry.delay_ms)) => return Ok(ModelAttempt::Retry(retry)),
+                    }
+                }
+                if error.kind() == ErrorKind::ContextLimit
+                    && error.dispatch_status() != DispatchStatus::Unknown
+                {
+                    return Ok(ModelAttempt::ContextLimit);
+                }
+                return Err(ai_failure(&error));
             }
             return match assembler.finish() {
                 Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
                 Err(LanguageAssemblyError::Incomplete { .. }) => Ok(ModelAttempt::Incomplete),
-                Err(LanguageAssemblyError::Provider { error, .. }) => {
-                    self.retry_or_fail(snapshot, &error, retry_attempt, cancellation, stop)
-                        .await
-                }
+                Err(LanguageAssemblyError::Provider { error, .. }) => Err(ai_failure(&error)),
                 Err(LanguageAssemblyError::Protocol(error)) => {
                     Err(failed(error.code(), error.to_string()))
                 }
             };
         }
-    }
-
-    pub(super) async fn retry_or_fail(
-        &self,
-        snapshot: &PreparedCallSnapshot,
-        error: &rsi_ai_protocol::AiError,
-        retry_attempt: u8,
-        cancellation: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> std::result::Result<ModelAttempt, DriveFailure> {
-        if error.kind() == ErrorKind::ContextLimit
-            && error.dispatch_status() != DispatchStatus::Unknown
-        {
-            return Ok(ModelAttempt::ContextLimit);
-        }
-        if !should_retry(snapshot, error, retry_attempt) {
-            return Err(ai_failure(error));
-        }
-        self.wait_retry(snapshot, error, retry_attempt, cancellation, stop)
-            .await?;
-        Ok(ModelAttempt::Retry)
     }
 
     #[allow(clippy::too_many_arguments)] // Keep durable claim/fold, live Jobs authority, policy, and both cancellation owners explicit.
@@ -1234,123 +1216,6 @@ impl Driver {
             .await?;
         }
         Ok(fact)
-    }
-
-    #[allow(clippy::too_many_arguments)] // The batch shares the exact turn policy and live turn-scoped authorities.
-    pub(super) async fn run_parallel_tools(
-        &self,
-        source_model_effect_id: &EffectId,
-        claim: &TurnClaim,
-        composition: &AgentCompositionPin,
-        job_scope: Option<&JobScopeAuthority>,
-        fold: &mut ModelContextState,
-        calls: Vec<ModelToolCall>,
-        turn_policy: ResolvedTurnPolicy,
-        cancellation: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> std::result::Result<Vec<Arc<SessionFact>>, DriveFailure> {
-        let mut pending = Vec::with_capacity(calls.len());
-        let mut rejections = vec![None; calls.len()];
-        for (index, call) in calls.into_iter().enumerate() {
-            match self
-                .prepare_tool_call(
-                    &rsi_agent_session_protocol::ToolOrigin::Model {
-                        effect_id: source_model_effect_id.clone(),
-                    },
-                    claim,
-                    composition,
-                    call,
-                    ToolScheduling::ParallelSafe,
-                    turn_policy,
-                    cancellation,
-                    stop,
-                )
-                .await?
-            {
-                ToolPreparation::Ready(effect) => pending.push(effect),
-                ToolPreparation::Rejected(body) => rejections[index] = Some(body),
-            }
-        }
-
-        if pending.is_empty() {
-            return Ok(self
-                .publish_durable(
-                    claim,
-                    fold,
-                    rejections.into_iter().flatten().map(|body| *body).collect(),
-                )
-                .await?
-                .into_facts());
-        }
-
-        let prepared = self
-            .publish_parallel_tool_starts(claim, composition, fold, pending)
-            .await?;
-
-        let outcomes = join_all(prepared.into_iter().map(|effect| async move {
-            let effect_id = effect.effect_id;
-            let identity = effect.identity;
-            let result = self
-                .start_tool(
-                    &effect_id,
-                    effect.prepared,
-                    &identity,
-                    composition,
-                    claim,
-                    job_scope,
-                    ToolScheduling::ParallelSafe,
-                    turn_policy,
-                    cancellation,
-                    stop,
-                    None,
-                )
-                .await;
-            (effect.intent, identity, result.map(|(result, _)| result))
-        }))
-        .await;
-
-        let mut first_failure = None;
-        let mut outcomes = outcomes.into_iter();
-        let mut settled = Vec::with_capacity(rejections.len());
-        for rejection in rejections {
-            if let Some(body) = rejection {
-                settled.extend(
-                    self.publish_durable(claim, fold, vec![*body])
-                        .await?
-                        .into_facts(),
-                );
-                continue;
-            }
-            let (intent, identity, result) =
-                outcomes.next().expect("one outcome per admitted call");
-            match result {
-                Ok(result) => {
-                    match self
-                        .publish_tool_result(claim, composition, fold, intent, result)
-                        .await
-                    {
-                        Ok(fact) => settled.push(fact),
-                        Err(DriveFailure::Stopped) => return Err(DriveFailure::Stopped),
-                        Err(failure) => {
-                            first_failure.get_or_insert(failure);
-                        }
-                    }
-                }
-                Err(failure) => {
-                    if matches!(
-                        composition.tools().query(&identity),
-                        Ok(RetainedToolResult::Absent)
-                    ) {
-                        self.clear_tracked_tool(claim, &identity);
-                    }
-                    first_failure.get_or_insert(failure);
-                }
-            }
-        }
-        if let Some(failure) = first_failure {
-            return Err(failure);
-        }
-        Ok(settled)
     }
 
     #[allow(clippy::too_many_arguments)] // Preparation binds one model call to its exact policy and cancellation authorities.
@@ -1653,11 +1518,11 @@ impl Driver {
         claim: &TurnClaim,
         composition: &AgentCompositionPin,
         fold: &mut ModelContextState,
-        pending: Vec<PendingToolEffect>,
-    ) -> std::result::Result<Vec<PreparedToolEffect>, DriveFailure> {
+        pending: Vec<(usize, PendingToolEffect)>,
+    ) -> std::result::Result<Vec<(usize, PreparedToolEffect)>, DriveFailure> {
         let mut markers = Vec::with_capacity(pending.len() * 2);
         let mut prepared = Vec::with_capacity(pending.len());
-        for effect in pending {
+        for (index, effect) in pending {
             let PendingToolEffect {
                 origin,
                 program_role,
@@ -1680,10 +1545,10 @@ impl Driver {
                 approval,
                 parallel_safe,
             });
-            prepared.push((effect_id, identity, prepared_call));
+            prepared.push((index, effect_id, identity, prepared_call));
         }
 
-        markers.extend(prepared.iter().map(|(effect_id, identity, _)| {
+        markers.extend(prepared.iter().map(|(_, effect_id, identity, _)| {
             SessionFactBody::ToolStarted {
                 turn_id: claim.turn_id().clone(),
                 effect_id: effect_id.clone(),
@@ -1695,16 +1560,19 @@ impl Driver {
         let prepared: Vec<_> = prepared
             .into_iter()
             .zip(markers.into_facts())
-            .map(
-                |((effect_id, identity, prepared), intent)| PreparedToolEffect {
-                    intent,
-                    effect_id,
-                    identity,
-                    prepared,
-                },
-            )
+            .map(|((index, effect_id, identity, prepared), intent)| {
+                (
+                    index,
+                    PreparedToolEffect {
+                        intent,
+                        effect_id,
+                        identity,
+                        prepared,
+                    },
+                )
+            })
             .collect();
-        for effect in &prepared {
+        for (_, effect) in &prepared {
             self.track_tool(claim, composition.clone(), effect.identity.clone());
         }
         Ok(prepared)
@@ -2146,22 +2014,6 @@ impl Driver {
         }
     }
 
-    pub(super) async fn wait_retry(
-        &self,
-        snapshot: &PreparedCallSnapshot,
-        error: &rsi_ai_protocol::AiError,
-        attempt: u8,
-        cancellation: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> std::result::Result<(), DriveFailure> {
-        let delay = retry_delay(snapshot, error, attempt);
-        tokio::select! {
-            () = tokio::time::sleep(delay) => Ok(()),
-            () = cancellation.cancelled() => Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
-            () = stop.cancelled() => Err(DriveFailure::Stopped),
-        }
-    }
-
     pub(super) async fn finish(
         &self,
         claim: &TurnClaim,
@@ -2451,14 +2303,9 @@ impl Driver {
         if let Some(checkpoint) = checkpoint
             && checkpoint.through_seq < claim.accepted_seq()
             && checkpoint.through_seq <= claim.live_seq()
-            && let Some(restored) = checkpoint::restore_candidate(fold, &checkpoint.bytes)
+            && let Some(restored) = checkpoint
+                .restore_for(fold)
                 .map_err(|error| context_failure("context.restore", &error))?
-            && restored.position().through_seq == checkpoint.through_seq
-            && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
-            && claim
-                .header()
-                .fingerprint()
-                .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
         {
             *fold = restored;
             cursor = checkpoint.through_seq;
@@ -2596,7 +2443,44 @@ fn tool_approval_review(
     })
 }
 
-fn model_cancelled() -> rsi_ai_protocol::AiError {
+/// Normalizes stream grammar and preserves terminal capacity for every paid language attempt.
+pub(super) fn record_event(
+    assembler: &mut LanguageAssembler,
+    evidence: &mut rsi_agent_session_protocol::ModelAttemptBuilder,
+    elapsed: u64,
+    received: std::result::Result<LanguageEvent, rsi_ai_protocol::AiError>,
+) -> std::result::Result<(LanguageEvent, bool), String> {
+    let mut event = received.unwrap_or_else(|error| LanguageEvent::Failed {
+        error,
+        replay: None,
+    });
+    if let Err(error) = assembler.push(&event) {
+        event = LanguageEvent::Failed {
+            error: model_stream_error(&error.to_string()),
+            replay: None,
+        };
+    }
+    if let Err(error) = evidence.push(elapsed, &event) {
+        let failure = rsi_ai_protocol::AiError::new(
+            ErrorKind::OutputValidation,
+            rsi_ai_protocol::ErrorPhase::Assemble,
+            DispatchStatus::Dispatched,
+            bounded(&error.to_string()),
+        )
+        .map_err(|error| bounded(&error.to_string()))?
+        .with_provider_code("model_output.capacity")
+        .map_err(|error| bounded(&error.to_string()))?;
+        event = LanguageEvent::Failed {
+            error: failure,
+            replay: None,
+        };
+        evidence.push(elapsed, &event).map_err(|error| bounded(&error.to_string()))?;
+        return Ok((event, true));
+    }
+    Ok((event, false))
+}
+
+pub(super) fn model_cancelled() -> rsi_ai_protocol::AiError {
     rsi_ai_protocol::AiError::new(
         ErrorKind::Cancelled,
         rsi_ai_protocol::ErrorPhase::Stream,
@@ -2605,7 +2489,7 @@ fn model_cancelled() -> rsi_ai_protocol::AiError {
     )
     .expect("static model cancellation")
 }
-fn model_stream_error(message: &str) -> rsi_ai_protocol::AiError {
+pub(super) fn model_stream_error(message: &str) -> rsi_ai_protocol::AiError {
     rsi_ai_protocol::AiError::new(
         ErrorKind::Protocol,
         rsi_ai_protocol::ErrorPhase::Stream,

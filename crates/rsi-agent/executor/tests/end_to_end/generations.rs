@@ -264,6 +264,17 @@ async fn provider_retry_keeps_its_original_generation_until_the_response_batch_s
         Some(TurnOutcome::Completed)
     );
     assert_eq!(*calls.lock().unwrap(), vec!["old", "new"]);
+    let history = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    assert_scheduled_retry_started(&history.facts);
     {
         let requests = language.requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
@@ -274,6 +285,22 @@ async fn provider_retry_keeps_its_original_generation_until_the_response_batch_s
     }
     drop(old_lease);
     stack.dispose(language_fiber, executor).await;
+}
+
+fn assert_scheduled_retry_started(facts: &[SessionFact]) {
+    let scheduled: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ModelAttemptSettled { attempt, .. } => {
+                attempt.scheduled_retry().map(|retry| (fact.seq(), retry))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(scheduled.len(), 1);
+    let (settled_seq, retry) = scheduled[0];
+    assert_eq!((retry.number, retry.delay_ms), (1, 1));
+    assert!(facts.iter().any(|fact| fact.seq() > settled_seq && matches!(fact.body(), SessionFactBody::ModelStarted { effect_id, .. } if *effect_id == retry.effect_id)));
 }
 
 #[tokio::test]

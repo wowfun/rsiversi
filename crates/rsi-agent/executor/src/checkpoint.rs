@@ -333,23 +333,15 @@ async fn rebuild_context_checkpoint(
     let checkpoint = read_checkpoint(turns, request.claim.session_id(), &request.budget)
         .await
         .map_err(|error| turn_outcome(&error))?;
-    if let Some(checkpoint) = checkpoint {
-        let candidate =
-            restore_candidate(&fold, &checkpoint.bytes).map_err(|error| context_outcome(&error))?;
-        if let Some(restored) = candidate
-            && restored.position().through_seq == checkpoint.through_seq
-            && restored.position().fact_prefix_sha256() == checkpoint.fact_prefix_sha256
-            && request
-                .claim
-                .header()
-                .fingerprint()
-                .is_ok_and(|fingerprint| fingerprint == checkpoint.header_fingerprint)
-        {
-            fold = restored;
-            cursor = checkpoint.through_seq;
-            restored_checkpoint = true;
-            scan.checkpoint_seq = cursor;
-        }
+    if let Some(checkpoint) = checkpoint
+        && let Some(restored) = checkpoint
+            .restore_for(&fold)
+            .map_err(|error| context_outcome(&error))?
+    {
+        fold = restored;
+        cursor = checkpoint.through_seq;
+        restored_checkpoint = true;
+        scan.checkpoint_seq = cursor;
     }
     if !restored_checkpoint
         && request.claim.header().history_origin().is_some()
@@ -389,19 +381,6 @@ async fn rebuild_context_checkpoint(
         fact_prefix_sha256: fold.position().fact_prefix_sha256(),
         bytes: fold.checkpoint().map_err(|error| context_outcome(&error))?,
     }))
-}
-
-/// Corrupt or incompatible caches fall back; pressure must preserve its refusal
-/// instead of initiating another expensive materialization from raw history.
-pub(super) fn restore_candidate(
-    state: &ModelContextState,
-    bytes: &[u8],
-) -> rsi_agent_context::Result<Option<ModelContextState>> {
-    match state.restored(bytes) {
-        Ok(restored) => Ok(Some(restored)),
-        Err(error @ rsi_agent_context::ContextError::Capacity) => Err(error),
-        Err(_) => Ok(None),
-    }
 }
 
 /// Admission travels into the actual Store worker, including after waiter cancellation.

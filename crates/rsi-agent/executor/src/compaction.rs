@@ -1,8 +1,8 @@
 //! Bounded orchestration over the Context-owned pure summary protocol.
 
 use super::{
-    AgentCompositionPin, CancellationToken, DriveFailure, Driver, ModelAttempt, ModelContextState,
-    TurnClaim, ai_failure, context_failure, failed, failure_outcome, fatal,
+    AgentCompositionPin, AttemptSlot, CancellationToken, DriveFailure, Driver, ModelAttempt,
+    ModelContextState, TurnClaim, ai_failure, context_failure, failed, failure_outcome, fatal,
 };
 use rsi_agent_session_protocol::{CompactionTrigger, ModelPurpose};
 
@@ -19,7 +19,7 @@ fn options_failure(
     failure_outcome(code, error.to_string())
 }
 
-fn admitted_options(
+pub(super) fn admitted_options(
     budget: &rsi_agent_context::ContextBudget,
     composition: &AgentCompositionPin,
     model: &rsi_agent_session_protocol::ModelSelection,
@@ -108,6 +108,11 @@ pub(super) struct PreparedRequestOptions {
     _credit: rsi_agent_context::ContextCredit,
 }
 
+enum CompactionStep {
+    Prepared(Box<rsi_agent_context::PlannedCompaction>),
+    Required(CompactionTrigger),
+}
+
 impl Driver {
     #[allow(clippy::result_large_err)] // Reuse the drive's owned failure value without adding allocation to request preparation.
     pub(super) fn prepare_request_options(
@@ -152,7 +157,7 @@ impl Driver {
         prepared: &PreparedRequestOptions,
         fold: &mut ModelContextState,
         model: &rsi_agent_session_protocol::ModelSelection,
-        retry_attempt: u8,
+        slot: &AttemptSlot,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<ModelAttempt, DriveFailure> {
@@ -160,22 +165,45 @@ impl Driver {
             profile, options, ..
         } = prepared;
         self.sync_fold(claim, fold).await?;
-        if retry_attempt == 0 {
-            self.compact(
-                claim,
-                fold,
-                options,
-                model,
-                profile,
-                None,
-                cancellation,
-                stop,
-            )
-            .await?;
-        }
-        let request = fold
-            .build(options.clone(), profile)
-            .map_err(|error| context_failure("context.limit", &error))?;
+        let request = if matches!(slot, AttemptSlot::First) {
+            use rsi_agent_context::{
+                ContextPreparation as Prepared, ContextPreparationError as Failure,
+            };
+            match fold.prepare(options.clone(), &model.model, profile) {
+                Ok(Prepared::Request(request)) => request,
+                Ok(Prepared::Compaction(planned)) => {
+                    self.compact(
+                        claim,
+                        fold,
+                        options,
+                        model,
+                        profile,
+                        CompactionStep::Prepared(planned),
+                        cancellation,
+                        stop,
+                    )
+                    .await?;
+                    fold.build(options.clone(), profile)
+                        .map_err(|error| context_failure("context.limit", &error))?
+                }
+                Err(Failure::Compaction(rsi_agent_context::ContextError::Capacity))
+                    if !fold.raw_pressure().is_some_and(
+                        rsi_agent_context::RawContextPressure::requires_compaction,
+                    ) =>
+                {
+                    eprintln!("optional context compaction declined: context.capacity");
+                    fold.build(options.clone(), profile)
+                        .map_err(|error| context_failure("context.limit", &error))?
+                }
+                Err(Failure::Request(error)) => {
+                    return Err(context_failure("context.limit", &error));
+                }
+                Err(Failure::Compaction(error)) => return Err(compaction_failure(&error)),
+            }
+        } else {
+            fold.build(options.clone(), profile)
+                .map_err(|error| context_failure("context.limit", &error))?
+        };
         let result = self
             .run_model_effect(
                 claim,
@@ -184,7 +212,7 @@ impl Driver {
                 fold,
                 model,
                 profile,
-                retry_attempt,
+                slot,
                 cancellation,
                 stop,
             )
@@ -198,7 +226,7 @@ impl Driver {
             options,
             model,
             profile,
-            Some(CompactionTrigger::ProviderContextLimit),
+            CompactionStep::Required(CompactionTrigger::ProviderContextLimit),
             cancellation,
             stop,
         )
@@ -215,7 +243,7 @@ impl Driver {
             fold,
             model,
             profile,
-            u8::MAX,
+            &AttemptSlot::Final,
             cancellation,
             stop,
         )
@@ -230,50 +258,29 @@ impl Driver {
         options: &rsi_ai_protocol::LanguageRequestOptions,
         model: &rsi_agent_session_protocol::ModelSelection,
         profile: &rsi_ai_protocol::LanguageProfile,
-        force: Option<CompactionTrigger>,
+        mut next_plan: CompactionStep,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<(), DriveFailure> {
-        let mut trigger = force;
         let raw_pressure = fold
             .raw_pressure()
             .is_some_and(rsi_agent_context::RawContextPressure::requires_compaction);
         let mut attempt = 0;
         loop {
             let before_pressure = fold.raw_pressure();
-            let planned_result =
-                fold.plan_compaction(options, &model.model, profile, trigger.clone(), attempt > 0);
-            if trigger.is_none()
-                && !raw_pressure
-                && matches!(
-                    planned_result,
-                    Err(rsi_agent_context::ContextError::Capacity)
-                )
-            {
-                eprintln!("optional context compaction declined: context.capacity");
-                return Ok(());
-            }
-            let planned = planned_result.map_err(|error| {
-                let code = if matches!(error, rsi_agent_context::ContextError::Capacity) {
-                    "context.capacity"
-                } else if matches!(error, rsi_agent_context::ContextError::TooLarge) {
-                    "context.limit"
-                } else {
-                    "context.compaction_failed"
-                };
-                failed(code, error.to_string())
-            })?;
-            let Some(planned) = planned else {
-                return if trigger.is_some() {
-                    Err(failed(
-                        "context.limit",
-                        "selected builder cannot compact this input",
-                    ))
-                } else {
-                    Ok(())
-                };
+            let planned = match next_plan {
+                CompactionStep::Prepared(plan) => *plan,
+                CompactionStep::Required(trigger) => fold
+                    .plan_compaction(options, &model.model, profile, Some(trigger), attempt > 0)
+                    .map_err(|error| compaction_failure(&error))?
+                    .ok_or_else(|| {
+                        failed(
+                            "context.limit",
+                            "selected builder cannot compact this input",
+                        )
+                    })?,
             };
-            trigger = Some(planned.plan.trigger.clone());
+            let trigger = planned.plan.trigger.clone();
             match self
                 .run_model_effect(
                     claim,
@@ -282,7 +289,7 @@ impl Driver {
                     fold,
                     model,
                     profile,
-                    u8::MAX,
+                    &AttemptSlot::Final,
                     cancellation,
                     stop,
                 )
@@ -312,16 +319,17 @@ impl Driver {
                                 "Raw context pressure cannot be reduced while preserving protected input",
                             ));
                         }
-                        trigger = Some(CompactionTrigger::CanonicalLimit);
+                        next_plan = CompactionStep::Required(CompactionTrigger::CanonicalLimit);
                         attempt = 0;
                         continue;
                     }
                     return Ok(());
                 }
                 ModelAttempt::ContextLimit if attempt == 0 => {
+                    next_plan = CompactionStep::Required(trigger);
                     attempt = 1;
                 }
-                ModelAttempt::ContextLimit | ModelAttempt::Retry => {
+                ModelAttempt::ContextLimit | ModelAttempt::Retry(_) => {
                     return Err(failed(
                         "context.limit",
                         "bounded summary input still exceeds provider capacity",
@@ -330,6 +338,15 @@ impl Driver {
             }
         }
     }
+}
+
+fn compaction_failure(error: &rsi_agent_context::ContextError) -> DriveFailure {
+    let code = match error {
+        rsi_agent_context::ContextError::Capacity => "context.capacity",
+        rsi_agent_context::ContextError::TooLarge => "context.limit",
+        rsi_agent_context::ContextError::Invalid(_) => "context.compaction_failed",
+    };
+    failed(code, error.to_string())
 }
 
 #[cfg(test)]
