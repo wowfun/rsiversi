@@ -1,6 +1,6 @@
 // A paired browser reads local Markdown images from the conversation's execution host.
 import assert from 'node:assert/strict';
-import {mkdir,open,writeFile} from 'node:fs/promises';
+import {mkdir,open,symlink,writeFile} from 'node:fs/promises';
 import {dirname,join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {connectWorkbench,readBrowserCaller,registerFixtureWorkspace} from './browser-fixture.mjs';
@@ -23,6 +23,12 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await writeFile(join(dirname(workspace),'linked.png'),png(210,90,[52,132,165,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
       await writeFile(join(workspace,'ordinary.png'),'An ordinary text document');
+      await writeFile(join(workspace,'notes.md'),'First line\nSelected source line\nLast line');
+      await writeFile(join(dirname(workspace),'outside.txt'),'Fixture outside document');
+      const sibling=join(dirname(workspace),'sibling-documents');
+      await mkdir(sibling);
+      await writeFile(join(sibling,'linked.txt'),'Fixture linked document');
+      await symlink(sibling,join(workspace,'linked-directory'),process.platform==='win32'?'junction':'dir');
       await writeFile(join(dirname(workspace),'unreadable.png'),unreadablePng());
       const large=await open(join(workspace,'large.png'),'w');
       try{await large.truncate(50*1024*1024+1);}finally{await large.close();}
@@ -66,6 +72,9 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       '![Too big](large.png)',
       '![](../unreadable.png)',
       '[Open drawing](../linked.png)',
+      '[Source line](./notes.md#L2)',
+      '[Absolute source](<'+join(service.workspace,'notes.md')+'#L3>)',
+      '[Outside document](../outside.txt)',
       '[![Thumbnail](drawing.svg)](../linked.png)',
     ].join('\n\n');
     await page.getByRole('textbox',{name:'Main message'}).fill((live?'Reproduce the following Markdown verbatim, including the empty alt text and both final links. Output only the Markdown. No tools.':'Show these images and links.')+'\n\n'+markdown);
@@ -78,7 +87,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
         const trigger=article.getByRole('button',{name:'View full image: '+label,exact:true});
         // The placeholder can be below the fold before any image request starts.
         const placeholder=article.getByText(label,{exact:true});
-        if(await placeholder.count())await placeholder.first().scrollIntoViewIfNeeded().catch(()=>{});
+        await trigger.or(placeholder).first().evaluate(el=>el.scrollIntoView({block:'nearest'}),undefined,{timeout:live?120000:30000});
         await trigger.waitFor({timeout:live?120000:30000});await trigger.scrollIntoViewIfNeeded();
         const handle=await trigger.getByRole('img').elementHandle();
         try {await page.waitForFunction((el)=>el.naturalWidth>0,handle);sizes[label]=await handle.evaluate(el=>[el.naturalWidth,el.naturalHeight]);}
@@ -133,6 +142,38 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await link.click();await displayed.waitFor();
       assert.equal(await dock.getByRole('tab').filter({hasText:'linked.png'}).count(),1);
       await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      const outside=article.getByText('Outside document',{exact:true});
+      assert(await outside.isVisible());
+      assert.equal(await outside.evaluate(el=>!!el.closest('button,a')),false);
+      const response=page.waitForResponse(r=>new URL(r.url()).pathname.endsWith('/files/document/2/read'));
+      await article.getByRole('button',{name:'Source line',exact:true}).click();
+      const accepted=await response;
+      assert.equal(accepted.status(),200);
+      const file=dock.getByRole('region',{name:'Document file'});
+      const line=stage==='author'?'Selected source line':'Changed since first read';
+      await file.locator('mark').filter({hasText:line}).waitFor();
+      assert.equal(await file.locator('pre').textContent(),'First line\n'+line+'\nLast line');
+      await page.screenshot({path:join(dir,stage+'-document.png')});
+      // The isolated device also exercises the Host boundary directly.
+      const request=accepted.request();
+      const headers=await request.allHeaders();
+      delete headers['content-length'];
+      const blocked=[];
+      for(const path of ['../outside.txt',join(dirname(service.workspace),'outside.txt'),'linked-directory/linked.txt']){
+        const denial=await page.context().request.post(request.url(),{
+          headers,
+          data:{...request.postDataJSON(),input:Buffer.from(path).toString('hex')},
+        });
+        blocked.push(denial.status());
+        assert([400,422].includes(denial.status()));
+        await denial.dispose();
+      }
+      await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      await article.getByRole('button',{name:'Absolute source',exact:true}).click();
+      await file.locator('mark').filter({hasText:'Last line'}).waitFor();
+      assert.equal(await dock.getByRole('tab').filter({hasText:'notes.md'}).count(),1);
+      await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      (result.documents??=[]).push({stage,line,absoluteLine:3,blocked});
       result.observations.push({stage,sizes,unreadable:await unreadable.innerText(),imageLink:{hover:true,keyboard:true,dock:[imageBounds.width,imageBounds.height],reloadedWidth:width+8,tabs:1}});
     }
     await inspect('author',210);
@@ -185,6 +226,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     assert(devices.includes(first.id));
     result.readerConfigurationAccess=devices.includes(second.id);
     assert.equal(result.readerConfigurationAccess,false);
+    await writeFile(join(service.workspace,'notes.md'),'First line\nChanged since first read\nLast line');
     await writeFile(join(dirname(service.workspace),'.outside.png'),png(248,90,[61,106,170,255]));
     await writeFile(join(dirname(service.workspace),'外部 草图.png'),png(248,90,[85,102,160,255]));
     await writeFile(join(dirname(service.workspace),'linked.png'),png(248,90,[52,132,165,255]));

@@ -1,3 +1,4 @@
+use crate::display_read::{DisplayHandler, DisplayKind};
 use crate::wire::{self, FilesOperation, Input, Reply, Request};
 use crate::{
     SessionFilesError,
@@ -241,7 +242,13 @@ impl SessionFilesApi {
             ),
             (
                 FilesOperation::Image,
-                Arc::new(super::image_read::ImageHandler(services.clone())) as Arc<dyn ApiHandler>,
+                Arc::new(DisplayHandler(services.clone(), DisplayKind::Image))
+                    as Arc<dyn ApiHandler>,
+            ),
+            (
+                FilesOperation::Document,
+                Arc::new(DisplayHandler(services.clone(), DisplayKind::Document))
+                    as Arc<dyn ApiHandler>,
             ),
             (FilesOperation::Release, release(services.owners)),
         ];

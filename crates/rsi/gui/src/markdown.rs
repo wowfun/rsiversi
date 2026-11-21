@@ -41,6 +41,7 @@ pub(crate) enum Element {
     Image { src: String },
     FileImage { path: String },
     FileImageLink { path: String },
+    FileLink { path: String, line: Option<u32> },
     Span,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -101,9 +102,45 @@ fn file_image(value: &str) -> Option<String> {
     Some(path.into_owned())
 }
 
-fn image_link(value: &str) -> Option<String> {
-    let path = file_image(value)?;
-    has_image_extension(&path).then_some(path)
+fn file_link(value: &str) -> Option<Element> {
+    let mut path = file_image(value)?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let location = if let Some((_, fragment)) = value.split_once('#') {
+        fragment.strip_prefix('L').and_then(|range| {
+            let (start, end) = range.split_once("-L").unwrap_or((range, range));
+            Some((digits(start).then_some(start)?, digits(end).then_some(end)?))
+        })
+    } else {
+        // Inspect the original spelling so an encoded colon remains part of the filename.
+        value.rsplit_once(':').and_then(|(prefix, tail)| {
+            let (last, end) = tail.split_once('-').unwrap_or((tail, tail));
+            if !digits(last) || !digits(end) {
+                return None;
+            }
+            let (name, start, end) = if last == tail
+                && let Some((name, column_line)) = prefix.rsplit_once(':')
+                && digits(column_line)
+            {
+                (name, column_line, column_line)
+            } else {
+                (prefix, last, end)
+            };
+            path.truncate(path.len() - (value.len() - name.len()));
+            Some((start, end))
+        })
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let line = location.and_then(|(start, end)| {
+        let line = start.parse::<u32>().ok()?;
+        (line > 0 && end.parse::<u64>().ok()? >= u64::from(line)).then_some(line)
+    });
+    Some(if has_image_extension(&path) {
+        Element::FileImageLink { path }
+    } else {
+        Element::FileLink { path, line }
+    })
 }
 
 fn has_image_extension(path: &str) -> bool {
@@ -243,9 +280,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                     Tag::Strikethrough => Element::Strike,
                     Tag::Link { dest_url, .. } => link(&dest_url)
                         .map(|url| Element::Link { href: url.into() })
-                        .or_else(|| {
-                            image_link(&dest_url).map(|path| Element::FileImageLink { path })
-                        })
+                        .or_else(|| file_link(&dest_url))
                         .unwrap_or(Element::Span),
                     _ => return None,
                 };
@@ -329,7 +364,8 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
                         Element::Link { href }
                         | Element::Image { src: href }
                         | Element::FileImage { path: href }
-                        | Element::FileImageLink { path: href },
+                        | Element::FileImageLink { path: href }
+                        | Element::FileLink { path: href, .. },
                 } => href.capacity(),
                 Node::Start {
                     element:
@@ -603,15 +639,25 @@ mod tests {
         ] {
             assert!(file_image(invalid).is_none(), "{invalid}");
         }
-        assert_eq!(image_link("./A%2EPnG#part").as_deref(), Some("./A.PnG"));
-        for value in [
-            "../notes.txt",
-            "./folder.png/notes",
-            "./notes",
-            "//server/image.png",
+        assert!(
+            matches!(file_link("./A%2EPnG#part"), Some(Element::FileImageLink { path }) if path == "./A.PnG")
+        );
+        for (value, expected, selected) in [
+            ("../notes.txt", "../notes.txt", None),
+            ("./folder.png/notes", "./folder.png/notes", None),
+            ("./a%20b%3A4.md:3:8", "./a b:4.md", Some(3)),
+            ("src/log:14-23", "src/log", Some(14)),
+            ("./a.md:3-1", "./a.md", None),
+            ("README.md#L2-L5", "README.md", Some(2)),
+            ("README.md#L0", "README.md", None),
+            ("./report%3A3", "./report:3", None),
         ] {
-            assert!(image_link(value).is_none(), "{value}");
+            assert!(
+                matches!(file_link(value), Some(Element::FileLink { path, line }) if path == expected && line == selected),
+                "{value}"
+            );
         }
+        assert!(file_link("//server/image.png").is_none());
     }
 
     #[test]

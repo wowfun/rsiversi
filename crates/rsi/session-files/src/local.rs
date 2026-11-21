@@ -26,6 +26,7 @@ pub(crate) fn client(
         FilesOperation::List,
         FilesOperation::Release,
         FilesOperation::Image,
+        FilesOperation::Document,
     ]
     .map(|op| op.spec().key())
     .to_vec();

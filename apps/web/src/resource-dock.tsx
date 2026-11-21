@@ -15,6 +15,7 @@ import {ExternalResources, ResourceGuide} from './resources.tsx'
 import {ResourceOwner} from './resource-owner.mjs'
 import {ScheduledTaskDetail} from './session/scheduled-tasks.tsx'
 import {FileImagePanel} from './session/transcript-file-image.tsx'
+import {DocumentFilePanel, type DocumentLocation} from './session/document-file.tsx'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',resizePane:'Resize resource panes',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>`Position ${x}, ${y} pixels. Arrow keys move; Shift changes by 50 pixels. Home and End select viewport corners.`,describeFloatSize:(w,h)=>`${w} by ${h} pixels. Arrow keys resize; Shift changes by 50 pixels. Home selects minimum size; End fills available space.`,dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
 const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
@@ -61,6 +62,7 @@ function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;p
   const hosts=useSyncExternalStore(resources.subscribe,resources.getSnapshot)
   const [doc,setDoc]=useState<DockDocument>(emptyDock),[notice,setNotice]=useState(''),[revision,changed]=useState(0)
   const [selection,setSelection]=useState<DockIntent>()
+  const [documentLocation,setDocumentLocation]=useState<DocumentLocation>()
   const dock=useRef<HTMLElement>(null),failedChip=useRef<HTMLElement>()
   const current=useRef(doc),store=useRef<DeviceStore>(),queue=useRef(Promise.resolve()),alive=useRef(true),ready=useRef(false),generation=useRef(0)
   const bindings=useRef(new Map<TabId,Binding>()),claimed=useRef(new Set<string>()),hostList=useRef(hosts),activeRef=useRef(active)
@@ -132,7 +134,7 @@ function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;p
     for(const tab of Object.values(next.state.tabs)){
       if(!valid())return
       const c=coordinate(JSON.parse(tab.contentId));let binding=bindings.current.get(tab.id)
-      if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task'||c.action==='file_image')continue
+      if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task'||c.action==='file_image'||c.action==='workspace_document')continue
       if(!binding){
         binding={label:tab.title};bindings.current.set(tab.id,binding)
         try{
@@ -240,14 +242,18 @@ function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;p
     const show=(event:Event)=>{
       const target=(event as CustomEvent).detail
       if(!activeRef.current||target?.pane!==pane||target.generation!==surface.generation)return
-      if(event.type==='rsi:file-image')
-        apply('open',{coordinate:{action:'file_image',path:target.path},title:target.path.split(/[\\/]/).at(-1)})
+      if(event.type==='rsi:file-image'||event.type==='rsi:workspace-document'){
+        const document=event.type==='rsi:workspace-document'
+        if(document)setDocumentLocation({path:target.path,line:target.line})
+        apply('open',{coordinate:{action:document?'workspace_document':'file_image',path:target.path},title:target.path.split(/[\\/]/).at(-1)})
+      }
       else apply('open',{coordinate:{action:'schedule_task',task:target.task},title:'Automation task'})
       update({resourcesClosed:false})
     }
     window.addEventListener('rsi:schedule-detail',show)
     window.addEventListener('rsi:file-image',show)
-    return ()=>{window.removeEventListener('rsi:schedule-detail',show);window.removeEventListener('rsi:file-image',show)}
+    window.addEventListener('rsi:workspace-document',show)
+    return ()=>{window.removeEventListener('rsi:schedule-detail',show);window.removeEventListener('rsi:file-image',show);window.removeEventListener('rsi:workspace-document',show)}
   },[pane,surface.generation])
   const intents:DockIntents={focusTab:tab=>apply('focus',{tab}),focusPane:pane=>apply('focus-pane',{pane}),splitPane:pane=>apply('split',{pane}),addTab:pane=>apply('open',{coordinate:{action:'resources'},title:'Resources',pane}),closeTab:tab=>apply('close',{tab}),duplicateTab:tab=>apply('duplicate',{tab}),floatTab:(tab,rect)=>apply('float',{tab,rect}),unfloatPane:pane=>apply('dock',{pane}),placeTab:(tab,pane,index)=>apply('place',{tab,pane,index}),dropTab:(tab,pane,zone)=>apply('drop',{tab,pane,zone}),moveFloat:(pane,x,y)=>apply('move-float',{pane,x,y}),resizeFloat:(pane,rect)=>apply('resize-float',{pane,rect}),resizeSplit:(split,sizes)=>apply('resize',{split,sizes})}
   const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow,selection?.tab as TabId|undefined),[doc.state,viewport.width,viewport.height,narrow,selection])
@@ -257,6 +263,8 @@ function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;p
   const body=(tab:TabRecord)=>{
     const c=coordinate(JSON.parse(tab.contentId)),binding=bindings.current.get(tab.id)
     if(c.action==='schedule_task')return <ScheduledTaskDetail surface={surface} id={String(c.task)}/>
+    if(c.action==='workspace_document')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?
+      <DocumentFilePanel key={tab.contentId} pane={pane} generation={surface.generation} path={String(c.path)} location={documentLocation?.path===c.path?documentLocation:undefined}/>:null
     if(c.action==='file_image')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?
       <FileImagePanel pane={pane} generation={surface.generation} path={String(c.path)}/>:null
     if(c.action==='resources')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?guide:null

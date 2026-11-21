@@ -4,15 +4,22 @@ use rsi_api_protocol::{
     ApiContext, ApiError, ApiHandler, ApiMessage, ApiOutput, ApiResponseCapacity, CallOrigin,
     RetainedBytes,
 };
-use rsi_files_protocol::{FilesError, MAXIMUM_FILE_BODY_BYTES, ReadPath};
+use rsi_files_protocol::{BodyPath, FilesError, MAXIMUM_FILE_BODY_BYTES, ReadPath, RelativePath};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
-pub(super) struct ImageHandler(pub(super) Services);
+pub(super) struct DisplayHandler(pub(super) Services, pub(super) DisplayKind);
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DisplayKind {
+    Image,
+    Document,
+}
 
 // The binary endpoint admits image content before returning any local bytes.
 fn media_type(bytes: &[u8]) -> rsi_files_protocol::Result<&'static str> {
     use image::{ImageFormat, ImageReader};
+    use quick_xml::{NsReader, events::Event, name::ResolveResult};
     if let Ok(format) = image::guess_format(bytes) {
         let mime = match format {
             ImageFormat::Png => "image/png",
@@ -35,7 +42,6 @@ fn media_type(bytes: &[u8]) -> rsi_files_protocol::Result<&'static str> {
     if bytes.len() > 256 * 1024 {
         return Err(FilesError::Invalid);
     }
-    use quick_xml::{NsReader, events::Event, name::ResolveResult};
     let mut reader = NsReader::from_reader(bytes);
     loop {
         match reader
@@ -56,19 +62,39 @@ fn media_type(bytes: &[u8]) -> rsi_files_protocol::Result<&'static str> {
 }
 
 #[async_trait]
-impl ApiHandler for ImageHandler {
+impl ApiHandler for DisplayHandler {
     async fn invoke(
         &self,
         context: ApiContext,
         input: RetainedBytes,
         output: ApiResponseCapacity,
     ) -> rsi_api_protocol::Result<ApiOutput> {
-        let request: Request<ReadPath> = serde_json::from_slice(input.as_bytes())
-            .map_err(|_| ApiError::Invalid("invalid Session image request".into()))?;
         let mut capacity = output.into_finite()?;
-        if !crate::is_local_image_path(request.input.as_bytes()) {
-            return Err(ApiError::Domain(capacity.encode(&FilesError::Invalid)?));
-        }
+        let kind = self.1;
+        let invalid = |_| ApiError::Invalid("invalid Session file request".into());
+        let (target, path, maximum) = match kind {
+            DisplayKind::Image => {
+                let request: Request<ReadPath> =
+                    serde_json::from_slice(input.as_bytes()).map_err(invalid)?;
+                if !crate::is_local_image_path(request.input.as_bytes()) {
+                    return Err(ApiError::Domain(capacity.encode(&FilesError::Invalid)?));
+                }
+                (
+                    request.target,
+                    BodyPath::Host(request.input),
+                    MAXIMUM_FILE_BODY_BYTES,
+                )
+            }
+            DisplayKind::Document => {
+                let request: Request<RelativePath> =
+                    serde_json::from_slice(input.as_bytes()).map_err(invalid)?;
+                (
+                    request.target,
+                    BodyPath::Workspace(request.input),
+                    crate::MAXIMUM_DOCUMENT_BYTES,
+                )
+            }
+        };
         let stop = context.retiring.child_token();
         let _cancel = stop.clone().drop_guard();
         let revoked = match &context.origin {
@@ -76,23 +102,29 @@ impl ApiHandler for ImageHandler {
             CallOrigin::Local => CancellationToken::new(),
         };
         let read = async {
-            let (lease, execution, binding) =
-                self.0.access(&context.origin, &request.target).await?;
+            let (lease, execution, binding) = self.0.access(&context.origin, &target).await?;
             let files = execution.files().map_err(|_| FilesError::Cancelled)?;
             let fence = lease.fence();
+            let permits = u32::try_from(maximum).expect("display byte ceilings fit the scratch pool");
             let scratch = tokio::select! {
                 biased;
                 () = fence.retiring().cancelled() => return Err(FilesError::Cancelled.into()),
-                permit = self.0.scratch.clone().acquire_many_owned(MAXIMUM_FILE_BODY_BYTES as u32) => {
+                permit = self.0.scratch.clone().acquire_many_owned(permits) => {
                     permit.map_err(|_| ApiError::ShuttingDown)?
                 }
             };
             let work = tokio::spawn(async move {
                 let _access = lease;
-                let body = files
-                    .read_body(binding, request.input, MAXIMUM_FILE_BODY_BYTES, stop)
-                    .await?;
-                let mime = media_type(&body)?;
+                let body = files.read_body(binding, path, maximum, stop).await?;
+                let mime = match kind {
+                    DisplayKind::Image => media_type(&body)?,
+                    DisplayKind::Document
+                        if !body.contains(&0) && std::str::from_utf8(&body).is_ok() =>
+                    {
+                        "text/plain"
+                    }
+                    DisplayKind::Document => return Err(FilesError::Invalid),
+                };
                 Ok::<_, FilesError>((mime, body, scratch))
             });
             tokio::select! {

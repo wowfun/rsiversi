@@ -1,6 +1,6 @@
 import type {ReactNode} from 'react';
 import {InlineHoverCard} from '../../vendor/dsh/dockkit-primitives/InlineHoverCard.tsx';
-import {PhotoGlyph} from '../../vendor/dsh/dockkit-primitives/PhotoGlyph.tsx';
+import {PhotoGlyph} from '../../vendor/dsh/dockkit-primitives/FileGlyphs.tsx';
 import {useOptionalDocumentSession} from '../document-plugins.tsx';
 import {FileImage} from './transcript-file-image.tsx';
 import css from './markdown-image.module.css';

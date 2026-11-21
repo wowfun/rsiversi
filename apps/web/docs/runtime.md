@@ -126,6 +126,11 @@ and outside-workspace images. The document validates local image bytes before
 decoding and releases the preview Blob URL with the displayed image.
 If the browser cannot decode a local image, the transcript immediately releases
 its original file and preview URL and shows the author's alt text or file path.
+A settled Markdown document link opens its UTF-8 source in the file panel
+when the destination resolves inside the conversation workspace. A line
+reference selects the requested line. Outside-workspace document labels
+remain plain text. Document bytes are requested when the panel opens.
+
 In a settled reply, a Markdown link to a local image opens that image in a
 Session resource tab. A text link previews the file on mouse hover or keyboard
 focus. Escape dismisses the preview. An image inside a link has a single

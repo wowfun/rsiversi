@@ -4,7 +4,7 @@ import {useOptionalDocumentSession} from '../document-plugins.tsx';
 import {boundedImage} from '../../image-bounds.js';
 import {releaseTranscriptImage} from './image-intake.ts';
 import {MarkdownImage} from './markdown-image.tsx';
-import {IconRefreshOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import {FilePanel} from './file-panel.tsx';
 import css from './markdown-image.module.css';
 
 type Props = {path: string; alt: string; linked: boolean};
@@ -45,7 +45,7 @@ export function FileImage({pane, generation, path, alt, linked, lazy = false}: P
     }
     async function load() {
       try {
-        const [mime, bytes] = await input.transcriptImage(pane, generation, path);
+        const [mime, bytes] = await input.transcriptFile(pane, generation, 'image', path);
         if (!mounted) return;
         const image = boundedImage(bytes, mime);
         const name = path.split(/[\\/]/).at(-1) || 'image';
@@ -91,15 +91,9 @@ export function TranscriptFileImage(props: Props) {
 
 export function FileImagePanel({pane, generation, path}: {pane:string; generation:string; path:string}) {
   const [revision, reload] = useState(0);
-  return <section className={css.panel} aria-label="Image file">
-    <header className={css.fileHeader}>
-      <span title={path}>{path}</span>
-      <button type="button" aria-label="Reload file" title="Reload file" onClick={() => reload(n => n + 1)}>
-        <IconRefreshOutlineRegular size={16}/>
-      </button>
-    </header>
-    <div className={css.fileScroll}><div className={css.fileFrame} data-image-preview="">
+  return <FilePanel label="Image file" path={path} reload={() => reload(n => n + 1)}>
+    <div className={css.fileFrame} data-image-preview="">
       <FileImage key={revision} pane={pane} generation={generation} path={path} alt={path} linked/>
-    </div></div>
-  </section>;
+    </div>
+  </FilePanel>;
 }

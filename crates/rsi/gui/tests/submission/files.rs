@@ -33,10 +33,10 @@ impl Drop for Active<'_> {
 }
 #[async_trait]
 impl SessionFiles for Reader {
-    async fn image(
+    async fn display(
         &self,
         _: SessionTarget,
-        _: rsi_files_protocol::ReadPath,
+        _: rsi_session_files::TranscriptFile,
     ) -> rsi_session_files::Result<(String, rsi_api_protocol::RetainedBytes)> {
         Err(FilesError::Unavailable.into())
     }

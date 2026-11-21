@@ -16,6 +16,12 @@ body, with no durable Media import, file token or directory access.
 The maximum is 50 MiB, with 16,777,216 pixels for raster previews and 256 KiB
 for SVG. Network-share and device prefixes are outside this local-path operation.
 
+The transcript document read accepts a workspace-relative file path under the
+same Session/Header grant. It opens through the confined workspace reader,
+including when a device supplies the request directly. It returns at most
+1 MiB of UTF-8 text without NUL, including empty documents. Display reads
+retain no file token or durable copy.
+
 The endpoint plugin also publishes the same typed client for trusted embedded
 applications. Its private adapter admits these Files read operations
 with Local origin through the same registry, byte pools, decoders and Session

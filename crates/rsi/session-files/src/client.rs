@@ -47,17 +47,21 @@ fn malformed() -> SessionFilesError {
 }
 #[async_trait]
 impl SessionFiles for SessionFilesClient {
-    async fn image(
+    async fn display(
         &self,
         target: SessionTarget,
-        path: rsi_files_protocol::ReadPath,
-    ) -> Result<(String, rsi_api_protocol::RetainedBytes)> {
+        file: crate::TranscriptFile,
+    ) -> Result<crate::DisplayBody> {
         use rsi_api_protocol::ApiOutput;
-        let spec = FilesOperation::Image.spec();
+        let operation = match &file {
+            crate::TranscriptFile::Image(_) => FilesOperation::Image,
+            crate::TranscriptFile::Document(_) => FilesOperation::Document,
+        };
+        let spec = operation.spec();
         let input = self.api.input_budget(spec.class).encode(
             &Request {
                 target,
-                input: path,
+                input: file,
             },
             spec.maximum_request_bytes,
         )?;
@@ -65,23 +69,24 @@ impl SessionFiles for SessionFilesClient {
             Ok(ApiOutput::Reply(message)) => {
                 let mime = serde_json::from_slice::<String>(message.json.as_bytes())
                     .map_err(|_| malformed())?;
-                let bytes = message
-                    .binary
-                    .filter(|part| {
-                        !part.is_empty()
-                            && part.len() <= rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES
-                    })
-                    .ok_or_else(malformed)?;
-                if !matches!(
-                    mime.as_str(),
-                    "image/png"
-                        | "image/jpeg"
-                        | "image/gif"
-                        | "image/webp"
-                        | "image/bmp"
-                        | "image/x-icon"
-                        | "image/svg+xml"
-                ) {
+                let bytes = message.binary.ok_or_else(malformed)?;
+                let valid = if operation == FilesOperation::Document {
+                    mime == "text/plain" && bytes.len() <= crate::MAXIMUM_DOCUMENT_BYTES
+                } else {
+                    !bytes.is_empty()
+                        && bytes.len() <= rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES
+                        && matches!(
+                            mime.as_str(),
+                            "image/png"
+                                | "image/jpeg"
+                                | "image/gif"
+                                | "image/webp"
+                                | "image/bmp"
+                                | "image/x-icon"
+                                | "image/svg+xml"
+                        )
+                };
+                if !valid {
                     return Err(malformed());
                 }
                 Ok((mime, bytes))

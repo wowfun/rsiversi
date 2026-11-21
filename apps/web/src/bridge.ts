@@ -119,9 +119,9 @@ interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').S
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
-  transcriptImage(pane:string,generation:string,path:string):Promise<[string,Uint8Array<ArrayBuffer>]> {
+  transcriptFile(pane:string,generation:string,kind:"image"|"document",path:string):Promise<[string,Uint8Array<ArrayBuffer>]> {
     if (!actions) return Promise.reject(new Error('Application is starting'));
-    return actions.call("transcript_image",JSON.stringify({pane,generation,path})) as Promise<[string,Uint8Array<ArrayBuffer>]>;
+    return actions.call("transcript_file",JSON.stringify({pane,generation,kind,path})) as Promise<[string,Uint8Array<ArrayBuffer>]>;
   },
   captureSetupBinding() { if (!actions) throw new Error('Application is starting'); return actions.captureSetupBinding() },
   disconnect() { if (!actions) return Promise.reject(new Error("Application is starting")); return actions.disconnect() },

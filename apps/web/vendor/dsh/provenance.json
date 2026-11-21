@@ -637,10 +637,10 @@
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
-      "path": "dockkit-primitives/PhotoGlyph.tsx",
+      "path": "dockkit-primitives/FileGlyphs.tsx",
       "source": "packages/client/ui-primitives/src/LinkIcon.tsx",
       "source_sha256": "fc103908514e3403055dc676bedead917cf87881aad4e0617223199d757e32cb",
-      "adapted_sha256": "a00c7006390e2ccdc7907e137ead90f2778421c695c57a4fa4deeb26bc56d640",
+      "adapted_sha256": "dcd003f413fe653342e31e1d6f2b81b4ec5bbc951efc9b89aed3754be4c86af5",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {

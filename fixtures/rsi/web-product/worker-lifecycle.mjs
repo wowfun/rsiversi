@@ -37,7 +37,7 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function read_pending_interaction() {}
     export async function reference_input() {}
     export async function file_input() {}
-    export async function transcript_image() {}
+    export async function transcript_file() {}
     export async function export_input() {}
     export async function dispatch_submission() {}
     export async function import_image() {}

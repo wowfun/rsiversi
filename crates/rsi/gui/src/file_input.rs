@@ -10,25 +10,40 @@ struct Input {
     request: Option<FilePickerRequest>,
 }
 impl GuiApplication {
-    /// Read image bytes under the currently displayed Session and Header.
-    pub fn transcript_image(
+    /// Read displayable file bytes under the currently displayed Session and Header.
+    pub fn transcript_file(
         self: &Arc<Self>,
         source: &str,
-    ) -> BoxFuture<'static, Result<rsi_session_files::SessionImage>> {
+    ) -> BoxFuture<'static, Result<rsi_session_files::DisplayBody>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            Image,
+            Document,
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Image {
+        struct Display {
             pane: crate::SurfaceId,
             generation: String,
             path: String,
+            kind: Kind,
         }
         let read = (|| {
             if source.len() > 2 * rsi_files_protocol::MAXIMUM_FILE_PATH_BYTES + 1024 {
-                return Err("Image path exceeds its limit".to_string());
+                return Err("File path exceeds its limit".to_string());
             }
-            let image: Image = serde_json::from_str(source).map_err(error)?;
-            let path = rsi_files_protocol::ReadPath::new(image.path.as_bytes()).map_err(error)?;
-            Ok((image.pane, image.generation, path))
+            let display: Display = serde_json::from_str(source).map_err(error)?;
+            let bytes = display.path.as_bytes();
+            let path = match display.kind {
+                Kind::Image => rsi_session_files::TranscriptFile::Image(
+                    rsi_files_protocol::ReadPath::new(bytes).map_err(error)?,
+                ),
+                Kind::Document => rsi_session_files::TranscriptFile::Document(
+                    rsi_files_protocol::RelativePath::new(bytes).map_err(error)?,
+                ),
+            };
+            Ok((display.pane, display.generation, path))
         })();
         self.admit_reply(move |app| async move {
             let (id, generation, path) = read?;
@@ -42,13 +57,13 @@ impl GuiApplication {
                 session_id: attached.id.clone(),
                 header_key: attached.header.clone(),
             };
-            let image = tokio::select! {
+            let body = tokio::select! {
                 biased;
                 () = attached.stop.cancelled() => return Err("This pane changed".into()),
-                result = files.image(target, path) => result.map_err(error)?,
+                result = files.display(target, path) => result.map_err(error)?,
             };
             pane.attachment(&generation)?;
-            Ok(image)
+            Ok(body)
         })
     }
     /// Finite `SessionFiles` picker read, or cancellation, for the actual pane generation.

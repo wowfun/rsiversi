@@ -270,14 +270,22 @@ fn resolve(
 }
 pub(super) fn read_body(
     binding: &FilesBinding,
-    path: &rsi_files_protocol::ReadPath,
+    path: rsi_files_protocol::BodyPath,
     maximum: usize,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>> {
     if !(1..=rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES).contains(&maximum) {
         return Err(FilesError::Invalid);
     }
-    let (_, resource) = resolve(binding.workspace(), path, FileKind::File, cancellation)?;
+    let resource = match path {
+        rsi_files_protocol::BodyPath::Workspace(path) => {
+            check(cancellation)?;
+            open_at(binding.workspace(), path, FileKind::File, cancellation)?
+        }
+        rsi_files_protocol::BodyPath::Host(path) => {
+            resolve(binding.workspace(), &path, FileKind::File, cancellation)?.1
+        }
+    };
     if resource.length() > maximum as u64 {
         return Err(FilesError::Capacity);
     }

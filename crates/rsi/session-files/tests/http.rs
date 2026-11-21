@@ -80,7 +80,7 @@ use rsi_credentials_protocol::{CredentialRef, SecretValue};
 use rsi_files::LocalFiles;
 use rsi_files_protocol::*;
 use rsi_session_files::{
-    SessionFiles as _, SessionFilesApi, SessionFilesClient, SessionFilesError,
+    SessionFiles as _, SessionFilesApi, SessionFilesClient, SessionFilesError, TranscriptFile,
 };
 use rsi_session_protocol::{SessionError, SessionReadLease, SessionReads, SessionTarget};
 use std::sync::{
@@ -374,6 +374,7 @@ impl Harness {
                     "list" => rsi_session_files::FilesOperation::List,
                     "release" => rsi_session_files::FilesOperation::Release,
                     "image" => rsi_session_files::FilesOperation::Image,
+                    "document" => rsi_session_files::FilesOperation::Document,
                     _ => panic!("unknown fixture operation"),
                 }
                 .spec()
@@ -405,6 +406,70 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn transcript_documents_require_session_access_and_a_confined_text_file() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::start().await;
+    let root = harness._temporary.path();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(outside.path(), "outside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("link.txt")).unwrap();
+    let text = "源\n".repeat(20_000);
+    std::fs::write(root.join("report.md"), &text).unwrap();
+    std::fs::write(root.join("empty.txt"), "").unwrap();
+    std::fs::write(
+        root.join("large.txt"),
+        vec![b'a'; rsi_session_files::MAXIMUM_DOCUMENT_BYTES + 1],
+    )
+    .unwrap();
+    let document = |path: &[u8]| TranscriptFile::Document(RelativePath::new(path).unwrap());
+    let request =
+        |bytes: &[u8]| serde_json::json!({"target":harness.target(),"input":hex::encode(bytes)});
+    assert_eq!(
+        harness
+            .raw("document", request(b"report.md"), false)
+            .await
+            .status(),
+        401
+    );
+    for path in [
+        b"../outside.txt".as_slice(),
+        outside.path().as_os_str().as_encoded_bytes(),
+    ] {
+        assert_eq!(
+            harness.raw("document", request(path), true).await.status(),
+            400
+        );
+    }
+    for (path, expected) in [("report.md", text.as_str()), ("empty.txt", "")] {
+        let (mime, bytes) = harness
+            .client
+            .display(harness.target(), document(path.as_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(mime, "text/plain");
+        assert_eq!(bytes.as_bytes(), expected.as_bytes());
+    }
+    for path in [b"link.txt".as_slice(), b"file", b"large.txt"] {
+        assert!(
+            harness
+                .client
+                .display(harness.target(), document(path))
+                .await
+                .is_err()
+        );
+    }
+    harness.reads.available.store(false, Ordering::SeqCst);
+    assert!(
+        harness
+            .client
+            .display(harness.target(), document(b"report.md"))
+            .await
+            .is_err()
+    );
+    harness.close().await;
+}
+
+#[tokio::test]
 async fn session_read_grants_preview_images_in_and_outside_the_workspace() {
     let _serial = SERIAL.lock().await;
     let harness = Harness::start().await;
@@ -417,7 +482,11 @@ async fn session_read_grants_preview_images_in_and_outside_the_workspace() {
     let request = serde_json::json!({"target":harness.target(),"input":&absolute});
     assert_eq!(harness.raw("image", request, false).await.status(), 401);
     for p in [absolute.clone(), ReadPath::new(b"image.svg").unwrap()] {
-        let (mime, body) = harness.client.image(harness.target(), p).await.unwrap();
+        let (mime, body) = harness
+            .client
+            .display(harness.target(), TranscriptFile::Image(p))
+            .await
+            .unwrap();
         assert_eq!(mime, "image/svg+xml");
         assert_eq!(body.as_bytes(), contents);
     }
@@ -431,9 +500,9 @@ async fn session_read_grants_preview_images_in_and_outside_the_workspace() {
     std::fs::write(&path, &bytes).unwrap();
     let (mime, body) = harness
         .client
-        .image(
+        .display(
             harness.target(),
-            ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap(),
+            TranscriptFile::Image(ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap()),
         )
         .await
         .unwrap();
@@ -442,18 +511,28 @@ async fn session_read_grants_preview_images_in_and_outside_the_workspace() {
     assert!(
         harness
             .client
-            .image(harness.target(), ReadPath::new(b"file").unwrap())
+            .display(
+                harness.target(),
+                TranscriptFile::Image(ReadPath::new(b"file").unwrap())
+            )
             .await
             .is_err()
     );
     let mut wrong = harness.target();
     wrong.header_key = "0".repeat(64);
-    assert!(harness.client.image(wrong, absolute).await.is_err());
+    assert!(
+        harness
+            .client
+            .display(wrong, TranscriptFile::Image(absolute))
+            .await
+            .is_err()
+    );
     harness.reader.gate.store(true, Ordering::SeqCst);
     let client = harness.client.clone();
     let target = harness.target();
     let large = ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap();
-    let read = tokio::spawn(async move { client.image(target, large).await });
+    let read =
+        tokio::spawn(async move { client.display(target, TranscriptFile::Image(large)).await });
     harness.reader.entered.acquire().await.unwrap().forget();
     harness.reads.retiring.cancel();
     assert!(matches!(

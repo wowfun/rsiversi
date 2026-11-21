@@ -9,7 +9,7 @@ use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 mod path_read;
 mod validation;
-pub use path_read::{PathPage, PathRead, ReadPage, ReadPath};
+pub use path_read::{BodyPath, PathPage, PathRead, ReadPage, ReadPath};
 
 /// Preferred exact file page size.
 pub const PREFERRED_FILE_PAGE_BYTES: usize = 16 * 1024;
@@ -283,12 +283,11 @@ pub struct DirectoryPage {
 /// Shared reader. Entrypoints must establish current authority before every call.
 #[async_trait]
 pub trait Files: fmt::Debug + Send + Sync + 'static {
-    /// Read one version of a regular file, resolving the path on the selected host.
-    /// The binding's cwd is a base for relative paths; the caller authorizes host paths.
+    /// Read one file version using the caller-selected path authority.
     async fn read_body(
         &self,
         binding: FilesBinding,
-        path: ReadPath,
+        path: BodyPath,
         maximum: usize,
         cancellation: CancellationToken,
     ) -> Result<Vec<u8>> {

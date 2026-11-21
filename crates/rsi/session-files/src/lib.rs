@@ -12,7 +12,7 @@ use rsi_session_protocol::SessionTarget;
 use std::fmt;
 
 mod client;
-mod image_read;
+mod display_read;
 mod local;
 mod plugin;
 mod resources;
@@ -35,8 +35,21 @@ pub enum SessionFilesError {
 }
 /// Session-bound file operation result.
 pub type Result<T> = std::result::Result<T, SessionFilesError>;
-/// Sniffed media type and the finite response's retained image allocation.
-pub type SessionImage = (String, rsi_api_protocol::RetainedBytes);
+/// MIME type and finite body of a file opened from the transcript.
+pub type DisplayBody = (String, rsi_api_protocol::RetainedBytes);
+
+/// Maximum UTF-8 source in a document preview.
+pub const MAXIMUM_DOCUMENT_BYTES: usize = 1024 * 1024;
+
+/// Files the transcript can display under the Session's grant.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum TranscriptFile {
+    /// A content-checked image on the execution host.
+    Image(rsi_files_protocol::ReadPath),
+    /// A document confined to the Session workspace.
+    Document(RelativePath),
+}
 
 /// A local Host image reference cannot select a network share or device namespace.
 pub fn is_local_image_path(path: &[u8]) -> bool {
@@ -47,12 +60,8 @@ pub fn is_local_image_path(path: &[u8]) -> bool {
 /// Human workspace browsing over one authenticated API connection generation.
 #[async_trait]
 pub trait SessionFiles: fmt::Debug + Send + Sync + 'static {
-    /// Read one displayable image through the Session and execution grants.
-    async fn image(
-        &self,
-        target: SessionTarget,
-        path: rsi_files_protocol::ReadPath,
-    ) -> Result<SessionImage>;
+    /// Read one file for display through the Session and execution grants.
+    async fn display(&self, target: SessionTarget, file: TranscriptFile) -> Result<DisplayBody>;
     /// Open a new read snapshot for the currently bound Session workspace.
     async fn open(
         &self,

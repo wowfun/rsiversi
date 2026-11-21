@@ -15,6 +15,7 @@ import { CopyButton } from "./copy-button.tsx";
 import { MarkdownImage } from "./markdown-image.tsx";
 import { TranscriptFileImage } from "./transcript-file-image.tsx";
 import { ImageFileLink } from "./image-file-link.tsx";
+import { DocumentFileLink } from "./document-file.tsx";
 import linkStyles from "./markdown-image.module.css";
 import {
   IconGlobeOutlineMedium,
@@ -41,6 +42,7 @@ type Element =
   | { kind: "link"; href: string }
   | { kind: "image"; src: string }
   | { kind: "file_image" | "file_image_link"; path: string }
+  | { kind: "file_link"; path: string; line: number | null }
   | {
       kind: "table_cell";
       header: boolean;
@@ -203,7 +205,7 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
   return nodes.map((node, key) => {
     if (typeof node === "string") return node;
     const element = node.element;
-    const children = () => render(node.children, streaming, inQuote || element.kind === "quote", inLink || element.kind === "link" || element.kind === "file_image_link");
+    const children = () => render(node.children, streaming, inQuote || element.kind === "quote", inLink || element.kind === "link" || element.kind === "file_image_link" || element.kind === "file_link");
     switch (element.kind) {
       case "pre":
         if (element.language === "math" && !streaming)
@@ -234,6 +236,8 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
         return <MarkdownImage key={`${key}:${element.src}`} src={element.src} alt={textOf(node.children)} linked={inLink}/>;
       case "file_image":
         return streaming ? textOf(node.children) : <TranscriptFileImage key={`${key}:${element.path}`} path={element.path} alt={textOf(node.children)} linked={inLink}/>;
+      case "file_link":
+        return streaming || inLink ? children() : <DocumentFileLink key={key} path={element.path} line={element.line} imagesOnly={onlyImages(node.children)}>{children()}</DocumentFileLink>;
       case "file_image_link": {
         return streaming ? children() : <ImageFileLink key={`${key}:${element.path}`} path={element.path} imagesOnly={onlyImages(node.children)}>{children()}</ImageFileLink>;
       }

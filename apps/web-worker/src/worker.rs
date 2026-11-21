@@ -519,11 +519,11 @@ pub async fn file_input(source: String) -> Result<String, JsValue> {
     application()?.file_input(&source).await.map_err(failure)
 }
 
-/// Returns the admitted MIME type and transferable bytes for one transcript image.
+/// Returns the admitted MIME type and transferable bytes for one transcript file.
 #[wasm_bindgen]
-pub async fn transcript_image(source: String) -> Result<js_sys::Array, JsValue> {
+pub async fn transcript_file(source: String) -> Result<js_sys::Array, JsValue> {
     let (mime, bytes) = application()?
-        .transcript_image(&source)
+        .transcript_file(&source)
         .await
         .map_err(failure)?;
     Ok(js_sys::Array::of2(

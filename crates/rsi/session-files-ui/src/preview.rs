@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const TEXT_BYTES: u64 = 1024 * 1024;
+const TEXT_BYTES: u64 = rsi_session_files::MAXIMUM_DOCUMENT_BYTES as u64;
 const PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 // Charge raw, parsed and encoded scratch before reading. Retained leases outlive waiters.
 static PREVIEW_BYTES: LazyLock<Arc<Semaphore>> =

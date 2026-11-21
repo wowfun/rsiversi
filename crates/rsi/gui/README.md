@@ -318,6 +318,9 @@ An escaped example, a code span, or a larger paragraph containing this
 space-separated form retains its ordinary Markdown interpretation.
 Links to these same image paths carry a distinct file-link event so the
 document can open the file from its label after settlement.
+Ordinary local file links carry their decoded path and optional one-based
+source line. The document resolves the link against the attached workspace
+and passes a relative path to the Session Files document reader.
 The document constructs only the closed element set with text nodes, and HTTP(S) links
 open with no opener or referrer.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses

@@ -167,17 +167,31 @@ impl PathPage {
     }
 }
 
-// Page-only providers resolve once, then pin a single version for a large body.
+/// Path resolution policy for a caller-authorized whole-file read.
+#[derive(Debug)]
+pub enum BodyPath {
+    /// Open relative to the bound workspace with the snapshot's confinement.
+    Workspace(crate::RelativePath),
+    /// Resolve native path components on the execution host.
+    Host(ReadPath),
+}
+
 pub(super) async fn read_body<F: crate::Files + ?Sized>(
     files: &F,
     binding: crate::FilesBinding,
-    path: ReadPath,
+    path: BodyPath,
     maximum: usize,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<Vec<u8>> {
     if !(1..=crate::MAXIMUM_FILE_BODY_BYTES).contains(&maximum) {
         return Err(FilesError::Invalid);
     }
+    let path = match path {
+        BodyPath::Workspace(relative) => {
+            return snapshot_body(files, binding, relative, maximum, cancellation).await;
+        }
+        BodyPath::Host(path) => path,
+    };
     let first = files
         .read_path(
             PathRead::new(
@@ -219,6 +233,22 @@ pub(super) async fn read_body<F: crate::Files + ?Sized>(
         ..binding
     };
     let relative = crate::RelativePath::new(&resolved[split + 1..])?;
+    snapshot_body(files, binding, relative, maximum, cancellation).await
+}
+
+async fn snapshot_body<F: crate::Files + ?Sized>(
+    files: &F,
+    binding: crate::FilesBinding,
+    relative: crate::RelativePath,
+    maximum: usize,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<Vec<u8>> {
+    struct Hold<'a, F: crate::Files + ?Sized>(&'a F, crate::FilesBinding, crate::FileToken);
+    impl<F: crate::Files + ?Sized> Drop for Hold<'_, F> {
+        fn drop(&mut self) {
+            let _ = self.0.release(&self.1, &self.2);
+        }
+    }
     let opened = files
         .open(
             binding.clone(),
@@ -227,12 +257,6 @@ pub(super) async fn read_body<F: crate::Files + ?Sized>(
             cancellation.clone(),
         )
         .await?;
-    struct Hold<'a, F: crate::Files + ?Sized>(&'a F, crate::FilesBinding, crate::FileToken);
-    impl<F: crate::Files + ?Sized> Drop for Hold<'_, F> {
-        fn drop(&mut self) {
-            let _ = self.0.release(&self.1, &self.2);
-        }
-    }
     let hold = Hold(files, binding, opened.token);
     if opened.length > maximum as u64 {
         return Err(FilesError::Capacity);

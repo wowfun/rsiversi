@@ -14,6 +14,7 @@ async fn whole_file_reads_use_the_selected_host_and_bound_the_complete_body() {
     std::fs::create_dir(&cwd).unwrap();
     let bytes = vec![37; MAXIMUM_FILE_PAGE_BYTES + 19];
     std::fs::write(root.join("sample"), &bytes).unwrap();
+    std::fs::write(cwd.join("sample"), b"workspace").unwrap();
     let files = LocalFiles::new().unwrap();
     let binding = FilesBinding::new(FilesCaller::default(), "session", "header", cwd).unwrap();
     let path = ReadPath::new(b"../sample").unwrap();
@@ -21,7 +22,19 @@ async fn whole_file_reads_use_the_selected_host_and_bound_the_complete_body() {
         files
             .read_body(
                 binding.clone(),
-                path.clone(),
+                BodyPath::Workspace(RelativePath::new(b"sample").unwrap()),
+                9,
+                CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+        b"workspace"
+    );
+    assert_eq!(
+        files
+            .read_body(
+                binding.clone(),
+                BodyPath::Host(path.clone()),
                 bytes.len(),
                 CancellationToken::new()
             )
@@ -31,7 +44,12 @@ async fn whole_file_reads_use_the_selected_host_and_bound_the_complete_body() {
     );
     assert_eq!(
         files
-            .read_body(binding, path, bytes.len() - 1, CancellationToken::new())
+            .read_body(
+                binding,
+                BodyPath::Host(path),
+                bytes.len() - 1,
+                CancellationToken::new()
+            )
             .await,
         Err(FilesError::Capacity)
     );

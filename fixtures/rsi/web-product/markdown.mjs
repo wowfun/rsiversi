@@ -35,6 +35,8 @@ const linkedImage=[start('paragraph'),start('link',{href:'https://media.example.
 const localImage=[start('paragraph'),start('file_image',{path:'../diagram.svg'}),text('Local diagram'),end,end];
 const brokenImage=[start('paragraph'),start('file_image',{path:'../unreadable.png'}),end,end];
 const fileLink=[start('paragraph'),start('file_image_link',{path:'../diagram.svg'}),text('View drawing'),end,end];
+const documents=['/work/notes.md','/work-other/notes.md'].flatMap((path,i)=>[start('paragraph'),start('file_link',{path,line:2}),text(i?'Outside notes':'Read notes'),end,end]);
+window.addEventListener('rsi:workspace-document',e=>window.documentLink=e.detail);
 window.addEventListener('rsi:file-image',e=>window.actions.push(e.detail));
 window.reads=[];window.revoked=[];
 const revoke=URL.revokeObjectURL.bind(URL);
@@ -68,9 +70,9 @@ window.renderTableTranscript=(type=false)=>{
     React.createElement(Transcript,{owner:{index:'main',setReadingSummary(){}},transcript:{blocks:[block],turns:{entries:{}}},
       generation:'1',mode:'standard',cards:false,register(){}}))));
 };
-window.renderLocal=(streaming,generation,content='image')=>{const view={session:'document',generation};
+window.renderLocal=(streaming,generation,content='image')=>{const view={session:'document',generation,workspace:{coordinates:{path:'/work'}}};
   flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
-    React.createElement(Markdown,{events:content==='broken'?brokenImage:content==='link'?fileLink:localImage,streaming}))))};
+    React.createElement(Markdown,{events:content==='broken'?brokenImage:content==='link'?fileLink:content==='documents'?documents:localImage,streaming}))))};
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
@@ -211,7 +213,7 @@ try{
       assert(!await page.evaluate(()=>window.dropOverlay.includes(true)));
       await page.evaluate(()=>window.releaseDrop());
       await page.evaluate(()=>window.render());
-      assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_image',{pane:'main',generation,path:'../diagram.svg'}]));
+      assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_file',{pane:'main',generation,kind:'image',path:'../diagram.svg'}]));
       assert.equal(await page.evaluate(()=>new Set(window.revoked).size),2);
       await page.evaluate(bytes=>{window.broken=bytes;window.renderLocal(false,'3','broken');},Array.from(unreadablePng()));
       const failure=page.getByText(/^Image preview unavailable · /);
@@ -313,9 +315,18 @@ try{
       assert(await globe.evaluate(shape=>shape.getBBox().width>0 && shape.getBBox().height>0));
       assert.equal(await page.locator('article a').count(),2);
       assert.equal(await page.locator('a[href="https://outer.test/"] > code').innerText(),'http://inner.test/path');
+      await page.evaluate(()=>window.renderLocal(true,'4','documents'));
+      assert.equal(await page.getByRole('button',{name:'Read notes'}).count(),0);
+      await page.evaluate(()=>window.renderLocal(false,'4','documents'));
+      const notes=page.getByRole('button',{name:'Read notes',exact:true});
+      assert(await notes.locator('svg path').first().evaluate(el=>el.getBBox().width>0));
+      assert.equal(await page.getByRole('button',{name:'Outside notes'}).count(),0);
+      await notes.focus();await notes.press('Enter');
+      const documentLink=await page.evaluate(()=>window.documentLink);
+      assert.deepEqual(documentLink,{pane:'main',generation:'4',path:'notes.md',line:2});
       assert.deepEqual(errors,[]);
       results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,typography,codeLink,linkedImage:true,
-        imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
+        documentLink,imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
         localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});
     }finally{await browser.close()}

@@ -40,15 +40,15 @@ pub struct Browser {
     pub(crate) stop: CancellationToken,
 }
 impl Browser {
-    /// Display a transcript image without replacing the visible file picker's snapshot.
-    pub async fn image(
+    /// Display a transcript file independently of the visible picker's snapshot.
+    pub async fn display(
         &self,
         target: SessionTarget,
-        path: rsi_files_protocol::ReadPath,
-    ) -> Result<rsi_session_files::SessionImage> {
+        path: rsi_session_files::TranscriptFile,
+    ) -> Result<rsi_session_files::DisplayBody> {
         tokio::select! {biased;
             ()=self.stop.cancelled()=>Err(UiError::Retired),
-            value=self.files.image(target,path)=>value.map_err(action_error),
+            value=self.files.display(target,path)=>value.map_err(action_error),
         }
     }
     pub(crate) fn new(

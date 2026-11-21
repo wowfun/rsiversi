@@ -219,12 +219,12 @@ impl Files for LocalFiles {
     async fn read_body(
         &self,
         binding: FilesBinding,
-        path: rsi_files_protocol::ReadPath,
+        path: rsi_files_protocol::BodyPath,
         maximum: usize,
         cancellation: CancellationToken,
     ) -> Result<Vec<u8>> {
         self.run(cancellation, move |stop| {
-            platform::read_body(&binding, &path, maximum, &stop)
+            platform::read_body(&binding, path, maximum, &stop)
         })
         .await
     }

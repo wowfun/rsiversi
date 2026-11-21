@@ -199,7 +199,7 @@ impl Files for BoundFiles {
     async fn read_body(
         &self,
         binding: FilesBinding,
-        path: rsi_files_protocol::ReadPath,
+        path: rsi_files_protocol::BodyPath,
         maximum: usize,
         cancellation: CancellationToken,
     ) -> Result<Vec<u8>> {

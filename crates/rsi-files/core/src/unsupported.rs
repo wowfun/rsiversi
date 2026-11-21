@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) enum Resource {}
 pub(super) fn read_body(
     _: &FilesBinding,
-    _: &rsi_files_protocol::ReadPath,
+    _: rsi_files_protocol::BodyPath,
     _: usize,
     _: &CancellationToken,
 ) -> Result<Vec<u8>> {

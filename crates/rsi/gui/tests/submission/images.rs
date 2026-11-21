@@ -393,8 +393,8 @@ async fn draft_thumbnail_reads_without_opening_a_detail_and_retires_with_its_pan
         !changes.has_changed().unwrap(),
         "Media reads only return bytes"
     );
-    let file = json!({"pane":"main","generation":generation,"path":"absent.png"});
-    assert!(app.transcript_image(&file.to_string()).await.is_err());
+    let file = json!({"pane":"main","generation":generation,"kind":"image","path":"absent.png"});
+    assert!(app.transcript_file(&file.to_string()).await.is_err());
     assert!(
         !changes.has_changed().unwrap(),
         "file errors only reach the caller"

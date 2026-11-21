@@ -84,7 +84,9 @@ returned native not-found. Missing roots, unavailable providers, expired tokens
 and transport failures do not prove absence. Consumers may infer deletion only
 from `Missing`; all other failures preserve incomplete evidence.
 
-Whole-file display consumers can request a finite regular-file body by native
-path. The caller supplies the execution cwd and byte ceiling and owns the
-authority for reading outside that cwd. A successful read returns one file
-version. The local provider reads the retained file directly into its result.
+Whole-file display consumers choose the authority when requesting a finite
+regular-file body. A workspace path opens relative to the bound workspace
+using the same confinement as a file snapshot. A host path resolves on the
+selected execution host and requires the caller to authorize that scope.
+Both take a byte ceiling and return one file version. The local provider
+reads the retained file directly into its result.
