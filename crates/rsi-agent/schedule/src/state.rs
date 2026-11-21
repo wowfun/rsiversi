@@ -232,9 +232,12 @@ impl ScheduleState {
             .ok_or("reminder not found")?;
         Ok(self.reminders.remove(index))
     }
+    fn can_reserve(&self) -> bool {
+        !self.exhausted() && self.reservation.as_ref().is_none_or(|r| r.settled)
+    }
     /// Earliest eligible due time, absent while the previous accepted round is open.
     pub fn next_due(&self) -> Option<u64> {
-        if self.exhausted() || self.reservation.as_ref().is_some_and(|r| !r.settled) {
+        if !self.can_reserve() {
             return None;
         }
         self.reminders
@@ -248,18 +251,16 @@ impl ScheduleState {
     /// # Errors
     /// Rejects an unsettled round, absent due work or overflowing anchored arithmetic.
     pub fn reserve(&mut self, now_ms: u64) -> Result<ContinuationInput, String> {
-        if self.next_due().is_none_or(|due| due > now_ms) {
+        if !self.can_reserve() {
             return Err("no due Schedule round".into());
         }
-        let index = self
+        let (index, reminder) = self
             .reminders
             .iter()
             .enumerate()
             .filter(|(_, r)| r.active && r.due_ms <= now_ms)
             .min_by_key(|(_, r)| (r.due_ms, &r.id))
-            .map(|(index, _)| index)
-            .ok_or("no due reminder")?;
-        let reminder = &self.reminders[index];
+            .ok_or("no due Schedule round")?;
         let occurrence_ms = if let Some(interval) = reminder.interval_ms {
             let elapsed = now_ms
                 .checked_sub(reminder.anchor_ms)

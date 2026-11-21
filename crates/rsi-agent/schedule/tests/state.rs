@@ -4,11 +4,38 @@ fn id(value: &str) -> DomainRequestId {
     DomainRequestId::new(value).unwrap()
 }
 #[test]
+fn equal_deadlines_keep_the_same_order_across_reservation_and_settlement() {
+    let mut state = ScheduleState::default();
+    for name in ["second", "first"] {
+        state
+            .create(id(name), name.into(), ScheduleRule::At { at_ms: 5 }, 1)
+            .unwrap();
+    }
+    assert_eq!(state.next_due(), Some(5));
+    assert!(state.reserve(4).is_err());
+    let first = state.reserve(5).unwrap();
+    assert_eq!(state.reservation.as_ref().unwrap().reminder_id, id("first"));
+    assert_eq!(state.next_due(), None);
+    assert!(state.reserve(5).is_err());
+    state.settle(&first.message_id).unwrap();
+    assert_eq!(state.next_due(), Some(5));
+    state.reserve(5).unwrap();
+    assert_eq!(
+        state.reservation.as_ref().unwrap().reminder_id,
+        id("second")
+    );
+}
+#[test]
 fn one_minute_floor_applies_to_creation_and_durable_reminders() {
     let mut state = ScheduleState::default();
-    let create = |state: &mut ScheduleState, interval_ms| state.create(
-        id("minute"), "Check".into(), ScheduleRule::Every { interval_ms }, 1_000,
-    );
+    let create = |state: &mut ScheduleState, interval_ms| {
+        state.create(
+            id("minute"),
+            "Check".into(),
+            ScheduleRule::Every { interval_ms },
+            1_000,
+        )
+    };
     assert!(create(&mut state, 59_999).is_err());
     create(&mut state, 60_000).unwrap();
     assert_eq!(state.next_due(), Some(61_000));

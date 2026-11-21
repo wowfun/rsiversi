@@ -40,7 +40,8 @@ Turns across its lifetime, including deleted reminders. Prompt text is limited
 to 2 KiB UTF-8. `after` and `at` create one-shot reminders; `every` requires at
 least one minute and keeps its original UTC anchor. A late recurring reminder
 coalesces missed occurrences into one Turn, then advances to the next anchored
-time. Arithmetic is checked. One due reminder reserves through the shared idle
+time. The earliest active deadline runs first, with reminder ID breaking ties.
+Arithmetic is checked. One due reminder reserves through the shared idle
 continuation admission; Busy neither spends budget nor revokes the owner.
 Ordinary Tool execution remains available during the resulting finite Turn.
 
