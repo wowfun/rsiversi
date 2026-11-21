@@ -168,9 +168,33 @@ impl StoreInputClaim<'_> {
     }
 }
 
-/// Body-free identity and ordering used by the Kernel's claim selection.
+/// Body and index rows needed for one mailbox operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreClaimableMessage {
+pub enum MailboxSelection {
+    /// Read just this message, including terminal state.
+    Exact(MessageId),
+    /// Check idempotency and select every pending identity for admission.
+    Submit(MessageId),
+    /// Select all next-Step inputs at the claim boundary.
+    Step,
+    /// Select next-Step inputs, this waking input and its command siblings.
+    Wake(MessageId),
+}
+impl MailboxSelection {
+    /// The one body requested at this cut, when present.
+    pub fn message(&self) -> Option<&MessageId> {
+        match self {
+            Self::Step => None,
+            Self::Exact(id) | Self::Submit(id) | Self::Wake(id) => Some(id),
+        }
+    }
+}
+
+/// Body-free identity and ordering of a selected pending message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreSelectedMessage {
+    /// Source class from the durable acceptance.
+    pub source_kind: rsi_agent_session_protocol::AgentMessageSourceKind,
     /// Exact accepted message identity.
     pub message_id: MessageId,
     /// Current delivery horizon.
@@ -180,28 +204,28 @@ pub struct StoreClaimableMessage {
 }
 
 /// Complete bounded selection, independently of mailbox payload pagination.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreMailboxClaim {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StoreMailboxSelection {
     /// Whether waking new work is paused.
     pub inbox_paused: bool,
-    /// Whether any ordinary next-Turn input precedes continuation work.
+    /// Whether an ordinary next-Turn input takes priority at a Step or waking claim.
     pub has_ordinary_pending_turn: bool,
-    /// Exact waking message status and execution options, when requested.
+    /// Exact message status and execution options, when requested.
     pub selected: Option<StoreAgentMessage>,
     /// All selected pending identities in acceptance order.
-    pub pending: Vec<StoreClaimableMessage>,
+    pub pending: Vec<StoreSelectedMessage>,
     /// Control watermark from this same snapshot.
     pub durable_control_seq: u64,
     /// Fact watermark from this same snapshot.
     pub durable_fact_seq: u64,
 }
 
-impl StoreMailboxClaim {
+impl StoreMailboxSelection {
     /// Validates the selection at its Store boundary.
     pub fn validate(&self) -> Result<()> {
         if self.pending.len() > MAXIMUM_PENDING_AGENT_MESSAGES {
             return Err(StoreError::Corrupt(
-                "claim selection exceeds mailbox capacity".into(),
+                "mailbox selection exceeds mailbox capacity".into(),
             ));
         }
         let mut previous = 0;
@@ -212,7 +236,7 @@ impl StoreMailboxClaim {
                 || !messages.insert(&entry.message_id)
             {
                 return Err(StoreError::Corrupt(
-                    "invalid claim selection order or identity".into(),
+                    "invalid mailbox selection order or identity".into(),
                 ));
             }
             previous = entry.accepted_control_seq;

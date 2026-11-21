@@ -1746,11 +1746,14 @@ impl SessionStore for MemoryStore {
             .contains_key(&(session.clone(), message.clone())))
     }
 
-    async fn read_agent_message(
+    async fn read_mailbox_selection(
         &self,
         session_id: &SessionId,
-        message_id: &MessageId,
-    ) -> Result<Option<StoreAgentMessage>> {
+        selection: rsi_agent_store_protocol::MailboxSelection,
+    ) -> Result<rsi_agent_store_protocol::StoreMailboxSelection> {
+        use rsi_agent_store_protocol::{
+            MailboxSelection, StoreMailboxSelection, StoreSelectedMessage,
+        };
         let state = self
             .inner
             .lock()
@@ -1759,59 +1762,44 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-        let entry = state
-            .agent_messages
-            .get(&(session_id.clone(), message_id.clone()))
-            .cloned();
-        if let Some(entry) = &entry {
-            entry.validate(session.controls.last().map_or(0, AgentControlRecord::seq))?;
-        }
-        Ok(entry)
-    }
-
-    async fn read_mailbox_claim(
-        &self,
-        session_id: &SessionId,
-        waking: Option<MessageId>,
-    ) -> Result<rsi_agent_store_protocol::StoreMailboxClaim> {
-        use rsi_agent_store_protocol::{StoreClaimableMessage, StoreMailboxClaim};
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let session = state
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-        let selected = waking
-            .as_ref()
+        let selected = selection
+            .message()
             .and_then(|id| state.agent_messages.get(&(session_id.clone(), id.clone())))
             .cloned();
         let mut pending = Vec::new();
         let mut has_ordinary_pending_turn = false;
-        for ((candidate, _), entry) in &state.agent_messages {
-            if candidate != session_id || entry.state != StoreAgentMessageState::Pending {
-                continue;
-            }
-            has_ordinary_pending_turn |= entry.target == MessageTarget::NextTurn
-                && !matches!(
-                    entry.message.source,
-                    AgentMessageSource::Continuation { .. }
-                );
-            if entry.target == MessageTarget::NextStep || selected.as_ref().is_some_and(|selected| {
-                entry.message.message_id == selected.message.message_id
-                    || matches!((&entry.message.source, &selected.message.source),
-                        (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
-                        if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
-            }) {
-                pending.push(StoreClaimableMessage {
-                    message_id: entry.message.message_id.clone(), target: entry.target,
-                    accepted_control_seq: entry.accepted_control_seq,
-                });
+        if !matches!(selection, MailboxSelection::Exact(_)) {
+            for ((candidate, _), entry) in &state.agent_messages {
+                if candidate != session_id || entry.state != StoreAgentMessageState::Pending {
+                    continue;
+                }
+                let source_kind = entry.message.source.kind();
+                has_ordinary_pending_turn |= matches!(
+                    selection,
+                    MailboxSelection::Wake(_) | MailboxSelection::Step
+                ) && entry.target == MessageTarget::NextTurn
+                    && source_kind
+                        != rsi_agent_session_protocol::AgentMessageSourceKind::Continuation;
+                let include = matches!(selection, MailboxSelection::Submit(_))
+                    || entry.target == MessageTarget::NextStep
+                    || selected.as_ref().is_some_and(|waking| {
+                        entry.message.message_id == waking.message.message_id
+                            || matches!((&entry.message.source, &waking.message.source),
+                                (AgentMessageSource::Command { source: candidate }, AgentMessageSource::Command { source })
+                                if candidate.request_id == source.request_id && candidate.invocation_sha256 == source.invocation_sha256)
+                    });
+                if include {
+                    pending.push(StoreSelectedMessage {
+                        message_id: entry.message.message_id.clone(),
+                        target: entry.target,
+                        source_kind,
+                        accepted_control_seq: entry.accepted_control_seq,
+                    });
+                }
             }
         }
         pending.sort_unstable_by_key(|entry| entry.accepted_control_seq);
-        let result = StoreMailboxClaim {
+        let result = StoreMailboxSelection {
             inbox_paused: session.inbox_paused,
             has_ordinary_pending_turn,
             selected,

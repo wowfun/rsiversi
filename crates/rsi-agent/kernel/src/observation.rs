@@ -1,5 +1,4 @@
 use super::*;
-use rsi_agent_store_protocol::MailboxRead;
 
 pub(super) async fn read_facts_bounded(
     inner: &Arc<KernelInner>,
@@ -199,14 +198,13 @@ pub(super) async fn observe_agent_wait_change(
     }))
 }
 
-pub(super) async fn read_mailbox_claim(
+pub(super) async fn read_mailbox_selection(
     inner: &Arc<KernelInner>,
     session_id: &SessionId,
-    waking: Option<MessageId>,
-) -> TurnResult<rsi_agent_store_protocol::StoreMailboxClaim> {
-    // A Step selection carries at most 64 short identities and no bodies.
-    // Only a waking selection can decode a full accepted message.
-    let bytes = if waking.is_some() {
+    query: MailboxSelection,
+) -> TurnResult<rsi_agent_store_protocol::StoreMailboxSelection> {
+    // Step claims reserve space for the bounded identity list. Other selections may read one body.
+    let bytes = if query.message().is_some() {
         MAXIMUM_SESSION_FACT_BYTES
     } else {
         store_reads::INITIAL_PAGE_BYTES
@@ -216,44 +214,11 @@ pub(super) async fn read_mailbox_claim(
         session_id,
         bytes,
         true,
-        move |store, id| async move { store.read_mailbox_claim(&id, waking).await },
+        move |store, id| async move { store.read_mailbox_selection(&id, query).await },
     )
     .await
     .map_err(turn_store_error)?;
     Ok(selection)
-}
-
-pub(super) async fn scan_durable_messages(
-    inner: &Arc<KernelInner>,
-    session_id: &SessionId,
-    query: MailboxRead,
-) -> TurnResult<DurableMessageScan> {
-    // One mailbox page contains at most 32 MiB of pending message payload plus
-    // one selected message and bounded index metadata, below one maximum-Fact
-    // reservation. Keep that reservation through decoding and validation.
-    let (mailbox, _permit, _lease) = store_reads::read(
-        inner,
-        session_id,
-        MAXIMUM_SESSION_FACT_BYTES,
-        true,
-        move |store, id| async move { store.read_agent_mailbox(&id, query).await },
-    )
-    .await
-    .map_err(turn_store_error)?;
-    let pending_count = mailbox.pending_count;
-    let pending = mailbox
-        .pending
-        .into_iter()
-        .map(durable_message_entry)
-        .collect::<Vec<_>>();
-    Ok(DurableMessageScan {
-        inbox_paused: mailbox.inbox_paused,
-        selected: mailbox.selected.map(durable_message_entry),
-        pending_count,
-        pending,
-        durable_control_seq: mailbox.durable_control_seq,
-        durable_fact_seq: mailbox.durable_fact_seq,
-    })
 }
 
 pub(super) fn durable_message_entry(entry: StoreAgentMessage) -> DurableMessageEntry {

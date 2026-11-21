@@ -339,12 +339,15 @@ not already-durable bodies. SQLite resolves and hashes one accepted body at a
 time inside the same transaction; it never collects the expanded claim batch.
 Logical Fact readers retain their existing byte bounds and representation.
 
-`read_mailbox_claim` captures the complete selected identity list, mailbox flags,
-Fact/control tails and optional exact waking message in one snapshot. Without a
-waking identity it selects next-Step messages; with one it also selects that
-message and same-command siblings. This metadata selection has the mailbox's
-cardinality bound, independently of the payload page bound. Kernel orders all
-selected next-Step inputs before waking inputs and claims them atomically.
+`read_mailbox_selection` captures the Fact/control tails, pause flag and at most
+one requested message body in one snapshot. Exact status reads select only that
+message. Submission also selects the identity, source class and target of every
+pending message, so the Kernel retains live execution leases and applies human
+priority across the whole mailbox. A Step claim selects next-Step messages. A
+waking claim includes those messages, its waking identity and same-command
+siblings, and reports whether an ordinary next-Turn message is pending. These
+identity lists have the mailbox cardinality bound. Kernel orders selected
+next-Step inputs before waking inputs and claims them atomically.
 
 Within each Session append, capacity and reservation
 checks observe controls in sequence order, including slots released or consumed

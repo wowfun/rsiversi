@@ -4,11 +4,6 @@ use rsi_agent_store_protocol::{MailboxRead, admit_page_record};
 const MAILBOX_PENDING_FROM_SQL: &str = "FROM agent_messages AS m LEFT JOIN agent_controls AS c
        ON c.session_id = m.session_id AND c.seq = m.accepted_control_seq
      WHERE m.session_id = ?1 AND m.state = 'pending'";
-const MAILBOX_CLAIM_FILTER_SQL: &str = " AND (NOT ?2 OR m.target = 'next_step')
-       AND (?3 IS NULL OR m.target = 'next_step' OR m.message_id = ?3
-         OR (?4 IS NOT NULL AND m.message_source = 'command'
-           AND json_extract(c.control_json, '$.message.source.source.request_id') = ?4
-           AND json_extract(c.control_json, '$.message.source.source.invocation_sha256') = ?5))";
 
 pub(super) const LIST_READY_MESSAGES_AFTER_SQL: &str =
     "SELECT r.session_id, r.message_id, r.ready_control_seq, r.timestamp_ms, r.target,
@@ -1795,82 +1790,68 @@ impl SessionStore for SqliteStore {
         }).await
     }
 
-    async fn read_agent_message(
+    async fn read_mailbox_selection(
         &self,
         session_id: &SessionId,
-        message_id: &MessageId,
-    ) -> Result<Option<StoreAgentMessage>> {
-        self.ensure_session_validated(session_id).await?;
-        let session_id = session_id.clone();
-        let message_id = message_id.clone();
-        self.with_reader(move |connection| {
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Deferred)
-                .map_err(sql_error)?;
-            let tail = transaction
-                .query_row(
-                    "SELECT control_seq FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
-                    [session_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-            let entry = read_indexed_message(&transaction, &session_id, &message_id)?;
-            if let Some(entry) = &entry {
-                entry.validate(decode_u64("mailbox durable control sequence", tail)?)?;
-            }
-            transaction.commit().map_err(sql_error)?;
-            Ok(entry)
-        })
-        .await
-    }
-
-    async fn read_mailbox_claim(
-        &self,
-        session_id: &SessionId,
-        waking: Option<MessageId>,
-    ) -> Result<rsi_agent_store_protocol::StoreMailboxClaim> {
-        use rsi_agent_store_protocol::{StoreClaimableMessage, StoreMailboxClaim};
+        selection: rsi_agent_store_protocol::MailboxSelection,
+    ) -> Result<rsi_agent_store_protocol::StoreMailboxSelection> {
+        use rsi_agent_store_protocol::{
+            MailboxSelection, StoreMailboxSelection, StoreSelectedMessage,
+        };
         self.ensure_session_validated(session_id).await?;
         let session_id = session_id.clone();
         self.with_reader(move |connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
             let (fact_seq, control_seq, inbox_paused, has_ordinary_pending_turn) = transaction.query_row(
                 "SELECT durable_seq, control_seq, inbox_paused,
-                    EXISTS (SELECT 1 FROM agent_messages m WHERE m.session_id=s.session_id
-                      AND m.state='pending' AND m.target='next_turn' AND m.message_source!='continuation')
+                    CASE WHEN ?2 THEN EXISTS (SELECT 1 FROM agent_messages m WHERE m.session_id=s.session_id
+                      AND m.state='pending' AND m.target='next_turn' AND m.message_source!='continuation') ELSE 0 END
                  FROM sessions s WHERE session_id=?1 AND session_id NOT IN (SELECT session_id FROM session_tombstones)",
-                [session_id.as_str()], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?, row.get::<_,bool>(2)?, row.get::<_,bool>(3)?)),
+                params![session_id.as_str(), matches!(selection, MailboxSelection::Wake(_) | MailboxSelection::Step)], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?, row.get::<_,bool>(2)?, row.get::<_,bool>(3)?)),
             ).optional().map_err(sql_error)?.ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-            let selected = waking.as_ref().map(|id| read_indexed_message(&transaction, &session_id, id)).transpose()?.flatten();
-            let (command_request, command_digest) = match selected.as_ref().map(|entry| &entry.message.source) {
-                Some(AgentMessageSource::Command { source }) => (Some(source.request_id.as_str()), Some(source.invocation_sha256.as_str())),
-                _ => (None, None),
-            };
-            let mut statement = transaction.prepare(&format!(
-                "SELECT m.message_id, m.target, m.accepted_control_seq {MAILBOX_PENDING_FROM_SQL}{MAILBOX_CLAIM_FILTER_SQL}
-                 ORDER BY m.accepted_control_seq LIMIT ?6"
-            )).map_err(sql_error)?;
-            let rows = statement.query_map(params![session_id.as_str(), waking.is_none(), waking.as_ref().map(MessageId::as_str), command_request, command_digest,
-                i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("bounded mailbox")],
-                |row| Ok((bounded_text(row,0,256)?, bounded_text(row,1,16)?, row.get::<_,i64>(2)?)),
-            ).map_err(sql_error)?;
+            let selected = selection.message().map(|id| read_indexed_message(&transaction, &session_id, id)).transpose()?.flatten();
             let mut pending = Vec::new();
-            for row in rows {
-                let (message_id, target, accepted) = row.map_err(sql_error)?;
-                pending.push(StoreClaimableMessage {
-                    message_id: MessageId::new(message_id).map_err(|error| StoreError::Corrupt(error.to_string()))?,
-                    target: match target.as_str() {
-                        "next_step" => MessageTarget::NextStep,
-                        "next_turn" => MessageTarget::NextTurn,
-                        _ => return Err(StoreError::Corrupt("invalid claim message target".into())),
-                    },
-                    accepted_control_seq: decode_u64("claim acceptance", accepted)?,
-                });
+            if !matches!(selection, MailboxSelection::Exact(_)) {
+                // Only a waking command needs its siblings' canonical command provenance.
+                let siblings = match (&selection, selected.as_ref().map(|entry| &entry.message.source)) {
+                    (MailboxSelection::Wake(_), Some(AgentMessageSource::Command { source })) => Some(source),
+                    _ => None,
+                };
+                let (from, siblings_filter) = if siblings.is_some() {
+                    (MAILBOX_PENDING_FROM_SQL, " OR (m.message_source='command'
+                        AND json_extract(c.control_json, '$.message.source.source.request_id')=?4
+                        AND json_extract(c.control_json, '$.message.source.source.invocation_sha256')=?5)")
+                } else {
+                    ("FROM agent_messages AS m WHERE m.session_id=?1 AND m.state='pending'", "")
+                };
+                let mut statement = transaction.prepare(&format!(
+                    "SELECT m.message_id, m.target, m.accepted_control_seq, m.message_source
+                     {from} AND (?2 OR m.target='next_step' OR m.message_id=?3 {siblings_filter})
+                     ORDER BY m.accepted_control_seq LIMIT ?6"
+                )).map_err(sql_error)?;
+                let waking = match &selection { MailboxSelection::Wake(id) => Some(id.as_str()), _ => None };
+                let mut rows = statement.query(params![
+                    session_id.as_str(), matches!(selection, MailboxSelection::Submit(_)), waking,
+                    siblings.map(|source| source.request_id.as_str()), siblings.map(|source| source.invocation_sha256.as_str()),
+                    i64::try_from(rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES + 1).expect("bounded mailbox"),
+                ]).map_err(sql_error)?;
+                while let Some(row) = rows.next().map_err(sql_error)? {
+                    let id = bounded_text(row, 0, 256).map_err(sql_error)?;
+                    let target = crate::text::borrowed_text(row, 1, 16).map_err(sql_error)?;
+                    let source = crate::text::borrowed_text(row, 3, 16).map_err(sql_error)?;
+                    pending.push(StoreSelectedMessage {
+                        message_id: MessageId::new(id).map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                        target: match target {
+                            "next_step" => MessageTarget::NextStep,
+                            "next_turn" => MessageTarget::NextTurn,
+                            _ => return Err(StoreError::Corrupt("invalid mailbox message target".into())),
+                        },
+                        accepted_control_seq: decode_u64("message acceptance", row.get(2).map_err(sql_error)?)?,
+                        source_kind: crate::append::decode_message_source(source.as_bytes())?,
+                    });
+                }
             }
-            drop(statement);
-            let result = StoreMailboxClaim {
+            let result = StoreMailboxSelection {
                 inbox_paused, has_ordinary_pending_turn, selected, pending,
                 durable_fact_seq: decode_u64("claim Fact tail", fact_seq)?,
                 durable_control_seq: decode_u64("claim control tail", control_seq)?,

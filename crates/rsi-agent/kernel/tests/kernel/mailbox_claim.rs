@@ -327,7 +327,10 @@ async fn mailbox_initial_claim_streams_beyond_the_atomic_payload_budget() {
     }
     enqueue(&kernel, &session, input("wake", false), false).await;
     let metadata = store
-        .read_mailbox_claim(&session, Some(MessageId::new("wake").unwrap()))
+        .read_mailbox_selection(
+            &session,
+            rsi_agent_store_protocol::MailboxSelection::Wake(MessageId::new("wake").unwrap()),
+        )
         .await
         .unwrap();
     assert_eq!(metadata.pending.len(), 35);
@@ -376,7 +379,10 @@ async fn mailbox_initial_claim_streams_beyond_the_atomic_payload_budget() {
         }
     }
     assert!(encoded > rsi_agent_store_protocol::MAXIMUM_STORE_BATCH_BYTES);
-    let remaining = store.read_mailbox_claim(&session, None).await.unwrap();
+    let remaining = store
+        .read_mailbox_selection(&session, rsi_agent_store_protocol::MailboxSelection::Step)
+        .await
+        .unwrap();
     assert!(remaining.pending.is_empty());
     kernel.shutdown(worker).await.unwrap();
     drop(kernel);

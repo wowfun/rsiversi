@@ -1,6 +1,6 @@
+use super::observation::durable_message_entry;
 use super::*;
-use rsi_agent_session_protocol::MessageDelivery;
-use rsi_agent_store_protocol::MailboxRead;
+use rsi_agent_session_protocol::{AgentMessageSourceKind, MessageDelivery};
 
 #[async_trait]
 impl TurnService for AgentKernel {
@@ -450,15 +450,15 @@ impl TurnService for AgentKernel {
         session_id: &SessionId,
         message_id: &MessageId,
     ) -> TurnResult<MessageReceipt> {
-        let scan = scan_durable_messages(
+        let scan = read_mailbox_selection(
             &self.inner,
             session_id,
-            MailboxRead::WithMessage(message_id.clone()),
+            MailboxSelection::Exact(message_id.clone()),
         )
         .await?;
         scan.selected
-            .as_ref()
-            .map(|entry| message_receipt(session_id, scan.durable_fact_seq, entry))
+            .map(durable_message_entry)
+            .map(|entry| message_receipt(session_id, scan.durable_fact_seq, &entry))
             .ok_or_else(|| TurnError::MessageNotFound {
                 session: session_id.to_string(),
                 message: message_id.to_string(),
@@ -561,13 +561,13 @@ impl TurnService for AgentKernel {
         }
         let admission = self.inner.submission_admission.acquire(session_id).await?;
         self.fence_pending_terminal(session_id).await?;
-        let scan = scan_durable_messages(
+        let scan = read_mailbox_selection(
             &self.inner,
             session_id,
-            MailboxRead::WithMessage(message_id.clone()),
+            MailboxSelection::Exact(message_id.clone()),
         )
         .await?;
-        let entry = scan.selected.ok_or_else(|| {
+        let entry = scan.selected.map(durable_message_entry).ok_or_else(|| {
             TurnError::Invalid(format!(
                 "message `{}` does not exist in session `{}`",
                 message_id.as_str(),
@@ -1081,29 +1081,21 @@ impl AgentKernel {
         }
 
         let scan = if durable_header.is_some() {
-            scan_durable_messages(
+            read_mailbox_selection(
                 &self.inner,
                 &session_id,
-                MailboxRead::WithMessage(request.message.message_id.clone()),
+                MailboxSelection::Submit(request.message.message_id.clone()),
             )
             .await?
         } else {
-            DurableMessageScan {
-                inbox_paused: false,
-                selected: None,
-                pending_count: 0,
-                pending: Vec::new(),
-                durable_control_seq: 0,
-                durable_fact_seq: 0,
-            }
+            rsi_agent_store_protocol::StoreMailboxSelection::default()
         };
         self.inner.execution_messages.retain_pending(
             &session_id,
             &scan.pending,
-            &observed_execution,
+            observed_execution,
         );
-        drop(observed_execution);
-        if let Some(entry) = scan.selected {
+        if let Some(entry) = scan.selected.map(durable_message_entry) {
             if let SubmitSession::Fresh(prepared) = &request.session {
                 self.validate_fresh_baseline(prepared).await?;
             }
@@ -1171,30 +1163,22 @@ impl AgentKernel {
         if automatic
             && scan.pending.iter().any(|entry| {
                 entry.target == MessageTarget::NextTurn
-                    && !matches!(
-                        entry.message.source,
-                        AgentMessageSource::Continuation { .. }
-                    )
+                    && entry.source_kind != AgentMessageSourceKind::Continuation
             })
         {
             return Err(TurnError::ContinuationDisarmed);
         }
+        let pending_count = scan.pending.len();
         let superseded = if !automatic && target == MessageTarget::NextTurn {
             scan.pending
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.message.source,
-                        AgentMessageSource::Continuation { .. }
-                    )
-                })
-                .map(|entry| entry.message.message_id.clone())
+                .into_iter()
+                .filter(|entry| entry.source_kind == AgentMessageSourceKind::Continuation)
+                .map(|entry| entry.message_id)
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        if scan
-            .pending_count
+        if pending_count
             .saturating_sub(superseded.len())
             .saturating_add(completion_reservations)
             >= MAXIMUM_PENDING_AGENT_MESSAGES
@@ -1352,12 +1336,16 @@ impl AgentKernel {
             .await
             .map_err(turn_kernel_error)?;
 
-        let mut scan =
-            read_mailbox_claim(&self.inner, &session_id, Some(request.message_id.clone())).await?;
+        let mut scan = read_mailbox_selection(
+            &self.inner,
+            &session_id,
+            MailboxSelection::Wake(request.message_id.clone()),
+        )
+        .await?;
         let entry = scan
             .selected
             .take()
-            .map(super::observation::durable_message_entry)
+            .map(durable_message_entry)
             .ok_or_else(|| {
                 TurnError::Invalid(format!(
                     "message `{}` does not exist in session `{}`",
@@ -2029,16 +2017,17 @@ impl AgentKernel {
                 "spawn retry disagrees with existing child Header".into(),
             ));
         }
-        let scan = scan_durable_messages(
+        let scan = read_mailbox_selection(
             &self.inner,
             &request.child_session_id,
-            MailboxRead::WithMessage(request.message_id.clone()),
+            MailboxSelection::Exact(request.message_id.clone()),
         )
         .await?;
         // A spawned child always publishes its executable selection at control one.
         let acceptance_seq = 2;
         let entry = scan
             .selected
+            .map(durable_message_entry)
             .filter(|entry| {
                 &entry.message == message
                     && entry.accepted_control_seq == acceptance_seq

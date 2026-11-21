@@ -2049,7 +2049,13 @@ pub async fn assert_mechanical_store_contract(
     );
     assert_eq!(promoted.target, MessageTarget::NextTurn);
     assert!(promoted.wake_required);
-    let step = store.read_mailbox_claim(&session_id, None).await.unwrap();
+    let step = store
+        .read_mailbox_selection(
+            &session_id,
+            rsi_agent_store_protocol::MailboxSelection::Step,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         step.pending.len(),
         rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES - 1

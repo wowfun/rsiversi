@@ -546,7 +546,8 @@ impl TurnExecution for AgentKernel {
             .submission_admission
             .acquire(claim.session_id())
             .await?;
-        let scan = read_mailbox_claim(&self.inner, claim.session_id(), None).await?;
+        let scan =
+            read_mailbox_selection(&self.inner, claim.session_id(), MailboxSelection::Step).await?;
         let pending = scan.pending;
         if pending.is_empty() {
             return Ok(0);

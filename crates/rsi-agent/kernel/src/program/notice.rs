@@ -1,6 +1,5 @@
 use super::*;
 use rsi_agent_session_protocol::ProgramCompletionSource;
-use rsi_agent_store_protocol::MailboxRead;
 impl LiveRun {
     pub(super) fn reserve_notice_execution(
         &self,
@@ -162,15 +161,15 @@ impl AgentKernel {
                     .submission_admission
                     .acquire(&notice.session_id)
                     .await?;
-                let scan = scan_durable_messages(
+                let scan = read_mailbox_selection(
                     &self.inner,
                     &notice.session_id,
-                    MailboxRead::WithMessage(notice.message_id.clone()),
+                    MailboxSelection::Exact(notice.message_id.clone()),
                 )
                 .await?;
                 let entry = scan
                     .selected
-                    .as_ref()
+                    .map(crate::observation::durable_message_entry)
                     .ok_or_else(|| invalid("program notice index lost its message"))?;
                 let AgentMessageSource::Program { source } = &entry.message.source else {
                     return Err(invalid("program notice index selected a different source"));
@@ -182,7 +181,7 @@ impl AgentKernel {
                     self.discard_continuation_admitted(
                         &notice.session_id,
                         (scan.durable_fact_seq, scan.durable_control_seq),
-                        entry,
+                        &entry,
                         MessageDiscardReason::ProgramInterrupted,
                     )
                     .await?;

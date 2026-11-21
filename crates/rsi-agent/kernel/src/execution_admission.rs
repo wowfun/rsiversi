@@ -100,21 +100,28 @@ impl Messages {
     pub(super) fn retain_pending(
         &self,
         session: &SessionId,
-        pending: &[DurableMessageEntry],
-        observed: &BTreeMap<MessageId, Arc<Pending>>,
+        pending: &[rsi_agent_store_protocol::StoreSelectedMessage],
+        mut observed: BTreeMap<MessageId, Arc<Pending>>,
     ) {
+        if observed.is_empty() {
+            return;
+        }
+        for entry in pending {
+            observed.remove(&entry.message_id);
+        }
+        if observed.is_empty() {
+            return;
+        }
         let mut entries = self.entries.lock().expect("execution messages");
         if let Some(messages) = entries.get_mut(session) {
-            let ids = pending
-                .iter()
-                .map(|entry| &entry.message.message_id)
-                .collect::<BTreeSet<_>>();
-            messages.retain(|message, current| {
-                ids.contains(message)
-                    || !observed
-                        .get(message)
-                        .is_some_and(|old| Arc::ptr_eq(old, current))
-            });
+            for (message, previous) in observed {
+                if messages
+                    .get(&message)
+                    .is_some_and(|current| Arc::ptr_eq(&previous, current))
+                {
+                    messages.remove(&message);
+                }
+            }
             if messages.is_empty() {
                 entries.remove(session);
             }
@@ -165,6 +172,7 @@ mod tests {
         let owner = Messages::default();
         let session = SessionId::new("child").unwrap();
         let old = MessageId::new("old").unwrap();
+        let retained = MessageId::new("retained").unwrap();
         let replaced = MessageId::new("replaced").unwrap();
         let fresh = MessageId::new("fresh").unwrap();
         let lease = crate::execution_fixture::lease(
@@ -172,7 +180,7 @@ mod tests {
             Arc::new(crate::execution_fixture::Gate::default()),
             0,
         );
-        for id in [&old, &replaced] {
+        for id in [&old, &retained, &replaced] {
             owner.publish(owner.reserve(&session, id, Some(&lease)).unwrap());
         }
         // The store read is now in flight. Child commit publishes through its parent's gate.
@@ -180,14 +188,20 @@ mod tests {
         for id in [&replaced, &fresh] {
             owner.publish(owner.reserve(&session, id, Some(&lease)).unwrap());
         }
-        owner.retain_pending(&session, &[], &observed);
-        drop(observed);
+        let pending = rsi_agent_store_protocol::StoreSelectedMessage {
+            message_id: retained.clone(),
+            target: MessageTarget::NextTurn,
+            accepted_control_seq: 1,
+            source_kind: rsi_agent_session_protocol::AgentMessageSourceKind::Human,
+        };
+        owner.retain_pending(&session, &[pending], observed);
         assert!(owner.get(&session, &old).is_none());
+        assert_eq!(owner.get(&session, &retained), Some(lease.clone()));
         assert_eq!(owner.get(&session, &replaced), Some(lease.clone()));
         assert_eq!(owner.get(&session, &fresh), Some(lease));
         assert_eq!(
             owner.slots.available_permits(),
-            MAXIMUM_PENDING_EXECUTION_LEASES - 2
+            MAXIMUM_PENDING_EXECUTION_LEASES - 3
         );
     }
 
@@ -250,7 +264,7 @@ mod tests {
         drop(unpublished);
         assert!(owner.get(&session, &extra).is_none());
         owner.publish(owner.reserve(&session, &extra, Some(&lease)).unwrap());
-        owner.retain_pending(&session, &[], &owner.snapshot(&session));
+        owner.retain_pending(&session, &[], owner.snapshot(&session));
         assert_eq!(
             owner.slots.available_permits(),
             MAXIMUM_PENDING_EXECUTION_LEASES
@@ -271,7 +285,7 @@ mod tests {
         owner.publish(owner.reserve(&a, &message, Some(&lease)).unwrap());
         owner.publish(owner.reserve(&b, &message, Some(&lease)).unwrap());
         let reserved = owner.reserve(&a, &message, Some(&lease)).unwrap();
-        owner.retain_pending(&a, &[], &owner.snapshot(&a));
+        owner.retain_pending(&a, &[], owner.snapshot(&a));
         assert!(owner.get(&a, &message).is_none());
         assert_eq!(owner.get(&b, &message), Some(lease.clone()));
         assert_eq!(

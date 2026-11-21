@@ -86,6 +86,7 @@ type ProgramReadBarrier = (
 #[derive(Debug)]
 struct MailboxProbe {
     reads: Mutex<std::collections::BTreeMap<SessionId, usize>>,
+    selections: Mutex<std::collections::BTreeMap<SessionId, usize>>,
     claim_selections: AtomicUsize,
     claim_references: AtomicBool,
     prefix_limit: AtomicUsize,
@@ -95,6 +96,7 @@ impl Default for MailboxProbe {
     fn default() -> Self {
         Self {
             reads: Mutex::default(),
+            selections: Mutex::default(),
             claim_selections: AtomicUsize::new(0),
             claim_references: AtomicBool::new(false),
             prefix_limit: AtomicUsize::new(usize::MAX),
@@ -1272,25 +1274,26 @@ impl SessionStore for FactReadRaceStore {
         self.inner.queue_mutation_count(session).await
     }
 
-    async fn read_agent_message(
+    async fn read_mailbox_selection(
         &self,
         session_id: &SessionId,
-        message_id: &MessageId,
-    ) -> rsi_agent_store_protocol::Result<Option<rsi_agent_store_protocol::StoreAgentMessage>> {
-        self.inner.read_agent_message(session_id, message_id).await
-    }
-
-    async fn read_mailbox_claim(
-        &self,
-        session_id: &SessionId,
-        waking: Option<MessageId>,
-    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMailboxClaim> {
-        if waking.is_none() {
+        selection: rsi_agent_store_protocol::MailboxSelection,
+    ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreMailboxSelection> {
+        *self
+            .mailbox
+            .selections
+            .lock()
+            .unwrap()
+            .entry(session_id.clone())
+            .or_default() += 1;
+        if matches!(selection, rsi_agent_store_protocol::MailboxSelection::Step) {
             self.mailbox
                 .claim_selections
                 .fetch_add(1, Ordering::Relaxed);
         }
-        self.inner.read_mailbox_claim(session_id, waking).await
+        self.inner
+            .read_mailbox_selection(session_id, selection)
+            .await
     }
 
     async fn read_agent_mailbox(

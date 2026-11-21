@@ -1076,6 +1076,7 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
                 < (b.timestamp_ms, &b.session_id, b.control_seq)
         }));
         store.mailbox.reads.lock().unwrap().clear();
+        store.mailbox.selections.lock().unwrap().clear();
         let _idle = kernel.register("idle".into()).unwrap();
         let idle = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -1086,10 +1087,11 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
         .unwrap()
         .unwrap();
         assert_eq!(idle.session_id(), &idle_id);
+        assert!(store.mailbox.reads.lock().unwrap().is_empty());
         assert_eq!(
             store
                 .mailbox
-                .reads
+                .selections
                 .lock()
                 .unwrap()
                 .get(&busy_id)
@@ -1100,7 +1102,7 @@ async fn busy_ordinary_backlog_skips_mailbox_while_same_tree_disarmed_input_is_c
         assert!(
             store
                 .mailbox
-                .reads
+                .selections
                 .lock()
                 .unwrap()
                 .get(&auto_id)
@@ -1293,9 +1295,9 @@ async fn held_command_context_enters_an_automatic_turn_without_waking_or_authori
 }
 
 #[tokio::test]
-async fn waking_command_supersedes_a_continuation_beyond_the_first_payload_page() {
+async fn waking_input_supersedes_a_continuation_beyond_the_first_payload_page() {
     use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery};
-    for sqlite in [false, true] {
+    for (sqlite, human) in [(false, true), (false, false), (true, true), (true, false)] {
         let directory = tempfile::tempdir().unwrap();
         let inner: Arc<dyn SessionStore> = if sqlite {
             Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
@@ -1323,7 +1325,20 @@ async fn waking_command_supersedes_a_continuation_beyond_the_first_payload_page(
         let lease = arm(&fixture).await;
         reserve(&fixture, &lease).await;
         store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
-        command(CommandInputDelivery::Steer, "wake").await;
+        store.mailbox.reads.lock().unwrap().clear();
+        if human {
+            fixture
+                .kernel
+                .submit_message(SubmitMessage {
+                    session: super::super::resume(&fixture.kernel, session.clone()).await,
+                    message: mailbox_message("wake"),
+                    delivery: MessageDelivery::NextTurn,
+                })
+                .await
+                .unwrap();
+        } else {
+            command(CommandInputDelivery::Steer, "wake").await;
+        }
         let automatic = fixture
             .kernel
             .message_status(session, &input().message_id)
@@ -1345,6 +1360,7 @@ async fn waking_command_supersedes_a_continuation_beyond_the_first_payload_page(
             .await
             .unwrap();
         assert_eq!(retained.state, MessageState::Pending);
+        assert!(store.mailbox.reads.lock().unwrap().is_empty());
         drop(lease);
         fixture.stop().await;
     }

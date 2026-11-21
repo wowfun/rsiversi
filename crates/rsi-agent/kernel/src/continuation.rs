@@ -1,7 +1,6 @@
 //! Live Host continuation admission over ordinary command and mailbox transactions.
 
 use super::*;
-use rsi_agent_store_protocol::MailboxRead;
 
 mod initial;
 use rsi_agent_composition_protocol::{ContinuationCommand, ContributionKind};
@@ -275,15 +274,15 @@ impl SessionContinuations for AgentKernel {
             .acquire(lease.session_id())
             .await?;
         self.fence_pending_terminal(lease.session_id()).await?;
-        let scan = scan_durable_messages(
+        let scan = read_mailbox_selection(
             &self.inner,
             lease.session_id(),
-            MailboxRead::WithMessage(message_id.clone()),
+            MailboxSelection::Exact(message_id.clone()),
         )
         .await?;
         let entry = scan
             .selected
-            .as_ref()
+            .map(crate::observation::durable_message_entry)
             .ok_or_else(|| TurnError::MessageNotFound {
                 session: lease.session_id().to_string(),
                 message: message_id.to_string(),
@@ -298,7 +297,7 @@ impl SessionContinuations for AgentKernel {
         self.discard_continuation_admitted(
             lease.session_id(),
             (scan.durable_fact_seq, scan.durable_control_seq),
-            entry,
+            &entry,
             MessageDiscardReason::ContinuationDisarmed,
         )
         .await
@@ -647,13 +646,13 @@ impl AgentKernel {
     ) -> TurnResult<bool> {
         let _admission = self.inner.submission_admission.acquire(session).await?;
         self.fence_pending_terminal(session).await?;
-        let scan = scan_durable_messages(
+        let scan = read_mailbox_selection(
             &self.inner,
             session,
-            MailboxRead::WithMessage(message.clone()),
+            MailboxSelection::Exact(message.clone()),
         )
         .await?;
-        let Some(entry) = &scan.selected else {
+        let Some(entry) = scan.selected.map(crate::observation::durable_message_entry) else {
             return Ok(false);
         };
         if let AgentMessageSource::Continuation { source } = &entry.message.source
@@ -670,7 +669,7 @@ impl AgentKernel {
             self.discard_continuation_admitted(
                 session,
                 (scan.durable_fact_seq, scan.durable_control_seq),
-                entry,
+                &entry,
                 MessageDiscardReason::ContinuationDisarmed,
             )
             .await?;

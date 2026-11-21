@@ -21,7 +21,9 @@ use thiserror::Error;
 
 mod activity;
 mod claim;
-pub use claim::{StoreClaimableMessage, StoreFactAppend, StoreInputClaim, StoreMailboxClaim};
+pub use claim::{
+    MailboxSelection, StoreFactAppend, StoreInputClaim, StoreMailboxSelection, StoreSelectedMessage,
+};
 mod inherited;
 pub use inherited::{InheritedInterval, InheritedReadError, capture_inherited_intervals};
 mod maintenance;
@@ -2484,20 +2486,20 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
         session_id: &SessionId,
         message_id: &MessageId,
     ) -> Result<Option<StoreAgentMessage>> {
-        let _ = (session_id, message_id);
-        Err(StoreError::Invalid(
-            "this Agent Store does not support exact message reads".into(),
-        ))
+        Ok(self
+            .read_mailbox_selection(session_id, MailboxSelection::Exact(message_id.clone()))
+            .await?
+            .selected)
     }
-    /// Captures all claimable identities and optional waking status at one durable cut.
-    async fn read_mailbox_claim(
+    /// Reads the requested message and pending identities at one durable cut.
+    async fn read_mailbox_selection(
         &self,
         session_id: &SessionId,
-        waking: Option<MessageId>,
-    ) -> Result<StoreMailboxClaim> {
-        let _ = (session_id, waking);
+        selection: MailboxSelection,
+    ) -> Result<StoreMailboxSelection> {
+        let _ = (session_id, selection);
         Err(StoreError::Invalid(
-            "this Store does not support mailbox claim selection".into(),
+            "this Store does not support mailbox selection".into(),
         ))
     }
     /// Reads a byte-bounded pending payload page at one durable cut.

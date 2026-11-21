@@ -10,7 +10,8 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_store_protocol::{
     AppendBatch, AtomicAgentCommit, AtomicSessionAppend, MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
-    MailboxRead, SessionStore, StoreError, StoredContextCheckpoint, WriteContextCheckpoint,
+    MailboxRead, MailboxSelection, SessionStore, StoreError, StoredContextCheckpoint,
+    WriteContextCheckpoint,
 };
 use rsi_agent_store_sqlite::SqliteStore;
 use rsi_agent_testkit::assert_mechanical_store_contract;
@@ -2339,12 +2340,27 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
         .await
         .unwrap();
     assert_eq!(all.pending_count, 35);
+    assert!(all.pending.len() < all.pending_count);
+    let submission = store
+        .read_mailbox_selection(
+            &session,
+            MailboxSelection::Submit(MessageId::new("new-input").unwrap()),
+        )
+        .await
+        .unwrap();
+    assert!(submission.selected.is_none());
+    assert_eq!(submission.durable_control_seq, all.durable_control_seq);
+    assert_eq!(submission.pending.len(), all.pending_count);
+    assert_eq!(submission.pending.last().unwrap().accepted_control_seq, 35);
     assert!(
         all.pending
             .iter()
             .all(|entry| entry.target == MessageTarget::NextTurn)
     );
-    let step = store.read_mailbox_claim(&session, None).await.unwrap();
+    let step = store
+        .read_mailbox_selection(&session, MailboxSelection::Step)
+        .await
+        .unwrap();
     assert_eq!(step.pending.len(), 2);
     assert_eq!(step.durable_control_seq, all.durable_control_seq);
     assert_eq!(
@@ -2360,7 +2376,10 @@ async fn step_mailbox_reaches_steers_beyond_a_full_page_of_next_turn_messages() 
             .all(|entry| entry.target == MessageTarget::NextStep)
     );
     let claim = store
-        .read_mailbox_claim(&session, Some(MessageId::new("input-33").unwrap()))
+        .read_mailbox_selection(
+            &session,
+            MailboxSelection::Wake(MessageId::new("input-33").unwrap()),
+        )
         .await
         .unwrap();
     assert_eq!(claim.pending.len(), 3);
@@ -2414,12 +2433,22 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
             [unrelated.as_str()],
         )
         .unwrap();
-    assert_eq!(
-        store.read_agent_message(&session, &selected).await.unwrap(),
-        Some(expected)
-    );
+    let exact = store
+        .read_mailbox_selection(&session, MailboxSelection::Exact(selected.clone()))
+        .await
+        .unwrap();
+    assert_eq!(exact.selected.as_ref(), Some(&expected));
+    assert!(exact.pending.is_empty());
+    let admission = store
+        .read_mailbox_selection(&session, MailboxSelection::Submit(selected.clone()))
+        .await
+        .unwrap();
+    assert_eq!(admission.selected.as_ref(), Some(&expected));
+    assert_eq!(admission.pending.len(), 2);
+    assert_eq!(admission.pending[1].message_id, unrelated);
+    assert_eq!(admission.durable_control_seq, exact.durable_control_seq);
     let claim = store
-        .read_mailbox_claim(&session, Some(selected.clone()))
+        .read_mailbox_selection(&session, MailboxSelection::Wake(selected.clone()))
         .await
         .unwrap();
     assert_eq!(claim.pending.len(), 1);
@@ -2431,7 +2460,7 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
     ));
     assert_eq!(
         store
-            .read_mailbox_claim(&session, None)
+            .read_mailbox_selection(&session, MailboxSelection::Step)
             .await
             .unwrap()
             .pending
