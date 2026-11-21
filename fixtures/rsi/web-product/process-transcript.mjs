@@ -21,6 +21,38 @@ fixture.view.surfaces.main.transcript={status:'Running',blocks:[
 ],turns:{entries:{turn:{id:'turn',status:'Running',running:true,foldable:true,partial:false,blocks:['u','ctx','m','r','intro','t','f'],process:['m','r','t','f'],candidate:[],answer:[],timestamps:{u:Date.now()-2000}}}}};
 `;
 const server=await sourceFixture({name:'process-transcript',source}),results=[];
+async function checkPresentedFiles(page,name) {
+  await page.evaluate(async()=>{
+    const file=(path,description)=>({path,description});
+    const declaration=(key,seq,presented)=>({key,role:'tool',title:'present',text:'',sources:1,presented,
+      tool:{name:'present',intent_present:true,result:{seq},phase:{settled:'completed'}}});
+    const blocks=[
+      declaration('later','11',[file('report.txt','Final report (text)')]),
+      declaration('first','9',[file('report.txt','Draft'),...['a','b','c','d'].map(path=>file(path,'Attachment'))]),
+      {key:'reply',role:'assistant',title:'Assistant',text:'The report is ready.',sources:1},
+      {key:'done',role:'status',title:'Completed',text:'',sources:1}
+    ];
+    fixture.view.surfaces.main.transcript={blocks,turns:{entries:{report:{id:'report',blocks:blocks.map(b=>b.key),
+      process:['later','first'],candidate:[],answer:['reply'],closing_prose:[2],terminal:'done',status:'Completed',running:false,foldable:true}}}};
+    await fixture.frame();
+  });
+  const tail=page.locator('[data-turn-tail="report"]');
+  const cards=tail.locator('[data-presented-file]');
+  const reportCard=tail.getByRole('button',{name:'Preview report.txt in sidebar',exact:true});
+  assert.equal(await cards.count(),4);
+  assert.equal(await reportCard.locator('small span').first().textContent(),'Final report');
+  await tail.getByRole('button',{name:'Show all 5 delivered files'}).click();
+  assert.equal(await cards.count(),5);
+  await tail.getByRole('button',{name:'Collapse delivered files'}).click();
+  assert.equal(await cards.count(),4);
+  await reportCard.scrollIntoViewIfNeeded();
+  await page.screenshot({path:join(report,name+'-presented-files.png')});
+  await page.evaluate(()=>window.addEventListener('rsi:workspace-document',event=>{
+    window.presentedOpen={path:event.detail.path,pane:event.detail.pane};
+  },{once:true}));
+  await reportCard.focus();await reportCard.press('Enter');
+  assert.deepEqual(await page.evaluate(()=>window.presentedOpen),{path:'report.txt',pane:'main'});
+}
 async function checkMessageActions(page, touch) {
   await page.evaluate(async()=>{
     const blocks=[], entries={};
@@ -246,6 +278,7 @@ try {
    await checkMessageActions(page,false);
    await page.screenshot({path:join(report,name+'-action-rows.png')});
    await checkReadingPosition(page);
+   await checkPresentedFiles(page,name);
    const touchPage=await browser.newPage({hasTouch:true,viewport:{width:390,height:844}});
    try {
      await touchPage.goto(server.url);await touchPage.waitForFunction(()=>window.ready);

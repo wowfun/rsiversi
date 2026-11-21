@@ -28,6 +28,7 @@ pub(crate) struct Block {
     pub text: String,
     pub clipped: bool,
     pub tool: Option<ToolState>,
+    presented: Option<Arc<rsi_session_files_ui::PresentedCards>>,
     request: Option<rsi_conversation::RequestPresentation>,
     compact: Option<(u64, rsi_agent_turn_protocol::CompactionOutcome)>,
     tool_start_seq: Option<u64>,
@@ -102,6 +103,12 @@ impl Serialize for BlockView<'_> {
             .as_ref()
             .is_some_and(|request| request.scheduled_retry().is_some());
         let schedule = block.tool.as_ref().and_then(ToolState::schedule_creation);
+        let presented = block.presented.as_ref().filter(|_| {
+            block
+                .tool
+                .as_ref()
+                .is_some_and(|tool| tool.intent_present && tool.name.as_deref() == Some("present"))
+        });
         let trigger = block.role.strip_prefix("trigger-");
         let mut view = serializer.serialize_struct(
             "Block",
@@ -109,6 +116,7 @@ impl Serialize for BlockView<'_> {
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
                 + usize::from(schedule.is_some())
+                + usize::from(presented.is_some())
                 + usize::from(trigger.is_some())
                 + usize::from(scheduled_retry),
         )?;
@@ -143,6 +151,9 @@ impl Serialize for BlockView<'_> {
         }
         if let Some(task) = schedule {
             view.serialize_field("created_schedule", task)?;
+        }
+        if let Some(files) = presented {
+            view.serialize_field("presented", &**files)?;
         }
         if let Some(markdown) = markdown {
             view.serialize_field("markdown", &markdown)?;
@@ -356,6 +367,7 @@ impl Transcript {
                 text: String::new(),
                 clipped: false,
                 tool: None,
+                presented: None,
                 request: None,
                 compact: None,
                 tool_start_seq: None,
@@ -406,6 +418,10 @@ impl Transcript {
             metadata += block.key.capacity()
                 + block.title.capacity()
                 + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
+                + block
+                    .presented
+                    .as_deref()
+                    .map_or(0, rsi_session_files_ui::PresentedCards::owned_bytes)
                 + block
                     .request
                     .as_ref()
@@ -572,6 +588,10 @@ impl Transcript {
                 .insert(ToolState::from_fact(fact).expect("Tool Fact"))
         };
         block.title = tool.title();
+        let may_present = tool.name.as_deref().is_none_or(|name| name == "present");
+        if !may_present {
+            block.presented = None;
+        }
         block.first_seq = block.first_seq.min(fact.seq());
         if tool.arguments != old_arguments {
             let arguments = match fact.body() {
@@ -596,6 +616,9 @@ impl Transcript {
         } else if tool.result != old_result
             && let SessionFactBody::ToolResult { result, .. } = fact.body()
         {
+            if may_present {
+                block.presented = rsi_session_files_ui::PresentedCards::from_result(result);
+            }
             block.text.truncate(block.tool_argument_bytes);
             let maximum = MAX_BLOCK_BYTES / 2;
             let mut remaining = maximum;
@@ -905,6 +928,69 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presented_files_require_the_matching_intent_and_success_across_backfill() {
+        use rsi_agent_session_protocol::{EffectId, ToolOrigin};
+        use rsi_tools_protocol::{ToolProgramRole, ToolResult, ToolResultIdentity};
+        use serde_json::json;
+        let identity = ToolResultIdentity::new("owner", "invoke", "file", "a".repeat(64)).unwrap();
+        let entry = json!({"path_hex":"612e747874","description":"Report","length":5});
+        let raw = json!({"path_hex":"ff","description":"Exact bytes","length":0});
+        for (name, failed) in [("present", false), ("present", true), ("other", false)] {
+            let intent = SessionFact::new(
+                1,
+                1,
+                SessionFactBody::ToolIntent {
+                    origin: ToolOrigin::Model {
+                        effect_id: EffectId::new("source").unwrap(),
+                    },
+                    program_role: ToolProgramRole::Unavailable,
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("file").unwrap(),
+                    identity: identity.clone(),
+                    name: name.into(),
+                    arguments: json!({}),
+                    approval: None,
+                    parallel_safe: false,
+                },
+            )
+            .unwrap();
+            let result = SessionFact::new(
+                2,
+                1,
+                SessionFactBody::ToolResult {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    effect_id: EffectId::new("file").unwrap(),
+                    identity: identity.clone(),
+                    result: ToolResult::new(
+                        json!({"presented":{"version":1,"files":[entry,raw]}}),
+                        vec![],
+                        failed,
+                    )
+                    .unwrap(),
+                    conclusion: None,
+                },
+            )
+            .unwrap();
+            for order in [[&intent, &result], [&result, &intent]] {
+                let mut transcript = Transcript::default();
+                transcript.fact(order[0]);
+                let read = |t: &Transcript| serde_json::to_value(&t.blocks[0]).unwrap();
+                assert!(read(&transcript).get("presented").is_none());
+                transcript.fact(order[1]);
+                let value = read(&transcript);
+                if name == "present" && !failed {
+                    assert_eq!(
+                        value["presented"],
+                        json!([{"path":"a.txt","description":"Report"},{"path_hex":"ff","description":"Exact bytes"}])
+                    );
+                } else {
+                    assert!(value.get("presented").is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn compaction_discloses_only_installed_text_even_when_backfilled() {

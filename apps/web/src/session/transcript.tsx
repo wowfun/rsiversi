@@ -27,6 +27,7 @@ import { closeDisclosure } from "../../disclosure.js";
 import { Markdown } from "./markdown.tsx";
 import {ForkTurn} from './fork.tsx';
 import {CreatedTaskCards} from './scheduled-tasks.tsx';
+import {PresentedFiles} from './presented-files.tsx';
 import {ModelRetryRow} from './model-retry.tsx';
 import {Trajectory, type TrajectoryMemory} from './trajectory.tsx';
 
@@ -349,11 +350,13 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
     const blocks = new Map<string,TranscriptBlock>();
     const replies = new Set<string>();
     let hasCreatedTasks = false;
+    let hasPresentedFiles = false;
     let latestUser: string | undefined, latestContent: string | undefined;
     for (const block of transcript.blocks) {
       blocks.set(block.key, block);
       if (block.role === 'assistant') replies.add(block.key);
       if (block.created_schedule) hasCreatedTasks = true;
+      if (block.presented) hasPresentedFiles = true;
       if (block.role === 'user' && !block.trigger) latestUser = block.key;
       if (block.role !== 'status' && block.role !== 'metadata') latestContent = block.key;
     }
@@ -463,6 +466,8 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         nodes.push(<div className="turn-tail" key={`tail:${generation}:${terminal.id}`} data-turn-tail={terminal.id}
           data-actions-reveal={last && last === latestContent && terminal.answer.includes(last) ? undefined : 'hover'}>
           <DocumentContributions seat="turnTail" turn={terminal.id}/>
+          {hasPresentedFiles && pane && generation && <PresentedFiles process={terminal.process} blocks={blocks}
+            pane={pane} generation={generation} owner={owner}/>}
           {taskCards}
           <div className="message-actions">
             {text.length > 0 && <CopyButton label="Copy message" text={text}/>}

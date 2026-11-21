@@ -6,6 +6,7 @@
 mod browser;
 mod markup;
 mod presented;
+pub use presented::PresentedCards;
 mod preview;
 mod view;
 use async_trait::async_trait;

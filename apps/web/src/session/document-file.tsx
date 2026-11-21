@@ -19,7 +19,7 @@ export function DocumentFileLink({path, line, children, imagesOnly}: {path:strin
   </button>;
 }
 
-export type DocumentLocation = {path:string; line?:number};
+export type DocumentLocation = {path:string; line?:number; details?:()=>void};
 
 function lineRange(text:string, line:number|undefined) {
   if (!line) return;
@@ -50,7 +50,8 @@ export function DocumentFilePanel({pane, generation, path, location}: {pane:stri
   const range = useMemo(() => text === undefined ? undefined : lineRange(text, location?.line), [text, location]);
   useLayoutEffect(() => { mark.current?.scrollIntoView({block:'nearest'}); }, [range]);
   return <FilePanel label="Document file" path={path} reload={() => reload(n => n + 1)}>
-    {text === undefined ? <p role="status">{error || 'Loading document…'}</p> :
+    {text === undefined ? <><p role="status">{error || 'Loading document…'}</p>
+      {error && location?.details && <button type="button" onClick={location.details}>View file details</button>}</> :
       <pre className={css.documentSource}>{range ? <>{text.slice(0,range[0])}<mark ref={mark}>{text.slice(...range)}</mark>{text.slice(range[1])}</> : text}</pre>}
   </FilePanel>;
 }

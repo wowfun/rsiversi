@@ -22,6 +22,7 @@ export interface TranscriptBlock {
   scheduled_retry?: true;
   external?: unknown;
   created_schedule?: {id:string; title:string; interval_ms:number|null};
+  presented?: (({path:string; path_hex?:never} | {path_hex:string; path?:never}) & {description:string})[];
   tool?: {
     name?: string | null;
     argument_summary?: string | null;

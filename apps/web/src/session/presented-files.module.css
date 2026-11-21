@@ -1,0 +1,15 @@
+.group { container-type: inline-size; display: flex; flex-direction: column; gap: 16px; min-width: 0; margin-top: 4px; }
+.grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.grid[data-single="true"] { grid-template-columns: minmax(0,1fr); }
+@container (max-width: 620px) { .grid { grid-template-columns: minmax(0,1fr); } }
+.card { composes: card from './scheduled-tasks.module.css'; height: 60px; min-height: 60px; }
+.tile { composes: tile from './scheduled-tasks.module.css'; color: var(--dsw-alias-link); }
+.tile svg { width: 20px; height: 20px; }
+.description { composes: description from './scheduled-tasks.module.css'; }
+.description small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.description small span:last-child { display: none; }
+@media (hover: hover) {
+  .card:hover small span:first-child { display: none; }
+  .card:hover small span:last-child { display: inline; }
+}
+.toggle { align-self: center; padding: 1px 11px; background: transparent; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }

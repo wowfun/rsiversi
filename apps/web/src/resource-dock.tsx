@@ -244,7 +244,7 @@ function SessionDock({owner,pane,surface,active,viewport}:{owner:ResourceOwner;p
       if(!activeRef.current||target?.pane!==pane||target.generation!==surface.generation)return
       if(event.type==='rsi:file-image'||event.type==='rsi:workspace-document'){
         const document=event.type==='rsi:workspace-document'
-        if(document)setDocumentLocation({path:target.path,line:target.line})
+        if(document)setDocumentLocation({path:target.path,line:target.line,details:target.details})
         apply('open',{coordinate:{action:document?'workspace_document':'file_image',path:target.path},title:target.path.split(/[\\/]/).at(-1)})
       }
       else apply('open',{coordinate:{action:'schedule_task',task:target.task},title:'Automation task'})

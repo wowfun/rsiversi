@@ -321,6 +321,11 @@ document can open the file from its label after settlement.
 Ordinary local file links carry their decoded path and optional one-based
 source line. The document resolves the link against the attached workspace
 and passes a relative path to the Session Files document reader.
+Completed tool blocks can supply the Files UI's bounded declaration to the
+closing turn. A successful result must pair with its exact `present` intent,
+including during result-first history replay.
+Cards carry the description and the exact UTF-8 path, or its hex spelling for a
+non-UTF-8 name. The observed length remains available in the tool result.
 The document constructs only the closed element set with text nodes, and HTTP(S) links
 open with no opener or referrer.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses

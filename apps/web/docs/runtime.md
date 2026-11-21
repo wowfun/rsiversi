@@ -131,6 +131,12 @@ when the destination resolves inside the conversation workspace. A line
 reference selects the requested line. Outside-workspace document labels
 remain plain text. Document bytes are requested when the panel opens.
 
+Completed turns show declared workspace files below the closing reply.
+A repeated declaration in the same turn uses its latest description. A
+text file card opens the current file in the Session resource panel.
+The recorded Files details remain available for names or content that the
+document preview cannot display.
+
 In a settled reply, a Markdown link to a local image opens that image in a
 Session resource tab. A text link previews the file on mouse hover or keyboard
 focus. Escape dismisses the preview. An image inside a link has a single

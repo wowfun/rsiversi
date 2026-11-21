@@ -17,6 +17,61 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Workspace file metadata shown below the turn's closing reply.
+#[derive(Debug)]
+pub struct PresentedCards(Vec<rsi_files_tools::PresentedFile>);
+impl Serialize for PresentedCards {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Card<'a> {
+            Text {
+                path: &'a str,
+                description: &'a str,
+            },
+            Bytes {
+                path_hex: &'a RelativePath,
+                description: &'a str,
+            },
+        }
+        serializer.collect_seq(self.0.iter().map(|file| {
+            let description = file.description.as_str();
+            match std::str::from_utf8(file.path_hex.as_bytes()) {
+                Ok(path) => Card::Text { path, description },
+                Err(_) => Card::Bytes {
+                    path_hex: &file.path_hex,
+                    description,
+                },
+            }
+        }))
+    }
+}
+impl PresentedCards {
+    /// Decode the versioned declaration once while the result is in hand.
+    pub fn from_result(result: &rsi_tools_protocol::ToolResult) -> Option<Arc<Self>> {
+        if result.is_error {
+            return None;
+        }
+        let files = PresentedFilesV1::decode(result.value.get("presented")?).ok()?;
+        Some(Arc::new(Self(files.files)))
+    }
+
+    /// Heap charge for the shared transcript declaration.
+    pub fn owned_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + 2 * std::mem::size_of::<usize>()
+            + self.0.capacity() * std::mem::size_of::<rsi_files_tools::PresentedFile>()
+            + self
+                .0
+                .iter()
+                .map(|file| file.path_hex.as_bytes().len() + file.description.capacity())
+                .sum::<usize>()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
