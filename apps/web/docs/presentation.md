@@ -1,5 +1,12 @@
 # Presentation design
 
+The Chat header's Session panel shows the attached working folder and its parent.
+The folder exposes its full path to pointer and keyboard users. With 348 px of
+space beside the transcript the panel docks there and follows the browser's
+docking preference. In a narrower pane its button opens a temporary overlay.
+Escape or a press outside closes it. The panel belongs to the selected Chat;
+the header control is unavailable in Trajectory.
+
 A conversation with a nonempty to-do projection shows its progress above the
 composer. The panel starts collapsed and names each status with a nonzero
 count. Expanding it shows the current items in their supplied order with

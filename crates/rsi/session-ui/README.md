@@ -4,6 +4,8 @@ This ordinary application contribution plugin owns Session and Tool inspection
 cards over `rsi-ui`. It contributes an application-independent Session surface,
 a Tool block renderer, and exact-source paging actions. Web and TUI render its
 closed views and forward bound references without branching on its factory id.
+The Session details card identifies the attached Session. Each Tool card owns
+its own arguments, results and rejection details.
 
 `SessionUiTargetFactory` runs in the actual Shell surface and requires its
 `SessionControllerContract`. Controller replacement therefore retires the UI

@@ -9,6 +9,10 @@ The selected Chat or Trajectory view belongs to the authenticated conversation.
 The document stores one device-local preference for each Session using
 Trajectory. Selecting Chat removes the preference.
 
+The Session panel docks by default when it fits. Hiding the docked panel stores
+one browser-local preference shared by conversations. Showing it again clears
+the preference. Opening or dismissing the temporary overlay uses no storage.
+
 Unsubmitted ordinary question answers and the active question survive reopening
 the conversation on the same browser. Progress belongs to the endpoint,
 principal, attached Session, owning turn and request. A complete pending

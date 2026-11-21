@@ -258,16 +258,10 @@ impl SurfaceRenderer for SessionCard {
         let controller = controller(target)?;
         Ok(UiView {
             title: "Session details".into(),
-            elements: vec![
-                UiElement::Field {
-                    label: "Session".into(),
-                    value: controller.session_id().to_string(),
-                },
-                UiElement::Text {
-                    text: "Open a card to read its complete arguments, results or rejection."
-                        .into(),
-                },
-            ],
+            elements: vec![UiElement::Field {
+                label: "Session".into(),
+                value: controller.session_id().to_string(),
+            }],
         })
     }
 }

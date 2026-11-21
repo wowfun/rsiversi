@@ -610,7 +610,9 @@ async fn remote_ui(
         .item;
     let view = item.snapshot.model.standard_view.unwrap();
     assert_eq!(view.title, "Session details");
-    assert!(view.elements.iter().any(|element| matches!(element, rsi_ui::UiElement::Field { label, value } if label == "Session" && value == session.as_str())));
+    assert!(
+        matches!(view.elements.as_slice(), [rsi_ui::UiElement::Field { label, value }] if label == "Session" && value == session.as_str())
+    );
     assert!(item.ticket.is_some());
     stream
 }
