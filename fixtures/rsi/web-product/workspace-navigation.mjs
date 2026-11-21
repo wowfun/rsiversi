@@ -240,6 +240,19 @@ try {
    });
    const group=page.getByTestId('workspace-group').filter({has:page.getByText('Conversation 0',{exact:true})});
    await group.getByTestId('conversation-row').first().waitFor();
+   const ungrouped=page.getByRole('button',{name:'Ungrouped',exact:true});
+   await ungrouped.waitFor({state:'detached'});
+   await page.evaluate(async()=>{fixture.view.navigation.more=true;await fixture.frame()});
+   await ungrouped.waitFor();
+   await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     nav.more=false;
+     nav.entries.push({...nav.groups.fixture.entries[0],session:'loose',workspace:null});
+     await fixture.frame();
+   });
+   await ungrouped.waitFor();
+   await page.evaluate(async()=>{fixture.view.navigation.entries.pop();await fixture.frame()});
+   await ungrouped.waitFor({state:'detached'});
    assert.equal(await group.getByTestId('conversation-row').count(),5);
    const more=group.getByRole('button',{name:'Show 4 more sessions',exact:true});
    assert.equal(await more.getAttribute('aria-expanded'),'false');
@@ -277,10 +290,17 @@ try {
    await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Main message');
    assert.equal(await editor.inputValue(),'Still editing');
    await page.evaluate(async()=>{
+     const workspace={...fixture.savedMain.workspace,registration:{status:'unregistered'}};
+     fixture.view.surfaces.main={...fixture.savedMain,session:'loose-draft',draft:true,workspace};
+     await fixture.frame();
+   });
+   await ungrouped.waitFor();
+   await page.evaluate(async()=>{
      fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',draft:false};
      await fixture.frame();
    });
    await fresh.waitFor({state:'detached'});
+   await ungrouped.waitFor({state:'detached'});
    await page.evaluate(()=>{
      window.groupOpens=0;
      fixture.setReply('command',async text=>{

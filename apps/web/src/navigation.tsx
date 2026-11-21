@@ -31,12 +31,22 @@ export function Navigation() {
   useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()), 60_000);return ()=>clearInterval(timer);}, []);
   const nav = useView((value) => value?.navigation),
     catalog = useView((value) => value?.catalog);
+  const [mode, setMode] = useState<ConversationFilter>("active");
+  const archived = mode === "all" ? null : mode === "archived";
+  const completeList = nav?.ticket && nav.continued === false && !nav.more &&
+    !nav.newer_activity && !nav.diagnostic && !nav.filter.query &&
+    nav.filter.workspace.kind === "all" && nav.filter.archived === archived;
   const selectedWorkspaces = useView((value) =>
     JSON.stringify(
       [
         ...new Set(
           Object.values(value?.surfaces ?? {})
-            .map((surface) => surface?.kind === "native" ? surface.workspace.registration.status === 'registered' ? surface.workspace.registration.id : undefined : undefined)
+            .map((surface) => {
+              if (surface?.kind !== "native") return;
+              const registration = surface.workspace.registration;
+              if (registration.status === "registered") return registration.id;
+              if (surface.draft && registration.status === "unregistered") return "other";
+            })
             .filter(Boolean),
         ),
       ].sort(),
@@ -55,9 +65,12 @@ export function Navigation() {
   );
   const device = useDeviceNavigation(nav, workspaces, !completeWorkspaces);
   const restoring = useRef(new GroupRestoration());
-  const firstVisits = useMemo(() => (JSON.parse(selectedWorkspaces) as string[]).filter(id =>
-    workspaces.some(record => record.id === id) && !layout.workspaces.some(item => item.id === id)),
-    [selectedWorkspaces, workspaces, layout.workspaces]);
+  const selectedGroups = useMemo(() => JSON.parse(selectedWorkspaces) as string[], [selectedWorkspaces]);
+  const showUngrouped = selectedGroups.includes("other") || !!nav &&
+    (!completeList || nav.entries.some(entry => entry.workspace === null));
+  const firstVisits = useMemo(() => selectedGroups.filter(id =>
+    (id === "other" || workspaces.some(record => record.id === id)) && !layout.workspaces.some(item => item.id === id)),
+    [selectedGroups, workspaces, layout.workspaces]);
   useEffect(() => { for (const id of firstVisits) expand(id); }, [firstVisits, expand]);
   const restoreKey = useMemo(() => {
     const registered = new Set(workspaces.map(row => row.id));
@@ -66,11 +79,11 @@ export function Navigation() {
     return JSON.stringify(
       [...desired]
         .filter(
-          (id) => !nav?.groups[id] && (id === "other" || registered.has(id)),
+          (id) => !nav?.groups[id] && (id === "other" ? showUngrouped : registered.has(id)),
         )
         .sort(),
     );
-  }, [workspaces, layout.workspaces, firstVisits, nav?.groups]);
+  }, [workspaces, layout.workspaces, firstVisits, nav?.groups, showUngrouped]);
   useEffect(() => {
     if (!nav?.ticket || nav.filter.query) return;
     for (const id of JSON.parse(restoreKey) as string[]) {
@@ -87,8 +100,7 @@ export function Navigation() {
     }
   }, [restoreKey, nav?.ticket, nav?.filter.query]);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchText, setSearchText] = useState(""),
-    [mode, setMode] = useState<ConversationFilter>("active");
+  const [searchText, setSearchText] = useState("");
   const query = searchText.trim();
   const searchRoot = useRef<HTMLFormElement>(null);
   const submitSearch = useRef<() => void>();
@@ -97,12 +109,9 @@ export function Navigation() {
   const [edit, setEdit] = useState<SessionMenuTarget>();
   const filter = {
     query,
-    archived: mode === "all" ? null : mode === "archived",
+    archived,
     workspace: { kind: "all" },
   };
-  const completeList = nav?.ticket && nav.continued === false && !nav.more &&
-    !nav.newer_activity && !nav.diagnostic && !nav.filter.query &&
-    nav.filter.workspace.kind === "all" && nav.filter.archived === filter.archived;
   const remoteQuery = completeList ? "" : query;
   const search = (value = filter, current?: () => boolean) =>
     device.command({
@@ -306,7 +315,7 @@ export function Navigation() {
                 ) : device.preferences.view === "flat" ? (
                   device.entries.map(row)
                 ) : (
-                  <WorkspaceNavigation nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} expand={expand} row={row}/>
+                  <WorkspaceNavigation nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row}/>
                 )}
                 <div className="manual-pagination">
                   <Button
@@ -370,6 +379,7 @@ export function Navigation() {
                   device={device}
                   workspaces={workspaces}
                   completeWorkspaces={completeWorkspaces}
+                  showUngrouped={showUngrouped}
                   expand={expand}
                   row={row}
                 />

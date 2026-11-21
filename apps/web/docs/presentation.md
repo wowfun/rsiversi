@@ -724,6 +724,9 @@ Collapsing an active workspace records the device preference before requesting t
 Hovering a registered workspace for 800ms, or focusing its title, reveals its
 name, full path and recorded creation time in a viewport-bounded card. The row's
 actions offer Rename and Delete workspace; Ungrouped has neither action.
+The sidebar omits Ungrouped when the complete filtered conversation list has
+no loose Session. A current loose draft keeps its group, and a partial list
+keeps the group available for browsing.
 Rename is persisted by Workspace and shared by navigation and composer pickers.
 Delete requires confirmation, removes only the registration, preserves files and
 Session logs, and refreshes those Sessions into Ungrouped. Pending mutations

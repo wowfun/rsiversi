@@ -28,6 +28,7 @@ export function WorkspaceNavigation({
   device,
   workspaces,
   completeWorkspaces,
+  showUngrouped,
   expand,
   row,
 }: {
@@ -35,6 +36,7 @@ export function WorkspaceNavigation({
   device: ReturnType<typeof useDeviceNavigation>;
   workspaces: (Parameters<typeof useDeviceNavigation>[1][number] & {name?:string|null;created_at_ms?:number|null})[];
   completeWorkspaces: boolean;
+  showUngrouped: boolean;
   expand: ReturnType<typeof useLayout>["expand"];
   row(entry: NavigationEntry): ReactNode;
 }) {
@@ -279,7 +281,7 @@ export function WorkspaceNavigation({
               ),
             )}
       </div>
-      {group("other", "Ungrouped", { kind: "unregistered" })}
+      {showUngrouped && group("other", "Ungrouped", { kind: "unregistered" })}
     </>
   );
 }
