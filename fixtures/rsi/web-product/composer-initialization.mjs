@@ -40,9 +40,9 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await input.fill('');
   await page.reload();await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
   const reloadedLabel=await model.getAttribute('aria-label');
-  await page.evaluate(async()=>{fixture.view.setup.agent.reasoning_effort='off';await fixture.frame();});
+  await page.evaluate(async()=>{fixture.view.setup.agent.default_reasoning_effort='off';await fixture.frame();});
   assert.match(await model.getAttribute('aria-label'),/reasoning effort Off/);
-  await page.evaluate(async()=>{delete fixture.view.setup.agent.reasoning_effort;fixture.view.setup.default_model_description.model={deployment:'other',model:'unknown'};await fixture.frame();});
+  await page.evaluate(async()=>{delete fixture.view.setup.agent.default_reasoning_effort;fixture.view.setup.default_model_description.model={deployment:'other',model:'unknown'};await fixture.frame();});
   assert.doesNotMatch(await model.getAttribute('aria-label'),/reasoning effort/);
   await page.evaluate(async()=>{fixture.view.setup.default_model_description.model=fixture.view.setup.agent.default_model;await fixture.frame();});
   const before=await composer.boundingBox();
@@ -76,7 +76,40 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await page.locator('.transcript').evaluate(node=>{node.scrollTop=0;});await bottom.waitFor();
   await page.evaluate(async()=>{fixture.view.surfaces.main.transcript.blocks.find(block=>block.key==='a').text='Short again';await fixture.frame();});
   await bottom.waitFor({state:'hidden'});
-  results.push({browser:name,initialLabel,reloadedLabel,before,after,shortBottom,shortGeometry,scrollReturn:true,contentShrink:true,errors});
+  const reconnect=await page.evaluate(async()=>{
+    const session=fixture.view.surfaces.main.session;
+    const actions=[];
+    let finishRestore;
+    const restoring=new Promise(resolve=>{finishRestore=resolve;});
+    fixture.setReply('command',async payload=>{
+      const command=JSON.parse(payload);
+      if(command.action==='initialize_workspace'){
+        actions.push('restore '+command.resume);
+        await restoring;
+        await fixture.surface(command.resume);
+      }else if(command.action==='open'){
+        actions.push('open '+command.session);
+        await fixture.surface(command.session);
+      }
+      return '{}';
+    });
+    await fixture.runtime.attach(fixture.makeTransport(),{async render(){return {}},close(){}},{},
+      async()=>({drafts:await fixture.DraftStore.open('a'.repeat(32),{kind:'local'})}));
+    fixture.view.surfaces.main=null;
+    await fixture.frame();
+    const same=fixture.input.open({action:'open',session});
+    const other=fixture.input.open({action:'open',session:'other'});
+    await fixture.tick();
+    const during=[...actions];
+    finishRestore();
+    await Promise.all([same,other]);
+    await fixture.input.open({action:'open',session:'other'});
+    return {session,during,actions,selected:fixture.view.surfaces.main.session};
+  });
+  assert.deepEqual(reconnect.during,['restore '+reconnect.session]);
+  assert.deepEqual(reconnect.actions,[...reconnect.during,'open other','open other']);
+  assert.equal(reconnect.selected,'other');
+  results.push({browser:name,initialLabel,reloadedLabel,before,after,shortBottom,shortGeometry,scrollReturn:true,contentShrink:true,reconnect,errors});
  }catch(error){
   await page.screenshot({path:join(report,name+'-failure.png')}).catch(()=>{});
   await writeFile(join(report,name+'-failure.json'),JSON.stringify(await page.evaluate(()=>({text:document.body.innerText,phase:fixture.runtime.connection.phase,panes:[...fixture.runtime.panes].map(([key,pane])=>({key,staged:pane.staged,starting:!!pane.starting,binding:!!pane.startBindingOwner,view:pane.composerView}))})),null,2));

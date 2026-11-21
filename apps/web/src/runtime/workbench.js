@@ -164,7 +164,12 @@ function completeConnection(current, identity, local) {
     if (current.storageNotice) notify("");
     const saved = !nativeDocument && history.state?.rsiConversation;
     const resume = saved?.owner === owner && typeof saved.session === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(saved.session) ? saved.session : undefined;
-    void current.request("command", JSON.stringify({action:"initialize_workspace",resume})).catch(error => { if (connection === current && !current.closing) notify(error.message); });
+    const opened = current.request("command", JSON.stringify({action:"initialize_workspace",resume}));
+    if (resume) current.restoring = {session:resume, opened};
+    void opened.catch(error => {
+      current.restoring = undefined;
+      if (connection === current && !current.closing) notify(error.message);
+    });
 }
 async function connectWith(receipt, localTicket) {
   if (connecting || (connection && !connection.closing)) throw new Error("A connection is already active or opening");
@@ -248,9 +253,18 @@ async function openInSelected(fields, startingText) {
   if (fields.action === "open" && pageKind() && surface?.kind === "native" && !surface.draft &&
       surface.session === fields.session && surface.generation === pane.generation && !pane.switching && !owner.closing) return;
   if (pane.switching || pane.submitting || pane.uploading) throw new Error("Wait for this conversation’s current operation");
+  const restoring = pane.index === "main" ? owner.restoring : undefined;
+  if (restoring && fields.action === "open" && fields.session === restoring.session)
+    return restoring.opened;
   pane.switching = true;
   pane.renderComposer();
   try {
+    if (restoring) {
+      // A failed startup restore still permits the user's new selection.
+      await restoring.opened.catch(() => {});
+      if (connection !== owner || owner.closing) throw new Error("The connection changed while opening the conversation");
+      owner.restoring = undefined;
+    }
     await pane.flush();
     const reuse = fields.action === "create" && !fields.agent_preset_id
       ? await workspaceBlank(pane, fields.workspace, owner.drafts) : undefined;
@@ -280,6 +294,7 @@ function render(next){
   const previous = view?.surfaces.main?.session;
   projectView(next);
   const session = next.surfaces.main?.session;
+  if (session && connection?.restoring?.session === session) connection.restoring = undefined;
   if (session !== previous) rememberConversation(session);
 }
 installActions({ captureSetupBinding:settings.captureSetupBinding, disconnect:async()=>nativeDocument?nativeCall({kind:"request_close"}):disconnectDocument(), restoreDrafts:async()=>{const pane=panes.get(selected);if(!(pane instanceof Pane))throw new Error("Open a local conversation first");await pane.restoreDrafts()}, command, open: openInSelected, select, call, resources: () => connection?.resources, dismissSettings:settings.dismiss,
