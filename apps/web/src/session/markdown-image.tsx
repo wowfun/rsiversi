@@ -12,7 +12,7 @@ export function MarkdownImage({src,alt,linked,original,onDecodeError}: {
   const [open,setOpen]=useState(false);
   const dragged = useRef(false);
   if (failed) return <span className={css.alt}>Image preview unavailable · {alt || src}</span>;
-  const image=<img className={css.image} alt={alt} loading="lazy" decoding="async"
+  const image=<img className={css.image} alt={alt} loading={original ? 'eager' : 'lazy'} decoding="async"
     {...(original && !linked && {
       draggable: true,
       onPointerDown: () => { dragged.current = false; },

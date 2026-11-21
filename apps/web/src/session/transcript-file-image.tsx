@@ -25,7 +25,7 @@ function drain() {
   }
 }
 
-export function FileImage({pane, generation, path, alt, linked}: Props & {pane: string; generation: string}) {
+export function FileImage({pane, generation, path, alt, linked, lazy = false}: Props & {pane: string; generation: string; lazy?: boolean}) {
   const placeholder = useRef<HTMLSpanElement>(null);
   const [preview, setPreview] = useState<Preview | null>();
 
@@ -58,21 +58,24 @@ export function FileImage({pane, generation, path, alt, linked}: Props & {pane: 
         unavailable();
       }
     }
-    const observer = new IntersectionObserver(entries => {
-      if (mounted && entries.some(entry => entry.isIntersecting)) {
-        observer.disconnect();
-        waiting.add(load);
-        drain();
-      }
-    }, {rootMargin: '300px'});
-    observer.observe(placeholder.current!);
+    function schedule() { waiting.add(load); drain(); }
+    let observer: IntersectionObserver | undefined;
+    if (lazy) {
+      observer = new IntersectionObserver(entries => {
+        if (mounted && entries.some(entry => entry.isIntersecting)) {
+          observer?.disconnect();
+          schedule();
+        }
+      }, {rootMargin: '300px'});
+      observer.observe(placeholder.current!);
+    } else schedule();
     return () => {
       mounted = false;
-      observer.disconnect();
+      observer?.disconnect();
       waiting.delete(load);
       release();
     };
-  }, [pane, generation, path]);
+  }, [pane, generation, path, lazy]);
 
   if (preview) return <MarkdownImage src={preview.url} original={preview.original} alt={alt} linked={linked}
     onDecodeError={preview.unavailable}/>;
@@ -83,7 +86,7 @@ export function FileImage({pane, generation, path, alt, linked}: Props & {pane: 
 export function TranscriptFileImage(props: Props) {
   const session = useOptionalDocumentSession();
   if (!session) return <>{props.alt}</>;
-  return <FileImage key={session.view.generation} {...props} pane={session.pane} generation={session.view.generation}/>;
+  return <FileImage key={session.view.generation} {...props} pane={session.pane} generation={session.view.generation} lazy/>;
 }
 
 export function FileImagePanel({pane, generation, path}: {pane:string; generation:string; path:string}) {

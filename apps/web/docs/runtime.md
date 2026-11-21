@@ -133,6 +133,9 @@ navigation target. The dock saves the file path and reads the current image
 through the Session grant when the tab becomes visible.
 The tab identifies the file, fits wider images to the available width, and
 offers an explicit reload to read changed bytes from the execution host.
+Opening a hover card or resource tab schedules the image read immediately.
+Inline local images wait until they approach the viewport. After the bytes
+arrive, the browser can decode the local preview immediately.
 Dragging a local transcript thumbnail into a composer copies the original file
 into that composer's normal image import. The gesture uses the bytes already
 read for this occurrence and leaves the editor text and preview dialog alone.

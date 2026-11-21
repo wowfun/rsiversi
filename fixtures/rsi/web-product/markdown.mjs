@@ -160,10 +160,18 @@ try{
       await page.evaluate(()=>window.renderLocal(true,'1'));
       assert.equal(await page.locator('article').innerText(),'Local diagram');
       assert.deepEqual(await page.evaluate(()=>window.reads),[]);
-      await page.evaluate(()=>window.renderLocal(false,'1'));
+      await page.evaluate(()=>{
+        document.querySelector('article').style.marginTop='200vh';
+        window.scrollTo(0,0);
+        window.renderLocal(false,'1');
+      });
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      assert.deepEqual(await page.evaluate(()=>window.reads),[]);
+      await page.locator('article').evaluate(el=>{el.style.marginTop='';el.scrollIntoView();});
       const local=page.getByRole('button',{name:'View full image: Local diagram'}).getByRole('img');
       await local.evaluate(element=>element.decode());
       const firstUrl=await local.getAttribute('src');
+      assert.equal(await local.getAttribute('loading'),'eager');
       assert(firstUrl.startsWith('blob:'));
       await page.evaluate(()=>window.renderLocal(false,'2'));
       await local.evaluate(element=>element.decode());
@@ -205,6 +213,7 @@ try{
       assert.equal(await page.evaluate(()=>window.reads.length),localImageReads);
       await fileLink.hover();await page.clock.runFor(510);
       await preview.waitFor();await preview.evaluate(el=>el.decode());
+      assert.equal(await preview.getAttribute('loading'),'eager');
       await preview.hover();await page.clock.runFor(220);assert(await preview.isVisible());
       await page.keyboard.press('Escape');await preview.waitFor({state:'detached'});
       await fileLink.focus();await fileLink.press('Tab');await page.keyboard.press('Shift+Tab');
