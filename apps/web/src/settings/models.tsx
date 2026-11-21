@@ -27,7 +27,7 @@ export function ModelsSettings({actions}:{actions:SetupActions}) {
       const id=String(entry.config.deployment),opened=editing?.entry?.config.deployment===id;
       const state=providers.applying?'Applying':providers.desired_revision===providers.applied_revision?'Applied':'Needs attention';
       return <div className={css.card} key={id}>
-        <div className={css.cardHeading}><strong>{providerLabels[entry.provider]}{id!==entry.provider&&<span className={css.identity}>{id}</span>}</strong><span className={css.dot} data-state={state} role="img" aria-label={state} title={state}/><Button size="sm" variant="outline" disabled={locked} onClick={()=>opened?closeEditor():edit(entry)}>Edit</Button></div>
+        <div className={css.cardHeading}><strong>{providerLabels[entry.provider]}{id!==entry.provider&&<span className={css.identity}>{id}</span>}</strong><span className={css.dot} data-state={state} role="img" aria-label={state} title={state}/><Button size="sm" variant="outline" aria-label={`Edit ${id}`} aria-expanded={opened} disabled={locked} onClick={()=>opened?closeEditor():edit(entry)}>Edit</Button></div>
         {opened&&<ProviderEditor key={`${id}:${editing.revision}`} binding={editing.binding} original={editing.entry} revision={editing.revision} deployments={editing.deployments} actions={actions} close={closeEditor}/>}
       </div>;
     })}

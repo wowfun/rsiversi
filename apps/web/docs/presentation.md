@@ -768,7 +768,8 @@ Its accessible name includes the percentage and identifies it as context use.
 The detail shows the last reported input and captured input capacity; system/tool/message
 subdivisions are absent because the current metrics owner does not report them.
 
-Models settings show configured provider cards with one inline editor. API key
+Models settings show configured provider cards with one inline editor. Each
+Edit control names the deployment it opens for assistive technology. API key
 is the primary field; blank preserves saved credentials. Customized settings
 disclose endpoint, protocol and bounded model definitions. Supported families
 come from RSI managed providers. Editors retain their opening revision and

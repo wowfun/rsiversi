@@ -64,7 +64,7 @@ try{for(const [name,engine] of Object.entries({chromium,firefox})){
   await page.getByRole('alert').filter({hasText:'Provider configuration could not be applied'}).waitFor();
   await page.getByRole('status').filter({hasText:'Provider configuration is read only'}).waitFor();
   await page.evaluate(()=>{fixture.view.setup.diagnostic=null;fixture.view.setup.providers_writable=true;return fixture.frame()});
-  await page.screenshot({path:join(report,name+'-models.png')});await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.screenshot({path:join(report,name+'-models.png')});await page.getByRole('button',{name:'Edit deepseek',exact:true}).click();
   const editor=page.getByRole('form',{name:'Edit model provider'});await editor.getByRole('textbox',{name:'API key'}).waitFor();
   assert.equal(await editor.getByRole('textbox',{name:'API key'}).inputValue(),'');
   await editor.getByRole('textbox',{name:'API key'}).fill('fixture-unsaved-key');
@@ -88,7 +88,7 @@ try{for(const [name,engine] of Object.entries({chromium,firefox})){
   await slot.fill('cancelled-slot');await editor.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.clock.runFor(350);assert.equal(await checks(),beforeChecks+1,'Closing cancels a pending status check');
   await page.clock.resume();await page.evaluate(()=>{fixture.holdCredential=true;});
-  await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.getByRole('button',{name:'Edit deepseek',exact:true}).click();
   await page.waitForFunction(()=>!!fixture.releaseCredential);
   const writes=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='command'&&JSON.parse(call.payload).command?.kind==='providers_replace').length);
   const beforeWrites=await writes();
@@ -97,7 +97,7 @@ try{for(const [name,engine] of Object.entries({chromium,firefox})){
   assert.equal(await writes(),beforeWrites,'Apply waits for the in-flight status read');
   await page.evaluate(()=>fixture.releaseCredential());await editor.waitFor({state:'detached'});
   assert.equal(await writes(),beforeWrites,'Applying an unchanged provider keeps its revision');
-  await page.getByRole('button',{name:'Edit',exact:true}).click();
+  await page.getByRole('button',{name:'Edit deepseek',exact:true}).click();
   await editor.getByText('Customized settings',{exact:true}).click();
   await editor.getByRole('button',{name:'Model settings 1'}).click();await editor.getByRole('textbox',{name:'Context window 1'}).fill('1M');
   await editor.getByRole('button',{name:'Fetch available models'}).click();await editor.getByRole('button',{name:'Candidate Add'}).click();
@@ -132,7 +132,9 @@ try{for(const [name,engine] of Object.entries({chromium,firefox})){
   await add.waitFor({state:'detached'});
   assert.equal(await keyWrites(),2);
   assert.equal(await writes(),acceptedWrites);
-  await page.getByRole('button',{name:'Edit',exact:true}).first().click();
+  await page.getByRole('button',{name:'Edit deepseek',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Edit gateway',exact:true}).getAttribute('aria-expanded'),'false');
+  assert.equal(await page.getByRole('button',{name:'Edit deepseek',exact:true}).getAttribute('aria-expanded'),'true');
   await editor.getByLabel('API key',{exact:true}).fill('fixture-credential-only');
   await editor.getByRole('button',{name:'Apply',exact:true}).click();
   await editor.waitFor({state:'detached'});
