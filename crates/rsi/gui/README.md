@@ -270,7 +270,9 @@ a fresh presentation baseline share the same encoded block. Markdown events
 are temporary during encoding. Their allocation capacity is bounded by eight
 times the block's source bytes plus 16 KiB. Unavailable or over-budget
 Markdown produces a cached plain-text block. Every visible block mutation
-invalidates its projection; duplicate retained Facts do not. Earlier frames
+invalidates its projection; duplicate retained Facts do not. A live block that
+outgrows its display window publishes its truncation marker with the same visible
+text. Further output beyond that window reuses the encoded block. Earlier frames
 keep their immutable bytes until released. Repeated controls preserve the history
 anchor of unchanged previews and status blocks. Pane and UI revisions refresh metadata
 without invalidating unchanged blocks. Frame construction borrows cached values,

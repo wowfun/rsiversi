@@ -235,6 +235,80 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
 }
 
 #[test]
+fn streaming_past_the_display_window_publishes_clipping_once() {
+    use rsi_agent_session_protocol::{ModelAttemptBuilder, ModelEventPurpose, SessionId};
+    use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus};
+    use rsi_ai_protocol::{ContentDelta, ContentStart, LanguageEvent};
+
+    let mut builder = ModelAttemptBuilder::new();
+    builder
+        .push(
+            0,
+            &LanguageEvent::ContentStarted {
+                index: 0,
+                content: ContentStart::Text,
+            },
+        )
+        .unwrap();
+    let delta = |text| LanguageEvent::ContentDelta {
+        index: 0,
+        delta: ContentDelta::Text(text),
+    };
+    for _ in 0..32 {
+        builder.push(1, &delta("a".repeat(4096))).unwrap();
+    }
+    let mut snapshot = ModelLiveSnapshot {
+        session_id: SessionId::new("session").unwrap(),
+        turn_id: TurnId::new("turn").unwrap(),
+        effect_id: EffectId::new("effect").unwrap(),
+        purpose: ModelEventPurpose::Conversation,
+        revision: 1,
+        prefix: builder.prefix(),
+        status: ModelLiveStatus::Streaming,
+    };
+    let mut transcript = Transcript::default();
+    transcript.fact(
+        &SessionFact::new(
+            1,
+            1,
+            SessionFactBody::ModelStarted {
+                turn_id: snapshot.turn_id.clone(),
+                effect_id: snapshot.effect_id.clone(),
+            },
+        )
+        .unwrap(),
+    );
+    let capture = |live: &Transcript, old| {
+        CachedPane::capture(json!({"transcript":null}), Some(live), old).unwrap()
+    };
+    transcript.model(&snapshot);
+    let full = capture(&transcript, None);
+    let mut next = |live: &mut Transcript| {
+        builder.push(2, &delta("界".into())).unwrap();
+        snapshot.revision += 1;
+        snapshot.prefix = builder.prefix();
+        allocations::measure(|| live.model(&snapshot)).1.requested
+    };
+    let first_allocated = next(&mut transcript);
+    let clipped = capture(&transcript, Some(&full));
+    let later_allocated = next(&mut transcript);
+    let later = capture(&transcript, Some(&clipped));
+    eprintln!(
+        "live projection at 128 KiB: first overflow={first_allocated} subsequent overflow={later_allocated} allocated bytes"
+    );
+    assert_eq!(clipped.projected_blocks, 1);
+    let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &full, &clipped)).unwrap();
+    let block = &patch["transcript"]["upsert"][0];
+    assert_eq!(block["clipped"], true);
+    assert_eq!(block["text"].as_str().unwrap().len(), 128 * 1024);
+    assert_eq!(later.projected_blocks, 0);
+    assert_eq!(
+        serde_json::to_vec(&clipped).unwrap(),
+        serde_json::to_vec(&later).unwrap()
+    );
+}
+
+#[test]
 fn fresh_baselines_share_the_live_blocks_encoding() {
     let mut transcript = Transcript::default();
     let rich = "中文 **note** with `code` and [a link](https://example.org/).\n\n".repeat(8);

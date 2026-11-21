@@ -251,26 +251,29 @@ impl Transcript {
         self.project_live_model();
     }
     fn project_live_model(&mut self) {
-        let Some((turn, effect, purpose, preview)) = self.live_model.view() else {
+        let model = std::mem::take(&mut self.live_model);
+        self.project_preview(&model);
+        self.live_model = model;
+    }
+    fn project_preview(&mut self, model: &rsi_conversation::LiveModelPreview) {
+        let Some((turn, effect, purpose, preview)) = model.view() else {
             self.blocks
                 .retain(|block| !self.live_keys.contains(&block.key) || !block.sources.is_empty());
             self.live_keys.clear();
             self.trim();
             return;
         };
-        let turn = turn.clone();
-        let effect = effect.clone();
         let parts: Vec<_> = preview
             .blocks()
             .map(|part| {
                 (
                     BlockIdentity::Model {
-                        turn: &turn,
-                        effect: &effect,
+                        turn,
+                        effect,
                         index: u32::from(part.index),
                     }
                     .key(),
-                    part.clone(),
+                    part,
                 )
             })
             .collect();
@@ -296,15 +299,18 @@ impl Transcript {
                 } else {
                     ("assistant", "Assistant")
                 };
-            self.add(key.clone(), role, title, &part.window.text, false);
-            if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-                block.clipped = part.window.more;
-            }
+            self.add(
+                key.clone(),
+                role,
+                title,
+                &part.window.text,
+                part.window.more,
+            );
             self.live_keys.push(key);
         }
         self.turns.live(
-            &turn,
-            &effect,
+            turn,
+            effect,
             purpose,
             &self.live_keys,
             &self.blocks,
@@ -329,7 +335,7 @@ impl Transcript {
             .min()
             .or_else(|| (self.seq != 0).then(|| self.seq.saturating_add(1)))
     }
-    fn add(&mut self, key: String, role: &'static str, title: &str, text: &str, append: bool) {
+    fn add(&mut self, key: String, role: &'static str, title: &str, text: &str, more: bool) {
         let index = self.blocks.iter().position(|block| block.key == key);
         let existed = index.is_some();
         let index = index.unwrap_or_else(|| {
@@ -359,31 +365,25 @@ impl Transcript {
             return;
         }
         let title = short(title, 512);
-        let available = if append {
-            MAX_BLOCK_BYTES.saturating_sub(block.text.len())
-        } else {
-            MAX_BLOCK_BYTES
-        };
-        let copied = short(text, available);
-        let clipped = (append && block.clipped) || text.len() > available;
-        if existed
-            && block.title == title
-            && block.clipped == clipped
-            && if append {
-                copied.is_empty()
-            } else {
-                block.text == copied
+        let copied = short(text, MAX_BLOCK_BYTES);
+        let clipped = more || copied.len() < text.len();
+        let text_changed = block.text != copied;
+        let title_changed = block.title != title;
+        if existed {
+            if !title_changed && !text_changed && block.clipped == clipped {
+                return;
             }
-        {
-            return;
+            block.invalidate();
         }
-        block.invalidate();
-        block.title = title.into();
-        if !append {
-            block.text.clear();
+        if title_changed {
+            title.clone_into(&mut block.title);
+        }
+        if text_changed {
+            copied.clone_into(&mut block.text);
+        }
+        if title_changed || text_changed {
             block.first_seq = self.seq;
         }
-        block.text.push_str(copied);
         block.clipped = clipped;
         self.trim();
     }
