@@ -1046,7 +1046,7 @@ impl GuiApplication {
         let mut creation = None;
         let mut selected_header = None;
         let _preset_permit;
-        let handle = match source {
+        let selected_handle = match source {
             Open::Create(mut request, _) => {
                 let handle = if let Some(previous) = previous {
                     request.session_id = id.clone();
@@ -1056,14 +1056,9 @@ impl GuiApplication {
                     self.session.create(request.clone()).await.map_err(error)?
                 };
                 creation = Some(request);
-                handle
+                Some(handle)
             }
-            Open::Existing(Some(handle)) => handle,
-            Open::Existing(None) => {
-                rsi_client::read_with_capacity_retry(&self.execution, || self.session.attach(&id))
-                    .await
-                    .map_err(error)?
-            }
+            Open::Existing(handle) => handle,
             Open::Preset {
                 generation,
                 header,
@@ -1092,33 +1087,48 @@ impl GuiApplication {
                 if let Some(creation) = &mut creation {
                     creation.agent_preset_id = Some(preset);
                 }
-                attached.handle.clone()
+                Some(attached.handle.clone())
             }
         };
-        let unpublished = if reopening {
-            match rsi_client::read_with_capacity_retry(&self.execution, || handle.draft_snapshot())
-                .await
-            {
-                Ok(draft) => Some(draft.header),
-                Err(rsi_session_protocol::SessionError::NotFound(_)) => None,
+        let surface = self
+            .shell
+            .open(surface_program(&id, self.has_files))
+            .await
+            .map_err(error)?;
+        let controller = surface
+            .lookup_local::<SessionControllerContract>()
+            .ok_or("Surface controller is unavailable")?;
+        let handle = selected_handle.unwrap_or_else(|| controller.session_handle());
+        let inspection = if reopening {
+            let inspect =
+                || rsi_client::read_with_capacity_retry(&self.execution, || handle.inspect());
+            match inspect().await {
+                Ok(inspection) => Some(inspection),
+                Err(rsi_session_protocol::SessionError::NotFound(_)) => {
+                    match rsi_client::read_with_capacity_retry(&self.execution, || {
+                        handle.draft_snapshot()
+                    })
+                    .await
+                    {
+                        Ok(draft) => {
+                            selected_header = Some(draft.header);
+                            None
+                        }
+                        // A draft may have published after the first inspection.
+                        Err(rsi_session_protocol::SessionError::NotFound(_)) => {
+                            Some(inspect().await.map_err(error)?)
+                        }
+                        Err(reason) => return Err(error(reason)),
+                    }
+                }
                 Err(reason) => return Err(error(reason)),
             }
         } else {
-            selected_header
+            None
         };
-        let durable = reopening && unpublished.is_none();
-        let header = match unpublished {
-            Some(header) => header,
-            None => rsi_client::read_with_capacity_retry(&self.execution, || handle.header())
-                .await
-                .map_err(error)?,
-        };
+        let durable = inspection.is_some();
         let mut transcript = Transcript::default();
-        let (cursor, before, more) = if durable {
-            let inspection =
-                rsi_client::read_with_capacity_retry(&self.execution, || handle.inspect())
-                    .await
-                    .map_err(error)?;
+        let (header, cursor, before, more) = if let Some(inspection) = inspection {
             let before = inspection
                 .durable_fact_seq
                 .checked_add(1)
@@ -1139,9 +1149,15 @@ impl GuiApplication {
                 fact_seq: inspection.durable_fact_seq,
                 control_seq: inspection.durable_control_seq,
             };
-            (Some(cursor), before, more)
+            (inspection.header, Some(cursor), before, more)
         } else {
-            (None, None, false)
+            let header = match selected_header {
+                Some(header) => header,
+                None => rsi_client::read_with_capacity_retry(&self.execution, || handle.header())
+                    .await
+                    .map_err(error)?,
+            };
+            (header, None, None, false)
         };
         let generation = self
             .attachment_generation
@@ -1152,14 +1168,6 @@ impl GuiApplication {
             )
             .map_err(|_| "Surface attachment generation exhausted")?
             + 1;
-        let surface = self
-            .shell
-            .open(surface_program(&id, cursor, self.has_files))
-            .await
-            .map_err(error)?;
-        let controller = surface
-            .lookup_local::<SessionControllerContract>()
-            .ok_or("Surface controller is unavailable")?;
         let renderer = surface
             .lookup_local::<RendererContract>()
             .ok_or("Surface renderer is unavailable")?;
@@ -1172,6 +1180,9 @@ impl GuiApplication {
             crate::panel_registry::InteractionPanels::new(&self.details, index, generation),
         );
         renderer.seed(transcript, before, more);
+        if let Some(cursor) = cursor {
+            controller.start_observing(cursor);
+        }
         let attachment = Arc::new(Attachment {
             metrics: Mutex::new(None),
             metrics_work: tokio::sync::Mutex::new(()),

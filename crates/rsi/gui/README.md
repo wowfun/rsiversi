@@ -6,6 +6,12 @@ input contributes no conversation row. Text, image and reference details use
 the Fact that owns each final block. A history page resolves unchanged inputs
 outside its interval from the same Session.
 
+Opening a conversation by ID uses the surface controller's Session attachment
+for the initial history page and subsequent observations. Durable history starts
+at one inspection cut. If inspection finds no history, the pane loads the live
+draft. Publication during that read resumes from a fresh durable inspection.
+Restoring saved input first checks its recorded Header against the target.
+
 Completed native Turns expose a manual fork action bound to the current pane
 generation. Full, Last(n), and None create a fresh independent draft in the source
 workspace and preset through the ordinary Session creation service. The document

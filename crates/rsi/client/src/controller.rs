@@ -156,7 +156,11 @@ impl SessionController {
         self.start_observing(ObservationCursor::default());
     }
 
-    fn start_observing(self: &Arc<Self>, cursor: ObservationCursor) {
+    /// Starts observation after an inspected cut. The first start owns the cursor.
+    ///
+    /// # Panics
+    /// Panics if a prior panic poisoned controller admission.
+    pub fn start_observing(self: &Arc<Self>, cursor: ObservationCursor) {
         let mut admission = self
             .admission
             .lock()

@@ -1427,7 +1427,6 @@ fn meta(error: impl std::fmt::Display) -> MetaError {
 
 pub(crate) fn surface_program(
     session: &rsi_agent_session_protocol::SessionId,
-    cursor: Option<rsi_agent_turn_protocol::ObservationCursor>,
     has_files: bool,
 ) -> ProfileProgram {
     let mut entries = vec![
@@ -1435,7 +1434,7 @@ pub(crate) fn surface_program(
         ProfileEntry::new(
             "controller",
             "rsi.client.session-controller",
-            serde_json::json!({"session_id":session,"cursor":cursor}),
+            serde_json::json!({"session_id":session}),
         ),
         ProfileEntry::new("ui-target", "rsi.session.ui-target", ConfigValue::Null),
         ProfileEntry::new(

@@ -43,10 +43,12 @@ async fn reopening_history_uses_one_attachment_path_and_no_draft_defaults() {
     let session = &current["session"];
     let before = backend.settings.calls.load(Ordering::SeqCst);
     let initial_attaches = backend.attaches.load(Ordering::Relaxed);
+    let initial_draft_reads = backend.draft_reads.load(Ordering::Relaxed);
     app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
         .await
         .unwrap();
     let history_attaches = backend.attaches.load(Ordering::Relaxed);
+    assert_eq!(history_attaches - initial_attaches, 1);
     let opened = app
         .restore_session(
             &json!({"action":"open","pane":"main","session":session,"header":current["header"]})
@@ -59,10 +61,32 @@ async fn reopening_history_uses_one_attachment_path_and_no_draft_defaults() {
         "opened"
     );
     assert_eq!(
-        backend.attaches.load(Ordering::Relaxed) - history_attaches,
-        history_attaches - initial_attaches,
+        backend.draft_reads.load(Ordering::Relaxed),
+        initial_draft_reads
     );
     assert_eq!(backend.settings.calls.load(Ordering::SeqCst), before);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn reopening_a_publishing_draft_seeds_the_durable_history() {
+    let (runtime, backend, app) = fixture().await;
+    let current = view(&app)["surfaces"]["main"].clone();
+    let open = json!({"action":"open","pane":"main","session":current["session"]}).to_string();
+    backend.unpublished.store(true, Ordering::Release);
+    let pages = backend.history_requests.lock().unwrap().len();
+    app.command(&open).await.unwrap();
+    assert_eq!(backend.history_requests.lock().unwrap().len(), pages);
+    backend
+        .publish_before_draft_read
+        .store(true, Ordering::Release);
+    app.command(&open).await.unwrap();
+    assert_eq!(backend.history_requests.lock().unwrap().len(), pages + 1);
+    assert_eq!(view(&app)["surfaces"]["main"]["header"], current["header"]);
+    let generation = view(&app)["surfaces"]["main"]["generation"].clone();
+    let missing = json!({"action":"open","pane":"main","session":"missing-session"}).to_string();
+    assert!(app.command(&missing).await.is_err());
+    assert_eq!(view(&app)["surfaces"]["main"]["generation"], generation);
     assert!(runtime.shutdown().await.is_clean());
 }
 

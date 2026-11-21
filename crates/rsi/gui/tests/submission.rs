@@ -100,6 +100,8 @@ struct Backend {
     export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
+    publish_before_draft_read: std::sync::atomic::AtomicBool,
+    draft_reads: std::sync::atomic::AtomicUsize,
     reject_submissions: std::sync::atomic::AtomicBool,
     header_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     terminal_gate: Mutex<Option<Arc<admission::TerminalGate>>>,
@@ -314,6 +316,15 @@ impl SessionHandle for Backend {
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
+        self.draft_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self
+            .publish_before_draft_read
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.unpublished
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         if self.unpublished.load(std::sync::atomic::Ordering::Acquire) {
             Ok(SessionDraftView {
                 header: self.header().await?,

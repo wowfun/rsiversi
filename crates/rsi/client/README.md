@@ -57,8 +57,9 @@ Application/controller plugins own the futures they drive and their cancellation
 
 SessionControllerFactory is an ordinary plugin requiring the Session domain and
 an ObservationSink capability. Its bounded configuration names one SessionId and
-an optional initial cursor. An attached surface supplies its inspection cursor;
-a fresh draft omits it and starts Fact/interaction observation from origin after
+an optional initial cursor. A surface can also start observation at the cursor
+it obtains by inspecting the controller's attached Session after activation.
+A fresh draft starts Fact/interaction observation from origin after
 the first accepted message. A separate projection subscription starts on activation,
 including fresh drafts, and delivers complete replacement snapshots. The factory
 attaches only within its own Context's Session capability.
