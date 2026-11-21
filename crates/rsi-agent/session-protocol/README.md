@@ -193,6 +193,8 @@ trailing bits. Durable admission performs this decoding once during grammar
 validation, without a separate decode/re-encode pass. Readers enforce the same
 upper bound on the final block. Raw suffix offsets must fall within the
 validated prefix; out-of-range programmer input is rejected before indexing.
+Resuming an event cursor or sending a suffix starts at the base64 quartet that
+contains the first unread byte. At most two previously read bytes are decoded.
 Readers preserve the original event index and elapsed time within its single settlement Fact.
 Payload extraction copies contiguous decoded slices across block boundaries;
 it preserves the same raw cursor and canonical-record validation without a

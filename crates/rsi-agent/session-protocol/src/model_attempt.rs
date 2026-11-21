@@ -22,6 +22,19 @@ fn invalid(reason: impl Into<String>) -> SessionError {
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq)]
 #[schemars(with = "String")]
 struct Chunk(Arc<str>);
+impl Chunk {
+    // Only callers with a validated or locally encoded block use its padding to seek.
+    fn raw_len(&self) -> usize {
+        self.0.len() / 4 * 3 - self.0.bytes().rev().take_while(|&b| b == b'=').count()
+    }
+
+    fn encoded_suffix(&self, skip: usize) -> Result<&str> {
+        if skip != 0 && skip > self.raw_len() {
+            return Err(invalid("invalid block offset"));
+        }
+        Ok(&self.0[skip / 3 * 4..])
+    }
+}
 impl Serialize for Chunk {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -213,18 +226,9 @@ pub struct ModelAttemptPrefix {
 impl ModelAttemptPrefix {
     /// Raw compact bytes, including the current unsealed tail.
     pub fn raw_len(&self) -> usize {
-        self.chunks
-            .iter()
-            .map(|chunk| {
-                chunk.0.len() / 4 * 3
-                    - chunk
-                        .0
-                        .bytes()
-                        .rev()
-                        .take_while(|byte| *byte == b'=')
-                        .count()
-            })
-            .sum()
+        self.chunks.split_last().map_or(0, |(tail, sealed)| {
+            sealed.len() * RAW_CHUNK_BYTES + tail.raw_len()
+        })
     }
 
     /// Encodes only bytes after a previously delivered raw offset in this attempt.
@@ -243,13 +247,12 @@ impl ModelAttemptPrefix {
                 } else {
                     0
                 };
-                if skip == 0 {
-                    chunk.0.to_string()
+                let suffix = chunk.encoded_suffix(skip).expect("validated suffix offset");
+                if skip % 3 == 0 {
+                    suffix.to_owned()
                 } else {
-                    let bytes = STANDARD
-                        .decode(chunk.0.as_bytes())
-                        .expect("validated compact block");
-                    STANDARD.encode(&bytes[skip..])
+                    let bytes = STANDARD.decode(suffix).expect("validated compact block");
+                    STANDARD.encode(&bytes[skip % 3..])
                 }
             })
             .filter(|page| !page.is_empty())
@@ -528,18 +531,20 @@ impl<'a> Events<'a> {
             let Some(chunk) = self.chunks.next() else {
                 return Ok(false);
             };
+            let skip = std::mem::take(&mut self.initial_skip);
             self.decoded = STANDARD
-                .decode(chunk.0.as_bytes())
+                .decode(chunk.encoded_suffix(skip)?)
                 .map_err(|_| invalid("invalid base64"))?;
             // STANDARD rejects noncanonical padding and nonzero trailing bits.
             // Check framing here so admission needs no second block decode.
-            if self.decoded.is_empty()
-                || self.decoded.len() > RAW_CHUNK_BYTES
-                || (!self.chunks.as_slice().is_empty() && self.decoded.len() != RAW_CHUNK_BYTES)
+            let block_len = skip / 3 * 3 + self.decoded.len();
+            if block_len == 0
+                || block_len > RAW_CHUNK_BYTES
+                || (!self.chunks.as_slice().is_empty() && block_len != RAW_CHUNK_BYTES)
             {
                 return Err(invalid("noncanonical block"));
             }
-            self.offset = std::mem::take(&mut self.initial_skip);
+            self.offset = skip % 3;
             if self.offset == self.decoded.len() {
                 return Ok(false);
             }
@@ -735,6 +740,47 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| prefix.pages_after(prefix.raw_len() + 1).count()).is_err()
         );
+    }
+
+    #[test]
+    fn suffix_pages_match_raw_bytes_at_every_base64_alignment_and_across_a_seal() {
+        let mut builder = ModelAttemptBuilder::new();
+        builder
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            )
+            .unwrap();
+        builder
+            .push(
+                1,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("界🦀".repeat(RAW_CHUNK_BYTES / 7 + 20)),
+                },
+            )
+            .unwrap();
+        let prefix = builder.prefix();
+        let raw: Vec<_> = prefix
+            .pages()
+            .flat_map(|chunk| STANDARD.decode(chunk).unwrap())
+            .collect();
+        assert_eq!(prefix.raw_len(), raw.len());
+        for offset in (0..4)
+            .chain(RAW_CHUNK_BYTES - 4..=RAW_CHUNK_BYTES + 4)
+            .chain(raw.len() - 4..=raw.len())
+        {
+            let pages: Vec<_> = prefix.pages_after(offset).collect();
+            assert_eq!(pages.len(), prefix.page_count_after(offset));
+            let decoded: Vec<_> = pages
+                .into_iter()
+                .flat_map(|page| STANDARD.decode(page).unwrap())
+                .collect();
+            assert_eq!(decoded, raw[offset..]);
+        }
     }
 
     #[test]

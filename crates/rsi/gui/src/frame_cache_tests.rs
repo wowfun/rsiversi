@@ -302,6 +302,10 @@ fn streaming_past_the_display_window_publishes_clipping_once() {
     assert_eq!(block["clipped"], true);
     assert_eq!(block["text"].as_str().unwrap().len(), 128 * 1024);
     assert_eq!(later.projected_blocks, 0);
+    assert!(
+        first_allocated < 128 * 1024 && later_allocated < 128 * 1024,
+        "processing another scalar must not allocate the complete display window"
+    );
     assert_eq!(
         serde_json::to_vec(&clipped).unwrap(),
         serde_json::to_vec(&later).unwrap()
