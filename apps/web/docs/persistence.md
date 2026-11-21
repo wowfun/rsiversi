@@ -211,7 +211,7 @@ Changing History's query or source filters clears the displayed matches and thei
 pagination actions. Changing a source filter also drops discovery continuation;
 pagination cannot silently reuse a previous query or workspace.
 
-Device presentation uses IndexedDB `rsi.presentation` schema 8, separately scoped
+Device presentation uses IndexedDB `rsi.presentation` schema 9, separately scoped
 by endpoint and authenticated principal. Three object stores have independent
 origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
 128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
@@ -248,11 +248,12 @@ blocked open exposes Retry after other windows close.
 Neither
 presentation records nor channel messages contain credentials, history or input.
 
-The version 6 workbench layout stores conversation width, resource visibility,
-detail and workspace expansion. Upgrades discard obsolete column dimensions
+The workbench layout stores conversation width, detail and workspace
+expansion. Upgrades discard obsolete column dimensions
 and desktop navigation mode while retaining other preferences, dock documents,
 revisions and LRU positions. The [navigation column](presentation.md) belongs
-to each window. Resources start closed. On first opening, the document
+to each window. A Session with no saved dock starts with resources closed.
+On first opening, the document
 chooses 45% of the viewport as its preferred width in CSS pixels. The document
 retains that width across window resizes and panel toggles. Reload samples a new
 initial width. The visible column respects the 300 px minimum, 70% maximum and
@@ -292,7 +293,9 @@ scope is still manual. A stale restored view cannot undo Updated mode or refill
 the order it cleared, including when another window made that choice.
 
 Each window owns its Session resource dock. Opening, closing and focusing
-tabs immediately changes that window's layout. A separate localStorage
+tabs or changing the column's visibility at any width immediately changes
+that window's layout. Resizing preserves whether the column is open.
+Resource surfaces without a Session dock keep their visibility in memory. A localStorage
 entry for each endpoint, authenticated principal and Session holds the latest
 saved layout and ID counter. Other open windows continue using their own
 layout. A fresh mount restores the last saved snapshot with an empty undo

@@ -3,6 +3,17 @@ import {test} from 'node:test';
 import {emptyDock,dockIntent,savedDock,validateDock,dockStorageKey,readDock,writeDock,dockPaneIds,floatingTab,narrowDock,displayDock} from '../src/dock-state.ts';
 const act=(doc,operation,fields={})=>dockIntent(doc,{kind:'dock',operation,...fields});
 const open=doc=>act(doc,'open',{coordinate:{action:'surface',bundle:'files',name:'browser'},title:'Files',duplicate:true});
+test('revealing a resource from a collapsed column is one undoable edit',()=>{
+ const start=emptyDock();
+ assert.equal(start.state.expanded,false);
+ const shown=act(start,'open',{coordinate:{action:'workspace_document',path:'report.md'},title:'Report'});
+ assert.equal(shown.history.entries.length,1);
+ assert.equal(shown.state.expanded,true);
+ assert.deepEqual(act(shown,'undo').state,start.state);
+ const closed=act(shown,'expanded',{expanded:false});
+ assert.deepEqual(closed.state.tabs,shown.state.tabs);
+ assert.equal(act(closed,'expanded',{expanded:false}),closed);
+});
 test('opening, copying or moving a guide respects its destination pane',()=>{
   const guide={coordinate:{action:'resources'},title:'Resources',duplicate:true};
   const start=act(open(emptyDock()),'open',guide);

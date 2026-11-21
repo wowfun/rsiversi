@@ -1,11 +1,10 @@
 // Device layout only. Submission durability belongs to drafts.js and Rust.
-export const defaultLayout = Object.freeze({version:6,conversationWidth:null,resourcesClosed:true,detail:'standard',workspaces:[]});
+export const defaultLayout = Object.freeze({version:7,conversationWidth:null,detail:'standard',workspaces:[]});
 export function parseLayout(value) {
   const fallback = () => {throw new Error('Invalid layout');};
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fallback();
-  if (Object.keys(value).sort().join() !== Object.keys(defaultLayout).sort().join() || value.version!==6 ||
+  if (Object.keys(value).sort().join() !== Object.keys(defaultLayout).sort().join() || value.version!==7 ||
       (value.conversationWidth!==null && (!Number.isSafeInteger(value.conversationWidth) || value.conversationWidth<640)) ||
-      typeof value.resourcesClosed!=='boolean' ||
       !['compact','standard','detailed','verbose'].includes(value.detail) || !Array.isArray(value.workspaces) || value.workspaces.length>16) return fallback();
   const ids=new Set();
   for(const item of value.workspaces) {

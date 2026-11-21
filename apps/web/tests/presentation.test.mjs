@@ -58,6 +58,6 @@ test('unsaved layout intents remain bounded and cannot be cleared by an older sa
   for(let i=0;i<100;i++)edits.add({kind:'workspace',id:String(i),expanded:false});
   assert.equal(edits.size,18);
   edits.add({kind:'reset'});assert.equal(edits.size,1);
-  edits.add({kind:'patch',patch:{resourcesClosed:false}});assert.equal(edits.size,2);
+  edits.add({kind:'patch',patch:{conversationWidth:750}});assert.equal(edits.size,2);
   assert.equal(edits.first()[1].kind,'reset');
 });

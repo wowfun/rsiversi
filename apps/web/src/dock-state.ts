@@ -53,7 +53,7 @@ export function coordinate(value:unknown):Coordinate {
 }
 export function emptyDock():DockDocument {
   const minter=createIdMinter()
-  return {kind:'session-dock',version:2,counter:1,state:{...createInitialState(minter),expanded:true},history:EMPTY_HISTORY}
+  return {kind:'session-dock',version:2,counter:1,state:createInitialState(minter),history:EMPTY_HISTORY}
 }
 export function savedDock({counter,state}:DockSnapshot):DockSnapshot {
   return {kind:'session-dock',version:2,counter,state}
@@ -122,6 +122,7 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
         kind:'rsi',contentId:JSON.stringify(c),title:text(intent.title,512)?intent.title:'Resource',
         revealIfOpened:!isGuide&&intent.duplicate!==true,paneId:p,
       }).ops
+      if(!s.expanded)ops=[...plan.planSetExpanded(s,true),...ops]
       break
     }
     case 'close':ops=[{type:'closeTab',tabId:t}];break
@@ -157,6 +158,7 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
       ops=[{type:'moveFloat',paneId:p,x:intent.x,y:intent.y}];break
     case 'resize-float':ops=[{type:'resizeFloat',paneId:p,rect:{...checkedFloatRect(intent.rect)}}];break
     case 'resize':ops=plan.planResizeSplit(intent.split as SplitId,intent.sizes as number[],.2);break
+    case 'expanded':if(typeof intent.expanded!=='boolean')return fail();ops=plan.planSetExpanded(s,intent.expanded);break
     case 'mode':if(intent.mode!=='push'&&intent.mode!=='fullscreen')fail();ops=plan.planSetMode(s,intent.mode as 'push'|'fullscreen');break
     case 'undo':result=stepBack(value.history,s);break
     case 'redo':result=stepForward(value.history,s);break

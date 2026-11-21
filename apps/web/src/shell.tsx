@@ -94,7 +94,6 @@ export function Shell({
   const { layout, update } = useResourceVisibility(
     desktopLayout,
     updateDesktop,
-    narrow,
     hasResources,
   );
   const [resourceWidth,setResourceWidth] = useState<number>();

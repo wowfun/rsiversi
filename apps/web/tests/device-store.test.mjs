@@ -28,7 +28,8 @@ test('semantic intents preserve unrelated values and reject malformed saves',()=
   assert.throws(()=>applyIntent('layouts',layout,{kind:'patch',patch:{resourcesWidth:.35}}));
   for(const intent of [{kind:'patch',patch:{navigation:'nope'}},{kind:'patch',patch:{version:3}},{kind:'patch',patch:{workspaces:[]}},{kind:'workspace',expanded:true}])assert.throws(()=>applyIntent('layouts',layout,intent));
   assert.equal(applyIntent('preferences',defaultPreferences,{kind:'patch',patch:{view:'workspace_tree'}}).sessionOrder,'updated');
-  assert.equal(applyIntent('layouts',layout,{kind:'patch',patch:{resourcesClosed:layout.resourcesClosed}}),layout);
+  assert.throws(()=>applyIntent('layouts',layout,{kind:'patch',patch:{resourcesClosed:true}}));
+  assert.equal(applyIntent('layouts',layout,{kind:'patch',patch:{detail:layout.detail}}),layout);
   assert.equal(applyIntent('preferences',defaultPreferences,{kind:'patch',patch:{}}),defaultPreferences);
 });
 test('first visit opens its workspace once and preserves a committed collapse',()=>{

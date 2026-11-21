@@ -1,14 +1,28 @@
-import {createContext,useCallback,useContext,useEffect,useLayoutEffect,useMemo,useRef,useState,type ReactNode} from 'react'
+import {createContext,useCallback,useContext,useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type ReactNode} from 'react'
 import {bindSnapshotSelector} from '../vendor/dsh/renderer/bind.ts'
 import {defaultLayout,validateLayout,PresentationStore} from '../presentation-store.js'
 import {observable,useView,type View} from './bridge.ts'
 import {applyIntent} from '../device-store.js'
 import {LayoutEdits} from '../layout-edits.js'
+import {dockIntent,readDock,writeDock,type DockDocument} from './dock-state.ts'
 
-export interface Layout {version:6;conversationWidth:number|null;resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
-export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
+interface SavedLayout {version:7;conversationWidth:number|null;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
+export type Layout=SavedLayout & {resourcesClosed:boolean}
+export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:{...defaultLayout as SavedLayout,resourcesClosed:true},update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)
+export function openDockWindow(key:string|undefined) {
+  const state=observable(readDock(key))
+  function commit(next:DockDocument) {
+    if(next===state.getSnapshot())return
+    state.set(next)
+    writeDock(key,next)
+  }
+  return {getSnapshot:state.getSnapshot,subscribe:state.subscribe,commit,
+    expand:(expanded:boolean)=>commit(dockIntent(state.getSnapshot(),{kind:'dock',operation:'expanded',expanded}))}
+}
+export const activeResourceDock=observable<ReturnType<typeof openDockWindow>|undefined>(undefined)
+const subscribeNothing=()=>()=>{}
 export function hasOpenOverlay(except?: Element | null) {
   for (const element of document.querySelectorAll('dialog[open],[aria-modal="true"],[role="menu"]')) {
     if (element !== except && !element.closest('details:not([open]),dialog:not([open]),[hidden],[inert]') && element.getClientRects().length) return true
@@ -28,7 +42,7 @@ export async function previewThemeWrite(theme: Theme, write: () => Promise<void>
 export function usePresentation() {
   const identity = useIdentity(value=>value)
   const appearance = useView(view=>view?.appearance)
-  const [layout,setLayout] = useState<Layout>(validateLayout(defaultLayout) as Layout)
+  const [layout,setLayout] = useState<SavedLayout>(validateLayout(defaultLayout) as SavedLayout)
   const [storageNotice,setStorageNotice] = useState('')
   const [storageRecovery,setStorageRecovery] = useState<'retry'|'reset'|'reload'>('retry')
   const [attempt,setAttempt] = useState(0)
@@ -69,7 +83,7 @@ export function usePresentation() {
     let unsubscribe:(()=>void)|undefined
     let focus:(()=>void)|undefined
     setStorageNotice(''); storage.current = undefined
-    if(owner.current!==identity){owner.current=identity;pending.current=new LayoutEdits();setLayout(validateLayout(defaultLayout) as Layout)}
+    if(owner.current!==identity){owner.current=identity;pending.current=new LayoutEdits();setLayout(validateLayout(defaultLayout) as SavedLayout)}
     if (!identity) return
     let store: PresentationStore | undefined
     void (async()=>{
@@ -126,26 +140,27 @@ export function usePresentation() {
     if(!storage.current){setStorageRecovery('retry');setStorageNotice('Layout changes are not saved on this device.');return}
     save.current()
   },[])
-  const update=useCallback((patch:Partial<Layout>)=>apply({kind:'patch',patch}),[apply])
+  const update=useCallback((patch:Partial<SavedLayout>)=>apply({kind:'patch',patch}),[apply])
   const expand=useCallback((id:string,expanded?:boolean)=>{
     if(expanded!==undefined)apply({kind:'workspace',id,expanded})
     else if(storage.current)apply({kind:'reveal_workspace',id})
   },[apply])
   return {layout,storageNotice,storageRecovery,retry:()=>setAttempt(value=>value+1),reset:()=>apply({kind:'reset'}),update,expand}
 }
-// Long-lived resource listeners must route through the current viewport, even
-// when they retained the callback before a responsive transition.
-export function useResourceVisibility(desktop:Layout,persist:(patch:Partial<Layout>)=>void,narrow:boolean,available=true) {
-  const [closed,setClosed]=useState(true)
-  const current=useRef({persist,narrow});current.current={persist,narrow}
+export function useResourceVisibility(desktop:SavedLayout,persist:(patch:Partial<SavedLayout>)=>void,available=true) {
+  const [fallbackClosed,setFallbackClosed]=useState(true)
+  const dock=useSyncExternalStore(activeResourceDock.subscribe,activeResourceDock.getSnapshot)
+  const dockClosed=useSyncExternalStore(dock?.subscribe??subscribeNothing,()=>!dock?.getSnapshot().state.expanded)
   const update=useCallback((patch:Partial<Layout>)=>{
-    const {persist,narrow}=current.current
-    if(!narrow){persist(patch);return}
     const {resourcesClosed,...saved}=patch
-    if(resourcesClosed!==undefined)setClosed(resourcesClosed)
+    if(resourcesClosed!==undefined){
+      const active=activeResourceDock.getSnapshot()
+      if(active)active.expand(!resourcesClosed)
+      else setFallbackClosed(resourcesClosed)
+    }
     if(Object.keys(saved).length)persist(saved)
-  },[])
-  const layout=useMemo(()=>!available?{...desktop,resourcesClosed:true}:narrow?{...desktop,resourcesClosed:closed}:desktop,[available,narrow,desktop,closed])
+  },[persist])
+  const layout=useMemo(()=>({...desktop,resourcesClosed:!available||(dock?dockClosed:fallbackClosed)}),[available,desktop,dock,dockClosed,fallbackClosed])
   return {layout,update}
 }
 export interface Viewport {width:number;height:number}

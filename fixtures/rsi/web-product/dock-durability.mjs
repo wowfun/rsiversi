@@ -8,20 +8,15 @@ import {chromium} from 'playwright';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {defaultLayout} from '../../../apps/web/presentation-layout.js';
 const report=process.env.RSI_REPORT_DIR;assert(report);await mkdir(report,{recursive:false});
 let service,browser,page,peer;const checks=[],errors=[];
 const tabs=page=>page.locator('[data-dockkit-tab]');
-async function record(page,kind="session-dock"){return page.evaluate(async({kind,shellVersion})=>{
-  if(kind==='session-dock'){
-    const key=Object.keys(localStorage).find(key=>key.startsWith('rsi.dock.v1.'));
-    return key?{value:JSON.parse(localStorage.getItem(key))}:undefined;
-  }
-  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('rsi.presentation');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
-  try{return await new Promise((resolve,reject)=>{const r=db.transaction('layouts').objectStore('layouts').getAll();r.onsuccess=()=>resolve(r.result.find(r=>kind==='shell'?r.value.version===shellVersion:r.value.kind===kind));r.onerror=()=>reject(r.error)})}finally{db.close()}
-},{kind,shellVersion:defaultLayout.version})}
+function record(page){return page.evaluate(()=>{
+  const key=Object.keys(localStorage).find(key=>key.startsWith('rsi.dock.v1.'));
+  return key?{value:JSON.parse(localStorage.getItem(key))}:undefined;
+})}
 async function menu(page,id,action){await page.locator(`[data-dockkit-tab="${id}"]`).click({button:'right'});await page.getByRole('menuitem',{name:action,exact:true}).click()}
-async function resumed(page,service,id){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await navigationMode(page,'flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);await resources(page)}
+async function resumed(page,service,id,open=true){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await navigationMode(page,'flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);if(open)await resources(page)}
 try{
  service=await startService({binary:paired.binary,assets:paired.assets,report});
  browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});
@@ -40,6 +35,16 @@ try{
  const session=(await page.locator('.pane.selected').getAttribute('data-session-id'));
  await resources(page);
  peer=await context.newPage();peer.setDefaultTimeout(15000);peer.on('pageerror',e=>errors.push(e.message));await resumed(peer,service,session);
+ await page.getByRole('button',{name:'Hide resources',exact:true}).click();
+ await waitUntil(async()=>(await record(page)).value.state.expanded===false,'saved collapsed column');
+ await peer.bringToFront();
+ assert.equal(await peer.getByRole('button',{name:'Toggle resources',exact:true}).getAttribute('aria-expanded'),'true');
+ await resumed(peer,service,session,false);
+ assert.equal(await peer.getByRole('button',{name:'Toggle resources',exact:true}).getAttribute('aria-expanded'),'false');
+ await resources(peer);
+ assert.equal(await page.getByRole('button',{name:'Toggle resources',exact:true}).getAttribute('aria-expanded'),'false');
+ await resources(page);
+ checks.push('Collapsing the column leaves the other window open; reload restores the last saved visibility');
  const initialPeer=await tabs(peer).count();
  await page.getByRole('button',{name:'Workspace files',exact:true}).click();
  await page.waitForFunction(()=>document.querySelectorAll('.resource-content .ui-contribution').length===1);
@@ -72,18 +77,24 @@ try{
  checks.push('A split opens a resource guide, accepts a dragged tab without reopening it, and permits closing the guide');
  await menu(page,first,'Float');await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();
  assert.equal(await peer.getByRole('button',{name:'Dock resource',exact:true}).count(),0);
- const desktop=await record(page),shell=await record(page,'shell');
+ const desktop=await record(page);
  assert.equal(desktop.value.version,2);assert(!Object.hasOwn(desktop.value,'history'));
- assert.ok(shell,'Shell layout is saved before viewport-only projection checks');
  await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await page.locator('[data-dockkit-float]').waitFor({state:'visible'});
  await page.screenshot({path:join(report,'float-390.png')});
  const bounds=await page.locator('[data-dockkit-float]').boundingBox();assert(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=391&&bounds.y+bounds.height<=845,JSON.stringify(bounds));
  assert.deepEqual((await record(page)).value,desktop.value,'viewport projection never overwrites desktop state');
  await page.getByRole('button',{name:'Hide resources',exact:true}).click();
- assert.deepEqual(await record(page,'shell'),shell,'closing narrow resources preserves desktop visibility');
- await resources(page);
- assert.deepEqual(await record(page,'shell'),shell,'opening narrow resources preserves desktop visibility');
+ const collapsed=await record(page);
+ assert.deepEqual(collapsed.value.state,{...desktop.value.state,expanded:false});
  await page.setViewportSize({width:1440,height:900});
+ const toggle=page.getByRole('button',{name:'Toggle resources',exact:true});
+ assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+ assert.equal(await peer.getByRole('button',{name:'Toggle resources',exact:true}).getAttribute('aria-expanded'),'true');
+ await page.screenshot({path:join(report,'widened-closed.png')});
+ await resumed(page,service,session,false);
+ assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+ await resources(page);
+ checks.push('Closing at 390 px stays closed after widening and reload, preserving the other window and float geometry');
  await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
  await page.locator(`[data-session-id="${session}"] [data-testid=conversation-open]`).click();
  await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();

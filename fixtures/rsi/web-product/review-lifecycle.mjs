@@ -25,7 +25,7 @@ import {DeviceStore,applyIntent} from './device-store.js';
 import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
 import {emptyDock,dockIntent,savedDock,readDock,writeDock,dockStorageKey} from './src/dock-state.ts';
-import {presentationIdentity,LayoutContext,usePresentation,useViewport,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
+import {presentationIdentity,activeResourceDock,openDockWindow,LayoutContext,usePresentation,useViewport,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {ConversationWidthControls} from './src/conversation-width.tsx';
 import {source,installActions,settingsPanel,settingsMounted,registeredSettings} from './src/bridge.ts';
@@ -219,13 +219,16 @@ window.mountResize=()=>{
 };
 window.mountVisibility=()=>{
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);window.visibilityWrites=[];
+ const key='rsi.dock.fixture.visibility';
+ localStorage.removeItem(key);
+ const dock=openDockWindow(key);activeResourceDock.set(dock);
  function Visibility(){
   const narrow=useViewport().width<768;const [saved,setSaved]=React.useState(defaultLayout);
-  const {layout,update}=useResourceVisibility(saved,patch=>{window.visibilityWrites.push(patch);setSaved(value=>({...value,...patch}))},narrow);
+  const {layout,update}=useResourceVisibility(saved,patch=>{window.visibilityWrites.push(patch);setSaved(value=>({...value,...patch}))});
   React.useEffect(()=>{window.oldVisibilityCallback=update},[]);
-  return <output data-narrow={narrow} data-closed={layout.resourcesClosed} data-saved={saved.resourcesClosed}/>;
+  return <output data-narrow={narrow} data-closed={layout.resourcesClosed} data-saved={!readDock(key).state.expanded}/>;
  }
- root.render(<Visibility/>);window.unmountVisibility=()=>{root.unmount();node.remove()};
+ root.render(<Visibility/>);window.unmountVisibility=()=>{root.unmount();activeResourceDock.set(undefined);node.remove()};
 };
 window.lifecycle=async(stage)=>{
  const events={reads:0,focus:0,detaches:0,viewportSubscriptions:0};let release,entered;
@@ -295,11 +298,12 @@ try{
  await page.waitForFunction(()=>document.querySelector('output')?.dataset.closed==='false');
  assert.deepEqual(await page.evaluate(()=>window.visibilityWrites),[]);
  await page.setViewportSize({width:1440,height:900});await page.waitForFunction(()=>document.querySelector('output')?.dataset.narrow==='false');
- assert.equal(await page.locator('output').getAttribute('data-closed'),'true');
- await page.evaluate(()=>window.oldVisibilityCallback({resourcesClosed:false}));
- await page.waitForFunction(()=>document.querySelector('output')?.dataset.saved==='false');
- assert.deepEqual(await page.evaluate(()=>window.visibilityWrites),[{resourcesClosed:false}]);
- await page.evaluate(()=>window.unmountVisibility());checks.push({retainedResourceListenerUsesCurrentViewport:true});
+ assert.equal(await page.locator('output').getAttribute('data-closed'),'false');
+ assert.equal(await page.locator('output').getAttribute('data-saved'),'false');
+ await page.evaluate(()=>window.oldVisibilityCallback({resourcesClosed:true}));
+ await page.waitForFunction(()=>document.querySelector('output')?.dataset.saved==='true');
+ assert.deepEqual(await page.evaluate(()=>window.visibilityWrites),[]);
+ await page.evaluate(()=>window.unmountVisibility());checks.push({resourceVisibilityPersistsAcrossViewportChanges:true});
  for(const action of ['application_surface','surface']){
   const expected=action==='application_surface'?{action:'application_ui_surface',reference:{name:'card',revision:'fixture'}}:{action:'ui_surface',reference:{name:'card',revision:'fixture'},pane:'main',generation:'17'};
   await page.evaluate(action=>window.mountExtension(action,true),action);

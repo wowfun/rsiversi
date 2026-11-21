@@ -118,7 +118,7 @@ export class DeviceStore {
   static async open(key,{onVersionChange=()=>{}}={}) {
     if(!identity(key))throw new Error('Invalid presentation identity');
     return new Promise((resolve,reject)=>{
-      const opening=indexedDB.open('rsi.presentation',8);
+      const opening=indexedDB.open('rsi.presentation',9);
       opening.onupgradeneeded=event=>{
         const db=opening.result,tx=opening.transaction;
         if(event.oldVersion<2 && db.objectStoreNames.contains('layouts'))db.deleteObjectStore('layouts');
@@ -143,7 +143,11 @@ export class DeviceStore {
                   delete record.value.navigationWidth;
                   record.value.version=6;
                 }
-                if(oldNavigation||oldWidth)store.put(record);
+                if(record.value?.version===6){
+                  delete record.value.resourcesClosed;
+                  record.value.version=7;
+                  store.put(record);
+                }
               }
             }catch{tx.abort();}
           };

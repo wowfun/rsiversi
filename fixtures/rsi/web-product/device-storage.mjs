@@ -38,7 +38,7 @@ try{
     window.store.subscribe('layouts','',()=>window.invalidated++);
     return window.store.read('layouts');
   });
-  const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,6);
+  const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,7);
   const preserved=await one.evaluate(async()=>{
     const read=(bucket,key)=>new Promise((resolve,reject)=>{const tx=store.database.transaction(bucket,'readonly'),q=tx.objectStore(bucket).get(key);tx.oncomplete=()=>resolve(q.result);tx.onabort=()=>reject(tx.error)});
     return {obsoleteDockRemoved:await read('layouts',retainedDock.key)===undefined,preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
@@ -154,8 +154,8 @@ try{
     old.close();
     const retry=await DeviceStore.open('retry'),version=retry.database.version;retry.close();return {error,version};
   });
-  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,8);await blockedContext.close();
-  for(const version of [3,6]){
+  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,9);await blockedContext.close();
+  for(const version of [3,6,8]){
    const priorContext=await browser.newContext(),prior=await priorContext.newPage();await prior.goto(origin);
    const upgraded=await prior.evaluate(async version=>{
     const {defaultLayout}=await import('/presentation-layout.js');
@@ -169,7 +169,8 @@ try{
       const req=indexedDB.open('rsi.presentation',version);
       req.onupgradeneeded=()=>{
         const bucket=req.result.createObjectStore('layouts',{keyPath:'key'});
-        const previous={...layout,version:5,navigation:'rail',navigationWidth:333};
+        const shell={...layout,version:6,resourcesClosed:false};
+        const previous=version===8?shell:{...shell,version:5,navigation:'rail',navigationWidth:333};
         bucket.put({key:'previous',used:9,revision:'8',value:version===3?{...previous,version:4,resourcesWidth:.35}:previous});
         bucket.put(dock);
       };
