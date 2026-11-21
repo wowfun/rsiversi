@@ -8,7 +8,11 @@ use rsi_agent_turn_protocol::SessionObservation;
 use rsi_conversation::{BlockIdentity, FactField, FieldWindow, SourceIndex, SourceRef, ToolState};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
-use std::collections::VecDeque;
+use serde_json::value::{RawValue, to_raw_value};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, OnceLock},
+};
 
 const MAX_BLOCKS: usize = 128;
 const MAX_BLOCK_BYTES: usize = 128 * 1024;
@@ -31,65 +35,96 @@ pub(crate) struct Block {
     sources: SourceIndex,
     source_bytes: VecDeque<usize>,
     first_seq: u64,
-    markdown: std::sync::OnceLock<Option<Vec<crate::markdown::Node>>>,
+    encoded: OnceLock<Option<Arc<CachedBlock>>>,
     #[cfg(test)]
     markdown_parses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+#[derive(Debug)]
+pub(crate) struct CachedBlock {
+    pub key: Box<str>,
+    pub raw: Box<RawValue>,
+}
+impl CachedBlock {
+    pub(crate) fn capture(
+        key: &str,
+        value: &impl Serialize,
+    ) -> rsi_api_protocol::Result<Arc<Self>> {
+        let raw = to_raw_value(value).map_err(|_| rsi_api_protocol::ApiError::Capacity)?;
+        Ok(Arc::new(Self {
+            key: key.into(),
+            raw,
+        }))
+    }
+}
+impl PartialEq for CachedBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw.get() == other.raw.get()
+    }
+}
+impl Eq for CachedBlock {}
+
 impl Serialize for Block {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.encoded()
+            .map_err(serde::ser::Error::custom)?
+            .raw
+            .serialize(serializer)
+    }
+}
+struct BlockView<'a>(&'a Block);
+impl Serialize for BlockView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let installed = self.compact.is_some_and(|(_, outcome)| {
+        let block = self.0;
+        let installed = block.compact.is_some_and(|(_, outcome)| {
             outcome == rsi_agent_turn_protocol::CompactionOutcome::Compacted
         });
-        let text = if self.compact.is_none() || installed {
-            self.text.as_str()
+        let text = if block.compact.is_none() || installed {
+            block.text.as_str()
         } else {
             ""
         };
-        let markdown = (self.role == "assistant" || installed && !text.is_empty())
+        let markdown = (block.role == "assistant" || installed && !text.is_empty())
             .then(|| {
-                self.markdown
-                    .get_or_init(|| {
-                        #[cfg(test)]
-                        self.markdown_parses
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        crate::markdown::parse(&self.text)
-                    })
-                    .as_ref()
+                #[cfg(test)]
+                block
+                    .markdown_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::markdown::parse(text)
             })
             .flatten();
-        let request_seq = self
+        let request_seq = block
             .request
             .as_ref()
             .and_then(rsi_conversation::RequestPresentation::intent_seq);
-        let scheduled_retry = self
+        let scheduled_retry = block
             .request
             .as_ref()
             .is_some_and(|request| request.scheduled_retry().is_some());
-        let schedule = self.tool.as_ref().and_then(ToolState::schedule_creation);
-        let trigger = self.role.strip_prefix("trigger-");
+        let schedule = block.tool.as_ref().and_then(ToolState::schedule_creation);
+        let trigger = block.role.strip_prefix("trigger-");
         let mut view = serializer.serialize_struct(
             "Block",
-            7 + usize::from(self.tool.is_some())
+            7 + usize::from(block.tool.is_some())
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
                 + usize::from(schedule.is_some())
                 + usize::from(trigger.is_some())
                 + usize::from(scheduled_retry),
         )?;
-        view.serialize_field("key", &self.key)?;
+        view.serialize_field("key", &block.key)?;
         if let Some(kind) = trigger {
             view.serialize_field("role", "status")?;
             view.serialize_field("trigger", kind)?;
-        } else if self.role == "step-context" {
+        } else if block.role == "step-context" {
             view.serialize_field("role", "context")?;
         } else {
-            view.serialize_field("role", &self.role)?;
+            view.serialize_field("role", &block.role)?;
         }
-        view.serialize_field("title", &self.title)?;
+        view.serialize_field("title", &block.title)?;
         view.serialize_field("text", text)?;
-        view.serialize_field("clipped", &self.clipped)?;
-        view.serialize_field("sources", &self.sources.len())?;
+        view.serialize_field("clipped", &block.clipped)?;
+        view.serialize_field("sources", &block.sources.len())?;
         if let Some(seq) = request_seq {
             view.serialize_field("request_intent_seq", &seq.to_string())?;
         }
@@ -98,12 +133,12 @@ impl Serialize for Block {
         }
         view.serialize_field(
             "external",
-            &self
+            &block
                 .tool
                 .as_ref()
                 .and_then(ToolState::external_conversation),
         )?;
-        if let Some(tool) = &self.tool {
+        if let Some(tool) = &block.tool {
             view.serialize_field("tool", tool)?;
         }
         if let Some(task) = schedule {
@@ -116,6 +151,20 @@ impl Serialize for Block {
     }
 }
 impl Block {
+    pub(crate) fn encoded(&self) -> rsi_api_protocol::Result<&Arc<CachedBlock>> {
+        self.encoded
+            .get_or_init(|| CachedBlock::capture(&self.key, &BlockView(self)).ok())
+            .as_ref()
+            .ok_or(rsi_api_protocol::ApiError::Capacity)
+    }
+    #[cfg(test)]
+    pub(crate) fn has_encoding(&self) -> bool {
+        self.encoded.get().is_some()
+    }
+    fn invalidate(&mut self) {
+        self.encoded.take();
+        self.revision = Arc::new(());
+    }
     fn refresh_tool_sources(&mut self, fact: &SessionFact) {
         let tool = self.tool.as_ref().expect("Tool block");
         let mut sources = SourceIndex::default();
@@ -299,7 +348,7 @@ impl Transcript {
                 sources: SourceIndex::default(),
                 source_bytes: VecDeque::new(),
                 first_seq: self.seq,
-                markdown: std::sync::OnceLock::new(),
+                encoded: OnceLock::new(),
                 #[cfg(test)]
                 markdown_parses: std::sync::Arc::default(),
             });
@@ -328,8 +377,7 @@ impl Transcript {
         {
             return;
         }
-        block.markdown.take();
-        block.revision = std::sync::Arc::new(());
+        block.invalidate();
         block.title = title.into();
         if !append {
             block.text.clear();
@@ -500,7 +548,7 @@ impl Transcript {
         {
             return;
         }
-        block.revision = std::sync::Arc::new(());
+        block.invalidate();
         if matches!(fact.body(), SessionFactBody::ToolStarted { .. }) {
             block.tool_start_seq = Some(fact.seq());
         }
@@ -793,9 +841,8 @@ impl Transcript {
         {
             (block.text, block.clipped) =
                 rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
-            block.markdown.take();
         }
-        block.revision = std::sync::Arc::new(());
+        block.invalidate();
         self.blocks
             .make_contiguous()
             .sort_by_key(|block| block.first_seq);
@@ -831,7 +878,7 @@ impl Transcript {
             let title = request.title();
             if block.title != title {
                 block.title = title;
-                block.revision = std::sync::Arc::new(());
+                block.invalidate();
             }
             block.first_seq = if !existing || block.first_seq == 0 {
                 fact.seq()

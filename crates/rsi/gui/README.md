@@ -265,17 +265,13 @@ Unknown mutation outcomes remain explicit; only a new server model can restore
 input admission. This path can display newly installed Service UI contributions
 without adding a linked Worker factory or rebuilding the application.
 
-Markdown events are cached per retained block and invalidated only when its
-source text changes. Eviction drops the cache with the block; unavailable or
-over-budget Markdown retains an explicit cached plain-text result. Retained
-Markdown capacity is limited to eight times each block's source bytes plus 16 KiB,
-within the existing 128-block / 1 MiB source budget (at most 8.5 MiB of cached
-events). The fixed allowance accommodates ordinary short tables and code blocks.
-
-The incremental frame baseline stores each block as its compact JSON bytes,
-with its key and revision identity. Snapshots and patches reuse those bytes
-directly. Every visible block mutation replaces that
-identity; duplicate retained Facts do not. Repeated controls preserve the history
+Each retained block owns its compact JSON projection. A snapshot, a patch and
+a fresh presentation baseline share the same encoded block. Markdown events
+are temporary during encoding. Their allocation capacity is bounded by eight
+times the block's source bytes plus 16 KiB. Unavailable or over-budget
+Markdown produces a cached plain-text block. Every visible block mutation
+invalidates its projection; duplicate retained Facts do not. Earlier frames
+keep their immutable bytes until released. Repeated controls preserve the history
 anchor of unchanged previews and status blocks. Pane and UI revisions refresh metadata
 without invalidating unchanged blocks. Frame construction borrows cached values,
 and commits replacements only after successful output encoding. Generation

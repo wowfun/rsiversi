@@ -36,8 +36,7 @@ impl Transcript {
         if block.sources.position(source).is_some() {
             return;
         }
-        block.markdown.take();
-        block.revision = std::sync::Arc::new(());
+        block.invalidate();
         if block.sources.is_empty() {
             // Entered Message data replaces its transient accepted-control preview.
             block.text.clear();
@@ -173,7 +172,13 @@ mod tests {
             3,
             "plain-text fallback is cached too"
         );
-        assert!(changed.markdown.get().unwrap().is_none());
+        assert!(changed.has_encoding());
+        assert!(
+            serde_json::to_value(changed)
+                .unwrap()
+                .get("markdown")
+                .is_none()
+        );
     }
     #[test]
     fn missing_interior_delta_is_inserted_once_without_regressing_terminal_status() {

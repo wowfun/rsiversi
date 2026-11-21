@@ -163,9 +163,10 @@ fn near_limit_transcript_projects_only_changed_blocks_and_counts_exact_wire_byte
     assert_eq!(patch["fields"], json!({"registration":"two"}));
     assert_eq!(patch["transcript"]["fields"], json!({"status":"Completed"}));
     assert_eq!(patch["transcript"]["upsert"], json!([]));
-    // A new generation has no reusable block proof even when its content matches.
+    // A fresh pane baseline can reuse encodings still owned by its live transcript.
     let replaced = CachedPane::capture(third.metadata.clone(), Some(&transcript), None).unwrap();
-    assert_eq!(replaced.projected_blocks, 128);
+    assert_eq!(replaced.projected_blocks, 0);
+    assert_eq!(replaced, third);
 }
 
 #[test]
@@ -231,6 +232,35 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
     let duplicate = CachedPane::capture(metadata, Some(&transcript), Some(&first)).unwrap();
     assert_eq!(duplicate.projected_blocks, 0);
     assert_eq!(first, duplicate);
+}
+
+#[test]
+fn fresh_baselines_share_the_live_blocks_encoding() {
+    let mut transcript = Transcript::default();
+    let rich = "中文 **note** with `code` and [a link](https://example.org/).\n\n".repeat(8);
+    for index in 0..128 {
+        span(&mut transcript, u64::from(index) + 1, index, &rich);
+    }
+    let capture =
+        || CachedPane::capture(json!({"transcript":null}), Some(&transcript), None).unwrap();
+    let (first, initial) = allocations::measure(capture);
+    let (again, fresh) = allocations::measure(capture);
+    let one = first.transcript.as_ref().unwrap();
+    let two = again.transcript.as_ref().unwrap();
+    let wire = serde_json::to_vec(one).unwrap();
+    eprintln!(
+        "128 rich blocks: wire={} source_cache_and_first_pane={} second_pane={}",
+        wire.len(),
+        initial.requested - initial.released,
+        fresh.requested - fresh.released
+    );
+    assert_eq!(wire, serde_json::to_vec(two).unwrap());
+    assert!(
+        one.blocks
+            .iter()
+            .zip(&two.blocks)
+            .all(|(a, b)| Arc::ptr_eq(a, b))
+    );
 }
 
 #[test]

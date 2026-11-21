@@ -1,16 +1,13 @@
 //! Immutable block projections retained by one presentation baseline.
 use super::{MAX_BYTES, encoded_size};
-use crate::projection::Transcript;
+use crate::projection::{CachedBlock, Transcript};
 use rsi_api_protocol::{ApiError, Result};
 use serde::{
     Serialize,
     ser::{SerializeMap, SerializeSeq},
 };
-use serde_json::{
-    Value,
-    value::{RawValue, to_raw_value},
-};
-use std::{collections::BTreeMap, sync::Arc};
+use serde_json::Value;
+use std::sync::Arc;
 const NULL_BYTES: usize = b"null".len();
 
 #[derive(Clone, Debug)]
@@ -55,29 +52,6 @@ impl PartialEq for CachedValue {
         Arc::ptr_eq(&self.value, &other.value) || self.value == other.value
     }
 }
-
-#[derive(Debug)]
-pub(super) struct CachedBlock {
-    pub key: Box<str>,
-    revision: Arc<()>,
-    pub raw: Box<RawValue>,
-}
-impl CachedBlock {
-    fn capture(key: &str, revision: Arc<()>, value: &impl Serialize) -> Result<Arc<Self>> {
-        let raw = to_raw_value(value).map_err(|_| ApiError::Capacity)?;
-        Ok(Arc::new(Self {
-            key: key.into(),
-            revision,
-            raw,
-        }))
-    }
-}
-impl PartialEq for CachedBlock {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw.get() == other.raw.get()
-    }
-}
-impl Eq for CachedBlock {}
 
 #[derive(Debug, PartialEq)]
 pub(super) struct CachedTranscript {
@@ -131,26 +105,15 @@ impl CachedPane {
                 let old_turns = previous
                     .and_then(|pane| pane.transcript.as_ref())
                     .map(|t| &t.turns);
-                let previous: BTreeMap<_, _> = previous
-                    .and_then(|pane| pane.transcript.as_ref())
-                    .into_iter()
-                    .flat_map(|transcript| &transcript.blocks)
-                    .map(|block| (block.key.as_ref(), block))
-                    .collect();
                 let blocks = transcript
                     .blocks
                     .iter()
                     .map(|block| {
-                        if let Some(cached) = previous.get(block.key.as_str())
-                            && Arc::ptr_eq(&cached.revision, &block.revision)
-                        {
-                            return Ok((*cached).clone());
-                        }
                         #[cfg(test)]
-                        {
+                        if !block.has_encoding() {
                             projected += 1;
                         }
-                        CachedBlock::capture(&block.key, block.revision.clone(), block)
+                        block.encoded().cloned()
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let turns = if let Some(old) = old_turns
@@ -232,7 +195,6 @@ impl CachedPane {
                     .map(|block| {
                         CachedBlock::capture(
                             block["key"].as_str().expect("fixture block key"),
-                            Arc::new(()),
                             block,
                         )
                     })
