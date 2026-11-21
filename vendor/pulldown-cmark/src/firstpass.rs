@@ -2668,21 +2668,23 @@ mod simd {
     /// there is a special character at that byte position. The least significant bit
     /// corresponds to `bytes[ix]` and the most significant bit corresponds to
     /// `bytes[ix + 15]`.
-    /// It is only safe to call this function when `bytes.len() >= ix + VECTOR_SIZE`.
+    ///
+    /// # Safety
+    /// The CPU must support SSSE3 and at least 16 bytes must remain at `ix`.
     #[target_feature(enable = "ssse3")]
     #[inline]
     unsafe fn compute_mask(lut: &[u8; 16], bytes: &[u8], ix: usize) -> i32 {
         debug_assert!(bytes.len() >= ix + VECTOR_SIZE);
 
-        let bitmap = _mm_loadu_si128(lut.as_ptr() as *const __m128i);
+        // SAFETY: the lookup array contains exactly 16 initialized bytes.
+        let bitmap = unsafe { _mm_loadu_si128(lut.as_ptr().cast()) };
         // Small lookup table to compute single bit bitshifts
         // for 16 bytes at once.
         let bitmask_lookup =
             _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, -1, -1, -1, -1, -1, -1, -1, -1);
 
-        // Load input from memory.
-        let raw_ptr = bytes.as_ptr().add(ix) as *const __m128i;
-        let input = _mm_loadu_si128(raw_ptr);
+        // SAFETY: the caller supplies a full block at ix. The load accepts any alignment.
+        let input = unsafe { _mm_loadu_si128(bytes.as_ptr().add(ix).cast()) };
         // Compute the bitmap using the bottom nibble as an index
         // into the lookup table. Note that non-ascii bytes will have
         // their most significant bit set and will map to lookup[0].
@@ -2720,6 +2722,7 @@ mod simd {
         F: FnMut(usize, u8) -> LoopInstruction<Option<T>>,
     {
         if is_x86_feature_detected!("ssse3") && bytes.len() >= VECTOR_SIZE {
+            // SAFETY: both the required CPU feature and a complete input block are present.
             unsafe { simd_iterate_special_bytes(&lut.simd, bytes, ix, callback) }
         } else {
             super::scalar_iterate_special_bytes(&lut.scalar, bytes, ix, callback)
@@ -2730,6 +2733,9 @@ mod simd {
     /// the index `offset + ix`, where `ix` is the position of the 1 in the mask.
     /// Returns `Ok(ix)` to continue from index `ix`, `Err((end_ix, opt_val)` to break with
     /// final index `end_ix` and optional value `opt_val`.
+    ///
+    /// # Safety
+    /// Each set bit must denote a valid input byte relative to `offset`.
     unsafe fn process_mask<F, T>(
         mut mask: i32,
         bytes: &[u8],
@@ -2742,7 +2748,8 @@ mod simd {
         while mask != 0 {
             let mask_ix = mask.trailing_zeros() as usize;
             offset += mask_ix;
-            match callback(offset, *bytes.get_unchecked(offset)) {
+            // SAFETY: offsets advance by exactly the number of mask bits consumed.
+            match callback(offset, unsafe { *bytes.get_unchecked(offset) }) {
                 LoopInstruction::ContinueAndSkip(skip) => {
                     offset += skip + 1;
                     let shift = skip + 1 + mask_ix;
@@ -2758,8 +2765,8 @@ mod simd {
     }
 
     #[target_feature(enable = "ssse3")]
-    /// Important: only call this function when `bytes.len() >= 16`. Doing
-    /// so otherwise may exhibit undefined behaviour.
+    /// # Safety
+    /// The CPU must support SSSE3 and the slice must contain at least 16 bytes.
     unsafe fn simd_iterate_special_bytes<F, T>(
         lut: &[u8; 16],
         bytes: &[u8],
@@ -2773,9 +2780,11 @@ mod simd {
         let upperbound = bytes.len() - VECTOR_SIZE;
 
         while ix < upperbound {
-            let mask = compute_mask(lut, bytes, ix);
+            // SAFETY: ix is below len - VECTOR_SIZE and SSSE3 is enabled here.
+            let mask = unsafe { compute_mask(lut, bytes, ix) };
             let block_start = ix;
-            ix = match process_mask(mask, bytes, ix, &mut callback) {
+            // SAFETY: this mask covers precisely the block starting at ix.
+            ix = match unsafe { process_mask(mask, bytes, ix, &mut callback) } {
                 Ok(ix) => std::cmp::max(ix, VECTOR_SIZE + block_start),
                 Err((end_ix, val)) => return (end_ix, val),
             };
@@ -2783,8 +2792,10 @@ mod simd {
 
         if bytes.len() > ix {
             // shift off the bytes at start we have already scanned
-            let mask = compute_mask(lut, bytes, upperbound) >> ix - upperbound;
-            if let Err((end_ix, val)) = process_mask(mask, bytes, ix, &mut callback) {
+            // SAFETY: upperbound is the start of the final full block; SSSE3 is enabled.
+            let mask = unsafe { compute_mask(lut, bytes, upperbound) } >> (ix - upperbound);
+            // SAFETY: shifting out the visited prefix makes bit zero correspond to ix.
+            if let Err((end_ix, val)) = unsafe { process_mask(mask, bytes, ix, &mut callback) } {
                 return (end_ix, val);
             }
         }
