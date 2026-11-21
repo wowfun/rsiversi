@@ -2315,56 +2315,44 @@ impl SessionStore for SqliteStore {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(sql_error)?;
-            let exists = transaction
-                .query_row(
-                    "SELECT 1 FROM sessions WHERE session_id NOT IN (SELECT session_id FROM session_tombstones) AND session_id = ?1",
-                    [session_id.as_str()],
-                    |_| Ok(()),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .is_some();
-            if !exists {
-                return Err(StoreError::NotFound(session_id.to_string()));
-            }
             let projection = transaction
-                .query_row(
+                .prepare_cached(
                     "SELECT c.header_fingerprint, c.through_seq, c.fact_prefix_sha256,
                             length(c.checkpoint_bytes),
-                            length(CAST(s.header_json AS BLOB)),
-                            CASE WHEN length(CAST(s.header_json AS BLOB)) <= ?2
+                            CASE WHEN c.through_seq IS NOT NULL THEN length(CAST(s.header_json AS BLOB)) END,
+                            CASE WHEN c.through_seq IS NOT NULL AND length(CAST(s.header_json AS BLOB)) <= ?2
                                  THEN s.header_json END,
                             s.durable_seq
-                     FROM context_checkpoints c
-                     JOIN sessions s ON s.session_id = c.session_id
-                     WHERE c.session_id = ?1",
+                     FROM sessions s LEFT JOIN context_checkpoints c USING (session_id)
+                     WHERE s.session_id = ?1 AND s.session_id NOT IN (SELECT session_id FROM session_tombstones)",
+                )
+                .map_err(sql_error)?
+                .query_row(
                     params![
                         session_id.as_str(),
                         i64::try_from(MAXIMUM_SESSION_HEADER_BYTES)
                             .expect("session header bound fits SQLite INTEGER"),
                     ],
                     |row| {
-                        let encoded_len =
-                            usize::try_from(row.get::<_, i64>(3)?).map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    3,
-                                    rusqlite::types::Type::Integer,
-                                    Box::new(error),
-                                )
-                            })?;
-                        Ok(cas::ContextCheckpointProjection {
+                        let Some(through_seq) = row.get(1)? else {
+                            return Ok(None);
+                        };
+                        let length = row.get::<_, i64>(3)?;
+                        Ok(Some(cas::ContextCheckpointProjection {
                             header_fingerprint: bounded_text(row, 0, 64)?,
-                            through_seq: row.get(1)?,
+                            through_seq,
                             fact_prefix_sha256: bounded_text(row, 2, 64)?,
-                            encoded_len,
+                            encoded_len: usize::try_from(length)
+                                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, length))?,
                             header_encoded_len: row.get(4)?,
                             header_json: row.get(5)?,
                             durable_seq: row.get(6)?,
-                        })
+                        }))
                     },
                 )
                 .optional()
-                .map_err(sql_error)?;
+                .map_err(sql_error)?
+                .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
             let checkpoint = if let Some(value) = projection {
                 let length = value.encoded_len;
                 if length == 0 {
@@ -2379,7 +2367,7 @@ impl SessionStore for SqliteStore {
                     .reserve(length)
                     .map_err(StoreError::read_admission)?;
                 let mut statement = transaction
-                    .prepare(
+                    .prepare_cached(
                         "SELECT checkpoint_bytes FROM context_checkpoints WHERE session_id = ?1",
                     )
                     .map_err(sql_error)?;

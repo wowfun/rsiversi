@@ -3354,7 +3354,7 @@ async fn queued_proof_reuses_subtree_validation_published_before_lane_admission(
 }
 
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();

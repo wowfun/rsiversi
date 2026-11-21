@@ -970,6 +970,11 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let session = SessionId::new("session-checkpoint-metadata").unwrap();
+    let no_bytes = || rsi_api_protocol::ByteAdmission::new(|_| panic!("no checkpoint body"));
+    assert!(matches!(
+        store.read_context_checkpoint(&session, no_bytes()).await,
+        Err(StoreError::NotFound(_))
+    ));
     let session_header = header(session.as_str());
     store
         .append(AppendBatch {
@@ -980,6 +985,13 @@ async fn checkpoint_reads_reassert_immutable_session_metadata() {
         })
         .await
         .unwrap();
+    assert!(
+        store
+            .read_context_checkpoint(&session, no_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     let fact_prefix_sha256 = connection
         .query_row(

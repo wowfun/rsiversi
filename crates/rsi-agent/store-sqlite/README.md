@@ -567,8 +567,10 @@ adjacent controls; these checks are not a constant-cost session-open guarantee.
 
 Opt-in control decode counters observe each record as it is decoded, including incomplete validation. The connection-scoped observer is removed before a worker can be reused.
 
-Context checkpoint reads select bounded metadata and body length first, reserve
-that exact length through the caller's deferred admission, then copy a borrowed
+Context checkpoint reads look up the live Session and its optional checkpoint
+in one metadata query. A Session without a checkpoint returns an empty result
+without requesting byte admission. For a stored checkpoint, reads reserve the
+projected body length through the caller's deferred admission, then copy a borrowed
 SQLite blob in the same read transaction. Byte pressure returns `ReadCapacity`;
 it never labels a valid cache corrupt or reserves the 64 MiB format maximum.
 
