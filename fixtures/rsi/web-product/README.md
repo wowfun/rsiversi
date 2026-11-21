@@ -1081,6 +1081,9 @@ and a fresh `RSI_WEB_REPORT` directory for each run.
 
 ## Host desktop verification
 
+The fixture reports the PIDs of its running foreground processes. A launcher
+that exits after handing its listener to the Host drops out of that list.
 The service fixture's `localWeb` option starts the installed `rsi web`
-listener and returns its one-use launch URL. It supports tests that distinguish
+listener. Its origin and one-use launch URL follow the current listener across
+a restart. It supports tests that distinguish
 the Host owner's browser credential from an ordinary paired device.

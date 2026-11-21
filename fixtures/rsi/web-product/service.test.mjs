@@ -87,7 +87,7 @@ test("embedded browser registers Windows devices with final private context befo
       assert.deepEqual(args.slice(0, 2), ['--profile', 'browser-fixture']);
       assert(!args.includes('--assets'));
       assert.equal(calls.length, process.platform === 'win32' ? 3 : 0, 'Windows registration completes before embedded ownership starts');
-      const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
+      const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),pid:4321,exitCode:null,signalCode:null});
       child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
       setImmediate(()=>child.stdout.write('{"event":"serving"}\n'));
       return child;
@@ -111,7 +111,10 @@ test("embedded browser registers Windows devices with final private context befo
       assert.deepEqual(JSON.parse(JSON.parse(encoded.slice('config_json = '.length))),configuredContext,'whole-profile replacement cannot remove personal-context isolation');
     }
     assert.deepEqual(service.registration, {id:'device'});
-    await service.close(); service = undefined;
+    assert.deepEqual(service.foregroundPids,[4321]);
+    await service.close();
+    assert.deepEqual(service.foregroundPids,[]);
+    service = undefined;
     assert.deepEqual(calls.map(args=>args.slice(2)), [
       ['register','embedded'], ['configuration','list'], ['configuration','grant','device','1'],
     ]);
@@ -128,24 +131,29 @@ test("renderer watch uses ordinary Web launch and a disjoint relative package re
     const assets = join(directory, 'assets');
     await mkdir(assets);
     t.mock.method(cp, 'spawnSync', () => ({status:0, stdout:'stopped\n', stderr:''}));
+    let port = 43210;
     t.mock.method(cp, 'spawn', (_program, args) => {
       assert.deepEqual(args, ['--watch','web','--port','0','--no-open']);
       const child = Object.assign(new EventEmitter(), {stdout:new PassThrough(), stderr:new PassThrough(),exitCode:null});
       child.kill = () => { child.exitCode=0; child.emit('exit',0,null); };
-      setImmediate(()=>child.stdout.write('rsi web: http://127.0.0.1:43210#rsi-launch=fixture\n'));
+      const next = port++;
+      setImmediate(()=>child.stdout.write(`rsi web: http://127.0.0.1:${next}#rsi-launch=fixture-${next}\n`));
       return child;
     });
     syncBuiltinESMExports();
     let config;
     service = await startService({binary:'fixture', assets, report:directory, watchAssets:true,
       configure(value) { config=value.config; }});
+    assert.equal(service.origin,'http://127.0.0.1:43210');
+    assert.equal(new URL(service.launchUrl).hash,'#rsi-launch=fixture-43210');
+    await service.restart();
+    assert.equal(service.origin,'http://127.0.0.1:43211');
+    assert.equal(service.launchUrl,'http://127.0.0.1:43211#rsi-launch=fixture-43211');
     const document = await readFile(join(config,'rsi.toml'),'utf8');
     assert.match(document, /\[sources\.web\]/);
     assert.match(document, /inputs = \["assets\/standard.js","assets\/file-preview.js","assets\/ui-renderers.json"\]/);
     assert.match(document, /output = "web-package\/package.json"/);
-    assert.equal(service.origin,'http://127.0.0.1:43210');
     assert.equal(service.developmentHttp,true);
-    assert.equal(new URL(service.launchUrl).hash,'#rsi-launch=fixture');
   } finally {
     try { await service?.close(); }
     finally {

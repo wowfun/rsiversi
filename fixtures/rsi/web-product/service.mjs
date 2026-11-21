@@ -308,8 +308,12 @@ export async function startService({ binary, assets, report, configure, registra
     };
     await startProcess();
     if(!registerBeforeStart && registrationLabel !== undefined) registration = register(registrationLabel);
-    return { origin, launchUrl, developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, register, registration, get pid() { return child.pid; },
-      get foregroundPids() { return hostProcess ? [hostProcess.pid, child.pid] : [child.pid]; },
+    return { get origin() { return origin; }, get launchUrl() { return launchUrl; },
+      developmentHttp: new URL(origin).protocol === 'http:', workspace, run, provider, close, register, registration, get pid() { return child.pid; },
+      get foregroundPids() {
+        return [hostProcess, child].filter(process => process && process.exitCode === null && process.signalCode === null)
+          .map(process => process.pid);
+      },
       waitForExit: () => deadline(stopped, 'foreground service exit', 20_000),
       async readSessionFacts(session) {
         assert(typeof session==='string'&&session.length>0&&session.length<=128);
