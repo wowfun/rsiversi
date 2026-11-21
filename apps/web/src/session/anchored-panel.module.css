@@ -1,0 +1,30 @@
+/* The portaled surface follows its trigger across scroll and resize. */
+@supports (position-try-fallbacks: --rsi-panel-window) and (top: anchor(bottom)) {
+  .panel {
+    inset: 12px 12px max(12px, calc(anchor(top) + 8px)) max(12px, anchor(left));
+    position-try-fallbacks: --rsi-panel-window, --rsi-panel-below, --rsi-panel-below-edge, --rsi-panel-viewport;
+    align-self: end;
+    justify-self: start;
+    height: fit-content;
+    margin: 0;
+  }
+}
+@position-try --rsi-panel-window {
+  left: 12px;
+  justify-self: safe end;
+}
+@position-try --rsi-panel-below {
+  top: max(12px, calc(anchor(bottom) + 8px));
+  bottom: 12px;
+  align-self: start;
+}
+@position-try --rsi-panel-below-edge {
+  inset: max(12px, calc(anchor(bottom) + 8px)) 12px 12px;
+  align-self: start;
+  justify-self: safe end;
+}
+@position-try --rsi-panel-viewport {
+  inset: 12px;
+  align-self: safe start;
+  justify-self: safe end;
+}

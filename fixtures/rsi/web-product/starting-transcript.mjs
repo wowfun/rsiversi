@@ -103,6 +103,10 @@ try {
    await turnUsage.waitFor();
    assert.match(await turnUsage.innerText(),/11,300 tok/);
    await turnUsage.getByText('fixture/long-model-identifier-for-the-narrow-window',{exact:true}).waitFor();
+   const usageBox=await turnUsage.boundingBox();
+   const triggerBox=await page.locator('.message-usage button').boundingBox();
+   assert(Math.abs(usageBox.y+usageBox.height+8-triggerBox.y)<2);
+   assert(Math.abs(usageBox.x-triggerBox.x)<2);
    await page.screenshot({path:join(report,name+'-Turn-usage.png')});
    await page.setViewportSize({width:320,height:844});
    await page.waitForFunction(()=>{

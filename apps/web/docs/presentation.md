@@ -750,8 +750,8 @@ reads and unfinished reductions offer an explicit retry in the statistics detail
 
 The composer footer has separate Session statistics, Token usage and Context usage
 buttons. Each opens one nonmodal, viewport-clamped panel above its own button.
-The menu tint overlays an opaque theme surface so transcript text stays legible
-only outside the panel. Panels support
+The menu tint overlays an opaque theme surface. Statistics and composer menus
+use CSS anchors for placement on supporting engines. Panels support
 Escape/outside dismissal and keyboard focus restoration. Turn usage uses
 the same panel skin. Token detail partitions inclusive input by reported cache reads; cache writes
 are a supplementary subset of uncached input and reasoning is a subset of output.

@@ -1,6 +1,7 @@
 import {useId, useLayoutEffect, useRef, useState, type ReactNode} from 'react';
 import {createPortal} from 'react-dom';
-import {statPosition} from '../../stat-position.js';
+import {watchPanelPosition} from '../../stat-position.js';
+import anchor from './anchored-panel.module.css';
 import css from './metrics.module.css';
 
 export function StatPopover({label, accessibleLabel, name, icon, headline, children, compact = false}: {
@@ -16,15 +17,9 @@ export function StatPopover({label, accessibleLabel, name, icon, headline, child
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
+  const anchorName = `--rsi-stat-${id.replaceAll(':', '')}`;
   useLayoutEffect(() => {
     if (!open) return;
-    const place = () => {
-      if (!trigger.current || !panel.current) return;
-      const position = statPosition(trigger.current.getBoundingClientRect(), panel.current.getBoundingClientRect(), {width: innerWidth, height: innerHeight});
-      panel.current.style.left = `${position.left}px`;
-      panel.current.style.top = `${position.top}px`;
-      panel.current.style.visibility = 'visible';
-    };
     const outside = (event: Event) => {
       const target = event.target;
       if (target instanceof Node && !panel.current?.contains(target) && !trigger.current?.contains(target)) setOpen(false);
@@ -35,29 +30,23 @@ export function StatPopover({label, accessibleLabel, name, icon, headline, child
       setOpen(false);
       trigger.current?.focus({preventScroll: true});
     };
-    place();
+    const stopPositioning = watchPanelPosition(trigger.current!, panel.current!);
     panel.current?.focus({preventScroll: true});
-    const observer = new ResizeObserver(place);
-    observer.observe(panel.current!);
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
     document.addEventListener('pointerdown', outside);
     document.addEventListener('focusin', outside);
     document.addEventListener('keydown', key);
     return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
+      stopPositioning?.();
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('focusin', outside);
       document.removeEventListener('keydown', key);
     };
   }, [open]);
   return <>
-    <button ref={trigger} type="button" className={`${css.pill}${compact ? ` ${css.contextPill}` : ''}`} aria-label={accessibleLabel} title={accessibleLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(value => !value)}>
+    <button ref={trigger} type="button" style={{anchorName}} className={`${css.pill}${compact ? ` ${css.contextPill}` : ''}`} aria-label={accessibleLabel} title={accessibleLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(value => !value)}>
       {icon}<span className={css.label}>{label}</span>
     </button>
-    {open && createPortal(<div ref={panel} id={id} role="dialog" aria-label={name} tabIndex={-1} className={`${css.panel}${compact ? ` ${css.context}` : ''}`}>
+    {open && createPortal(<div ref={panel} id={id} role="dialog" aria-label={name} tabIndex={-1} style={{positionAnchor:anchorName}} className={`${anchor.panel} ${css.panel}${compact ? ` ${css.context}` : ''}`}>
       {!compact && <><div className={css.title}><span>{icon}{name}</span>{headline != null && <strong>{headline}</strong>}</div>
       <div className={css.rule}/></>}
       {children}
