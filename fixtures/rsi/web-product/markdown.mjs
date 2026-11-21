@@ -12,6 +12,7 @@ import React from 'react';import {createRoot} from 'react-dom/client';import {fl
 import {IconSprite} from '/src/icon-sprite.tsx';
 import {Markdown} from '/src/session/markdown.tsx';import {setClipboardWriter} from '/mounts.js';
 import {DocumentSessionScope} from '/src/document-plugins.tsx';import {installActions} from '/src/bridge.ts';
+import {bindImageIntake} from '/src/session/image-intake.ts';
 import '/styles.css';import '/vendor/dsh/theme-base.css';import session from '/src/session/surface.module.css';import '/vendor/dsh/dockkit-tokens.css';import '/code-highlight.css';
 const start=(kind,fields={})=>({kind:'start',element:{kind,...fields}}),end={kind:'end'},text=value=>({kind:'text',text:value});
 window.code='const value = "<img src=x onerror=alert(1)>";\\nconsole.log("MARKDOWN_OK");\\n';
@@ -38,6 +39,16 @@ installActions({call:async(method,raw)=>{
   window.reads.push([method,JSON.parse(raw)]);
   return ['image/svg+xml',new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="teal"/></svg>')];
 }});
+window.mountImageDrop=()=>{
+  const form=document.createElement('form'),input=document.createElement('textarea');
+  form.style.cssText='position:fixed;bottom:20px;right:20px';
+  form.append(input);document.body.append(form);
+  const outside=document.createElement('div');outside.id='outside-composer';
+  outside.style.cssText='position:fixed;top:40px;right:20px;width:80px;height:80px';document.body.append(outside);
+  window.dropped=[];window.dropOverlay=[];
+  window.releaseDrop=bindImageIntake(input,{index:'main',composerView:{mediaLimits:{}},
+    upload:async files=>{for(const file of files)window.dropped.push({name:file.name,type:file.type,text:await file.text()});}},active=>window.dropOverlay.push(active));
+};
 const root=createRoot(article);
 window.renderLocal=(streaming,generation)=>{const view={session:'document',generation};
   flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
@@ -156,11 +167,25 @@ try{
       assert.deepEqual(await local.evaluate(el=>[el.naturalWidth,el.naturalHeight]),[96,48]);
       await local.scrollIntoViewIfNeeded();
       await page.screenshot({path:join(report,name+'-local-image.png')});
+      await page.evaluate(()=>window.mountImageDrop());
+      const editor=page.getByRole('textbox');
+      await local.dragTo(page.locator('#outside-composer'));
+      assert.deepEqual(await page.evaluate(()=>window.dropped),[]);
+      await local.dragTo(editor);
+      await page.waitForFunction(()=>window.dropped.length===1);
+      const [dropped]=await page.evaluate(()=>window.dropped);
+      assert.equal(dropped.name,'diagram.svg');assert.equal(dropped.type,'image/svg+xml');
+      assert.equal(dropped.text,'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="teal"/></svg>');
+      assert.equal(await editor.inputValue(),'');assert.equal(await page.getByRole('dialog').count(),0);
+      assert(!await page.evaluate(()=>window.dropOverlay.includes(true)));
+      await page.evaluate(()=>window.releaseDrop());
       await page.evaluate(()=>window.render());
       assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_image',{pane:'main',generation,path:'../diagram.svg'}]));
       assert.equal(await page.evaluate(()=>new Set(window.revoked).size),2);
       assert.deepEqual(errors,[]);
-      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,errors});
+      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,
+        localImage:{readCount:await page.evaluate(()=>window.reads.length),originalName:dropped.name,originalType:dropped.type,
+          releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});
     }finally{await browser.close()}
   }
   await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));

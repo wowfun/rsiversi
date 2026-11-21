@@ -13,9 +13,24 @@ let lastFocused: Target | undefined;
 let dragTarget: Target | undefined;
 let depth = 0;
 let listeners: AbortController | undefined;
+const transcriptImageType = 'application/x-rsi-transcript-image';
+let transcriptDrag: {token: string; file: File} | undefined;
+
+export function startTranscriptImageDrag(transfer: DataTransfer, file: File) {
+  const token = crypto.randomUUID();
+  transfer.clearData();
+  transfer.effectAllowed = 'copy';
+  transfer.setData(transcriptImageType, token);
+  transcriptDrag = {token, file};
+}
+
+export function releaseTranscriptImage(file: File) {
+  if (transcriptDrag?.file === file) transcriptDrag = undefined;
+}
 
 function destination(event: Event, pasting = false) {
   const origin = event.composedPath().find(node => node instanceof Element);
+  const fromTranscript = event instanceof DragEvent && event.dataTransfer?.types.includes(transcriptImageType);
   const editable = pasting && origin?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
   const foreground = Array.from(document.querySelectorAll('dialog[open], ' + modalSelector))
     .filter(element => element.checkVisibility({visibilityProperty:true})).at(-1);
@@ -24,7 +39,8 @@ function destination(event: Event, pasting = false) {
   for (const target of targets) {
     const {input, owner} = target;
     if (!owner.composerView?.mediaLimits || (pasting && owner.composerView.imageDisabled) ||
-        (editable && editable !== input) || (foreground && !foreground.contains(input)) ||
+        (editable && editable !== input) || (fromTranscript && !input.form?.contains(origin ?? null)) ||
+        (foreground && !foreground.contains(input)) ||
         input.closest('[inert]') || !input.checkVisibility({visibilityProperty:true})) continue;
     if (editable === input || (!pasting && origin && input.closest(".pane")?.contains(origin))) return target;
     if (target === lastFocused) focused = target;
@@ -55,7 +71,9 @@ function paste(event: ClipboardEvent) {
 }
 
 function imageDrag(event: DragEvent) {
-  return event.dataTransfer && Array.from(event.dataTransfer.items).some(item => item.kind === "file" && item.type.startsWith("image/"));
+  const transfer = event.dataTransfer;
+  return transfer && ((transcriptDrag && transfer.types.includes(transcriptImageType)) ||
+    Array.from(transfer.items).some(item => item.kind === "file" && item.type.startsWith("image/")));
 }
 
 function showDrag(target?: Target) {
@@ -79,6 +97,7 @@ function install() {
     const target = destination(event);
     if (!target) return;
     event.preventDefault();
+    if (transcriptDrag && event.dataTransfer!.types.includes(transcriptImageType)) return;
     depth++;
     showDrag(target);
   }, options);
@@ -98,14 +117,17 @@ function install() {
   document.addEventListener("drop", event => {
     resetDrag();
     if (event.defaultPrevented || !event.dataTransfer) return;
-    const files = Array.from(event.dataTransfer.files).filter(file => file.type.startsWith("image/"));
+    const internal = transcriptDrag && event.dataTransfer.getData(transcriptImageType) === transcriptDrag.token
+      ? transcriptDrag.file : undefined;
+    transcriptDrag = undefined;
+    const files = internal ? [internal] : Array.from(event.dataTransfer.files).filter(file => file.type.startsWith("image/"));
     if (!files.length) return;
     const target = destination(event);
     if (!target) return;
     event.preventDefault();
     if (!target.owner.composerView?.imageDisabled) void run(() => target.owner.upload(files));
   }, options);
-  window.addEventListener("dragend", resetDrag, options);
+  window.addEventListener("dragend", () => { transcriptDrag = undefined; resetDrag(); }, options);
   return controller;
 }
 

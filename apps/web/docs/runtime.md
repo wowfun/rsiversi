@@ -124,6 +124,9 @@ Settled replies can also display local image paths on the conversation's
 execution host. A paired device uses its Session read grant for both workspace
 and outside-workspace images. The document validates local image bytes before
 decoding and releases the preview Blob URL with the displayed image.
+Dragging a local transcript thumbnail into a composer copies the original file
+into that composer's normal image import. The gesture uses the bytes already
+read for this occurrence and leaves the editor text and preview dialog alone.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.

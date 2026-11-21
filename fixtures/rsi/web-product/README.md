@@ -1101,3 +1101,5 @@ a Host restart and replacement of an outside-workspace image. Windows and
 Linux Chromium and Firefox use deterministic replies by default. For a real
 DeepSeek reply, run from the repository root with `RSI_LIVE_DEEPSEEK=1` and
 the fixture's path, using the development key file under that root.
+Set `RSI_CHECK_IMAGE_DRAG=1` to also drag the workspace thumbnail into the
+composer, inspect the imported attachment, and remove it before restarting.

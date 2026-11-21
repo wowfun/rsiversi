@@ -1,14 +1,27 @@
-import {useState} from 'react';
+import {useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {Modal} from '../presentation.tsx';
 import {IconCloseOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import css from './markdown-image.module.css';
+import {startTranscriptImageDrag} from './image-intake.ts';
 
-export function MarkdownImage({src,alt,linked}: {src:string;alt:string;linked:boolean}) {
+export function MarkdownImage({src,alt,linked,original}: {src:string;alt:string;linked:boolean;original?:File}) {
   const [failed,setFailed]=useState(false);
   const [open,setOpen]=useState(false);
+  const dragged = useRef(false);
   if (failed) return <span className={css.alt}>Image preview unavailable · {alt || src}</span>;
   const image=<img className={css.image} alt={alt} loading="lazy" decoding="async"
+    {...(original && !linked && {
+      draggable: true,
+      onPointerDown: () => { dragged.current = false; },
+      onDragStart: (event: React.DragEvent<HTMLImageElement>) => {
+        startTranscriptImageDrag(event.dataTransfer, original);
+        dragged.current = true;
+      },
+      onClickCapture: (event: React.MouseEvent<HTMLImageElement>) => {
+        if (dragged.current && event.detail) { event.preventDefault(); event.stopPropagation(); }
+      },
+    })}
     referrerPolicy="no-referrer" src={src} onError={()=>setFailed(true)}/>;
   if (linked) return image;
   return <>

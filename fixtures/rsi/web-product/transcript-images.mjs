@@ -86,6 +86,23 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       result.observations.push({stage,sizes});
     }
     await inspect('author',210);
+    if(process.env.RSI_CHECK_IMAGE_DRAG==='1'){
+      const reads=[];
+      const watch=request=>{if(new URL(request.url()).pathname.endsWith('/files/image/2/read'))reads.push(request.method());};
+      author.on('request',watch);
+      try{
+        const editor=page.getByRole('textbox',{name:'Main message'});
+        const thumbnail=page.locator('.message.assistant').getByRole('button',{name:'View full image: Workspace diagram'}).getByRole('img');
+        await thumbnail.dragTo(editor);
+        const chip=page.locator('.pane.selected .draft-image');
+        await chip.waitFor();assert.match(await chip.innerText(),/84 × 52/);
+        assert.equal(await editor.inputValue(),'');assert.equal(await page.getByRole('dialog',{name:'Image preview'}).count(),0);
+        await page.screenshot({path:join(dir,'dragged-attachment.png')});
+        result.drag={draftAttachment:await chip.locator('span').first().innerText(),imageReads:reads.length};
+        await chip.getByRole('button',{name:'Remove image',exact:true}).click();
+        await chip.waitFor({state:'detached'});assert.deepEqual(reads,[]);
+      }finally{author.off('request',watch);}
+    }
     const id=await session();assert(id);
     await author.close();
     await service.restart();
