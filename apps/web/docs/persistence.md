@@ -302,7 +302,9 @@ A no-op leaves both local history and storage untouched.
 Only the layout and coordinates enter the snapshot. Each window retains up to
 64 undo entries in memory. The adapter allows two horizontal panes, 20 to 80%
 split, 16 tabs and four floats. A snapshot is limited to 32,768 UTF-16 code units and checked on restore
-before any resource opens. Runtime view IDs, references and terminal
+before any resource opens. Live edits admit new coordinates and geometry
+at the operation boundary and reuse the dock engine's validated layout.
+Runtime view IDs, references and terminal
 attachments stay with the current connection. Undo and reload resolve the
 saved coordinates again. Terminal restoration attaches read-only.
 Document resource opens carry a connection-local UUID and return an exact

@@ -127,6 +127,30 @@ test('float visibility clamps to a narrow viewport without persisting temporary 
  assert.equal(JSON.stringify(doc),saved);
 });
 
+test('float inputs preserve restorable geometry through edits and undo',()=>{
+ const start=open(emptyDock()),tab=Object.keys(start.state.tabs)[0];
+ const rect={x:20,y:30,width:300,height:200};
+ const floated=act(start,'float',{tab,rect}),pane=floated.state.activePaneId;
+ rect.width=0;
+ assert.equal(floated.state.nodes[pane].rect.width,300);
+ for(const bad of [{...rect,width:99},{...rect,width:300,y:NaN},{...rect,width:300,extra:1}]){
+   assert.throws(()=>act(start,'float',{tab,rect:bad}));
+   assert.throws(()=>act(floated,'resize-float',{pane,rect:bad}));
+   const snapshot=structuredClone(savedDock(floated));
+   snapshot.state.nodes[pane].rect=bad;
+   assert.throws(()=>validateDock(snapshot));
+ }
+ assert.throws(()=>act(floated,'move-float',{pane,x:100001,y:0}));
+ assert.throws(()=>act(floated,'move-float',{pane,x:0,y:Infinity}));
+ const resizedRect={x:-5,y:8,width:400,height:290};
+ const resized=act(floated,'resize-float',{pane,rect:resizedRect});
+ resizedRect.height=0;
+ const undone=act(resized,'undo'),redone=act(undone,'redo');
+ assert.deepEqual(undone.state,floated.state);
+ assert.deepEqual(redone.state,resized.state);
+ assert.equal(validateDock(savedDock(redone)).state.nodes[pane].rect.height,290);
+});
+
 test('narrow projection preserves floating focus and the dock selection',()=>{
  let doc=open(open(emptyDock()));
  const root=doc.state.activePaneId,selected=doc.state.nodes[root].activeTabId;

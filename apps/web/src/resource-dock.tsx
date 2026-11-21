@@ -4,7 +4,7 @@ import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExt
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
 import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
-import {coordinate,dockIntent,dockStorageKey,readDock,writeDock,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
+import {dockIntent,dockStorageKey,readDock,writeDock,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
 import {composerInteraction,resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
 import {input,source,useSelected,useView} from './bridge.ts'
 import {presentationIdentity,useLayout,type Viewport} from './presentation.tsx'
@@ -17,7 +17,7 @@ import {FileImagePanel} from './session/transcript-file-image.tsx'
 import {DocumentFilePanel, type DocumentLocation} from './session/document-file.tsx'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',resizePane:'Resize resource panes',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>`Position ${x}, ${y} pixels. Arrow keys move; Shift changes by 50 pixels. Home and End select viewport corners.`,describeFloatSize:(w,h)=>`${w} by ${h} pixels. Arrow keys resize; Shift changes by 50 pixels. Home selects minimum size; End fills available space.`,dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
-const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
+const descriptor=(host:ResourceHost,surface:NativeSurface)=>{
   const value=host.entry.reopen
   if(!value)throw new Error('This resource cannot be reopened')
   if(value.action==='ui_surface'||value.action==='application_ui_surface'){
@@ -27,7 +27,7 @@ const descriptor=(host:ResourceHost,surface:NativeSurface):Coordinate=>{
     return {action:value.action==='ui_surface'?'surface':'application_surface',bundle:entry.bundle,name:entry.reference.name}
   }
   const {pane:_,generation:__,...saved}=value
-  return coordinate(saved)
+  return saved
 }
 interface Binding {label?:string;view?:string;open_revision?:string;opening?:ReturnType<ResourceOwner['open']>;created?:ReturnType<ResourceOwner['attachment']>;error?:string;floating?:boolean}
 export function openTerminals() { window.dispatchEvent(new Event('rsi:terminals')) }
@@ -103,7 +103,7 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
     const previous=current.current
     current.current=next;setDoc(next);bindHosts()
     for(const tab of Object.values(next.state.tabs)){
-      const c=coordinate(JSON.parse(tab.contentId));let binding=bindings.current.get(tab.id)
+      const c=JSON.parse(tab.contentId) as Coordinate;let binding=bindings.current.get(tab.id)
       if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task'||c.action==='file_image'||c.action==='workspace_document')continue
       if(!binding){
         binding={label:tab.title};bindings.current.set(tab.id,binding)
@@ -201,7 +201,7 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
   const list=useCallback(()=>terminal({type:'list'}),[owner,pane,surface.generation])
   const guide=<ResourceGuide surface={surface} pane={pane} terminals={{open:openTerminal,list}}/>
   const body=(tab:TabRecord)=>{
-    const c=coordinate(JSON.parse(tab.contentId)),binding=bindings.current.get(tab.id)
+    const c=JSON.parse(tab.contentId) as Coordinate,binding=bindings.current.get(tab.id)
     if(c.action==='schedule_task')return <ScheduledTaskDetail surface={surface} id={String(c.task)}/>
     if(c.action==='workspace_document')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?
       <DocumentFilePanel key={tab.contentId} pane={pane} generation={surface.generation} path={String(c.path)} location={documentLocation?.path===c.path?documentLocation:undefined}/>:null

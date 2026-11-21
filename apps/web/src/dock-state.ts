@@ -28,6 +28,11 @@ const keys=(v:unknown,list:string)=>plain(v)&&Object.keys(v).sort().join()===lis
 const text=(v:unknown,max=256):v is string=>typeof v==='string'&&v.length>0&&new TextEncoder().encode(v).length<=max&&!/[\x00-\x1f\x7f]/.test(v)
 const id=(v:unknown):v is string=>text(v,80)&&/^(pane|split|tab|float)[1-9][0-9]{0,14}$/.test(v)
 const fail=():never=>{throw new Error('Invalid resource layout')}
+const floatPixel=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&Math.abs(v)<=100000
+function checkedFloatRect(value:unknown):FloatRect {
+  if(!plain(value)||!keys(value,'x,y,width,height')||!Object.values(value).every(floatPixel)||value.width<100||value.height<100) return fail()
+  return value as FloatRect
+}
 export function coordinate(value:unknown):Coordinate {
   if(!plain(value)||!text(value.action,40)||JSON.stringify(value).length>16384)fail()
   const v=value as Record<string,any>
@@ -94,7 +99,7 @@ function validateState(state:LayoutState,counter:number) {
       // JSON removes the two optional fields. Accept exactly that normalized form.
       if(Object.keys(node).some(k=>!['kind','id','host','tabs','activeTabId','rect'].includes(k))||node.host!==(floating?'float':'dock')||!Array.isArray(node.tabs)||node.tabs.length>16||(floating&&node.tabs.length!==1))fail()
       if(!floating)docked++
-      if(floating){const r=node.rect;if(!r||!keys(r,'x,y,width,height')||Object.values(r).some(n=>!Number.isFinite(n)||Math.abs(n)>100000)||r.width<100||r.height<100)fail()}else if(node.rect!==undefined)fail()
+      if(floating)checkedFloatRect(node.rect);else if(node.rect!==undefined)fail()
       if(node.tabs.length?!node.tabs.includes(node.activeTabId!):node.activeTabId!==undefined)fail()
       for(const tabId of node.tabs){if(!id(tabId)||Number(tabId.replace(/^[a-z]+/,''))>counter||tabs.has(tabId))fail();tabs.add(tabId);const tab=state.tabs[tabId];if(!keys(tab,'id,kind,contentId,title')||tab.id!==tabId||tab.kind!=='rsi'||!text(tab.title,512))fail();coordinate(JSON.parse(tab.contentId))}
     }else fail()
@@ -138,14 +143,19 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
       if(intent.zone==='center')ops=mergeArrivingGuide(s,t,p)??plan.planDropTab(s,next,t,p,'center')
       else if((intent.zone==='left'||intent.zone==='right')&&dockPaneIds(s).length<2)ops=plan.planDropTab(s,next,t,p,intent.zone)
       break
-    case 'float':if(s.floats.length<4||findTabPane(s,t)?.host==='float')ops=plan.planFloatTab(s,next,t,intent.rect as FloatRect|undefined).ops;break
+    case 'float':
+      if(s.floats.length<4||findTabPane(s,t)?.host==='float')
+        ops=plan.planFloatTab(s,next,t,intent.rect===undefined?undefined:{...checkedFloatRect(intent.rect)}).ops
+      break
     case 'dock':{
       const source=getPane(s,p)
       ops=(source.host==='float'?mergeArrivingGuide(s,source.tabs[0]!,plan.activeDockPaneId(s)):undefined)??plan.planUnfloatPane(s,p)
       break
     }
-    case 'move-float':ops=[{type:'moveFloat',paneId:p,x:intent.x as number,y:intent.y as number}];break
-    case 'resize-float':ops=[{type:'resizeFloat',paneId:p,rect:intent.rect as FloatRect}];break
+    case 'move-float':
+      if(!floatPixel(intent.x)||!floatPixel(intent.y))return fail()
+      ops=[{type:'moveFloat',paneId:p,x:intent.x,y:intent.y}];break
+    case 'resize-float':ops=[{type:'resizeFloat',paneId:p,rect:{...checkedFloatRect(intent.rect)}}];break
     case 'resize':ops=plan.planResizeSplit(intent.split as SplitId,intent.sizes as number[],.2);break
     case 'mode':if(intent.mode!=='push'&&intent.mode!=='fullscreen')fail();ops=plan.planSetMode(s,intent.mode as 'push'|'fullscreen');break
     case 'undo':result=stepBack(value.history,s);break
@@ -159,8 +169,7 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
   }
   if(counter>1e14)fail()
   result??=record(value.history,s,ops)
-  // Check the two-pane/float/tab constraints after every semantic operation.
-  validateState(result.state,counter)
+  if(result.state.tabs!==s.tabs && Object.keys(result.state.tabs).length>16)fail()
   const history=result.history.entries.length>64?{entries:result.history.entries.slice(-64),cursor:64}:result.history
   return {...value,counter,state:result.state,history}
 }
