@@ -30,7 +30,7 @@ impl GuiApplication {
             let path = rsi_files_protocol::ReadPath::new(image.path.as_bytes()).map_err(error)?;
             Ok((image.pane, image.generation, path))
         })();
-        self.admit(false, None, move |app| async move {
+        self.admit_reply(move |app| async move {
             let (id, generation, path) = read?;
             let pane = app.pane(id)?;
             let attached = pane.attachment(&generation)?;

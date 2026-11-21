@@ -360,8 +360,10 @@ Session creation invalid or reuses a historical/durable Session.
 Detail previews read through the current exact-source ticket. A restored draft
 thumbnail can read its canonical Media reference with the attached pane generation.
 Replacing the attachment retires its thumbnail reads. Media owns canonical PNG validation and byte identity; arbitrary
-URLs and filenames are never read capabilities. Binary input and output travel
-separately from JSON views. Source bytes are bounded before copying into WASM;
+URLs and filenames are never read capabilities. A Media preview or Session file
+image read delivers its bytes or error to the caller without waking the workbench
+frame publisher. Binary input and output travel separately from JSON views.
+Source bytes are bounded before copying into WASM;
 canonical response receive leases remain owned until the document transfer is
 created. Two preview reads may run concurrently, independently of one upload.
 Read slots and the GUI's 32 MiB canonical-byte admission remain with returned

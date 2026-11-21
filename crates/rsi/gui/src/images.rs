@@ -168,7 +168,7 @@ impl GuiApplication {
             Ok(value) => value,
             Err(error) => return Box::pin(async { Err(error) }),
         };
-        self.admit(false, None, move |_| async move {
+        self.admit_reply(move |_| async move {
             let stored = tokio::select! { biased;
                 () = stop.cancelled() => Err("Image preview closed".into()),
                 result = media.read(&reference) => result.map_err(error),

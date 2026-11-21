@@ -387,7 +387,18 @@ async fn draft_thumbnail_reads_without_opening_a_detail_and_retires_with_its_pan
         .unwrap();
     let selection =
         json!({"kind":"draft","pane":"main","generation":generation,"media":media}).to_string();
+    let changes = app.changes();
     assert_eq!(app.read_image(&selection).await.unwrap().bytes, png(2));
+    assert!(
+        !changes.has_changed().unwrap(),
+        "Media reads only return bytes"
+    );
+    let file = json!({"pane":"main","generation":generation,"path":"absent.png"});
+    assert!(app.transcript_image(&file.to_string()).await.is_err());
+    assert!(
+        !changes.has_changed().unwrap(),
+        "file errors only reach the caller"
+    );
     assert!(sources::panel(&app)["image_detail"].is_null());
     backend.media.block_read.store(true, Ordering::SeqCst);
     let reading = app.read_image(&selection);
