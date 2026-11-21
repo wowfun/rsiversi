@@ -512,11 +512,17 @@ pub struct ScheduledSession {
     pub archived: bool,
     /// The Session has used its lifetime automatic Turn allowance.
     pub exhausted: bool,
-    /// Reminder whose accepted delivery has not settled yet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub executing: Option<rsi_agent_session_protocol::DomainRequestId>,
     /// Current reminders, including paused and consumed ones.
-    pub reminders: Vec<rsi_agent_schedule::Reminder>,
+    pub reminders: Vec<ScheduledReminder>,
+}
+/// Retained rule and the current admission state of its task actions.
+#[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledReminder {
+    /// Durable reminder in its linked Session.
+    pub rule: rsi_agent_schedule::Reminder,
+    /// The target still holds an acknowledged delivery.
+    pub executing: bool,
 }
 /// Host-wide reminder page. A scan over protected rows can yield an empty intermediate page.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -566,7 +572,7 @@ impl ScheduledSession {
             ));
         }
         for group in groups {
-            rsi_agent_schedule::validate_reminders(&group.reminders)
+            rsi_agent_schedule::validate_reminders(group.reminders.iter().map(|r| &r.rule))
                 .map_err(SessionError::Invalid)?;
         }
         validate_visible_order(
@@ -999,6 +1005,10 @@ impl rsi_meta_contract::LocalContract for SessionPurgeCleanupContract {
 /// Transport-independent Session domain service.
 #[async_trait]
 pub trait SessionService: fmt::Debug + Send + Sync + 'static {
+    /// Queues an operator-requested delivery in the linked Session.
+    async fn run_scheduled_task(&self, _task: ScheduledTaskId) -> Result<bool> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
     /// Removes future occurrences, returning false if the reminder is already absent.
     async fn delete_scheduled_task(&self, _task: ScheduledTaskId) -> Result<bool> {
         Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))

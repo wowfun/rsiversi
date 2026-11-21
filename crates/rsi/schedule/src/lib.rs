@@ -58,6 +58,8 @@ pub struct ScheduleService {
 }
 #[derive(Debug)]
 struct Inner {
+    context: rsi_meta::Context,
+    delivery_holds: tokio::sync::watch::Sender<rsi_agent_schedule::DeliveryHolds>,
     turns: Arc<dyn TurnService>,
     execution: Arc<dyn TurnExecution>,
     store: Arc<dyn SessionStore>,
@@ -91,6 +93,7 @@ impl ScheduleService {
     /// Builds a controller with an injectable UTC clock. Call `start` once
     /// its dependencies and cleanup have been registered.
     pub fn new(
+        context: rsi_meta::Context,
         turns: Arc<dyn TurnService>,
         execution: Arc<dyn TurnExecution>,
         store: Arc<dyn SessionStore>,
@@ -101,6 +104,8 @@ impl ScheduleService {
         let stop = CancellationToken::new();
         Self {
             inner: Arc::new(Inner {
+                context,
+                delivery_holds: tokio::sync::watch::channel(BTreeMap::new()).0,
                 turns,
                 execution,
                 store,
@@ -121,11 +126,7 @@ impl ScheduleService {
         }
     }
     /// Runs the generation's shared timer until shutdown.
-    pub fn start(
-        self,
-        context: rsi_meta::Context,
-        startup: Option<tokio::sync::watch::Receiver<bool>>,
-    ) {
+    pub fn start(self, startup: Option<tokio::sync::watch::Receiver<bool>>) {
         let dispatcher = self.clone();
         self.inner.tasks.spawn(async move {
             let run = async {
@@ -134,7 +135,7 @@ impl ScheduleService {
                 {
                     return;
                 }
-                dispatcher.dispatch(&context).await;
+                dispatcher.dispatch(&dispatcher.inner.context).await;
             };
             tokio::select! { biased; () = dispatcher.inner.stop.cancelled() => {}, () = run => {} }
         });
@@ -261,6 +262,10 @@ impl ScheduleService {
             if let Some(reservation) = state.reservation.as_ref().filter(|r| !r.settled) {
                 self.wait_terminal(live, &reservation.input.message_id, live.stop.clone())
                     .await?;
+                tokio::select! {
+                    () = live.stop.cancelled() => return Err("Schedule wait cancelled".into()),
+                    result = self.inner.turns.wait_idle(live.lease.session_id()) => result.map_err(display)?,
+                }
                 self.command(live, &reservation.input, None)
                     .await
                     .map_err(display)?;
@@ -341,24 +346,10 @@ impl ScheduleService {
             .watch_projection_changes(live.lease.session_id())
             .map_err(display)?;
         loop {
-            let receipt = retry_contention(|| {
-                self.inner
-                    .turns
-                    .message_status(live.lease.session_id(), message)
-            })
-            .await
-            .map_err(display)?;
-            let terminal = match receipt.state {
-                MessageState::Pending => false,
-                MessageState::Discarded { .. } => true,
-                MessageState::Claimed { turn_id, .. } => {
-                    retry_contention(|| self.inner.turns.outcome(live.lease.session_id(), &turn_id))
-                        .await
-                        .map_err(display)?
-                        .is_some()
-                }
-            };
-            if terminal {
+            if !self
+                .delivery_active(live.lease.session_id(), message)
+                .await?
+            {
                 break;
             }
             tokio::select! {
@@ -367,6 +358,27 @@ impl ScheduleService {
             }
         }
         Ok(())
+    }
+    async fn delivery_active(
+        &self,
+        session: &SessionId,
+        message: &MessageId,
+    ) -> Result<bool, String> {
+        let receipt = retry_contention(|| self.inner.turns.message_status(session, message))
+            .await
+            .map_err(display)?;
+        match receipt.state {
+            MessageState::Pending => Ok(true),
+            MessageState::Discarded { .. } => Ok(false),
+            MessageState::Claimed { turn_id, .. } => {
+                Ok(
+                    retry_contention(|| self.inner.turns.outcome(session, &turn_id))
+                        .await
+                        .map_err(display)?
+                        .is_none(),
+                )
+            }
+        }
     }
     async fn finish(&self, live: &Live) -> Result<(), String> {
         live.lease.revoke();
@@ -409,6 +421,83 @@ impl ScheduleService {
 }
 #[async_trait]
 impl ScheduleController for ScheduleService {
+    fn delivery_holds(&self) -> tokio::sync::watch::Receiver<rsi_agent_schedule::DeliveryHolds> {
+        self.inner.delivery_holds.subscribe()
+    }
+
+    async fn check_operator_run(
+        &self,
+        session: &SessionId,
+        task: &rsi_agent_session_protocol::DomainRequestId,
+        previous: Option<&MessageId>,
+    ) -> Result<(), String> {
+        if self.inner.stop.is_cancelled() {
+            return Err("Schedule runtime is stopping".into());
+        }
+        if self
+            .inner
+            .context
+            .lookup_local::<rsi_navigation::NavigationContract>()
+            .is_some_and(|nav| nav.archived_sessions().contains(session))
+        {
+            return Err("The linked session is archived".into());
+        }
+        if self
+            .inner
+            .delivery_holds
+            .borrow()
+            .get(session)
+            .is_some_and(|tasks| tasks.contains(task))
+        {
+            return Err("reminder execution is still active".into());
+        }
+        if let Some(message) = previous
+            && self.delivery_active(session, message).await?
+        {
+            self.hold_delivery(session, task);
+            return Err("reminder execution is still active".into());
+        }
+        Ok(())
+    }
+
+    fn hold_delivery(
+        &self,
+        session: &SessionId,
+        task: &rsi_agent_session_protocol::DomainRequestId,
+    ) {
+        let _gate = self.inner.gate.lock().unwrap();
+        if self.inner.stop.is_cancelled() {
+            return;
+        }
+        let mut first = false;
+        self.inner.delivery_holds.send_if_modified(|sessions| {
+            let tasks = sessions.entry(session.clone()).or_default();
+            first = tasks.is_empty();
+            tasks.insert(task.clone())
+        });
+        if !first {
+            return;
+        }
+        let service = self.clone();
+        let session = session.clone();
+        self.inner.tasks.spawn(async move {
+            loop {
+                let count = service.inner.delivery_holds.borrow()[&session].len();
+                tokio::select! { biased;
+                    () = service.inner.stop.cancelled() => return,
+                    result = service.inner.turns.wait_idle(&session) => {
+                        if let Err(error) = result { service.record_failure(&session, &display(error)); }
+                    }
+                }
+                // A second task may have published after this idle observation.
+                if service.inner.delivery_holds.send_if_modified(|sessions| {
+                    if sessions[&session].len() != count { return false; }
+                    sessions.remove(&session);
+                    true
+                }) { break; }
+            }
+        });
+    }
     async fn refresh_pending(&self, session: &SessionId) {
         let gate = self.session_gate(session);
         let _session = gate.lock().await;
@@ -737,6 +826,20 @@ impl ScheduleService {
                         .transpose()
                 }) {
                     Ok(Some(state)) => {
+                        for reminder in &state.reminders {
+                            if let Some(last) = &reminder.last_delivery
+                                && !state
+                                    .reservation
+                                    .as_ref()
+                                    .is_some_and(|r| r.input.message_id == last.message_id)
+                            {
+                                match self.delivery_active(&session, &last.message_id).await {
+                                    Ok(true) => self.hold_delivery(&session, &reminder.id),
+                                    Ok(false) => {}
+                                    Err(problem) => self.record_failure(&session, &problem),
+                                }
+                            }
+                        }
                         self.schedule(&session, &state);
                     }
                     Ok(None) => {}
@@ -799,6 +902,7 @@ impl PluginFactory for ScheduleControllerFactory {
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let service = ScheduleService::new(
+            plan.context().clone(),
             plan.local::<TurnServiceContract>()?,
             plan.local::<TurnExecutionContract>()?,
             plan.local::<SessionStoreContract>()?,
@@ -820,7 +924,7 @@ impl PluginFactory for ScheduleControllerFactory {
                 })
             }),
         )?;
-        service.start(plan.context().clone(), self.startup.clone());
+        service.start(self.startup.clone());
         Ok(())
     }
 }

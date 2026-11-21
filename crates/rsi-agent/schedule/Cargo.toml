@@ -16,12 +16,12 @@ rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
 rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
 schemars.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

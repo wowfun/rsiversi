@@ -291,21 +291,28 @@ fn root_operations(
             },
         ),
     )?;
-    let delete_owner = service.clone();
-    let delete_scratch = scratch.clone();
-    let delete = registrar.register(
-        Operation::DeleteScheduledTask.spec(),
-        json_handler(
-            move |context, task: rsi_session_protocol::ScheduledTaskId| {
-                let service = delete_owner.scoped(context.origin);
-                let scratch = delete_scratch.clone();
-                async move {
-                    let reservation = scratch.reserve(Operation::DeleteScheduledTask).await?;
-                    admitted(service.delete_scheduled_task(task).await, reservation)
-                }
-            },
-        ),
-    )?;
+    for operation in [Operation::RunScheduledTask, Operation::DeleteScheduledTask] {
+        let task_owner = service.clone();
+        let task_scratch = scratch.clone();
+        maintenance.push(registrar.register(
+            operation.spec(),
+            json_handler(
+                move |context, task: rsi_session_protocol::ScheduledTaskId| {
+                    let service = task_owner.scoped(context.origin);
+                    let scratch = task_scratch.clone();
+                    async move {
+                        let reservation = scratch.reserve(operation).await?;
+                        let result = if operation == Operation::RunScheduledTask {
+                            service.run_scheduled_task(task).await
+                        } else {
+                            service.delete_scheduled_task(task).await
+                        };
+                        admitted(result, reservation)
+                    }
+                },
+            ),
+        )?);
+    }
     let recent = registrar.register(
         Operation::Recent.spec(),
         json_handler(move |context, request: wire::Recent| {
@@ -330,7 +337,7 @@ fn root_operations(
             }
         }),
     )?;
-    maintenance.extend([create, attach, read_summary, recent, catalog, delete]);
+    maintenance.extend([create, attach, read_summary, recent, catalog]);
     Ok(maintenance)
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.

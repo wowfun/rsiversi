@@ -437,6 +437,12 @@ impl SessionService for SessionClient {
     ) -> rsi_session_protocol::Result<bool> {
         self.state.call(Operation::DeleteScheduledTask, &task).await
     }
+    async fn run_scheduled_task(
+        &self,
+        task: rsi_session_protocol::ScheduledTaskId,
+    ) -> rsi_session_protocol::Result<bool> {
+        self.state.call(Operation::RunScheduledTask, &task).await
+    }
 
     async fn scheduled_tasks(
         &self,

@@ -1,5 +1,10 @@
 # Presentation design
 
+The automation task's action menu offers Run now for active, paused and ended
+tasks. It disables delivery while the linked Session is archived, while a
+delivery is running or until the one-minute interval expires. The manager
+and Session task views sort and display the earliest eligible run, including
+that interval. An unsuccessful request shows its error beside the task.
 The automation task manager confirms deletion against the selected task and
 Session. Confirmation removes future triggers and keeps queued messages and
 the original conversation. A successful deletion returns focus to the list.

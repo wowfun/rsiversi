@@ -4,6 +4,7 @@ Entered runtime context carries the explicit participant label `Runtime context`
 Labels follow typed provenance; identical human text remains human input.
 The schedule deletion command contributes held context labelled `Automation task`.
 Its original text and source remain available with the Step that consumed it.
+An operator's Run now command shows the same collapsed automation trigger as a timed delivery.
 An automatic input uses the continuation's recorded domain for its shared Web
 and TUI label. Schedule deliveries read `Automation task`, Goal deliveries read
 `Goal continuation`, and other domains read `Automatic continuation`.

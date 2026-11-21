@@ -38,7 +38,8 @@ const transcript = {blocks,turns:{entries:{turn:{id:'turn',status:'Completed',ru
 const transcriptOwner = {blocks:new Map(),setReadingSummary(){},action:async()=>{}};
 window.scene = (mode) => {
   const cards = ['cards','stale','deleted'].includes(mode);
-  const reminders = mode==='many'||mode==='cards'?tasks:mode==='one'?tasks.slice(0,1):mode==='ended'?[{...tasks[0],active:false,consumed:true}]:[];
+  const reminders = mode==='held'?[tasks[0],{...tasks[1],last_delivery:{available_ms:time+55000}}]:
+    mode==='many'||mode==='cards'?tasks:mode==='one'?tasks.slice(0,1):mode==='ended'?[{...tasks[0],active:false,consumed:true}]:[];
   const schedule = {reminders,allocated_rounds:mode==='ended'?1:0,reservation:mode==='ended'?{reminder_id:'reminder-0',occurrence_ms:time,settled:true}:null};
   source.set({surfaces:{main:{kind:'native',session:'research',generation:'1',ui_surfaces:[],transcript:cards?transcript:undefined,projections:{
     cursor:{kind:'durable',fact_seq:mode==='stale'?8:19},entries:[{producer:'rsi.schedule.projection',content:{kind:'value',value:schedule}}]}}},application_surfaces:[]});
@@ -112,7 +113,13 @@ try {
       await trigger.click();
       await first.click();
       await detail.getByText('Prepare the weekly summary').waitFor();
+      await page.evaluate(()=>window.scene('held'));
+      assert.equal(await detail.locator('time').getAttribute('datetime'),'2026-11-20T09:30:55.000Z');
       await page.getByRole('button',{name:'Hide resources'}).click();
+      await trigger.click();
+      assert.match(await first.innerText(),/Review open pull requests/);
+      assert.equal(await list.locator('time').last().getAttribute('datetime'),'2026-11-20T09:30:55.000Z');
+      await first.press('Escape');
       await page.evaluate(()=>window.scene('cards'));
       const transcript = page.getByRole('region',{name:'Conversation transcript'});
       const tail = transcript.locator('[data-turn-tail="turn"]');

@@ -26,6 +26,44 @@ fn equal_deadlines_keep_the_same_order_across_reservation_and_settlement() {
     );
 }
 #[test]
+fn manual_and_timed_deliveries_share_a_floor_but_keep_the_original_occurrence() {
+    let mut state = ScheduleState::default();
+    let task = id("one-shot");
+    let message = |s| rsi_agent_session_protocol::MessageId::new(s).unwrap();
+    state
+        .create(
+            task.clone(),
+            "first\nsecond".into(),
+            ScheduleRule::At { at_ms: 5000 },
+            1,
+        )
+        .unwrap();
+    let (text, previous) = state.run_now(&task, message("manual"), 4000).unwrap();
+    assert!(previous.is_none());
+    assert!(text.contains(r#"reminder_prompt_json: "first\nsecond""#));
+    assert_eq!(state.reminders[0].due_ms, 5000);
+    assert_eq!(state.next_due(), Some(64000));
+    assert_eq!(state.allocated_rounds, 0);
+    let held = state.clone();
+    assert!(state.run_now(&task, message("too-soon"), 63999).is_err());
+    assert!(state.reserve(63999).is_err());
+    assert_eq!(state, held);
+    let automatic = state.reserve(64000).unwrap();
+    assert!(
+        state
+            .run_now(&task, message("still-running"), 124000)
+            .is_err()
+    );
+    state.settle(&automatic.message_id).unwrap();
+    assert!(state.next_due().is_none());
+    assert!(state.run_now(&task, message("too-soon"), 123999).is_err());
+    state.run_now(&task, message("ended"), 124000).unwrap();
+    assert!(state.reminders[0].consumed);
+    assert_eq!(state.reminders[0].due_ms, 5000);
+    assert_eq!(state.allocated_rounds, 1);
+    state.validate().unwrap();
+}
+#[test]
 fn one_minute_floor_applies_to_creation_and_durable_reminders() {
     let mut state = ScheduleState::default();
     let create = |state: &mut ScheduleState, interval_ms| {
@@ -62,6 +100,14 @@ fn delayed_fixed_rate_work_coalesces_and_keeps_its_original_anchor() {
     let first = state.reserve(1_000_000).unwrap();
     assert_eq!(state.reservation.as_ref().unwrap().occurrence_ms, 901_000);
     assert_eq!(state.reminders[0].due_ms, 1_201_000);
+    assert_eq!(
+        state.reminders[0]
+            .last_delivery
+            .as_ref()
+            .unwrap()
+            .available_ms,
+        961_000
+    );
     assert_eq!(state.allocated_rounds, 1);
     assert!(state.reserve(2_000_000).is_err());
     state.settle(&first.message_id).unwrap();
@@ -80,6 +126,14 @@ fn one_shot_is_charged_once_and_selected_resume_cannot_replenish_it() {
         )
         .unwrap();
     let input = state.reserve(9000).unwrap();
+    assert_eq!(
+        state.reminders[0]
+            .last_delivery
+            .as_ref()
+            .unwrap()
+            .available_ms,
+        69_000
+    );
     state.settle(&input.message_id).unwrap();
     assert!(state.next_due().is_none());
     assert!(state.resume(&[id("once")]).is_err());
@@ -240,6 +294,13 @@ fn resume_can_reconcile_the_last_accepted_round_without_replenishing_it() {
         state.validate().unwrap();
         state.settle(&input.message_id).unwrap();
         assert!(state.resume(std::slice::from_ref(&reminder)).is_err());
+        if round == 100 {
+            let msg =
+                rsi_agent_session_protocol::MessageId::new("manual-after-exhaustion").unwrap();
+            state.run_now(&reminder, msg, 62000).unwrap();
+            assert!(state.next_due().is_none());
+            state.validate().unwrap();
+        }
         state.delete(&reminder).unwrap();
     }
     assert_eq!(state.allocated_rounds, 100);

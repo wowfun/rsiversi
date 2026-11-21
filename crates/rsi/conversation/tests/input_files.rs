@@ -8,6 +8,45 @@ use rsi_conversation::{
 use rsi_media_protocol::{FileRef, MediaId};
 
 #[test]
+fn running_and_deleting_a_schedule_use_their_distinct_transcript_roles() {
+    use rsi_agent_session_protocol::{CommandMessageSource, ContributionId, DomainRequestId};
+    for (name, role, title) in [
+        (
+            "rsi.schedule.run",
+            "trigger-schedule",
+            Some("Automation task"),
+        ),
+        (
+            "rsi.schedule.delete",
+            "step-context",
+            Some("Automation task"),
+        ),
+        ("example.command", "user", None),
+    ] {
+        let source = CommandMessageSource {
+            command: ContributionId::new(name).unwrap(),
+            request_id: DomainRequestId::new("task").unwrap(),
+            invocation_sha256: "a".repeat(64),
+            ordinal: 0,
+            attribution: None,
+        };
+        let claim = InputMessageSource::Command {
+            message_id: source.message_id().unwrap(),
+            source,
+        };
+        let input = EnteredInput {
+            index: 0,
+            seq: 1,
+            offset: 0,
+            source: Some(&claim),
+            content: EnteredContent::Direct("[SCHEDULE REMINDER]"),
+        };
+        assert_eq!(input.presentation().0, role);
+        assert_eq!(input.attribution().as_deref(), title);
+    }
+}
+
+#[test]
 fn runtime_context_label_follows_provenance_instead_of_message_text() {
     let human = InputMessageSource::Human {
         message_id: MessageId::new("human").unwrap(),

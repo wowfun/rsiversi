@@ -1,10 +1,11 @@
 # rsi-session-api
 
-Interface version 32 exposes a caller-scoped `delete-scheduled-task` mutation
-that removes one reminder in its owning Session and reports whether it existed.
-It uses the same Session protection and mutation admission as an attached writer.
-The caller-scoped `scheduled-tasks` v2 Data read and
-`scheduled-tasks-observe` v2 Subscription. Both report the current linked
+Interface version 33 exposes caller-scoped `run-scheduled-task` and
+`delete-scheduled-task` mutations. Run queues one explicit follow-up in the
+linked Session. Delete removes the reminder. Both use the Session protection
+and mutation admission of an attached writer.
+The caller-scoped `scheduled-tasks` v3 Data read and
+`scheduled-tasks-observe` v3 Subscription report current execution holds and the linked
 Session archive state alongside visible reminders without
 attaching their Sessions. The subscription sends changed, zero-based pages of up
 to eight Session groups and completes each update with its page count. A shorter

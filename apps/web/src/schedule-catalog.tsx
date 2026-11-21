@@ -1,8 +1,8 @@
-import {useEffect,useId,useMemo,useRef,useState,useSyncExternalStore} from 'react';
+import {useEffect,useId,useMemo,useRef,useState,useSyncExternalStore,type Ref} from 'react';
 import {input,run,loadScheduleCatalog,scheduleCatalog,useView} from './bridge.ts';
 import {navigationTitle} from '../conversation-title.js';
 import {IconChevronRightOutlineRegular,IconClockOutlineRegular,IconCloseOutlineRegular,IconEllipsisOutlineRegular,IconSearchOutlineRegular} from '../vendor/dsh/dockkit-primitives/icons/index.tsx';
-import {frequency,NextRun,ReminderDetails,reminderStatus} from './session/scheduled-tasks.tsx';
+import {frequency,NextRun,nextRunAt,ReminderDetails,reminderStatus,type Reminder} from './session/scheduled-tasks.tsx';
 import {ScheduleRecommendations} from '../vendor/dsh/schedule/ScheduleRecommendations.tsx';
 import {ScheduleEmptyIllustration} from '../vendor/dsh/schedule/ScheduleEmptyIllustration.tsx';
 import {TextSearchIndex} from '../vendor/dsh/text-search.ts';
@@ -15,13 +15,40 @@ import css from './schedule-catalog.module.css';
 const filters = ['Active','Paused','Ended','All'] as const;
 const creationPrompt = 'Please create an automation task based on the requirements.';
 
-function TaskActions({disabled,onDelete}: {disabled:boolean;onDelete:()=>void}) {
+type CatalogTask = {session:string;row:Reminder;archived:boolean;executing:boolean;exhausted:boolean};
+function TaskDetail({task,problem,id,now,closeRef,onClose,onDelete}: {
+  task:CatalogTask;problem:boolean;id:string;now:number;closeRef:Ref<HTMLButtonElement>;onClose:()=>void;onDelete:()=>void;
+}) {
   const [open,setOpen] = useState(false);
+  const [busy,setBusy] = useState(false);
+  const [error,setError] = useState('');
   const trigger = useRef<HTMLButtonElement>(null);
-  return <Menu open={open} onClose={()=>setOpen(false)} align="end" portal autoFocus
+  const disabled = task.executing || problem || busy;
+  const floor = task.row.last_delivery?.available_ms;
+  const limited = floor !== undefined && floor > Date.now();
+  async function start() {
+    trigger.current?.focus();
+    setOpen(false);
+    setError('');
+    setBusy(true);
+    try { await input.command({action:'run_scheduled_task',task:{session_id:task.session,id:task.row.id}}); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setBusy(false); }
+  }
+  return <aside id={id} className={css.detail} aria-label="Selected task" aria-busy={busy}><div className={css.detailActions}>
+    <Menu open={open} onClose={()=>setOpen(false)} align="end" portal autoFocus
     anchor={<button ref={trigger} type="button" aria-label="Automation task actions" aria-haspopup="menu" aria-expanded={open} onClick={()=>setOpen(!open)}><IconEllipsisOutlineRegular size={16}/></button>}>
+    <MenuItemButton disabled={disabled || task.archived || limited}
+      disabledReason={limited && !disabled && !task.archived ? 'Available at '+new Date(floor).toLocaleTimeString() : undefined}
+      onSelect={()=>void start()}>Run now</MenuItemButton>
     <MenuItemButton disabled={disabled} onSelect={()=>{trigger.current?.focus();setOpen(false);onDelete()}}>Delete task</MenuItemButton>
-  </Menu>;
+    </Menu>
+    <button ref={closeRef} type="button" aria-label="Close details" onClick={onClose}><IconCloseOutlineRegular size={16}/></button></div>
+    {error && <p role="alert">{error}</p>}
+    <ReminderDetails row={task.row} exhausted={task.exhausted} now={now}/>
+    {task.archived && <p role="status">The linked session is archived.</p>}
+    <LinkedSession session={task.session} archived={task.archived}/>
+  </aside>;
 }
 
 function DeleteTaskDialog({target,close,onDeleted}: {target:{session:string;id:string;prompt:string};close:()=>void;onDeleted:()=>void}) {
@@ -78,11 +105,11 @@ export default function ScheduleCatalog({onClose,onDeleted}: {onClose:()=>void;o
   const details = useRef<HTMLButtonElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
   const detailId = useId();
-  const all = useMemo(()=>groups?.flatMap(group=>group.reminders.map(row=>({
+  const all = useMemo(()=>groups?.flatMap(group=>group.reminders.map(({rule:row,executing})=>({
     session:group.position.session_id,row,title:row.prompt.trim().split('\n',1)[0],
     key:encodeURIComponent(group.position.session_id)+'/'+encodeURIComponent(row.id),
-    archived:group.archived,exhausted:group.exhausted,executing:group.executing===row.id,status:reminderStatus(row,group.exhausted),
-  }))).sort((a,b)=>a.row.due_ms-b.row.due_ms),[groups]);
+    archived:group.archived,exhausted:group.exhausted,executing,next:nextRunAt(row),status:reminderStatus(row,group.exhausted),
+  }))).sort((a,b)=>a.next-b.next),[groups]);
   const task = selected && all?.find(item=>item.session===selected.session && item.row.id===selected.id);
   const showingDetails = !!task;
   const prefill = (text:string) => void run(()=>input.open({action:'new_conversation'},text));
@@ -96,6 +123,14 @@ export default function ScheduleCatalog({onClose,onDeleted}: {onClose:()=>void;o
   const hasActiveRows = useMemo(()=>shown?.some(item=>item.status==='Active'),[shown]);
   const showCountdown = hasActiveRows || task?.status==='Active';
   const [now,setNow] = useState(Date.now);
+  const floor = task?.row.last_delivery?.available_ms;
+  useEffect(()=>{
+    if (!floor) return;
+    const delay = floor-Date.now();
+    if (delay<=0) return;
+    const timer = window.setTimeout(()=>setNow(Date.now()),delay);
+    return ()=>window.clearTimeout(timer);
+  },[floor]);
   useEffect(()=>{
     if (!showCountdown) return;
     setNow(Date.now());
@@ -141,20 +176,15 @@ export default function ScheduleCatalog({onClose,onDeleted}: {onClose:()=>void;o
             onClick={event=>{returnFocus.current=event.currentTarget;setSelected({session:item.session,id:item.row.id})}}>
             <IconClockOutlineRegular size={16}/><span><strong>{item.title}</strong><small id={metadataId}>
               {item.status!=='Active' && item.status+' · '}{frequency(item.row)}
-              {item.status==='Active' && <> · Next run <NextRun millis={item.row.due_ms} now={now}/></>}
+              {item.status==='Active' && <> · Next run <NextRun millis={item.next} now={now}/></>}
             </small></span>
           </button>
         </li>;
       })}</ul> : <div className={css.empty} role="status">{!query && <ScheduleEmptyIllustration/>}<p>{query?'No matching tasks':filter==='All'?'No tasks yet. Tasks created in your sessions appear here.':'No '+filter.toLowerCase()+' automation tasks'}</p></div>)}
       {shown?.length===0 && !query && (filter==='Active'||filter==='All') && <ScheduleRecommendations onUse={prefill}/>}
     </div></div>
-    {task && <aside id={detailId} className={css.detail} aria-label="Selected task"><div className={css.detailActions}>
-      <TaskActions key={task.key} disabled={task.executing || !!problem} onDelete={()=>setDeleting({session:task.session,id:task.row.id,prompt:task.row.prompt})}/>
-      <button ref={details} type="button" aria-label="Close details" onClick={()=>setSelected(undefined)}><IconCloseOutlineRegular size={16}/></button></div>
-      <ReminderDetails row={task.row} exhausted={task.exhausted} now={now}/>
-      {task.archived && <p role="status">The linked session is archived.</p>}
-      <LinkedSession session={task.session} archived={task.archived}/>
-    </aside>}
+    {task && <TaskDetail key={task.key} task={task} problem={!!problem} id={detailId} now={now} closeRef={details}
+      onClose={()=>setSelected(undefined)} onDelete={()=>setDeleting({session:task.session,id:task.row.id,prompt:task.row.prompt})}/>}
     {deleting && <DeleteTaskDialog target={deleting} close={()=>setDeleting(undefined)} onDeleted={onDeleted}/>}
   </section>;
 }

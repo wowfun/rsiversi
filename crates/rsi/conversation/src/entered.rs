@@ -68,6 +68,11 @@ impl<'a> EnteredInput<'a> {
             },
             Some(InputMessageSource::RuntimeContext) => ("context", "Runtime context".into()),
             Some(InputMessageSource::Command { source, .. })
+                if source.command.as_str() == "rsi.schedule.run" =>
+            {
+                ("trigger-schedule", "Automation task".into())
+            }
+            Some(InputMessageSource::Command { source, .. })
                 if source.command.as_str() == "rsi.schedule.delete" =>
             {
                 ("step-context", "Automation task".into())

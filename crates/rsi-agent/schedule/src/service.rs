@@ -1,10 +1,14 @@
 //! Host-generation capability. A durable domain is never itself live authority.
 use async_trait::async_trait;
-use rsi_agent_session_protocol::{DomainIdentity, SessionId};
+use rsi_agent_session_protocol::{DomainIdentity, DomainRequestId, MessageId, SessionId};
 use rsi_agent_turn_protocol::{AgentCallerAuthority, DomainMutationReceipt};
 use rsi_meta::LocalContract;
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
+
+/// Active operator deliveries by linked Session, released when the target goes idle.
+pub type DeliveryHolds =
+    std::collections::BTreeMap<SessionId, std::collections::BTreeSet<DomainRequestId>>;
 
 /// Captured Host epoch, revoked on withdrawal.
 #[derive(Clone, Debug)]
@@ -48,6 +52,17 @@ pub trait ScheduleController: fmt::Debug + Send + Sync + 'static {
     fn armed(&self, session: &SessionId) -> bool;
     /// Latest bounded driver or cleanup failure for this Session, if any.
     fn failure(&self, session: &SessionId) -> Option<String>;
+    /// Reports changes to the execution holds shared by the task manager and admission.
+    fn delivery_holds(&self) -> tokio::sync::watch::Receiver<DeliveryHolds>;
+    /// Checks target availability and recovers a previous uncompleted delivery.
+    async fn check_operator_run(
+        &self,
+        session: &SessionId,
+        task: &DomainRequestId,
+        previous: Option<&MessageId>,
+    ) -> Result<(), String>;
+    /// Tracks an acknowledged follow-up through the target Session's idle boundary.
+    fn hold_delivery(&self, session: &SessionId, task: &DomainRequestId);
     /// Recomputes an existing future timer after an operator edit. An accepted
     /// delivery keeps its owner; this does not arm a disarmed Session.
     async fn refresh_pending(&self, session: &SessionId);

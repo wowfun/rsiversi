@@ -7,9 +7,10 @@ use rsi_session_protocol::{
 use sha2::{Digest, Sha256};
 
 impl LocalSessionService {
-    pub(super) async fn delete_reminder(
+    pub(super) async fn edit_reminder(
         &self,
         task: rsi_session_protocol::ScheduledTaskId,
+        command: &'static str,
     ) -> Result<bool> {
         use rsi_agent_schedule::{SCHEDULE_DELETE, SCHEDULE_DOMAIN, ScheduleState};
         use rsi_agent_session_protocol::{
@@ -17,20 +18,21 @@ impl LocalSessionService {
             SessionCommandInvocation,
         };
         // Sample existing owners before this management request attaches its own handle.
-        let attached = self.lifecycles.attached(&task.session_id);
+        let attached = command == SCHEDULE_DELETE && self.lifecycles.attached(&task.session_id);
         let handle = self.attach_local(&task.session_id).await?;
         let _operation = handle.admit_mutation()?;
         let _activity = handle.begin_activity()?;
-        let mut notify = attached
-            || self
-                .projection_service
-                .resident_composition(&task.session_id)
-                .is_ok_and(|state| {
-                    matches!(
-                        state,
-                        rsi_agent_turn_protocol::ResidentComposition::Resident { .. }
-                    )
-                });
+        let mut notify = command == SCHEDULE_DELETE
+            && (attached
+                || self
+                    .projection_service
+                    .resident_composition(&task.session_id)
+                    .is_ok_and(|state| {
+                        matches!(
+                            state,
+                            rsi_agent_turn_protocol::ResidentComposition::Resident { .. }
+                        )
+                    }));
         loop {
             let Some((control_seq, row)) = self
                 .turns
@@ -50,12 +52,24 @@ impl LocalSessionService {
             hash.update([u8::from(notify)]);
             hash.update(task.id.as_str().as_bytes());
             let invocation = SessionCommandInvocation {
-                command: ContributionId::new(SCHEDULE_DELETE).expect("registered command"),
-                request_id: DomainRequestId::new(format!("schedule-delete-{:x}", hash.finalize()))
-                    .expect("SHA-256 identity"),
+                command: ContributionId::new(command).expect("registered command"),
+                request_id: DomainRequestId::new(format!(
+                    "schedule-{}-{:x}",
+                    if command == SCHEDULE_DELETE {
+                        "delete"
+                    } else {
+                        "run"
+                    },
+                    hash.finalize()
+                ))
+                .expect("SHA-256 identity"),
                 expected_revision: CommandRevision::Durable { control_seq },
-                arguments: CommandArguments::new(serde_json::json!({"id":task.id,"notify":notify}))
-                    .map_err(|e| SessionError::Invalid(e.to_string()))?,
+                arguments: CommandArguments::new(if command == SCHEDULE_DELETE {
+                    serde_json::json!({"id":task.id,"notify":notify})
+                } else {
+                    serde_json::json!({"id":task.id})
+                })
+                .map_err(|e| SessionError::Invalid(e.to_string()))?,
             };
             match handle.dispatch_command(invocation).await {
                 Ok(_) => return Ok(true),
@@ -71,6 +85,13 @@ impl LocalSessionService {
             .as_ref()?
             .lookup_local::<rsi_navigation::NavigationContract>()
     }
+    fn schedule_controller(
+        &self,
+    ) -> Option<std::sync::Arc<dyn rsi_agent_schedule::ScheduleController>> {
+        self.plugin_context
+            .as_ref()?
+            .lookup_local::<rsi_agent_schedule::ScheduleControllerContract>()
+    }
 
     pub(super) async fn catalog_page(
         &self,
@@ -78,42 +99,58 @@ impl LocalSessionService {
         archived: Option<&rsi_navigation::ArchivedSessions>,
     ) -> Result<rsi_session_protocol::ScheduleCatalogPage> {
         use rsi_agent_schedule::{SCHEDULE_DOMAIN, ScheduleState};
+        let controller = self
+            .schedule_controller()
+            .map(|owner| owner.delivery_holds());
         let (sessions, next) = self
             .visible_recent(
                 after,
                 rsi_session_protocol::SCHEDULE_CATALOG_PAGE_SIZE,
                 Some(SCHEDULE_DOMAIN),
-                |summary| async move {
-                    let position = summary.cursor();
-                    let page = self
-                        .store
-                        .read_domain_states(
-                            &position.session_id,
-                            Some(summary.durable_control_seq),
-                            Some(SCHEDULE_DOMAIN),
-                        )
-                        .await
-                        .map_err(map_store_error)?;
-                    let row = page.states.into_iter().next().ok_or_else(|| {
-                        SessionError::Backend(
-                            "scheduled domain is absent at its catalog cut".into(),
-                        )
-                    })?;
-                    let state = ScheduleState::from_snapshot(&row.snapshot)
-                        .map_err(SessionError::Backend)?;
-                    Ok(rsi_session_protocol::ScheduledSession {
-                        archived: archived.is_some_and(|ids| ids.contains(&position.session_id)),
-                        position,
-                        exhausted: state.exhausted(),
-                        executing: state
-                            .reservation
-                            .filter(|r| {
-                                !r.settled
-                                    && state.reminders.iter().any(|row| row.id == r.reminder_id)
+                |summary| {
+                    let holds = &controller;
+                    async move {
+                        let position = summary.cursor();
+                        let page = self
+                            .store
+                            .read_domain_states(
+                                &position.session_id,
+                                Some(summary.durable_control_seq),
+                                Some(SCHEDULE_DOMAIN),
+                            )
+                            .await
+                            .map_err(map_store_error)?;
+                        let row = page.states.into_iter().next().ok_or_else(|| {
+                            SessionError::Backend(
+                                "scheduled domain is absent at its catalog cut".into(),
+                            )
+                        })?;
+                        let state = ScheduleState::from_snapshot(&row.snapshot)
+                            .map_err(SessionError::Backend)?;
+                        let exhausted = state.exhausted();
+                        let holds = holds.as_ref().map(|rx| rx.borrow());
+                        let held = holds
+                            .as_ref()
+                            .and_then(|sessions| sessions.get(&position.session_id));
+                        let reminders = state
+                            .reminders
+                            .into_iter()
+                            .map(|rule| rsi_session_protocol::ScheduledReminder {
+                                executing: held.is_some_and(|ids| ids.contains(&rule.id))
+                                    || state.reservation.as_ref().is_some_and(|last| {
+                                        !last.settled && last.reminder_id == rule.id
+                                    }),
+                                rule,
                             })
-                            .map(|r| r.reminder_id),
-                        reminders: state.reminders,
-                    })
+                            .collect();
+                        Ok(rsi_session_protocol::ScheduledSession {
+                            archived: archived
+                                .is_some_and(|ids| ids.contains(&position.session_id)),
+                            position,
+                            exhausted,
+                            reminders,
+                        })
+                    }
                 },
             )
             .await?;
@@ -180,6 +217,8 @@ impl LocalSessionService {
                 let mut changed = initial;
                 // Subscribe before the snapshot so edits during the scan wake the next pass.
                 let navigation = service.navigation();
+                let controller = service.schedule_controller();
+                let mut holds = controller.as_ref().map(|owner| owner.delivery_holds());
                 let mut archive_changes = navigation.as_ref().map(|owner| owner.archive_changes());
                 let archived = navigation.as_ref().map(|owner| owner.archived_sessions());
                 let pages = service.catalog_pages(archived);
@@ -208,10 +247,16 @@ impl LocalSessionService {
                 loop {
                     tokio::select! {
                         update = schedule_edits.next() => if update.is_some() { break; } else { return; },
+                        _ = async { holds.as_mut().expect("available controller").changed().await }, if holds.is_some() => break,
                         _ = visibility.next() => break,
                         _ = async { archive_changes.as_mut().expect("available owner").changed().await }, if archive_changes.is_some() => break,
                         change = async { registry.as_mut().expect("plugin context").changed().await }, if registry.is_some() => {
                             if change.is_err() { return; }
+                            match (controller.as_ref(), service.schedule_controller()) {
+                                (None, None) => {}
+                                (Some(old), Some(current)) if std::sync::Arc::ptr_eq(old, &current) => {}
+                                _ => break,
+                            }
                             match (navigation.as_ref(), service.navigation()) {
                                 (None, None) => {},
                                 (Some(old), Some(current)) if std::sync::Arc::ptr_eq(old, &current) => {},

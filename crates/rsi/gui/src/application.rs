@@ -69,6 +69,9 @@ pub(crate) enum Command {
     DeleteScheduledTask {
         task: rsi_session_protocol::ScheduledTaskId,
     },
+    RunScheduledTask {
+        task: rsi_session_protocol::ScheduledTaskId,
+    },
     ForkConversation {
         pane: crate::SurfaceId,
         generation: String,
@@ -321,6 +324,7 @@ impl Command {
             | Self::ReopenRemoteSurface { .. }
             | Self::NewConversation { .. }
             | Self::DeleteScheduledTask { .. }
+            | Self::RunScheduledTask { .. }
             | Self::AddSurface { .. }
             | Self::CloseSurface { .. }
             | Self::Setup { .. }
@@ -997,6 +1001,18 @@ impl GuiApplication {
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
+            Command::RunScheduledTask { task } => {
+                if self
+                    .session
+                    .run_scheduled_task(task)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    Ok(())
+                } else {
+                    Err("This task is no longer available".into())
+                }
+            }
             Command::ForkConversation {
                 pane,
                 generation,

@@ -6,13 +6,15 @@ pub use state::*;
 /// Durable reminder domain identity.
 pub const SCHEDULE_DOMAIN: &str = "rsi.schedule";
 /// Current durable reminder codec, shared with exact-version authority consumers.
-pub const SCHEDULE_CODEC_VERSION: u32 = 1;
+pub const SCHEDULE_CODEC_VERSION: u32 = 2;
 /// Internal atomic reservation command.
 pub const SCHEDULE_RESERVE: &str = "rsi.schedule.reserve";
 /// Internal terminal settlement command.
 pub const SCHEDULE_SETTLE: &str = "rsi.schedule.settle";
 /// Operator command to remove one reminder while preserving admitted work.
 pub const SCHEDULE_DELETE: &str = "rsi.schedule.delete";
+/// Operator command to queue one execution without changing the rule.
+pub const SCHEDULE_RUN: &str = "rsi.schedule.run";
 mod service;
 pub use service::*;
 mod plugin;

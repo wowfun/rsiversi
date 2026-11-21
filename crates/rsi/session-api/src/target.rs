@@ -22,6 +22,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::ScheduledTasks
             | Operation::ScheduledTasksObserve
             | Operation::DeleteScheduledTask
+            | Operation::RunScheduledTask
             | Operation::ReadSummary
             | Operation::WorkflowReadiness
             | Operation::ListWorkflows

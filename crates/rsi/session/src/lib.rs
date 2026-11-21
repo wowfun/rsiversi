@@ -747,7 +747,15 @@ impl SessionService for LocalSessionService {
         &self,
         task: rsi_session_protocol::ScheduledTaskId,
     ) -> Result<bool> {
-        self.delete_reminder(task).await
+        self.edit_reminder(task, rsi_agent_schedule::SCHEDULE_DELETE)
+            .await
+    }
+    async fn run_scheduled_task(
+        &self,
+        task: rsi_session_protocol::ScheduledTaskId,
+    ) -> Result<bool> {
+        self.edit_reminder(task, rsi_agent_schedule::SCHEDULE_RUN)
+            .await
     }
 }
 

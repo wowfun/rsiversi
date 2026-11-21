@@ -16,17 +16,22 @@ import '/styles.css';
 const events = window.events = [];
 window.renameLinkedSession = title => publish({navigation:{entries:[{session:'research',metadata:{title}}]}});
 window.renameLinkedSession('Research notes');
-const group = (session_id, reminders) => ({position:{session_id}, archived:session_id==='archived', exhausted:false, reminders});
+const group = (session_id, rules) => ({position:{session_id}, archived:session_id==='archived', exhausted:false, reminders:rules.map(rule=>({rule,executing:session_id==='research'}))});
 function reminder(prompt,active=true,consumed=false) {
   return {id:'task',prompt,active,consumed,interval_ms:null,due_ms:Date.UTC(2026,10,active?20:19,9,30)};
 }
 const pages = location.search==='?empty' ? [] : [
-  [{...group('research',[reminder('Review open issues')]),executing:'task'}],
+  [group('research',[reminder('Review open issues')])],
   [group('writing',[reminder('Prepare release notes',false)]),group('archived',[reminder('Past release',false,true)])],
 ];
+if(location.search==='?floor') {
+  const held={...reminder('Held task'),last_delivery:{available_ms:Date.UTC(2026,10,20,9,30,55)}};
+  const other={...reminder('Other task'),id:'other',due_ms:Date.UTC(2026,10,20,9,30,20)};
+  pages.splice(0,pages.length,[group('writing',[held,other])]);
+}
 const updates=pages.map((sessions,index)=>({kind:'page',index,sessions}));
 updates.push({kind:'complete',pages:pages.length});
-let waiting, attempts=0, deletes=0;
+let waiting, attempts=0, deletes=0, runs=0;
 window.changeCatalog = value => {
   if (waiting) { const take=waiting; waiting=undefined; take(JSON.stringify(value)); }
   else updates.push(value);
@@ -42,6 +47,13 @@ installActions({
   async open(command,text) { events.push({command,text}); },
   async command(command) {
     events.push(command);
+    if (command.action==='run_scheduled_task') {
+      if (++runs===1) throw new Error('Run temporarily unavailable');
+      window.changeCatalog({kind:'page',index:1,sessions:[{position:{session_id:'writing'},archived:false,exhausted:true,
+        reminders:[{rule:{...reminder('Prepare release notes again',false),last_delivery:{available_ms:Date.now()+60000}},executing:false}]}]});
+      window.changeCatalog({kind:'complete',pages:2});
+      return;
+    }
     if (++deletes === 1) throw new Error('Could not delete task');
     window.changeCatalog({kind:'page',index:1,sessions:[]});
     window.changeCatalog({kind:'complete',pages:2});
@@ -86,6 +98,7 @@ try {
       await panel.getByRole('button',{name:'Automation task actions'}).click();
       const heldDelete = page.getByRole('menuitem',{name:'Delete task'});
       assert(await heldDelete.isDisabled());
+      assert(await page.getByRole('menuitem',{name:'Run now'}).isDisabled());
       await page.keyboard.press('Escape');
       await heldDelete.waitFor({state:'hidden'});
       assert.equal(await activeRow.getAttribute('aria-controls'),await panel.getAttribute('id'));
@@ -109,13 +122,16 @@ try {
       const archiveLink = panel.getByRole('button',{name:'Linked session: open linked session',exact:true});
       assert(await archiveLink.isDisabled());
       assert.equal(await archiveLink.innerText(),'archived');
+      await panel.getByRole('button',{name:'Automation task actions'}).click();
+      assert(await page.getByRole('menuitem',{name:'Run now'}).isDisabled());
+      await page.keyboard.press('Escape');
       await page.screenshot({path:join(report,name+'-archived.png')});
       await page.evaluate(() => {
         window.changeCatalog({kind:'page',index:1,sessions:['writing','archived'].map(session_id => ({
-          position:{session_id},archived:false,exhausted:false,reminders:[{
+          position:{session_id},archived:false,exhausted:false,reminders:[{executing:false,rule:{
             id:'task',prompt:session_id==='writing'?'Prepare release notes':'Past release',active:false,
             consumed:session_id==='archived',interval_ms:null,due_ms:Date.UTC(2026,10,19,9,30),
-          }],
+          }}],
         }))});
         window.changeCatalog({kind:'complete',pages:2});
       });
@@ -145,7 +161,7 @@ try {
       const linked = manager.getByRole('button',{name:'Linked session: open linked session',exact:true});
       await linked.focus();
       await page.evaluate(()=>window.changeCatalog({kind:'page',index:1,sessions:[{
-        position:{session_id:'writing'},archived:false,exhausted:false,reminders:[{id:'task',prompt:'Prepare release notes today',active:false,consumed:false,interval_ms:null,due_ms:Date.UTC(2026,10,20,9,30)}],
+        position:{session_id:'writing'},archived:false,exhausted:false,reminders:[{executing:false,rule:{id:'task',prompt:'Prepare release notes today',active:false,consumed:false,interval_ms:null,due_ms:Date.UTC(2026,10,20,9,30)}}],
       }]}));
       await detail.getByText('Prepare release notes',{exact:true}).waitFor();
       await page.evaluate(()=>window.changeCatalog({kind:'complete',pages:2}));
@@ -159,7 +175,7 @@ try {
       assert(await manager.getByRole('heading',{name:'Automation tasks'}).evaluate(title=>title===document.activeElement));
       await page.evaluate(()=>{
         window.changeCatalog({kind:'page',index:1,sessions:[{position:{session_id:'writing'},archived:false,exhausted:false,reminders:[
-          {id:'task',prompt:'Prepare release notes again',active:false,consumed:false,interval_ms:null,due_ms:Date.UTC(2026,10,20,9,30)}
+          {executing:false,rule:{id:'task',prompt:'Prepare release notes again',active:false,consumed:false,interval_ms:null,due_ms:Date.UTC(2026,10,20,9,30)}}
         ]}]});
         window.changeCatalog({kind:'complete',pages:2});
       });
@@ -168,6 +184,18 @@ try {
       assert(await detail.isHidden());
       await restored.click();
       const actions = panel.getByRole('button',{name:'Automation task actions'});
+      await actions.click();
+      const runNow = page.getByRole('menuitem',{name:'Run now'});
+      await runNow.click();
+      await panel.getByRole('alert').filter({hasText:'Run temporarily unavailable'}).waitFor();
+      await actions.click();
+      await runNow.click();
+      await actions.click();
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role="menuitem"]')).some(el=>el.textContent==='Run now'&&(el.matches(':disabled')||el.getAttribute('aria-disabled')==='true')));
+      await page.screenshot({path:join(report,name+'-run-now-floor.png')});
+      await page.clock.fastForward(60000);
+      assert(await runNow.isEnabled());
+      await page.keyboard.press('Escape');
       async function requestDeletion() {
         await actions.click();
         await page.getByRole('menuitem',{name:'Delete task'}).click();
@@ -200,6 +228,8 @@ try {
       await manager.getByRole('button',{name:'Close',exact:true}).click();
       const events = await page.evaluate(()=>window.events);
       assert.deepEqual(events,[
+        {action:'run_scheduled_task',task:{session_id:'writing',id:'task'}},
+        {action:'run_scheduled_task',task:{session_id:'writing',id:'task'}},
         {action:'delete_scheduled_task',task:{session_id:'writing',id:'task'}},
         {action:'delete_scheduled_task',task:{session_id:'writing',id:'task'}},
         'deleted',
@@ -221,12 +251,21 @@ try {
       assert.deepEqual(proposal.command,{action:'new_conversation'});
       assert.match(proposal.text,/Weekly review/);
       assert.match(proposal.text,/Friday/);
+      await page.goto(fixture.url+'?floor');
+      await manager.getByRole('alert').getByRole('button',{name:'Retry'}).click();
+      await page.setViewportSize({width:1280,height:850});
+      const held = list.getByRole('button',{name:'Held task',exact:true});
+      await held.waitFor();
+      assert.deepEqual(await list.locator('strong').allTextContents(),['Other task','Held task']);
+      await held.click();
+      for(const stamp of [held.locator('time'),panel.locator('time')])
+        assert.equal(await stamp.getAttribute('datetime'),'2026-11-20T09:30:55.000Z');
       assert.deepEqual(errors,[]);
       results.push({name,version:browser.version(),statusFilters:4,focusReturned:true,updatePreservedFocus:true,
         searchBySessionAndFuzzyTitle:true,removedSelectionRetired:true,recommendations:8,executingTaskProtected:true,
         deletionCancelReturnedFocus:true,deletionFailureRetainedTask:true,retryRemovedTask:true,
         taskExpandedAndDescribed:true,sharedCountdownCrossedDeadline:true,archivedSessionLinkDisabled:true,
-        linkedTitleUpdates:true,linkedIdFallback:true});
+        linkedTitleUpdates:true,linkedIdFallback:true,deliveryFloorDeterminesNextRun:true});
     } finally { await browser.close(); }
   }
   await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));

@@ -2,6 +2,9 @@
 
 The native Host-generation controller waits on one UTC timer for all scheduled
 Sessions. A future reminder holds its Session identity and next UTC deadline.
+Operator follow-ups share one idle wait per active target Session. The current
+holds wake catalog subscribers on admission and release. Recovery checks the
+last message in the canonical inbox before admitting another delivery.
 Only due work takes an execution slot and pins a continuation lease. At most 64
 Sessions can execute concurrently, with one automatic round per Session through
 Kernel admission. Its Agent-side Local interface and durable semantics belong to

@@ -13,6 +13,7 @@ let hostProfile;
 const fixture = await liveFixture({foregroundHost:true,developmentHttp:process.platform === 'win32',
   configure:async({config})=>{hostProfile=join(config,'host-profiles/fixture/host.profile.toml');}});
 const {service, report, model} = fixture;
+const manual = process.argv.includes('--run-now');
 const crashHost = process.argv.includes('--crash-host');
 const pendingRestart = process.argv.includes('--pending-restart');
 const withoutNavigation = pendingRestart || process.argv.includes('--without-navigation');
@@ -39,6 +40,22 @@ async function reconnect() {
   await page.locator('#workbench').waitFor({state:'visible'});
 }
 
+async function verifyScheduledTranscript(pane) {
+  await pane.locator('.message.assistant').filter({hasText:'LIVE_SCHEDULE_ONCE'}).waitFor();
+  const trigger = pane.locator('.turn-trigger').filter({has:page.getByText('Automation task',{exact:true})});
+  const toggle = trigger.getByRole('button',{name:/Automation task/});
+  await toggle.waitFor();
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  assert.equal(await trigger.locator('.message-text').count(),0);
+  await page.screenshot({path:join(report,'schedule-wide.png')});
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await trigger.locator('.message-text').filter({hasText:'LIVE_SCHEDULE_ONCE'}).waitFor();
+  await page.screenshot({path:join(report,'notification-expanded.png')});
+  await page.keyboard.press('Space');
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+}
+
 async function verify() {
   ({browser, page} = await openBrowserPage(chromium, errors));
   const registration=service.register('schedule creation');
@@ -47,7 +64,7 @@ async function verify() {
   await chooseStartingWorkspace(page, service);
   const pane = page.getByRole('region', {name: 'Main conversation', exact: true});
   await pane.getByRole('textbox', {name: 'Main message'}).fill(
-    'Create one reminder using schedule_create exactly once. Use rule {"kind":"after","delay_ms":45000} and the following prompt verbatim: "Call schedule_list once, then answer LIVE_SCHEDULE_ONCE. Do not change any reminders or files." Once creation succeeds, answer REMINDER_CREATED immediately.'
+    `Create one reminder using schedule_create exactly once. Use rule {"kind":"after","delay_ms":${manual?900000:45000}} and the following prompt verbatim: "Call schedule_list once, then answer LIVE_SCHEDULE_ONCE. Do not change any reminders or files." Once creation succeeds, answer REMINDER_CREATED immediately.`
   );
   await pane.getByTestId('composer-send').click();
   await pane.locator('.message.assistant').first().waitFor();
@@ -94,6 +111,55 @@ async function verify() {
   }
   await writeFile(join(report,'created-turn-usage.json'),JSON.stringify({attempts:attempts.length,readings,total:completeTotal,routes:[...routes]},null,2));
   await page.screenshot({path:join(report,'created-task.png')});
+  if (manual) {
+    const title = reminder.prompt.split('\n',1)[0];
+    const openTask = async () => {
+      await page.getByRole('button',{name:'Automation tasks',exact:true}).click();
+      await page.getByRole('button',{name:title,exact:true}).click();
+    };
+    await openTask();
+    const more = page.getByRole('button',{name:'Automation task actions',exact:true});
+    await more.click();
+    const run = page.getByRole('menuitem',{name:'Run now',exact:true});
+    await page.screenshot({path:join(report,'run-menu.png')});
+    await run.click();
+    await more.click();
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role="menuitem"]')).some(el=>
+      el.textContent==='Run now' && (el.matches(':disabled') || el.getAttribute('aria-disabled')==='true')));
+    await page.screenshot({path:join(report,'run-held.png')});
+    const facts = await terminalFacts(session,2);
+    const followups = facts.filter(f=>f.type==='input_message_claimed' && f.source?.source?.command==='rsi.schedule.run');
+    assert.equal(followups.length,1);
+    const claim = followups[0];
+    assert.notEqual(claim.turn_id,creates[0].turn_id);
+    const list = facts.find(f=>f.type==='tool_intent' && f.name==='schedule_list' && f.turn_id===claim.turn_id);
+    assert(list);
+    const saved = facts.find(f=>f.type==='tool_result' && f.effect_id===list.effect_id && f.turn_id===claim.turn_id)?.result.value.state;
+    assert.equal(saved.allocated_rounds,0);
+    const current = saved.reminders.find(row=>row.id===reminder.id);
+    assert(current.active && !current.consumed);
+    assert.equal(current.due_ms,reminder.due_ms);
+    assert.equal(current.last_delivery.message_id,claim.source.message_id);
+    assert.match(assistantText(facts.filter(f=>f.turn_id===claim.turn_id)),/LIVE_SCHEDULE_ONCE/);
+    assert.equal(service.provider.requests.length,0);
+    await page.close();
+    await service.restart();
+    await reconnect();
+    await openTask();
+    assert.equal(await page.getByRole('complementary',{name:'Selected task'}).locator('time').first().getAttribute('datetime'),
+      new Date(reminder.due_ms).toISOString());
+    const reopened = await service.readSessionFacts(session);
+    assert.deepEqual(reopened,facts);
+    await page.screenshot({path:join(report,'reopened-rule.png')});
+    await page.getByRole('complementary',{name:'Selected task'}).getByRole('button',{name:/open linked session/i}).click();
+    await verifyScheduledTranscript(page.getByRole('region',{name:'Main conversation',exact:true}));
+    assert.deepEqual(errors,[]);
+    await writeFile(join(report,'result.json'),JSON.stringify({ok:true,model,browser:browser.version(),
+      session,originalDue:reminder.due_ms,manualDelivery:current.last_delivery,automaticRounds:saved.allocated_rounds,
+      manualTurn:claim.turn_id,manualAttempts:facts.filter(f=>f.type==='model_attempt_settled'&&f.turn_id===claim.turn_id).length,
+      retainedFacts:reopened.length,transcriptAttribution:'Automation task',expandedOriginalInput:true},null,2));
+    return;
+  }
   if (process.argv.includes('--delete-before-due')) {
     await page.getByRole('button',{name:'Automation tasks',exact:true}).click();
     const manager = page.getByRole('region',{name:'Automation tasks',exact:true});
@@ -196,19 +262,7 @@ async function verify() {
     if (await group.getAttribute('aria-expanded') === 'false') await group.click();
   }
   await openConversation(page, reopened, session);
-  await reopened.locator('.message.assistant').filter({hasText: 'LIVE_SCHEDULE_ONCE'}).waitFor();
-  const trigger = reopened.locator('.turn-trigger').filter({has:page.getByText('Automation task',{exact:true})});
-  const toggle = trigger.getByRole('button',{name:/Automation task/});
-  await toggle.waitFor();
-  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
-  assert.equal(await trigger.locator('.message-text').count(),0);
-  await page.screenshot({path: join(report, 'schedule-wide.png')});
-  await toggle.focus();
-  await page.keyboard.press('Enter');
-  await trigger.locator('.message-text').filter({hasText:'LIVE_SCHEDULE_ONCE'}).waitFor();
-  await page.screenshot({path:join(report,'notification-expanded.png')});
-  await page.keyboard.press('Space');
-  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  await verifyScheduledTranscript(reopened);
   await page.setViewportSize({width: 420, height: 900});
   await reopened.locator('.transcript').evaluate(node => { node.scrollTop = node.scrollHeight; });
   await page.screenshot({path: join(report, 'schedule-narrow.png')});

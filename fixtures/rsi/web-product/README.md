@@ -657,6 +657,8 @@ JSON/JSONL/log/text evidence files before reporting any credential match; links
 are excluded. Usage comparisons require nonempty, finite positive token counts.
 
 `schedule-live.mjs` uses the same explicit live environment as `plan-live.mjs`.
+Pass `--run-now` to deliver a future rule from the task manager, inspect the
+model's command-origin Turn, and reopen the preserved rule after Host restart.
 It creates one one-shot reminder, closes the page, and stops the isolated Host
 before the deadline. The Host starts again after the deadline. The fixture
 waits for the actual automatic Turn's terminal Fact before reconnecting any

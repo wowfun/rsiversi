@@ -46,7 +46,7 @@ export const compactNavigation = observable<'drawer' | 'column' | undefined>(und
 export function dismissNavigationDrawer() {
   if (compactNavigation.getSnapshot() === 'drawer') compactNavigation.set(undefined)
 }
-export interface ScheduledGroup {position:{session_id:string};archived:boolean;exhausted:boolean;executing?:string;reminders:import('./session/scheduled-tasks.tsx').Reminder[]}
+export interface ScheduledGroup {position:{session_id:string};archived:boolean;exhausted:boolean;reminders:{rule:import('./session/scheduled-tasks.tsx').Reminder;executing:boolean}[]}
 type CatalogUpdate = {kind:'page';index:number;sessions:ScheduledGroup[]}|{kind:'complete';pages:number}
 interface CatalogView {groups?:ScheduledGroup[];error?:string}
 export const scheduleCatalog = observable<CatalogView | undefined>(undefined)

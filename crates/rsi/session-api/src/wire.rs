@@ -41,6 +41,7 @@ pub enum Operation {
     ScheduledTasks,
     ScheduledTasksObserve,
     DeleteScheduledTask,
+    RunScheduledTask,
     Submit,
     Commands,
     ExecuteCommand,
@@ -86,7 +87,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -108,6 +109,7 @@ impl Operation {
         Self::ScheduledTasks,
         Self::ScheduledTasksObserve,
         Self::DeleteScheduledTask,
+        Self::RunScheduledTask,
         Self::Submit,
         Self::Commands,
         Self::ExecuteCommand,
@@ -179,6 +181,7 @@ impl Operation {
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
             Self::ScheduledTasks => ("scheduled-tasks", Data, Read, 4096, LARGE_REPLY),
             Self::DeleteScheduledTask => ("delete-scheduled-task", Data, Mutation, 4096, 4096),
+            Self::RunScheduledTask => ("run-scheduled-task", Data, Mutation, 4096, 4096),
             Self::ScheduledTasksObserve => (
                 "scheduled-tasks-observe",
                 Subscription,
@@ -273,10 +276,10 @@ impl Operation {
             | Self::Jobs
             | Self::MutateQueue
             | Self::Cancel
-            | Self::Projections => 3,
-            Self::ModelObserve
+            | Self::Projections
             | Self::ScheduledTasks
-            | Self::ScheduledTasksObserve
+            | Self::ScheduledTasksObserve => 3,
+            Self::ModelObserve
             | Self::Purge
             | Self::PurgeStatus
             | Self::ListWorkflows

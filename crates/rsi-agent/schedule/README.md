@@ -45,6 +45,19 @@ Arithmetic is checked. One due reminder reserves through the shared idle
 continuation admission; Busy neither spends budget nor revokes the owner.
 Ordinary Tool execution remains available during the resulting finite Turn.
 
+An operator may run any retained reminder in its linked Session, including a
+paused or consumed reminder and one in a Session with no automatic rounds
+left. The manual follow-up starts a new Turn with Schedule command provenance.
+It keeps the original deadline, recurrence, enabled status and automatic
+allowance. An archived target holds delivery while the navigation service
+reports it archived.
+
+Each reminder retains the latest delivery's mailbox identity and the UTC
+instant when it may be delivered again. Both delivery paths hold a reused
+target through its activity. The one-minute interval starts at the scheduled
+occurrence for a recurring automatic delivery and at admission for a one-shot
+or operator delivery. The catalog and Session projection share that deadline.
+
 Resume selects explicit reminder identities without resetting the lifetime
 budget. Selecting the reminder of an unsettled accepted reservation also permits
 cleanup after restart, including a consumed one-shot or exhausted allowance; it

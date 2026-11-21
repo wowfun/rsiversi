@@ -1,0 +1,207 @@
+{
+  "payload": {
+    "version": 2,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "reminders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/0"
+            }
+          },
+          "allocated_rounds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "reservation": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/4"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "reminders",
+          "allocated_rounds",
+          "reservation"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "anchor_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "due_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "interval_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "consumed": {
+              "type": "boolean"
+            },
+            "last_delivery": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/2"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "prompt",
+            "anchor_ms",
+            "due_ms",
+            "interval_ms",
+            "active",
+            "consumed"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/3"
+                }
+              ]
+            },
+            "available_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "message_id",
+            "available_ms"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reminder_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "input": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/5"
+                }
+              ]
+            },
+            "occurrence_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "settled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "reminder_id",
+            "prompt",
+            "input",
+            "occurrence_ms",
+            "settled"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "round": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "message_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/3"
+                }
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "round",
+            "message_id",
+            "text"
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"reminders\":[],\"allocated_rounds\":0,\"reservation\":null}",
+      "{\"reminders\":[{\"id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"anchor_ms\":301000,\"due_ms\":301000,\"interval_ms\":300000,\"active\":true,\"consumed\":false}],\"allocated_rounds\":0,\"reservation\":null}",
+      "{\"reminders\":[{\"id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"anchor_ms\":301000,\"due_ms\":601000,\"interval_ms\":300000,\"active\":true,\"consumed\":false,\"last_delivery\":{\"message_id\":\"schedule-1dd817a70b9d0fbc4cf06cc389370e9d8d8216318149e3951155772823cb74ea\",\"available_ms\":361000}}],\"allocated_rounds\":1,\"reservation\":{\"reminder_id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"input\":{\"owner\":\"schedule\",\"round\":1,\"message_id\":\"schedule-1dd817a70b9d0fbc4cf06cc389370e9d8d8216318149e3951155772823cb74ea\",\"text\":\"Scheduled reminder fixture at UTC Unix ms 301000. Automatic parent round 1/100.\\nCheck 中🦀\\nThis finite round cannot create or replenish reminders.\"},\"occurrence_ms\":301000,\"settled\":false}}",
+      "{\"reminders\":[{\"id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"anchor_ms\":301000,\"due_ms\":601000,\"interval_ms\":300000,\"active\":true,\"consumed\":false,\"last_delivery\":{\"message_id\":\"manual\",\"available_ms\":421000}}],\"allocated_rounds\":1,\"reservation\":{\"reminder_id\":\"fixture\",\"prompt\":\"Check 中🦀\",\"input\":{\"owner\":\"schedule\",\"round\":1,\"message_id\":\"schedule-1dd817a70b9d0fbc4cf06cc389370e9d8d8216318149e3951155772823cb74ea\",\"text\":\"Scheduled reminder fixture at UTC Unix ms 301000. Automatic parent round 1/100.\\nCheck 中🦀\\nThis finite round cannot create or replenish reminders.\"},\"occurrence_ms\":301000,\"settled\":true}}"
+    ]
+  },
+  "sha256": "c7fc914e354c3772c59b7629b68f5b0be8ac60ff014b432b0677673a5d53d555"
+}

@@ -12,6 +12,7 @@ export interface Reminder {
   interval_ms: number | null;
   active: boolean;
   consumed: boolean;
+  last_delivery?: {available_ms:number};
 }
 interface Schedule {
   allocated_rounds: number;
@@ -25,7 +26,11 @@ function projectedSchedule(projections: NativeSurface['projections']) {
   if (typeof schedule.allocated_rounds === 'number' && Array.isArray(schedule.reminders) &&
       schedule.reminders.every(row => row && typeof row.id === 'string' && typeof row.prompt === 'string' &&
         typeof row.active === 'boolean' && typeof row.consumed === 'boolean' && Number.isFinite(row.due_ms) &&
-        (row.interval_ms === null || Number.isFinite(row.interval_ms)))) return schedule;
+        (row.interval_ms === null || Number.isFinite(row.interval_ms)) &&
+        (row.last_delivery === undefined || Number.isFinite(row.last_delivery?.available_ms)))) return schedule;
+}
+export function nextRunAt(row:Reminder) {
+  return Math.max(row.due_ms,row.last_delivery?.available_ms ?? 0);
 }
 const localTime = new Intl.DateTimeFormat(document.documentElement.lang || 'en', {
   year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hourCycle:'h23',
@@ -91,7 +96,7 @@ export function ScheduledTasks({surface, pane}: {surface: NativeSurface; pane: s
   }
   if (tasks.length === 1) return <button type="button" className={css.trigger} aria-label="1 automation task" title="1 automation task"
     onClick={() => inspect(tasks[0])}><IconClockOutlineRegular size={16}/></button>;
-  return <TaskMenu key={surface.generation} tasks={tasks.sort((a,b) => a.due_ms - b.due_ms)} inspect={inspect}/>;
+  return <TaskMenu key={surface.generation} tasks={tasks.sort((a,b) => nextRunAt(a) - nextRunAt(b))} inspect={inspect}/>;
 }
 
 function TaskMenu({tasks, inspect}: {tasks: Reminder[]; inspect: (row: Reminder) => void}) {
@@ -126,7 +131,7 @@ function TaskMenu({tasks, inspect}: {tasks: Reminder[]; inspect: (row: Reminder)
       {tasks.map(row => <li key={row.id}>
         <button type="button" onClick={event => {closeDisclosure(event.currentTarget, true); inspect(row);}}>
           <span className={css.prompt}>{row.prompt}</span>
-          <small>{frequency(row)}</small><small>Next run <NextRun millis={row.due_ms} now={now}/></small>
+          <small>{frequency(row)}</small><small>Next run <NextRun millis={nextRunAt(row)} now={now}/></small>
         </button>
       </li>)}
     </ul>}
@@ -149,7 +154,7 @@ export function ReminderDetails({row,exhausted,previous,now}: {row:Reminder;exha
     <h2>Automation task</h2>
     <p className={css.instruction}>{row.prompt}</p>
     <dl><dt>Status</dt><dd>{status}</dd><dt>Frequency</dt><dd>{frequency(row)}</dd>
-      {status === 'Active' && <><dt>Next run</dt><dd>{now === undefined ? <Stamp millis={row.due_ms}/> : <NextRun millis={row.due_ms} now={now}/>}</dd></>}
+      {status === 'Active' && <><dt>Next run</dt><dd>{now === undefined ? <Stamp millis={nextRunAt(row)}/> : <NextRun millis={nextRunAt(row)} now={now}/>}</dd></>}
       {previous !== undefined && <><dt>Last scheduled occurrence</dt><dd><Stamp millis={previous}/></dd></>}
     </dl>
   </section>;

@@ -33,6 +33,7 @@ pub struct ScheduleFactory;
 #[derive(Debug)]
 struct SchedulePlugin {
     state: DomainHandle<ScheduleState>,
+    host: Arc<dyn ScheduleController>,
 }
 impl SchedulePlugin {
     fn current<'a>(
@@ -70,6 +71,26 @@ enum ScheduleCommand {
     Reserve,
     Settle,
     Delete,
+    Run,
+}
+#[derive(Debug)]
+struct TrackDelivery {
+    host: Arc<dyn ScheduleController>,
+    id: DomainRequestId,
+}
+#[async_trait]
+impl rsi_agent_composition_protocol::PublicationObserver for TrackDelivery {
+    async fn committed(
+        &self,
+        receipt: &rsi_agent_composition_protocol::PublicationReceipt<'_>,
+    ) -> ContributionResult<()> {
+        self.host.hold_delivery(receipt.session_id, &self.id);
+        Ok(())
+    }
+    async fn rejected(&self) -> ContributionResult<()> {
+        Ok(())
+    }
+    fn unconfirmed(&self) {}
 }
 #[async_trait]
 impl SessionCommand for Command {
@@ -96,6 +117,7 @@ impl SessionCommand for Command {
         }
         let (view, mut state) = self.plugin.current(&context.domains)?;
         let mut inputs = Vec::new();
+        let mut publications = Vec::new();
         match self.kind {
             ScheduleCommand::Reserve => {
                 let args = ReserveSchedule::deserialize(arguments.value()).map_err(invalid)?;
@@ -131,6 +153,51 @@ impl SessionCommand for Command {
                     });
                 }
             }
+            ScheduleCommand::Run => {
+                use rsi_agent_session_protocol::{
+                    CommandMessageSource, CommandRevision, SessionCommandInvocation,
+                };
+                if !matches!(context.revision, CommandRevision::Durable { .. }) {
+                    return Err(invalid("Run now requires a retained Session"));
+                }
+                let args = Delete::deserialize(arguments.value()).map_err(invalid)?;
+                let invocation = SessionCommandInvocation {
+                    command: ContributionId::new(crate::SCHEDULE_RUN).map_err(invalid)?,
+                    request_id: context.request_id.clone(),
+                    expected_revision: context.revision,
+                    arguments: arguments.clone(),
+                };
+                let source = CommandMessageSource {
+                    invocation_sha256: invocation.digest().map_err(invalid)?,
+                    command: invocation.command,
+                    request_id: invocation.request_id,
+                    ordinal: 0,
+                    attribution: None,
+                };
+                let (text, previous) = state
+                    .run_now(
+                        &args.id,
+                        source.message_id().map_err(invalid)?,
+                        self.plugin.host.clock().now_ms(),
+                    )
+                    .map_err(invalid)?;
+                self.plugin
+                    .host
+                    .check_operator_run(context.header.session_id(), &args.id, previous.as_ref())
+                    .await
+                    .map_err(invalid)?;
+                inputs.push(CommandInput {
+                    delivery: MessageDelivery::NextTurn,
+                    content: vec![rsi_agent_session_protocol::AgentMessageContent::Text { text }],
+                    attribution: None,
+                });
+                publications.push(rsi_agent_composition_protocol::Publication::new(Arc::new(
+                    TrackDelivery {
+                        host: self.plugin.host.clone(),
+                        id: args.id,
+                    },
+                )));
+            }
         }
         Ok(rsi_agent_composition_protocol::SessionCommandOutput {
             domains: vec![
@@ -140,7 +207,7 @@ impl SessionCommand for Command {
                     .map_err(invalid)?,
             ],
             inputs,
-            publications: vec![],
+            publications,
         })
     }
 }
@@ -394,7 +461,11 @@ impl PluginFactory for ScheduleFactory {
         let (state, domain_lease) = definition
             .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
             .map_err(activation)?;
-        let plugin = Arc::new(SchedulePlugin { state });
+        let host = plan.local::<ScheduleControllerContract>()?;
+        let plugin = Arc::new(SchedulePlugin {
+            state,
+            host: host.clone(),
+        });
         let registrar = plan.local::<ContributionRegistrarContract>()?;
         let mut leases = Vec::new();
         for (id, name, kind) in [
@@ -404,6 +475,7 @@ impl PluginFactory for ScheduleFactory {
                 ScheduleCommand::Reserve,
             ),
             (SCHEDULE_SETTLE, "schedule-settle", ScheduleCommand::Settle),
+            (crate::SCHEDULE_RUN, "schedule-run", ScheduleCommand::Run),
             (
                 crate::SCHEDULE_DELETE,
                 "schedule-delete",
@@ -414,7 +486,9 @@ impl PluginFactory for ScheduleFactory {
             let descriptor = SessionCommandDescriptor::new(
                 id.clone(),
                 name,
-                if matches!(kind, ScheduleCommand::Delete) {
+                if matches!(kind, ScheduleCommand::Run) {
+                    "Run a retained scheduled reminder now"
+                } else if matches!(kind, ScheduleCommand::Delete) {
                     "Delete a scheduled reminder"
                 } else {
                     "Internal Schedule transition"
@@ -435,7 +509,7 @@ impl PluginFactory for ScheduleFactory {
                     command.continuation_only(ContinuationCommand::RecoverableReserve)
                 }
                 ScheduleCommand::Settle => command.continuation_only(ContinuationCommand::Settle),
-                ScheduleCommand::Delete => command,
+                ScheduleCommand::Delete | ScheduleCommand::Run => command,
             };
             leases.push(
                 registrar
@@ -459,7 +533,6 @@ impl PluginFactory for ScheduleFactory {
                 .map_err(activation)?,
         );
         let turns = plan.local::<TurnExecutionContract>()?;
-        let host = plan.local::<ScheduleControllerContract>()?;
         let mut tools = Vec::new();
         for (operation, description, schema) in tool_definitions() {
             tools.push(ToolRegistration {

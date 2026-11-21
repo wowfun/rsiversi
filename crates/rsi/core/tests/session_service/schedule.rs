@@ -209,6 +209,184 @@ enum RestartTarget {
     PendingRestart,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operator_run_keeps_the_rule_holds_until_idle_and_recovers_its_floor() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new().route("/v1/chat/completions", post({
+        let (calls, entered, release) = (calls.clone(), entered.clone(), release.clone());
+        move |Json(body): Json<serde_json::Value>| {
+            let index = calls.fetch_add(1, Ordering::SeqCst);
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                if index == 0 {
+                    return response(Some(("task","schedule_create",serde_json::json!({
+                        "prompt":"Check this release", "rule":{"kind":"after","delay_ms":900000}
+                    }))));
+                }
+                if index == 2 {
+                    assert!(body["messages"].to_string().contains("[SCHEDULE REMINDER]"));
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                response(None)
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let clock = ManualClock::new();
+    select_clock_profile(&fixture);
+    let boot = || {
+        RunningRsi::boot(
+            composition_with_clock(&fixture, clock.clone()),
+            &fixture.profile,
+        )
+    };
+    let running = boot().await.unwrap();
+    let session = SessionId::new("schedule-restart").unwrap();
+    let handle = create(&running, &fixture, session.as_str()).await;
+    run_message_to_terminal(&handle, "create-rule").await;
+    let before = state(&handle).await.reminders.remove(0);
+    let task = || rsi_session_protocol::ScheduledTaskId {
+        session_id: session.clone(),
+        id: before.id.clone(),
+    };
+    let service = running.session_service().unwrap();
+    set_archived(&running, true).await;
+    assert!(
+        service
+            .run_scheduled_task(task())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("archived")
+    );
+    set_archived(&running, false).await;
+    assert!(service.run_scheduled_task(task()).await.unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let receipt = state(&handle).await;
+    assert_eq!(receipt.allocated_rounds, 0);
+    assert_eq!(receipt.reminders[0].due_ms, before.due_ms);
+    assert!(receipt.reminders[0].active);
+    assert!(service.scheduled_tasks(None).await.unwrap().sessions[0].reminders[0].executing);
+    assert!(service.run_scheduled_task(task()).await.is_err());
+    clock.advance(60000);
+    assert!(
+        service
+            .run_scheduled_task(task())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("active")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    release.notify_one();
+    handle.wait_idle().await.unwrap();
+    let mut changes = service.observe_scheduled_tasks().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(update) = changes.next().await {
+            if matches!(update.unwrap(), rsi_session_protocol::ScheduleCatalogUpdate::Page { sessions, .. }
+                if !sessions[0].reminders[0].executing) { return; }
+        }
+        panic!("Schedule observation ended before execution settled");
+    }).await.unwrap();
+    drop(changes);
+    assert!(service.run_scheduled_task(task()).await.unwrap());
+    handle.wait_idle().await.unwrap();
+    let before_restart = state(&handle).await;
+    drop(handle);
+    drop(service);
+    assert!(running.shutdown().await.is_clean());
+    let restarted = boot().await.unwrap();
+    let service = restarted.session_service().unwrap();
+    assert!(
+        service
+            .run_scheduled_task(task())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("interval")
+    );
+    let handle = service.attach(&session).await.unwrap();
+    assert_eq!(state(&handle).await, before_restart);
+    clock.advance(840000);
+    let after = settled(&handle, 1).await;
+    assert!(after.reminders[0].consumed);
+    assert_eq!(after.reservation.unwrap().occurrence_ms, before.due_ms);
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    drop(handle);
+    assert!(restarted.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operator_run_calls_the_model_after_the_automatic_allowance_is_spent() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route("/v1/chat/completions", post({
+        let calls = calls.clone();
+        move |Json(body): Json<serde_json::Value>| {
+            let index = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if index == 0 {
+                    return response(Some(("task", "schedule_create", serde_json::json!({
+                        "prompt":"Report the time", "rule":{"kind":"every","interval_ms":60000}
+                    }))));
+                }
+                if index == 102 {
+                    assert!(body["messages"].to_string().contains("[SCHEDULE REMINDER]"));
+                }
+                response(None)
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let clock = ManualClock::new();
+    select_clock_profile(&fixture);
+    let running = RunningRsi::boot(
+        composition_with_clock(&fixture, clock.clone()),
+        &fixture.profile,
+    )
+    .await
+    .unwrap();
+    let session = SessionId::new("schedule-allowance").unwrap();
+    let handle = create(&running, &fixture, session.as_str()).await;
+    run_message_to_terminal(&handle, "create-recurring").await;
+    for round in 1..=100 {
+        clock.advance(60_000);
+        settled(&handle, round).await;
+    }
+    let before = state(&handle).await;
+    assert!(before.exhausted());
+    let task = &before.reminders[0];
+    clock.advance(60_000);
+    let service = running.session_service().unwrap();
+    assert!(
+        service
+            .run_scheduled_task(rsi_session_protocol::ScheduledTaskId {
+                session_id: session,
+                id: task.id.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    handle.wait_idle().await.unwrap();
+    let after = state(&handle).await;
+    assert_eq!(after.allocated_rounds, 100);
+    assert_eq!(after.reminders[0].due_ms, task.due_ms);
+    assert_eq!(after.next_due(), None);
+    assert_eq!(calls.load(Ordering::SeqCst), 103);
+    drop(handle);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
 fn disable_navigation(profile: &std::path::Path) {
     use std::io::Write as _;
     std::fs::OpenOptions::new()
@@ -290,7 +468,10 @@ async fn overdue_delivery_after_restart(target: RestartTarget) {
         catalog.sessions[0].position.session_id.as_str(),
         "schedule-restart"
     );
-    assert_eq!(catalog.sessions[0].reminders[0].id, before.reminders[0].id);
+    assert_eq!(
+        catalog.sessions[0].reminders[0].rule.id,
+        before.reminders[0].id
+    );
     let update = tokio::time::timeout(std::time::Duration::from_secs(3), changes.next())
         .await
         .unwrap()
@@ -317,7 +498,7 @@ async fn overdue_delivery_after_restart(target: RestartTarget) {
             .unwrap();
         assert!(
             matches!(update, ScheduleCatalogUpdate::Page { index: 0, sessions }
-            if sessions.len() == 1 && sessions[0].archived && sessions[0].reminders[0].id == before.reminders[0].id)
+            if sessions.len() == 1 && sessions[0].archived && sessions[0].reminders[0].rule.id == before.reminders[0].id)
         );
     }
     if matches!(target, RestartTarget::PendingRestart) {
@@ -505,6 +686,26 @@ struct GatedController {
 }
 #[async_trait::async_trait]
 impl rsi_agent_schedule::ScheduleController for GatedController {
+    fn delivery_holds(&self) -> tokio::sync::watch::Receiver<rsi_agent_schedule::DeliveryHolds> {
+        self.service.delivery_holds()
+    }
+    async fn check_operator_run(
+        &self,
+        session: &SessionId,
+        task: &rsi_agent_session_protocol::DomainRequestId,
+        previous: Option<&rsi_agent_session_protocol::MessageId>,
+    ) -> Result<(), String> {
+        self.service
+            .check_operator_run(session, task, previous)
+            .await
+    }
+    fn hold_delivery(
+        &self,
+        session: &SessionId,
+        task: &rsi_agent_session_protocol::DomainRequestId,
+    ) {
+        self.service.hold_delivery(session, task);
+    }
     async fn refresh_pending(&self, session: &SessionId) {
         self.service.refresh_pending(session).await
     }
@@ -584,6 +785,7 @@ impl rsi_meta::PluginFactory for GatedFactory {
             TurnServiceContract,
         };
         let service = rsi_schedule::ScheduleService::new(
+            plan.context().clone(),
             plan.local::<TurnServiceContract>()?,
             plan.local::<TurnExecutionContract>()?,
             plan.local::<SessionStoreContract>()?,
@@ -609,7 +811,7 @@ impl rsi_meta::PluginFactory for GatedFactory {
                 })
             }),
         )?;
-        service.start(plan.context().clone(), None);
+        service.start(None);
         Ok(())
     }
 }

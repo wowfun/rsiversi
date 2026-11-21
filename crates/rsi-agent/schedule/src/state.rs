@@ -44,6 +44,28 @@ pub struct Reminder {
     pub active: bool,
     /// A one-shot occurrence has already been accepted.
     pub consumed: bool,
+    /// Most recent automatic or operator delivery to the linked Session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_delivery: Option<ReminderDelivery>,
+}
+/// Receipt retained with the reminder rule in its atomic mailbox publication.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct ReminderDelivery {
+    /// Exact command or continuation message accepted in the owning Session.
+    pub message_id: MessageId,
+    /// Earliest UTC time when the next delivery may be admitted.
+    pub available_ms: u64,
+}
+impl Reminder {
+    /// Earliest admission allowed by the previous delivery.
+    fn delivery_floor_ms(&self) -> Option<u64> {
+        self.last_delivery.as_ref().map(|last| last.available_ms)
+    }
+    fn eligible_at(&self) -> u64 {
+        self.due_ms.max(self.delivery_floor_ms().unwrap_or(0))
+    }
 }
 /// The most recent exact accepted automatic input.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -77,7 +99,9 @@ pub struct ScheduleState {
 ///
 /// # Errors
 /// Rejects duplicate IDs, invalid prompts and invalid recurrence arithmetic.
-pub fn validate_reminders(reminders: &[Reminder]) -> Result<(), String> {
+pub fn validate_reminders<'a>(
+    reminders: impl ExactSizeIterator<Item = &'a Reminder>,
+) -> Result<(), String> {
     if reminders.len() > 16 {
         return Err("invalid Schedule capacity".into());
     }
@@ -92,6 +116,10 @@ pub fn validate_reminders(reminders: &[Reminder]) -> Result<(), String> {
             })
             || (reminder.interval_ms.is_none() && reminder.due_ms != reminder.anchor_ms)
             || (reminder.consumed && (reminder.active || reminder.interval_ms.is_some()))
+            || reminder
+                .last_delivery
+                .as_ref()
+                .is_some_and(|last| last.available_ms <= MIN_INTERVAL_MS)
         {
             return Err("invalid reminder identity or anchored time".into());
         }
@@ -130,7 +158,7 @@ impl ScheduleState {
         {
             return Err("invalid Schedule capacity or allocation state".into());
         }
-        validate_reminders(&self.reminders)?;
+        validate_reminders(self.reminders.iter())?;
         if let Some(reservation) = &self.reservation {
             prompt(&reservation.prompt)?;
             reservation.input.validate().map_err(|e| e.to_string())?;
@@ -186,6 +214,7 @@ impl ScheduleState {
             interval_ms,
             active: true,
             consumed: false,
+            last_delivery: None,
         });
         self.validate()
     }
@@ -232,6 +261,47 @@ impl ScheduleState {
             .ok_or("reminder not found")?;
         Ok(self.reminders.remove(index))
     }
+    /// Stages an operator follow-up without changing the retained rule or automatic budget.
+    /// The owner checks target availability and any outstanding execution before publication.
+    ///
+    /// # Errors
+    /// Rejects an unknown task or a delivery inside its minimum interval.
+    pub fn run_now(
+        &mut self,
+        id: &DomainRequestId,
+        message_id: MessageId,
+        now_ms: u64,
+    ) -> Result<(String, Option<MessageId>), String> {
+        if self
+            .reservation
+            .as_ref()
+            .is_some_and(|r| !r.settled && &r.reminder_id == id)
+        {
+            return Err("reminder execution is still active".into());
+        }
+        let reminder = self
+            .reminders
+            .iter_mut()
+            .find(|row| &row.id == id)
+            .ok_or("reminder not found")?;
+        if now_ms == 0
+            || reminder
+                .delivery_floor_ms()
+                .is_some_and(|floor| now_ms < floor)
+        {
+            return Err("reminder delivery interval is still active".into());
+        }
+        let text = format!(
+            "[SCHEDULE REMINDER]\nThis is a scheduled message from the user\nschedule_id_json: {}\noccurrence_at_unix_ms: {now_ms}\nreminder_prompt_json: {}",
+            serde_json::json!(id),
+            serde_json::json!(reminder.prompt),
+        );
+        let previous = reminder.last_delivery.replace(ReminderDelivery {
+            message_id,
+            available_ms: now_ms.saturating_add(MIN_INTERVAL_MS),
+        });
+        Ok((text, previous.map(|receipt| receipt.message_id)))
+    }
     fn can_reserve(&self) -> bool {
         !self.exhausted() && self.reservation.as_ref().is_none_or(|r| r.settled)
     }
@@ -243,7 +313,7 @@ impl ScheduleState {
         self.reminders
             .iter()
             .filter(|r| r.active)
-            .map(|r| r.due_ms)
+            .map(Reminder::eligible_at)
             .min()
     }
     /// Proposes one due input for atomic idle admission. Failure preserves state.
@@ -258,7 +328,7 @@ impl ScheduleState {
             .reminders
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.active && r.due_ms <= now_ms)
+            .filter(|(_, r)| r.active && r.eligible_at() <= now_ms)
             .min_by_key(|(_, r)| (r.due_ms, &r.id))
             .ok_or("no due Schedule round")?;
         let occurrence_ms = if let Some(interval) = reminder.interval_ms {
@@ -303,6 +373,15 @@ impl ScheduleState {
             settled: false,
         };
         let reminder = &mut self.reminders[index];
+        reminder.last_delivery = Some(ReminderDelivery {
+            message_id: input.message_id.clone(),
+            available_ms: if next.is_some() {
+                occurrence_ms
+            } else {
+                now_ms
+            }
+            .saturating_add(MIN_INTERVAL_MS),
+        });
         if let Some(next) = next {
             reminder.due_ms = next;
         } else {
@@ -392,6 +471,16 @@ rsi_persistence_testkit::payload_contract!(
             .unwrap();
         samples.push(state.clone());
         state.reserve(301_000).unwrap();
+        samples.push(state.clone());
+        let message = state.reservation.as_ref().unwrap().input.message_id.clone();
+        state.settle(&message).unwrap();
+        state
+            .run_now(
+                &DomainRequestId::new("fixture").unwrap(),
+                MessageId::new("manual").unwrap(),
+                361_000,
+            )
+            .unwrap();
         samples.push(state);
 
         let samples: Vec<ScheduleState> = samples;
@@ -399,5 +488,21 @@ rsi_persistence_testkit::payload_contract!(
             sample.validate().unwrap();
         }
         samples
+    },
+    |path, version| {
+        use rsi_agent_session_protocol::{DomainIdentity, DomainSnapshot, DomainStateValue};
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for sample in fixture["payload"]["samples"].as_array().unwrap() {
+            let value = serde_json::from_str(sample.as_str().unwrap()).unwrap();
+            let snapshot = DomainSnapshot::new(
+                DomainIdentity::new(crate::SCHEDULE_DOMAIN, version).unwrap(),
+                DomainStateValue::new(value).unwrap(),
+            );
+            assert_eq!(
+                ScheduleState::from_snapshot(&snapshot).unwrap_err(),
+                "unsupported Schedule domain or codec"
+            );
+        }
     }
 );
