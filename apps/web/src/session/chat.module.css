@@ -527,11 +527,11 @@
 }
 .transcriptArea > :global(.transcript:not(.trajectory)) {
   container-type: inline-size;
+  padding-inline: 32px;
+  margin-right: 2px;
 }
-@media (min-width: 1024px) {
-  .transcriptArea > :global(.transcript:not(.trajectory)) {
-    padding-inline: 24px;
-  }
+.transcriptArea > :global(.transcript)::-webkit-scrollbar-track {
+  margin-block: 2px;
 }
 :global(.transcript-flow):where(.scope *) {
   max-width: var(--text-width);

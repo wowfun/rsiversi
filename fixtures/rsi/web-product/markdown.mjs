@@ -259,10 +259,12 @@ try{
         const bounds=await page.locator('.transcript .markdown').evaluate(markdown=>{
           const wide=markdown.querySelector('.md-table-wide'),quote=markdown.querySelector('blockquote .markdown-table');
           const prose=markdown.querySelector('p').getBoundingClientRect();
-          return {column:prose.width,wide:wide.clientWidth,alignment:wide.querySelector('table').getBoundingClientRect().left-prose.left,
+          const scroll=markdown.closest('.transcript'),style=getComputedStyle(scroll);
+          return {inset:[style.paddingLeft,style.paddingRight,style.marginRight],column:prose.width,wide:wide.clientWidth,alignment:wide.querySelector('table').getBoundingClientRect().left-prose.left,
             quoted:quote.clientWidth,overflow:wide.scrollWidth-wide.clientWidth,documentWidth:document.documentElement.scrollWidth};
         });
         assert(Math.abs(bounds.alignment)<=1 && bounds.quoted<=bounds.column && bounds.documentWidth===width);
+        assert.deepEqual(bounds.inset,['32px','32px','2px'],'transcript side clearance and scrollbar offset');
         if(width===1680)assert(bounds.wide>bounds.column+100,'wide table uses transcript gutters');
         else assert(Math.abs(bounds.wide-bounds.column)<=1 && bounds.overflow>0);
         tableLayout.push(bounds);

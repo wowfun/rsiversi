@@ -960,6 +960,8 @@ inside their independently admitted renderer bundle. Its queue and grammar insta
 are separate from the main document bundle and obey the same bounds. Plain lines
 appear immediately; preview retirement cancels pending highlighting.
 
+The conversation transcript reserves 32 CSS pixels on both sides of its text
+and table area. Its vertical scrollbar sits 2 pixels inside the pane edge.
 Assistant tables with at least four columns start at the surrounding text and
 can scroll across the available transcript width. On narrow screens the scroll
 area stays within the text column. On hover-capable devices the scrollbar
