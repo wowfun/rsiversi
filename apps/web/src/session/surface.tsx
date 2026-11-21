@@ -229,7 +229,7 @@ function NativeSurface({
         <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
         {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
       </div>
-      {data && !data.protected && !catalogOpen && <TodoPanel key={data.session} projections={data.projections}/>}
+      {data && !data.protected && !catalogOpen && <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>}
       <Composer
         owner={owner}
         data={data}

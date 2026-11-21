@@ -487,7 +487,8 @@ group set or a new navigation ticket, not by unrelated redraws; explicit expansi
 can always retry. Row titles and native attention are indexed once per projection,
 with one date formatter and shortest unique same-time ID prefixes.
 
-Protected panes hide queue mutation controls and close the queue editor.
+Claimed inputs leave the queue as soon as the pane receives the updated queue,
+including while its to-do list is open. Protected panes hide queue mutation controls and close the queue editor.
 Queue rows reuse the last received array while its pane generation is unchanged.
 Unrelated transcript patches do not serialize the queue for a comparison or
 replace its controls. Layout persistence failures are visible; the current

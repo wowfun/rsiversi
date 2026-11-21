@@ -20,6 +20,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
     "files",
     "references",
     "projections",
+    "claimed-queue",
     "transcript",
     "renderer-error",
     "renderer-rejection",
@@ -706,6 +707,29 @@ export async function verifyFrameCommit(browser, url, report, name) {
         true,
       );
       await page.screenshot({ path: join(report, `${name}-references.png`) });
+    } else if (scenario === "claimed-queue") {
+      await page.evaluate(async () => {
+        fixture.view.surfaces.main.projections = {cursor: {kind: "draft"}, entries: [{producer: "rsi.todo.view",
+          content: {kind: "value", value: [{content: "Review", status: "pending"}]}}]};
+        await fixture.frame();
+      });
+      const todo = page.getByRole("region", {name: "To-dos"});
+      await todo.getByRole("button").click();
+      const pending = page.getByRole("region", {name: "Pending inputs"});
+      for (const id of ["first", "second"]) {
+        await page.evaluate(async id => {
+          fixture.view.surfaces.main.queue = [{queue_slot: {id}, message_id: id,
+            source_kind: "human", delivery_label: "Next turn", editable: true}];
+          await fixture.frame();
+        }, id);
+        await pending.getByText(`human · Next turn · ${id}`, {exact: true}).waitFor();
+        await page.evaluate(async () => {
+          fixture.view.surfaces.main.queue = [];
+          await fixture.frame();
+        });
+        assert.equal(await pending.count(), 0, "claimed input leaves the composer");
+        assert.equal(await todo.getByRole("button").getAttribute("aria-expanded"), "true");
+      }
     } else if (scenario === "projections") {
       await page.evaluate(async () => {
         Object.assign(fixture.view.surfaces.main, {
