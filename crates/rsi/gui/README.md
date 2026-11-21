@@ -11,6 +11,8 @@ for the initial history page and subsequent observations. Durable history starts
 at one inspection cut. If inspection finds no history, the pane loads the live
 draft. Publication during that read resumes from a fresh durable inspection.
 Restoring saved input first checks its recorded Header against the target.
+If the target cannot attach, the current pane stays open and the caller
+receives the attachment failure recorded by the surface Profile.
 
 Completed native Turns expose a manual fork action bound to the current pane
 generation. Full, Last(n), and None create a fresh independent draft in the source

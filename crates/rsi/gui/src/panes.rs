@@ -1097,7 +1097,12 @@ impl GuiApplication {
             .map_err(error)?;
         let controller = surface
             .lookup_local::<SessionControllerContract>()
-            .ok_or("Surface controller is unavailable")?;
+            .ok_or_else(|| {
+                surface
+                    .lookup_local::<rsi_host::ProfileControlContract>()
+                    .and_then(|profile| profile.status().diagnostic().map(str::to_owned))
+                    .unwrap_or_else(|| "Surface controller is unavailable".into())
+            })?;
         let handle = selected_handle.unwrap_or_else(|| controller.session_handle());
         let inspection = if reopening {
             let inspect =

@@ -85,7 +85,8 @@ async fn reopening_a_publishing_draft_seeds_the_durable_history() {
     assert_eq!(view(&app)["surfaces"]["main"]["header"], current["header"]);
     let generation = view(&app)["surfaces"]["main"]["generation"].clone();
     let missing = json!({"action":"open","pane":"main","session":"missing-session"}).to_string();
-    assert!(app.command(&missing).await.is_err());
+    let failure = app.command(&missing).await.unwrap_err();
+    assert!(failure.contains("missing-session"), "{failure}");
     assert_eq!(view(&app)["surfaces"]["main"]["generation"], generation);
     assert!(runtime.shutdown().await.is_clean());
 }
