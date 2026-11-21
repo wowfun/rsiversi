@@ -48,15 +48,20 @@ impl Managed {
 impl LocalSessionService {
     pub(super) async fn collect_activity(&self) -> Result<SessionActivityPage> {
         self.check_origin()?;
-        let _permit = self
-            .activity
-            .slots
-            .try_acquire()
-            .map_err(|_| SessionError::Capacity)?;
+        let collect = async {
+            let _permit = self
+                .activity
+                .slots
+                .acquire()
+                .await
+                .map_err(|_| SessionError::ShuttingDown)?;
+            self.check_origin()?;
+            self.activity_snapshot().await
+        };
         tokio::select! {
             biased;
             () = self.projection_stopped.cancelled() => Err(SessionError::ShuttingDown),
-            result = tokio::time::timeout(std::time::Duration::from_secs(30), self.activity_snapshot()) =>
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), collect) =>
                 result.map_err(|_| SessionError::Invalid("activity read deadline elapsed".into()))?,
         }
     }

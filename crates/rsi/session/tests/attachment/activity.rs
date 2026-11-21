@@ -26,6 +26,75 @@ impl rsi_session_protocol::SessionProtection for ReadingPolicy {
     }
 }
 
+fn activity_service(
+    store: Arc<MemoryStore>,
+    roster: Arc<Roster>,
+    approvals: Arc<TreeApprovals>,
+) -> LocalSessionService {
+    LocalSessionService::new(
+        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+        Arc::new(UnavailableCommands),
+        roster,
+        Arc::new(UnavailableTurns::default()),
+        store,
+        rsi_agent_context::ContextBudget::default(),
+        Arc::new(UnavailableComposition),
+        Arc::new(UnavailableWorkspace),
+        Arc::new(UnavailableSettings),
+        Arc::new(UnavailableLanguage),
+        Arc::new(UnavailableImage),
+        Arc::new(UnavailableMedia),
+        approvals,
+    )
+}
+
+#[tokio::test]
+async fn simultaneous_activity_readers_wait_for_capacity_and_recheck_their_access() {
+    let store = Arc::new(MemoryStore::new());
+    let roster = Arc::new(Roster {
+        ids: vec![SessionId::new("resident").unwrap()],
+        present: true.into(),
+        revision: 0.into(),
+    });
+    let approvals = Arc::new(TreeApprovals::default());
+    let gate = approvals.pending.lock().await;
+    let service = activity_service(store.clone(), roster, approvals.clone());
+    let revoked = CancellationToken::new();
+    let device = service.scoped(rsi_api_protocol::CallOrigin::Device(
+        rsi_api_protocol::AuthenticatedDevice {
+            id: rsi_api_protocol::DeviceId::from_bytes([1; 16]),
+            revoked: revoked.clone(),
+        },
+    ));
+    let mut first = service.activity();
+    let mut second = service.activity();
+    let mut abandoned = service.activity();
+    let mut waiting_device = device.activity();
+    let mut last = service.activity();
+    for reader in [
+        &mut first,
+        &mut second,
+        &mut abandoned,
+        &mut waiting_device,
+        &mut last,
+    ] {
+        assert!(futures_util::poll!(reader).is_pending());
+    }
+    assert_eq!(store.activity_read_counts().1, 2);
+    drop(abandoned);
+    revoked.cancel();
+    drop(gate);
+    let (first, second, device, last) = tokio::join!(first, second, waiting_device, last);
+    assert_eq!(first.unwrap(), second.unwrap());
+    assert!(matches!(
+        device,
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+    ));
+    assert!(last.is_ok());
+    assert_eq!(store.activity_read_counts().1, 3);
+    service.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn activity_revocation_during_collection_refuses_protected_and_device_delivery() {
     for revoke_scope in [true, false] {
@@ -79,29 +148,21 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
             reads: AtomicUsize::new(0),
         });
         let device_stop = CancellationToken::new();
-        let service = LocalSessionService::new(
-            rsi_meta::Execution::native(tokio::runtime::Handle::current()),
-            Arc::new(UnavailableCommands),
-            roster,
-            Arc::new(UnavailableTurns::default()),
-            store,
-            rsi_agent_context::ContextBudget::default(),
-            Arc::new(UnavailableComposition),
-            Arc::new(UnavailableWorkspace),
-            Arc::new(UnavailableSettings),
-            Arc::new(UnavailableLanguage),
-            Arc::new(UnavailableImage),
-            Arc::new(UnavailableMedia),
-            approvals.clone(),
-        )
-        .with_protection(policy.clone());
+        let service =
+            activity_service(store, roster, approvals.clone()).with_protection(policy.clone());
         let scoped = service.scoped(rsi_api_protocol::CallOrigin::Device(
             rsi_api_protocol::AuthenticatedDevice {
                 id: rsi_api_protocol::DeviceId::from_bytes([1; 16]),
                 revoked: device_stop.clone(),
             },
         ));
-        assert_eq!(scoped.visible_activity_sessions(std::slice::from_ref(&id)).await.unwrap(), vec![id.clone()]);
+        assert_eq!(
+            scoped
+                .visible_activity_sessions(std::slice::from_ref(&id))
+                .await
+                .unwrap(),
+            vec![id.clone()]
+        );
         let mut reading = Box::pin(scoped.activity());
         assert!(futures_util::poll!(&mut reading).is_pending());
         assert_eq!(
@@ -119,11 +180,16 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
         }
         drop(gate);
         let reply = reading.await;
-        let cold = scoped.visible_activity_sessions(std::slice::from_ref(&id)).await;
+        let cold = scoped
+            .visible_activity_sessions(std::slice::from_ref(&id))
+            .await;
         if revoke_scope {
             assert!(cold.unwrap().is_empty());
         } else {
-            assert!(matches!(cold, Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))));
+            assert!(matches!(
+                cold,
+                Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+            ));
         }
         service.stop().await.unwrap();
         assert!(
@@ -191,19 +257,9 @@ async fn maximum_activity_roster_uses_one_access_and_two_cut_batches() {
         present: std::sync::atomic::AtomicBool::new(true),
         revision: std::sync::atomic::AtomicU64::new(0),
     });
-    let service = LocalSessionService::new(
-        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
-        Arc::new(UnavailableCommands),
-        roster.clone(),
-        Arc::new(UnavailableTurns::default()),
+    let service = activity_service(
         store.clone(),
-        rsi_agent_context::ContextBudget::default(),
-        Arc::new(UnavailableComposition),
-        Arc::new(UnavailableWorkspace),
-        Arc::new(UnavailableSettings),
-        Arc::new(UnavailableLanguage),
-        Arc::new(UnavailableImage),
-        Arc::new(UnavailableMedia),
+        roster.clone(),
         Arc::new(TreeApprovals::default()),
     );
     for id in &ids[..64] {
@@ -369,21 +425,7 @@ async fn activity_distinguishes_current_owner_from_durable_open_turn_and_bounds_
             })
             .collect(),
     );
-    let service = LocalSessionService::new(
-        rsi_meta::Execution::native(tokio::runtime::Handle::current()),
-        Arc::new(UnavailableCommands),
-        roster.clone(),
-        Arc::new(UnavailableTurns::default()),
-        store.clone(),
-        rsi_agent_context::ContextBudget::default(),
-        Arc::new(UnavailableComposition),
-        Arc::new(UnavailableWorkspace),
-        Arc::new(UnavailableSettings),
-        Arc::new(UnavailableLanguage),
-        Arc::new(UnavailableImage),
-        Arc::new(UnavailableMedia),
-        approvals.clone(),
-    );
+    let service = activity_service(store.clone(), roster.clone(), approvals.clone());
     let mut page = service.activity().await.unwrap();
     let reads = store.activity_read_counts().0;
     for _ in 0..16 {

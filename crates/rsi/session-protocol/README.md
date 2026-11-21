@@ -125,12 +125,11 @@ handle. Results carry exact pending approval/question identities, a durable Fact
 watermark and current-owner running evidence. A durable open Turn without that
 evidence is `Unknown`; a closed durable cut is `Idle`, not proof that all external
 effects settled. Missing unpublished drafts are omitted. Truncation is explicit.
-Collection admits two callers, has a 30-second deadline and reserves the existing
-bounded interaction payload budget before reading brokers. At most 32 interaction
-identities per Session survive into the returned metadata.
-The union therefore contains at most 128 identities. The current adapter performs
-one sequential, single-row open-Turn Store read per selected identity under that
-shared deadline; this is a bounded activity view, not historical enumeration.
+At most two collections run concurrently. Callers wait in arrival order within
+the same 30-second deadline that covers collection. Each collection reserves the
+interaction payload budget before reading brokers, retains up to 32 interaction
+identities per Session and rechecks caller access before publication.
+The [Session implementation](../session/README.md) owns the batched Store reads.
 
 `SessionDraftControl` is a Local-only lifetime capability. It explicitly expires
 one completed, inactive, unpublished draft and releases its generation pin.
