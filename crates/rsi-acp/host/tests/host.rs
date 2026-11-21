@@ -181,6 +181,9 @@ async fn host_owns_peers_across_detach_reconciles_start_and_reopens_after_retire
     drop(detached);
     service.submit(&identity, "work").await.unwrap();
     settle(service.as_ref(), &identity, Status::Completed).await;
+    let resident = service.residents().await.unwrap().pop().unwrap();
+    assert_eq!(resident.sequence, "1");
+    assert!(!resident.failed);
     let projection = service.page(&identity, snapshot.epoch, 0).await.unwrap();
     assert_eq!(projection.records.len(), 2);
     assert_eq!(
@@ -200,6 +203,7 @@ async fn host_owns_peers_across_detach_reconciles_start_and_reopens_after_retire
         service.page(&identity, 1, 0).await.unwrap().records.len(),
         2
     );
+    assert_eq!(service.residents().await.unwrap()[0].sequence, "1");
     service.close(&identity).await.unwrap();
     assert_eq!(
         service
@@ -213,6 +217,7 @@ async fn host_owns_peers_across_detach_reconciles_start_and_reopens_after_retire
         service.page(&identity, 2, 0).await.unwrap().records.len(),
         1
     );
+    assert_eq!(service.residents().await.unwrap()[0].sequence, "0");
     assert!(fiber.dispose().await.is_clean());
     assert_reaped(root.path());
     assert!(service.list(None).await.is_err());

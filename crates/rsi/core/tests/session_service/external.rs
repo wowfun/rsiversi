@@ -180,6 +180,30 @@ async fn native_tool_and_direct_uds_share_external_owner_without_cross_caller_au
         assert!(!std::path::Path::new("/proc").join(pid).exists());
     }
     daemon.shutdown().await;
+    let restarted = DaemonFixture::new(&fixture).await;
+    let connection = restarted.connection.api_client();
+    let direct = rsi_acp_api::Client::new(connection.clone());
+    let restored = direct
+        .reconnect(&id, rsi_acp_protocol::service::Setup::Load)
+        .await
+        .unwrap();
+    assert!(
+        !direct
+            .page(&id, restored.epoch, 0)
+            .await
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    let page = rsi_navigation_api::attention::Client::new(connection)
+        .read()
+        .await
+        .unwrap();
+    assert!(
+        page.entries.iter().all(|row| !row.reading.unread()),
+        "replaying ACP history after Host restart raised an unread reminder: {page:?}"
+    );
+    restarted.shutdown().await;
     server.abort();
     let _ = server.await;
 }

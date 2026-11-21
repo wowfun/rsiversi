@@ -114,8 +114,10 @@ pub struct PermissionSummary {
 pub struct Resident {
     /// Current persisted observation.
     pub snapshot: Snapshot,
-    /// Canonical decimal highest visible observation sequence, within snapshot epoch.
+    /// Canonical decimal count of prompts settled live during this Host and replay epoch.
     pub sequence: String,
+    /// Whether that last live prompt failed, independent of the current running state.
+    pub failed: bool,
     /// Whether the exact peer accepts control.
     pub connected: bool,
     /// At most 32 exact outstanding interaction targets.

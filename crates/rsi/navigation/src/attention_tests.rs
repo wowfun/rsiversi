@@ -10,6 +10,7 @@ struct Sources(
     Arc<Mutex<ExternalStatus>>,
     Arc<std::sync::atomic::AtomicUsize>,
     Arc<Mutex<Vec<CallOrigin>>>,
+    Vec<rsi_session_protocol::SessionActivity>,
 );
 #[async_trait]
 impl SessionIngress for Sources {
@@ -66,7 +67,7 @@ impl SessionService for Sources {
     ) -> rsi_session_protocol::Result<Vec<rsi_agent_session_protocol::SessionId>> {
         Ok(ids
             .iter()
-            .filter(|id| id.as_str() == "visible")
+            .filter(|id| id.as_str() == "visible" || id.as_str().starts_with("cold-"))
             .cloned()
             .collect())
     }
@@ -75,7 +76,7 @@ impl SessionService for Sources {
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionActivityPage> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(rsi_session_protocol::SessionActivityPage {
-            entries: vec![],
+            entries: self.3.clone(),
             truncated: false,
         })
     }
@@ -98,6 +99,7 @@ impl ExternalConversations for Sources {
                 capabilities: Capabilities::default(),
             },
             sequence: "2".into(),
+            failed: status == ExternalStatus::Failed,
             connected: status != ExternalStatus::Closed,
             permissions: vec![],
         }])
@@ -148,10 +150,14 @@ impl ExternalConversations for Sources {
     }
 }
 fn fixture() -> Attention {
+    fixture_with(Vec::new())
+}
+fn fixture_with(native: Vec<rsi_session_protocol::SessionActivity>) -> Attention {
     let sources = Arc::new(Sources(
         Arc::new(Mutex::new(ExternalStatus::Ready)),
         Arc::default(),
         Arc::default(),
+        native,
     ));
     Attention {
         session: sources.clone(),
@@ -169,6 +175,11 @@ fn fixture() -> Attention {
 fn reminders_preserve_manual_intent_and_exact_cuts() {
     use rsi_agent_session_protocol::SessionId;
     let records = Records::default();
+    let mut changes = records.changes.subscribe();
+    records.handle(&SessionActivityEvent::TurnStarted);
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    assert!(records.rows.lock().unwrap().is_empty());
     let session = SessionId::new("visible").unwrap();
     let id = ConversationIdentity::Native(session.clone());
     for (sequence, failed) in [(8, false), (12, true), (8, false)] {
@@ -255,6 +266,41 @@ async fn follow_wakes_for_visible_changes_and_coalesces_private_and_repeated_eve
     assert!(poll!(updates.next()).is_pending());
     retiring.cancel();
     assert!(updates.next().await.is_none());
+}
+
+#[tokio::test]
+async fn first_page_orders_cold_and_managed_reminders_together() {
+    use rsi_agent_session_protocol::SessionId;
+    let managed: Vec<_> = (0..16)
+        .map(|n| rsi_session_protocol::SessionActivity {
+            session: SessionId::new(format!("managed-{n}")).unwrap(),
+            fact_seq: "1".into(),
+            status: ActivityStatus::Idle,
+            requests: Vec::new(),
+            truncated: false,
+        })
+        .collect();
+    let owner = fixture_with(managed.clone());
+    for session in managed
+        .into_iter()
+        .map(|row| row.session)
+        .chain((0..150).map(|n| SessionId::new(format!("cold-{n:03}")).unwrap()))
+    {
+        owner.records.handle(&SessionActivityEvent::TurnEnded {
+            session,
+            sequence: 1,
+            failed: false,
+        });
+    }
+    let page = owner.read(&CallOrigin::Local).await.unwrap();
+    assert!(page.truncated);
+    assert_eq!(page.entries.len(), 136);
+    for (n, row) in page.entries.iter().enumerate() {
+        assert_eq!(
+            row.position.conversation,
+            ConversationIdentity::Native(SessionId::new(format!("cold-{n:03}")).unwrap())
+        );
+    }
 }
 
 #[tokio::test]

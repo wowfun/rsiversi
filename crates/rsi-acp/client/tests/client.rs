@@ -39,7 +39,7 @@ async fn fixture(resume: bool) -> (tempfile::TempDir, Journal, Client, Peer) {
     let client = Peer::start(StreamTransport::new(read, write));
     let (read, write) = tokio::io::split(right);
     let peer = Peer::start(StreamTransport::new(read, write));
-    let client = Client::attach(client, journal.clone(), snapshot).unwrap();
+    let client = Client::attach(client, journal.clone(), snapshot, Default::default()).unwrap();
     (root, journal, client, peer)
 }
 

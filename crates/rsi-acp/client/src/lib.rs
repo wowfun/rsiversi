@@ -26,6 +26,39 @@ use transitions::Transition;
 
 const CONTROL: Duration = Duration::from_secs(30);
 
+/// Prompt completions observed by one Host, shared across peer reconnections.
+#[derive(Clone, Debug, Default)]
+pub struct LivePromptCompletions(Arc<Mutex<BTreeMap<ConversationId, PromptCompletion>>>);
+
+#[derive(Debug, Default)]
+struct PromptCompletion {
+    epoch: u64,
+    count: u64,
+    failed: bool,
+}
+
+impl LivePromptCompletions {
+    fn position(&self, snapshot: &Snapshot) -> (u64, bool) {
+        self.0
+            .lock()
+            .expect("ACP prompt completions")
+            .get(&snapshot.id)
+            .filter(|record| record.epoch == snapshot.epoch)
+            .map_or((0, false), |record| (record.count, record.failed))
+    }
+
+    fn settled(&self, snapshot: &Snapshot) {
+        let mut records = self.0.lock().expect("ACP prompt completions");
+        let record = records.entry(snapshot.id.clone()).or_default();
+        if snapshot.epoch != record.epoch {
+            record.epoch = snapshot.epoch;
+            record.count = 0;
+        }
+        record.count = (record.count + 1).min(i64::MAX as u64);
+        record.failed = snapshot.status == Status::Failed;
+    }
+}
+
 /// Categorical failures with no command, credential or raw peer error text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
@@ -63,6 +96,7 @@ struct PendingPermission {
 struct State {
     journal: Journal,
     snapshot: Mutex<Snapshot>,
+    completions: LivePromptCompletions,
     id: ConversationId,
     generation: u64,
     target: Mutex<Option<String>>,
@@ -148,7 +182,12 @@ impl std::fmt::Debug for Client {
 impl Client {
     /// Attaches an already admitted peer to a reserved journal generation.
     /// Routing is installed immediately, before any setup request can emit updates.
-    pub fn attach(peer: Peer, journal: Journal, snapshot: Snapshot) -> Result<Self> {
+    pub fn attach(
+        peer: Peer,
+        journal: Journal,
+        snapshot: Snapshot,
+        completions: LivePromptCompletions,
+    ) -> Result<Self> {
         snapshot.validate().map_err(|_| Error::Input)?;
         if snapshot.generation == 0 {
             return Err(Error::Input);
@@ -158,6 +197,7 @@ impl Client {
             generation: snapshot.generation,
             target: Mutex::new(snapshot.remote.clone()),
             snapshot: Mutex::new(snapshot),
+            completions,
             journal,
             port: peer.handle(),
             stop: CancellationToken::new(),
@@ -267,6 +307,14 @@ impl Handle {
     /// Reads the latest observed state, without creating or resuming a peer.
     pub fn snapshot(&self) -> Snapshot {
         self.0.snapshot()
+    }
+    /// Captures the published peer status and its last live prompt completion together.
+    /// # Panics
+    /// Panics if the snapshot or completion lock was poisoned.
+    pub fn activity(&self) -> (Snapshot, u64, bool) {
+        let snapshot = self.0.snapshot.lock().expect("ACP client snapshot");
+        let (count, failed) = self.0.completions.position(&snapshot);
+        (snapshot.clone(), count, failed)
     }
     /// First categorical transport failure, without raw peer payload or stderr.
     pub fn failure(&self) -> Option<rsi_acp::Error> {

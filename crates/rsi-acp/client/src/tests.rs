@@ -53,6 +53,30 @@ impl AsyncWrite for Writer {
 }
 
 #[tokio::test]
+async fn only_settled_prompts_advance_live_activity() {
+    let (_root, client, peer, _) = fixture().await;
+    let state = &client.state;
+    let handle = client.handle();
+    state.status(Status::Failed).await.unwrap();
+    assert_eq!(handle.activity().1, 0);
+    state.status(Status::Running).await.unwrap();
+    state.status(Status::Failed).await.unwrap();
+    let (_, sequence, failed) = handle.activity();
+    assert_eq!((sequence, failed), (1, true));
+    state.status(Status::Running).await.unwrap();
+    let (_, sequence, failed) = handle.activity();
+    assert_eq!((sequence, failed), (1, true));
+    state
+        .transition(Transition::Complete(Completion::EndTurn))
+        .await
+        .unwrap();
+    let (_, sequence, failed) = handle.activity();
+    assert_eq!((sequence, failed), (2, false));
+    client.close().await.unwrap();
+    peer.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn completed_prompt_survives_transport_cleanup_failure() {
     let (_root, client, peer, gate) = fixture().await;
     let state = client.state.clone();
@@ -180,7 +204,7 @@ async fn fixture() -> (tempfile::TempDir, Client, Peer, Arc<Gate>) {
     let (read, write) = tokio::io::split(b);
     (
         root,
-        Client::attach(local, journal, snapshot).unwrap(),
+        Client::attach(local, journal, snapshot, Default::default()).unwrap(),
         Peer::start(StreamTransport::new(read, write)),
         gate,
     )

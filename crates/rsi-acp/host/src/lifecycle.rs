@@ -132,7 +132,13 @@ async fn prepare_local(
     let snapshot = owner.journal.connect(id).await.map_err(journal)?;
     *reserved = Some(snapshot.clone());
     let (peer, servers) = launch::open(owner, endpoint, &cwd).await?;
-    let connection = Client::attach(peer, owner.journal.clone(), snapshot).map_err(client)?;
+    let connection = Client::attach(
+        peer,
+        owner.journal.clone(),
+        snapshot,
+        owner.completions.clone(),
+    )
+    .map_err(client)?;
     owner
         .residents
         .lock()

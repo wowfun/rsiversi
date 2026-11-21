@@ -29,16 +29,19 @@ impl ExternalConversations for Owner {
             .collect())
     }
     async fn residents(&self) -> Result<Vec<Resident>> {
-        let mut rows: Vec<_> = self
+        Ok(self
             .state
             .residents
             .lock()
             .expect("ACP residents")
             .values()
             .filter_map(|resident| {
-                resident.handle.as_ref().map(|handle| Resident {
-                    snapshot: handle.snapshot(),
-                    sequence: "0".into(),
+                let handle = resident.handle.as_ref()?;
+                let (snapshot, sequence, failed) = handle.activity();
+                Some(Resident {
+                    snapshot,
+                    sequence: sequence.to_string(),
+                    failed,
                     connected: handle.connected(),
                     permissions: handle
                         .permissions()
@@ -51,17 +54,7 @@ impl ExternalConversations for Owner {
                         .collect(),
                 })
             })
-            .collect();
-        for row in &mut rows {
-            row.sequence = self
-                .state
-                .journal
-                .position(&row.snapshot.id, row.snapshot.epoch)
-                .await
-                .map_err(journal)?
-                .to_string();
-        }
-        Ok(rows)
+            .collect())
     }
     async fn list(&self, after: Option<ConversationId>) -> Result<Vec<Snapshot>> {
         self.state.journal.list(after).await.map_err(journal)

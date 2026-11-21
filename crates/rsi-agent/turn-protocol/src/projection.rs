@@ -9,6 +9,8 @@ use std::fmt;
 /// Session visibility separately. Historical reads and replay never emit them.
 #[derive(Debug)]
 pub enum SessionActivityEvent {
+    /// A newly admitted Turn may change running status in the caller's visible page.
+    TurnStarted,
     /// A confirmed terminal Fact from the running Kernel.
     TurnEnded {
         /// Session whose turn completed.

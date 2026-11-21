@@ -43,7 +43,9 @@ this protocol library.
 
 The external-conversation Local service exposes only configured endpoint IDs,
 explicit new/resume/load, one-shot text submission, bounded observations and exact
-permission replies. Its owner survives detachable clients. New local identities
+permission replies. Resident activity reports live prompt completions for the
+current Host and observation epoch. History replay leaves this count unchanged.
+Its owner survives detachable clients. New local identities
 reconcile only their recorded start; they never authorize a repeated prompt send.
 The same contract serves direct interaction and model delegation. Endpoint launch
 configuration is Local Host input and is absent from this client capability.

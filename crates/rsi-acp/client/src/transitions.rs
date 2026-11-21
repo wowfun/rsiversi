@@ -43,6 +43,9 @@ impl State {
             self.accepting()?;
         }
         let current = self.snapshot();
+        let settled_prompt = matches!(change, Transition::Complete(_))
+            || current.status == Status::Running
+                && matches!(change, Transition::Status(Status::Failed));
         let journal = &self.journal;
         let id = &self.id;
         let generation = self.generation;
@@ -81,7 +84,13 @@ impl State {
             }
             .map_err(|_| Error::Journal)?;
         }
-        *self.snapshot.lock().expect("ACP client snapshot") = snapshot.clone();
+        {
+            let mut published = self.snapshot.lock().expect("ACP client snapshot");
+            if settled_prompt {
+                self.completions.settled(&snapshot);
+            }
+            *published = snapshot.clone();
+        }
         if setup && snapshot.status == Status::Ready && !lost_setup {
             self.initialized.store(true, Ordering::Release);
         }

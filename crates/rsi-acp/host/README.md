@@ -1,5 +1,7 @@
 # rsi-acp-host
 
+The resident activity page gets the latest live prompt completion and failure flag from the current Host. Restart clears these counters. Reopening a peer can display its saved journal without creating a completion reminder.
+
 The ordinary Host plugin owns operator-configured external ACP endpoints and at
 most eight resident peers, including preparing and retiring processes. Local
 Profile configuration supplies exact executable, arguments, workspace and complete

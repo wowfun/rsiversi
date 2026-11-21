@@ -12,13 +12,14 @@ manual views may retain their own order; Workspace clients use this Host positio
 The separate `attention` operations expose at most 136 current-owner conversation
 candidates, each with at most 32 exact interaction targets. Pending interactions
 sort before running work, unknown ownership and unread idle activity. Reading
-positions use lossless decimal epoch and sequence coordinates. A caller can
+positions use lossless decimal epoch and sequence coordinates. An external
+sequence counts settled live prompts in its replay epoch. A caller can
 mark an accessible conversation unread, explicitly read an observed position
 or acknowledge it after display. Positions belong to the live Host and apply
 to every caller with access. Acknowledgment preserves a manual reminder.
 Future positions and positions from a replaced source or Host are rejected.
 A subscription starts with the caller-visible attention page. Each later frame
-replaces that page. Reading mutations and new native completions wake connected
+replaces that page. Reading mutations, native admissions and new native completions wake connected
 clients. Equivalent visible pages produce no frame. A 256 KiB response cap can truncate rows. Polling never opens a Session or
 starts a peer.
 

@@ -6,6 +6,11 @@ use super::{
 pub use rsi_conversation::ConversationIdentity;
 use rsi_session_protocol::ActivityRequest;
 
+/// Maximum number of activity candidates in one page.
+pub const MAXIMUM_ENTRIES: usize = 136;
+/// Maximum encoded size of one attention page.
+pub const MAXIMUM_PAGE_BYTES: usize = 256 * 1024;
+
 /// Exact visible source cut, independent of execution authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,7 +20,7 @@ pub struct Position {
     pub conversation: ConversationIdentity,
     /// Zero for append-only native history, otherwise the external replay epoch.
     pub epoch: String,
-    /// Latest observed live native terminal or external journal record.
+    /// Latest live native terminal or external prompt completion in the observed epoch.
     pub sequence: String,
 }
 impl Position {
@@ -108,7 +113,7 @@ pub struct Page {
 impl Page {
     /// Validates remote/durable identities and bounded presentation metadata.
     pub fn validate(&self) -> Result<()> {
-        if self.entries.len() > 136 {
+        if self.entries.len() > MAXIMUM_ENTRIES {
             return Err(ApiError::Invalid("attention row bound".into()));
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -189,7 +194,7 @@ impl Operation {
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: 4096,
-            maximum_response_bytes: 256 * 1024,
+            maximum_response_bytes: MAXIMUM_PAGE_BYTES,
         }
     }
 }

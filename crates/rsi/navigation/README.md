@@ -37,7 +37,9 @@ Pending targets precede running, unknown and unread idle activity. Two
 nonqueued request slots bound concurrent attention operations. A finite read
 starts on first poll and retires on abandonment or shutdown. An accepted mark
 settles even if its caller disconnects. Neither operation hydrates a Session. The live feed coalesces reading changes and
-rechecks visibility before publishing each replacement. It also samples the
+rechecks visibility before publishing each replacement. Cold reminders are
+resolved in batches of 64. The page retains the first authorized entries in
+priority and identity order across resident and cold Sessions. It also samples the
 other activity owners for changes in running work, access or human interaction.
 
 Storage failures use the [Domain API projection](../../rsi-storage/domain/README.md).

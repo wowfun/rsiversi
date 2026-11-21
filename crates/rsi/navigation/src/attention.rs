@@ -11,12 +11,15 @@ use rsi_acp_protocol::{
 use rsi_agent_turn_protocol::SessionActivityEvent;
 use rsi_api_protocol::{
     ApiError, ApiRegistrarContract, CallOrigin, ConnectionDescriptionContract, HostEpoch,
-    json_handler,
+    json_handler, measure_json,
 };
 use rsi_conversation::ConversationIdentity;
 use rsi_meta::{ActivationPlan, EmitEventHandler};
 use rsi_navigation_api::{
-    attention::{Entry, Mark, Operation, Page, Position, ReadAction, Reading, Status, Target},
+    attention::{
+        Entry, MAXIMUM_ENTRIES, MAXIMUM_PAGE_BYTES, Mark, Operation, Page, Position, ReadAction,
+        Reading, Status, Target,
+    },
     revision,
 };
 use rsi_session_protocol::{ActivityStatus, SessionIngress, SessionIngressContract};
@@ -57,13 +60,16 @@ struct Records {
 
 impl EmitEventHandler<SessionActivityEvent> for Records {
     fn handle(&self, event: &SessionActivityEvent) {
-        let mut records = self.rows.lock().expect("reading records");
         match event {
+            SessionActivityEvent::TurnStarted => {
+                self.changes.send_replace(());
+            }
             SessionActivityEvent::TurnEnded {
                 session,
                 sequence,
                 failed,
             } => {
+                let mut records = self.rows.lock().expect("reading records");
                 let record = records
                     .entry(ConversationIdentity::Native(session.clone()))
                     .or_default();
@@ -74,7 +80,10 @@ impl EmitEventHandler<SessionActivityEvent> for Records {
                 }
             }
             SessionActivityEvent::Retired(session) => {
-                if records
+                if self
+                    .rows
+                    .lock()
+                    .expect("reading records")
                     .remove(&ConversationIdentity::Native(session.clone()))
                     .is_some()
                 {
@@ -123,7 +132,7 @@ impl Attention {
             .map_err(|_| ApiError::Unavailable)?;
         let mut truncated = native.truncated;
         let mut entries = Vec::new();
-        let cold = {
+        let managed = {
             let records = self.records.rows.lock().expect("reading records");
             let mut managed = std::collections::BTreeSet::new();
             for row in native.entries {
@@ -183,7 +192,7 @@ impl Attention {
                 let reading = Reading {
                     manual: saved.is_some_and(|record| record.manual),
                     unseen: sequence > saved.map_or(0, |record| record.read),
-                    failed: row.snapshot.status == ExternalStatus::Failed,
+                    failed: row.failed,
                 };
                 if status == Status::Unread && !reading.unread() {
                     continue;
@@ -200,8 +209,18 @@ impl Attention {
                 });
             }
 
-            records
-                .iter()
+            managed
+        };
+        let mut after = None;
+        let mut cold_count = 0;
+        loop {
+            use std::ops::Bound::{Excluded, Unbounded};
+            let batch: Vec<_> = self
+                .records
+                .rows
+                .lock()
+                .expect("reading records")
+                .range((after.as_ref().map_or(Unbounded, Excluded), Unbounded))
                 .filter_map(|(id, record)| match id {
                     ConversationIdentity::Native(session)
                         if record.reading().unread() && !managed.contains(id) =>
@@ -210,11 +229,13 @@ impl Attention {
                     }
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-        };
-        for batch in cold.chunks(64) {
+                .take(64)
+                .collect();
+            if batch.is_empty() {
+                break;
+            }
             let visible = scoped
-                .visible_activity_sessions(batch)
+                .visible_activity_sessions(&batch)
                 .await
                 .map_err(session_error)?;
             let records = self.records.rows.lock().expect("reading records");
@@ -222,29 +243,39 @@ impl Attention {
                 let id = ConversationIdentity::Native(session);
                 if let Some(record) = records.get(&id).filter(|r| r.reading().unread()) {
                     entries.push(native_entry(id, *record, Status::Unread, Vec::new()));
+                    cold_count += 1;
                 }
             }
-            if entries.len() > 136 {
+            if batch.len() < 64 || cold_count > MAXIMUM_ENTRIES {
                 break;
             }
+            after = batch
+                .into_iter()
+                .next_back()
+                .map(ConversationIdentity::Native);
         }
         entries.sort_by(|a, b| {
             (&a.status, &a.position.conversation).cmp(&(&b.status, &b.position.conversation))
         });
-        if entries.len() > 136 {
+        if entries.len() > MAXIMUM_ENTRIES {
             truncated = true;
-            entries.truncate(136);
+            entries.truncate(MAXIMUM_ENTRIES);
         }
-        let mut bytes = 1024;
-        entries.retain(|row| {
-            bytes += serde_json::to_vec(row).expect("typed attention row").len() + 1;
-            if bytes <= 256 * 1024 {
-                true
-            } else {
-                truncated = true;
-                false
-            }
-        });
+        let mut remaining = MAXIMUM_PAGE_BYTES - 1024;
+        if let Some(end) =
+            entries
+                .iter()
+                .position(|row| match measure_json(row, remaining.saturating_sub(1)) {
+                    Ok(bytes) => {
+                        remaining -= bytes + 1;
+                        false
+                    }
+                    Err(_) => true,
+                })
+        {
+            entries.truncate(end);
+            truncated = true;
+        }
         super::finish_scope(origin, &[])?;
         Ok(Page {
             host_epoch: self.epoch.clone(),

@@ -34,6 +34,7 @@ struct Resident {
 struct State {
     endpoints: Vec<EndpointConfig>,
     journal: Journal,
+    completions: rsi_acp_client::LivePromptCompletions,
     credentials: Arc<dyn CredentialsResolve>,
     processes: Arc<dyn DuplexProcess>,
     sandbox: Arc<dyn Sandbox>,
@@ -131,6 +132,7 @@ impl PluginFactory for Factory {
             serde_json::from_value(plan.config().as_ref().clone()).map_err(|_| meta())?;
         let owner = Arc::new(Owner {
             state: Arc::new(State {
+                completions: Default::default(),
                 endpoints: config.endpoints,
                 journal: Journal::open(config.directory, rsi_acp_journal::Limits::default())
                     .await

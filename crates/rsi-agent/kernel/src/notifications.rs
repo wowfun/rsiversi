@@ -177,9 +177,18 @@ impl KernelInner {
         mut commit: AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
         let mut completions = Vec::new();
+        let mut started = false;
         correlate_terminal_boundaries(&mut commit, |id, fact| {
             if self.event_context.is_some() {
-                completions.push(completion_event(id, fact));
+                match fact.body() {
+                    SessionFactBody::TurnAccepted { .. }
+                    | SessionFactBody::MessageTurnAccepted { .. }
+                    | SessionFactBody::ImageRequested { .. } => started = true,
+                    SessionFactBody::TurnTerminal { .. } => {
+                        completions.push(completion_event(id, fact))
+                    }
+                    _ => {}
+                }
             }
         })?;
         let created = commit
@@ -267,10 +276,13 @@ impl KernelInner {
             for (session, message) in &retired_messages {
                 self.execution_messages.remove(session, message);
             }
+            self.notify_committed(committed);
+            if started && completions.is_empty() {
+                self.emit_activity(rsi_agent_turn_protocol::SessionActivityEvent::TurnStarted);
+            }
             for event in completions {
                 self.emit_activity(event);
             }
-            self.notify_committed(committed);
         }
         // An I/O error can lose the acknowledgement of a committed creation.
         // Membership watches carry only requery hints, so failed attempts may wake them.
@@ -301,21 +313,25 @@ pub(super) fn completion_event(
 /// The only Kernel producer of terminal correlation records, including startup recovery.
 pub(super) fn correlate_terminal_boundaries(
     commit: &mut AtomicAgentCommit,
-    mut on_terminal: impl FnMut(&SessionId, &SessionFact),
+    mut observe: impl FnMut(&SessionId, &SessionFact),
 ) -> rsi_agent_store_protocol::Result<()> {
     for append in &mut commit.sessions {
-        if let Some(terminal) = append.facts.iter().find(|fact| is_terminal_fact(fact)) {
+        for fact in &append.facts {
+            observe(&append.session_id, fact);
+            if !is_terminal_fact(fact) {
+                continue;
+            }
             let seq = append
                 .controls
                 .last()
                 .map_or(append.expected_control_seq, AgentControlRecord::seq)
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Invalid("terminal control sequence exhausted".into()))?;
-            on_terminal(&append.session_id, terminal);
             append.controls.push(
-                terminal_boundary_record(seq, terminal)
+                terminal_boundary_record(seq, fact)
                     .map_err(|error| StoreError::Invalid(error.to_string()))?,
             );
+            break;
         }
     }
     commit.validate()

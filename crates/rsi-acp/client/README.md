@@ -1,5 +1,7 @@
 # rsi-acp-client
 
+A Host shares one in-memory prompt completion counter per external Session and replay epoch across its connections. Confirmed prompt settlement advances the counter. Loading or resuming saved history leaves the counter untouched.
+
 This library owns one external ACP Session over an explicitly supplied `Peer`.
 The Host keeps its `Client` owner across UI detach; detachable handles do not own
 process lifetime. Endpoint configuration, credentials and Process/Sandbox launch
