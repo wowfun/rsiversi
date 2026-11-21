@@ -48,13 +48,6 @@ export function Setup({
     settingsMounted.set(true);
     return () => settingsMounted.set(false);
   }, []);
-  const select = (section: SettingsSection) => {
-    settingsPanel.set(section);
-    if (section === "plugins")
-      actions.act(() =>
-        input.command({ action: "plugins", command: { kind: "refresh" } }),
-      );
-  };
   return (
     <section className={`setup-panel ${css.panel} ${css.scope}`} aria-label="Settings">
       <h1 className={css.title}>Settings</h1>
@@ -70,7 +63,7 @@ export function Setup({
                 key={section}
                 className={css.navCell}
                 aria-pressed={tab === section}
-                onClick={() => select(section)}
+                onClick={() => settingsPanel.set(section)}
               >
                 <Icon size={16} />
                 {label}
@@ -95,7 +88,7 @@ export function Setup({
         <div hidden={tab !== "models"}>
           <ModelsSettings actions={actions} />
         </div>
-        {tab === "plugins" && <Plugins loading={actions.busy} />}
+        {tab === "plugins" && <Plugins loading={actions.busy}/>}
         {tab === "appearance" && receipts?.some(receipt=>receipt.outcome!=='confirmed') && (
           <section className="setup-receipts" aria-label="Setup receipts">
             {receipts.filter(receipt=>receipt.outcome!=='confirmed').slice(-2).map((receipt, index) => (

@@ -552,6 +552,9 @@
 }
 .shortcuts { display: flex; flex-direction: column; gap: 4px; padding-bottom: 16px; }
 .shortcuts > button { justify-content: start; height: 36px; padding: 6px 12px; gap: 8px; font-size: 14px; font-weight: 400; }
+.shortcuts > button[aria-pressed="true"], :global(.navigation-rail) > button[aria-pressed="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
 .footer > button {
   flex: 1;
   justify-content: start;

@@ -41,7 +41,11 @@ try {
   const browser=await engine.launch(),context=await browser.newContext({viewport:{width:900,height:900}}),page=await context.newPage(),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   try {
-   await page.goto(fixture.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+   await page.goto(fixture.url);await page.waitForFunction(()=>window.ready);
+   await page.evaluate(async()=>{
+    fixture.view.plugins={actions:[],target:{kind:'host'},guidance:[],ticket:'test',diagnostic:null,page:{context:{target:{kind:'host'},availability:'available'},desired_revision:'8',observed_revision:'9',offset:0,total:1,next_offset:null,plugins:[{instance:'test-plugin',desired_plugin:'example.test',enabled:true,origin:'linked',diagnostics:[],observed:{plugin:'example.test',state:'active'}}]}};
+    await fixture.frame();
+   });
    const checks={browser:name,version:browser.version(),navigation:[],focus:[]};
    // Observe each case before asserting, so a failing branch does not hide the others.
    for(const width of [767,768,900,1023]) {
@@ -105,10 +109,23 @@ try {
    const rail=page.locator('.workbench > .navigation-rail');
    const plugins=rail.getByRole('button',{name:'Open plugins'});
    assert(await plugins.evaluate(button=>button.nextElementSibling?.getAttribute('aria-label')==='Automation tasks'));
+   const hostReads=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='command' && JSON.parse(call.payload).action==='plugins').length);
+   const loadedReads=await hostReads();
    await plugins.click();
-   await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor();
-   await page.keyboard.press('Escape');
-   await page.getByRole('dialog',{name:'Settings',exact:true}).waitFor({state:'hidden'});
+   const inventory=page.getByRole('region',{name:'Plugins',exact:true});
+   await inventory.waitFor();assert.equal(await page.getByRole('dialog').count(),0);
+   const plugin=inventory.getByRole('button',{name:'View test-plugin',exact:true});
+   await plugin.click();await inventory.getByRole('heading',{name:'test-plugin',exact:true}).waitFor();
+   assert(await inventory.locator('header svg use').evaluateAll(icons=>icons.length===3 &&
+     icons.every(icon=>icon.getBBox().width>0 && icon.getBBox().height>0)),'all plugin header controls must draw their glyphs');
+   assert.equal(await hostReads(),loadedReads,'opening a loaded Host inventory must reuse its page');
+   assert(await inventory.getByText('active · example.test').isVisible());
+   await inventory.getByRole('button',{name:'Back to plugins'}).click();
+   await page.waitForFunction(()=>document.activeElement?.getAttribute('data-instance')==='test-plugin');
+   await inventory.getByRole('button',{name:'Refresh',exact:true}).click();
+   assert.equal(await hostReads(),loadedReads+1,'explicit refresh must read the Host');
+   await inventory.getByRole('button',{name:'Close plugins'}).click();await inventory.waitFor({state:'hidden'});
+   assert(await plugins.evaluate(button=>document.activeElement===button));
    const expand=rail.getByRole('button',{name:'Expand navigation',exact:true});
    const mark=expand.locator('.brand-logo'),panel=expand.locator('svg');
    assert.equal(await mark.count(),1,'The rail logo must be inside its single expand control');

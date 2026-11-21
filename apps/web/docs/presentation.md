@@ -60,7 +60,16 @@ Confirmed task deletion shows a brief success banner that remains visible when
 the operator returns from the manager to the conversation.
 
 Expanded and collapsed workspace navigation both offer Plugins followed by
-Automation tasks. Opening the manager subscribes to the current Host catalog
+Automation tasks. Plugins opens a workbench page with the first page of the Host
+inventory. It reuses a loaded first page from the current Host. Refresh reads
+the inventory again. Rows identify configured instances and their observed
+state. Selecting a row opens its details. A back arrow returns focus to that
+row, and a labeled refresh button reads the inventory. Host configuration and diagnostics
+remain accessible from the page through Settings. Selecting the already attached
+conversation from a global page reveals its existing binding, draft and reading
+position. Returning to its visible transcript starts a new reading visit.
+Opening either global page closes the other
+and releases any task observation. Opening the task manager subscribes to the current Host catalog
 while its view loads. It displays each complete update atomically, including
 changes made by another device or an automatic turn in a closed conversation.
 Closing the manager releases its observation and results. The initial list shows

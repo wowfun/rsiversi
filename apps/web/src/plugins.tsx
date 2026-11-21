@@ -1,24 +1,46 @@
 import {McpSsh} from './mcp-ssh.tsx'
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from './button.tsx'
 import { input, run, useView, useSelected, type McpServer, type PluginsView } from './bridge.ts'
 import { SshTargets } from './ssh-targets.tsx'
 import { ProfileLeaves } from './profile-leaves.tsx'
+export function usePluginCommand() {
+  const [busy,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
+  const command = useCallback(async (command: Record<string,unknown>) => {
+    setBusy(true); setProblem(null)
+    try {await input.command({action:'plugins',command})}
+    catch (error) {setProblem(error instanceof Error ? error.message : String(error))}
+    finally {setBusy(false)}
+  },[])
+  return {busy,problem,command}
+}
+
+type PluginPage = NonNullable<PluginsView['page']>
+type PluginRow = PluginPage['plugins'][number]
+const label = (value: string) => value.replaceAll('_',' ')
+
+export function PluginDetails({row,pinned=false}:{row:PluginRow;pinned?:boolean}) {
+  return <><p className="hint">{label(row.origin)}{row.diagnostics.map(reason => ` · ${label(reason)}`)}</p>
+    <dl><dt>Desired</dt><dd>{row.desired_plugin ?? 'Removed'} · {row.enabled ? 'enabled' : 'disabled'}</dd>
+      <dt>{pinned ? 'Pinned manifest' : 'Observed'}</dt><dd>{row.observed ? `${label(row.observed.state)} · ${row.observed.plugin}` : 'Not observed'}</dd></dl></>
+}
+
+export function PluginPagination({page,busy,go}:{page:PluginPage;busy:boolean;go:(offset:number)=>void}) {
+  return <div className="actions"><Button disabled={busy || page.offset===0} onClick={()=>go(Math.max(0,page.offset-32))}>Previous plugin page</Button>
+    <span>{page.offset + Number(page.plugins.length > 0)}–{page.offset+page.plugins.length} of {page.total}</span>
+    <Button disabled={busy || page.next_offset===null} onClick={()=>{if(page.next_offset!==null)go(page.next_offset)}}>Next plugin page</Button></div>
+}
+
 export function Plugins({loading=false}:{loading?:boolean}) {
-  const view = useView(view => view?.plugins), [working,setBusy] = useState(false), [problem,setProblem] = useState<string|null>(null)
-  const busy = loading || working
+  const view = useView(view => view?.plugins)
+  const {busy:reading,problem,command} = usePluginCommand()
+  const busy=reading || loading
+  useEffect(()=>{void command({kind:'refresh'})},[command])
   const selected = useSelected(value => value)
   const active = useView(view => {const surface=view?.surfaces[selected];return surface?.kind === 'native' ? surface : undefined})
   const agentPreset = active?.agent_preset, session = active?.session, header = active?.header
   const [preset,setPreset] = useState('')
   const page = view?.page
-  const command = (command: Record<string,unknown>) => void (async () => {
-    setBusy(true); setProblem(null)
-    try {await input.command({action:'plugins',command})}
-    catch (error) {setProblem(error instanceof Error ? error.message : String(error))}
-    finally {setBusy(false)}
-  })()
-  const label = (value: string) => value.replaceAll('_',' ')
   return <section className="plugins-panel" aria-label="Plugins">
     {view?.ssh?.available && <SshTargets actions={view.actions} view={view.ssh} busy={busy} command={value=>command({kind:'ssh',command:value})} grantCommand={value=>command({kind:'leaves',command:value})} grantRevision={view.leaves?.grants?.revision ?? null}/>}
     {view?.mcp_ssh?.available&&<McpSsh actions={view.actions} view={view.mcp_ssh} ssh={view.ssh} busy={busy} command={value=>command({kind:'mcp_ssh',command:value})}/>}
@@ -56,9 +78,9 @@ export function Plugins({loading=false}:{loading?:boolean}) {
     </section>}
     {page && <><p className="plugin-revisions">Desired {page.desired_revision} · Observed {page.observed_revision}<br/>{page.health && <>Profile {label(page.health)} · Watcher {label(page.watcher ?? 'inactive')}</>}{!page.health && <>{label(page.context.availability)}{page.context.preset_source && ` · ${label(page.context.preset_source)} preset root`}</>}{page.context.source_digest && <><br/>Source {page.context.source_digest.slice(0,12)}</>}</p>
       <div className="plugin-rows">{page.plugins.map(row => <article className="plugin-row" key={row.instance}>
-        <h3>{row.instance}</h3><p className="hint">{label(row.origin)}{row.diagnostics.map(reason => ` · ${label(reason)}`)}</p><dl><dt>Desired</dt><dd>{row.desired_plugin ?? 'Removed'} · {row.enabled ? 'enabled' : 'disabled'}</dd><dt>{view?.target.kind === 'session' ? 'Pinned manifest' : 'Observed'}</dt><dd>{row.observed ? `${label(row.observed.state)} · ${row.observed.plugin}` : 'Not observed'}</dd></dl>
+        <h3>{row.instance}</h3><PluginDetails row={row} pinned={view?.target.kind==='session'}/>
       </article>)}</div>
-      <div className="actions"><Button disabled={busy || page.offset === 0} onClick={() => command({kind:'page',ticket:view.ticket,offset:Math.max(0,page.offset-32)})}>Previous plugin page</Button><span>{page.offset + Number(page.plugins.length > 0)}–{page.offset+page.plugins.length} of {page.total}</span><Button disabled={busy || page.next_offset === null} onClick={() => command({kind:'page',ticket:view.ticket,offset:page.next_offset})}>Next plugin page</Button></div>
+      <PluginPagination page={page} busy={busy} go={offset=>void command({kind:'page',ticket:view.ticket,offset})}/>
     </>}
   </section>
 }

@@ -48,9 +48,13 @@ export function dismissNavigationDrawer() {
 }
 export interface ScheduledGroup {position:{session_id:string};archived:boolean;exhausted:boolean;reminders:{rule:import('./session/scheduled-tasks.tsx').Reminder;executing:boolean}[]}
 type CatalogUpdate = {kind:'page';index:number;sessions:ScheduledGroup[]}|{kind:'complete';pages:number}
-interface CatalogView {groups?:ScheduledGroup[];error?:string}
-export const scheduleCatalog = observable<CatalogView | undefined>(undefined)
-export const catalogVisible = () => scheduleCatalog.getSnapshot() !== undefined
+interface CatalogView {kind:'tasks';groups?:ScheduledGroup[];error?:string}
+export const workbenchPage = observable<CatalogView | {kind:'plugins'} | undefined>(undefined)
+export const pageKind = () => workbenchPage.getSnapshot()?.kind
+export function currentScheduleCatalog() {
+  const page = workbenchPage.getSnapshot();
+  return page?.kind === 'tasks' ? page : undefined;
+}
 let catalogId = 0
 let catalogOpen = false
 
@@ -60,15 +64,20 @@ function stopCatalogObservation() {
     void actions?.call("scheduled_tasks",{action:"close",id:catalogId}).catch(() => {});
   }
 }
-export function closeScheduleCatalog() {
+export function closeWorkbenchPage() {
   stopCatalogObservation();
-  scheduleCatalog.set(undefined);
+  workbenchPage.set(undefined);
+}
+export function openPluginPage() {
+  if (pageKind() === 'plugins') return;
+  stopCatalogObservation();
+  workbenchPage.set({kind:'plugins'});
 }
 
 export async function loadScheduleCatalog() {
   const id = ++catalogId;
   catalogOpen = true;
-  scheduleCatalog.set({});
+  workbenchPage.set({kind:'tasks'});
   try {
     if (!actions) throw new Error("Application is starting");
     const pages: ScheduledGroup[][] = [];
@@ -81,14 +90,14 @@ export async function loadScheduleCatalog() {
       if (update.kind === "page") pages[update.index] = update.sessions;
       else {
         pages.length = update.pages;
-        scheduleCatalog.set({groups:pages.flat()});
+        workbenchPage.set({kind:'tasks',groups:pages.flat()});
       }
       action = "next";
     }
   } catch (reason) {
     if (catalogOpen && id === catalogId) {
       stopCatalogObservation();
-      scheduleCatalog.set({error: reason instanceof Error ? reason.message : String(reason)});
+      workbenchPage.set({kind:'tasks',error: reason instanceof Error ? reason.message : String(reason)});
     }
   }
 }
@@ -123,7 +132,7 @@ export const input = {
   automationArtifact(value: unknown): Promise<string> { return actions ? actions.call("automation_artifact",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   directory(value: unknown): Promise<string> { return actions ? actions.call("directory_input",JSON.stringify(value)) as Promise<string> : Promise.reject(new Error("Application is starting")) },
   command(value: Command) { if (!actions) return Promise.reject(new Error('Application is starting')); return actions.command(value) },
-  async open(value: Command, startingText?: string) { if (!actions) throw new Error('Application is starting'); const result = await actions.open(value, startingText); closeScheduleCatalog(); dismissNavigationDrawer(); return result },
+  async open(value: Command, startingText?: string) { if (!actions) throw new Error('Application is starting'); const result = await actions.open(value, startingText); closeWorkbenchPage(); dismissNavigationDrawer(); return result },
   select(key: string) { actions?.select(key) },
   close(key: string) { return actions?.closeSurface(key) ?? Promise.reject(new Error('Application is starting')) },
   add(key: string) { return actions?.addSurface(key) ?? Promise.reject(new Error('Application is starting')) },

@@ -4,10 +4,10 @@ import { SessionSurfaces } from "./session/surface.tsx";
 import { useState, useLayoutEffect, useSyncExternalStore } from "react";
 import { useLayout } from "./presentation.tsx";
 import { Button } from "./button.tsx";
-import { input, run, useView, useSelected, scheduleCatalog, catalogVisible } from "./bridge.ts";
+import { input, run, useView, useSelected, workbenchPage, pageKind } from "./bridge.ts";
 import { openTerminals } from "./resource-dock.tsx";
 export function Conversation() {
-  const catalogOpen = useSyncExternalStore(scheduleCatalog.subscribe, catalogVisible);
+  const pageOpen = useSyncExternalStore(workbenchPage.subscribe, () => pageKind() !== undefined);
   const [column, setColumn] = useState<HTMLElement | null>(null);
   const [titleActions, setTitleActions] = useState<HTMLDivElement | null>(null);
   const surfaceKeys = useView((view) =>
@@ -27,7 +27,7 @@ export function Conversation() {
   return (
     <section
       ref={setColumn}
-      hidden={catalogOpen}
+      hidden={pageOpen}
       className={`workspace-main mode-${mode} ${css.scope}`}
       aria-label="Conversations"
     >
@@ -142,7 +142,7 @@ export function Conversation() {
         </div>
       </div>
       <div id="panes" className="panes">
-        <SessionSurfaces mode={mode} column={column} titleActions={titleActions} catalogOpen={catalogOpen} />
+        <SessionSurfaces mode={mode} column={column} titleActions={titleActions} pageOpen={pageOpen} />
       </div>
     </section>
   );

@@ -11,7 +11,7 @@ import { workspaceTree } from "../workspace-tree.js";
 import { Button } from "./button.tsx";
 import { sessionSurfaces } from "./session/state.ts";
 import {
-  closeScheduleCatalog,
+  closeWorkbenchPage,
   dismissNavigationDrawer,
   run,
   useSelected,
@@ -24,6 +24,7 @@ import type { useDeviceNavigation } from "./navigation-device.ts";
 import type { useLayout } from "./presentation.tsx";
 import {workspaceName as basename} from '../workspace-name.js';
 export function WorkspaceNavigation({
+  conversationVisible,
   nav,
   device,
   workspaces,
@@ -32,6 +33,7 @@ export function WorkspaceNavigation({
   expand,
   row,
 }: {
+  conversationVisible: boolean;
   nav: Navigation | undefined;
   device: ReturnType<typeof useDeviceNavigation>;
   workspaces: (Parameters<typeof useDeviceNavigation>[1][number] & {name?:string|null;created_at_ms?:number|null})[];
@@ -146,8 +148,8 @@ export function WorkspaceNavigation({
         {page && (
           <div className="workspace-conversations">
             {showDraft && <div className="session-row" data-session-id={active.session}>
-              <button type="button" className="nav-item" aria-current="true" onClick={() => {
-                closeScheduleCatalog();
+              <button type="button" className="nav-item" aria-current={conversationVisible||undefined} onClick={() => {
+                closeWorkbenchPage();
                 dismissNavigationDrawer();
                 const pane = sessionSurfaces.getSnapshot().find(surface => surface.index === selected);
                 if (pane && pane.kind !== 'external') requestAnimationFrame(() => pane.focusInput());

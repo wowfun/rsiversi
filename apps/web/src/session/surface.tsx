@@ -60,14 +60,14 @@ function NativeSurface({
   mode,
   column,
   titleActions,
-  catalogOpen,
+  pageOpen,
 }: {
   owner: SessionSurfaceOwner;
   selected: boolean;
   mode: string;
   column: HTMLElement | null;
   titleActions: HTMLElement | null;
-  catalogOpen?: boolean;
+  pageOpen?: boolean;
 }) {
   useSyncExternalStore(owner.subscribe, owner.getSnapshot);
   const data = owner.staged?.data;
@@ -119,7 +119,7 @@ function NativeSurface({
   );
   return (
     <DocumentSessionScope view={data} owner={owner}>
-    {selected && data && !data.draft && <SessionReading key={data.session} surface={data} visible={tab === "conversation" && !catalogOpen}/>}
+    {selected && data && !data.draft && tab === "conversation" && !pageOpen && <SessionReading key={data.session} surface={data}/>}
     <section
       ref={ref("node")}
       className={`${css.scope} ${chat.scope} pane${selected ? " selected" : ""}${empty ? " is-empty" : ""}`}
@@ -180,7 +180,7 @@ function NativeSurface({
       </div>
       <div className={chat.transcriptArea} hidden={empty} role="tabpanel" id={`${tabId}-panel`} aria-labelledby={`${tabId}-${tab}`}>
         <Transcript
-          suspended={catalogOpen}
+          suspended={pageOpen}
             pane={data?.protected ? undefined : owner.index}
           register={ref("transcript")}
           owner={owner}
@@ -235,7 +235,7 @@ function NativeSurface({
         <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
         {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
       </div>
-      {data && !data.protected && !catalogOpen && <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>}
+      {data && !data.protected && !pageOpen && <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>}
       <Composer
         owner={owner}
         data={data}
@@ -258,12 +258,12 @@ export function SessionSurfaces({
   mode,
   column,
   titleActions,
-  catalogOpen,
+  pageOpen,
 }: {
   mode: string;
   column: HTMLElement | null;
   titleActions: HTMLElement | null;
-  catalogOpen?: boolean;
+  pageOpen?: boolean;
 }) {
   const owners = useSyncExternalStore(
     sessionSurfaces.subscribe,
@@ -287,7 +287,7 @@ export function SessionSurfaces({
             mode={mode}
             column={column}
             titleActions={titleActions}
-            catalogOpen={catalogOpen}
+            pageOpen={pageOpen}
           />
         ),
       )}

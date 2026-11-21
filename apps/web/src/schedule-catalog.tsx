@@ -1,5 +1,5 @@
 import {useEffect,useId,useMemo,useRef,useState,useSyncExternalStore,type Ref} from 'react';
-import {input,run,loadScheduleCatalog,scheduleCatalog,useView} from './bridge.ts';
+import {input,run,loadScheduleCatalog,currentScheduleCatalog,workbenchPage,useView} from './bridge.ts';
 import {navigationTitle} from '../conversation-title.js';
 import {IconChevronRightOutlineRegular,IconClockOutlineRegular,IconCloseOutlineRegular,IconEllipsisOutlineRegular,IconSearchOutlineRegular} from '../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import {frequency,NextRun,nextRunAt,ReminderDetails,reminderStatus,type Reminder} from './session/scheduled-tasks.tsx';
@@ -80,7 +80,7 @@ function DeleteTaskDialog({target,close,onDeleted}: {target:{session:string;id:s
 function LinkedSession({session,archived}: {session:string;archived:boolean}) {
   const title = useView(view=>navigationTitle(view,session)) || session;
   function open() {
-    const current = scheduleCatalog.getSnapshot()?.groups?.find(group=>group.position.session_id===session);
+    const current = currentScheduleCatalog()?.groups?.find(group=>group.position.session_id===session);
     if (current && !current.archived) void run(()=>input.open({action:'open',session}));
   }
   return <footer className={css.linkedSession}>
@@ -93,7 +93,7 @@ function LinkedSession({session,archived}: {session:string;archived:boolean}) {
 }
 
 export default function ScheduleCatalog({onClose,onDeleted}: {onClose:()=>void;onDeleted:()=>void}) {
-  const catalog = useSyncExternalStore(scheduleCatalog.subscribe,scheduleCatalog.getSnapshot);
+  const catalog = useSyncExternalStore(workbenchPage.subscribe,currentScheduleCatalog);
   const groups = catalog?.groups;
   const problem = catalog?.error;
   const [search,setSearch] = useState('');

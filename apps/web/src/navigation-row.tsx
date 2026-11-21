@@ -13,8 +13,6 @@ import { ActivityLabel } from "./activity-label.tsx";
 import { rowContextMenu } from "./row-context-menu.ts";
 import {
   input, selection, source,
-  useSelected,
-  useView,
   run,
   type NavigationEntry,
   type AttentionEntry,
@@ -30,6 +28,7 @@ export interface SessionMenuTarget {
 
 export function ConversationRow({
   entry,
+  active,
   title,
   activity,
   workspaceLabel,
@@ -41,6 +40,7 @@ export function ConversationRow({
   now,
 }: {
   entry: NavigationEntry;
+  active: boolean;
   title: string | undefined;
   activity: AttentionEntry | undefined;
   workspaceLabel?: string;
@@ -53,8 +53,6 @@ export function ConversationRow({
 }) {
   const row = useRef<HTMLDivElement>(null);
   const menuOpen = !!opener && !!row.current?.contains(opener);
-  const selected=useSelected(value=>value);
-  const active=useView(value=>value?.surfaces[selected]?.kind === "native" && value.surfaces[selected].session===entry.session);
   const clock = workspaceLabel ? undefined : messageClock(entry.last_activity_ms, now);
   function showMenu(event: SyntheticEvent<HTMLElement>, point?: SessionMenuTarget["point"]) {
     if (event.defaultPrevented) return;

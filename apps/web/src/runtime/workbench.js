@@ -17,7 +17,7 @@ import { downloadSession } from "../../session-export.js";
 import { DocumentConnection } from "../../document-connection.js";
 import {installDisclosures} from '../../disclosure.js';
 import { StartingDraft } from "../../starting-draft.js";
-import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice } from "../bridge.ts";
+import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice, pageKind } from "../bridge.ts";
 import { createDocumentTransport } from "../native.ts";
 import { isDesktop, desktopCall } from "../../desktop-bridge.js";
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
@@ -244,6 +244,9 @@ async function openInSelected(fields, startingText) {
   const owner = connection;
   const pane = panes.get(selected);
   if (!pane) throw new Error("Open a conversation surface first");
+  const surface = view?.surfaces[selected];
+  if (fields.action === "open" && pageKind() && surface?.kind === "native" && !surface.draft &&
+      surface.session === fields.session && surface.generation === pane.generation && !pane.switching && !owner.closing) return;
   if (pane.switching || pane.submitting || pane.uploading) throw new Error("Wait for this conversation’s current operation");
   pane.switching = true;
   pane.renderComposer();

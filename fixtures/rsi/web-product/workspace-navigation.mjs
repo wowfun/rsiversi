@@ -160,8 +160,9 @@ try {
    await sessionOpen.click();await drawer.waitFor({state:'hidden'});
    await opener.click();await drawer.getByRole('button',{name:'Open plugins',exact:true}).click();
    await drawer.waitFor({state:'hidden'});
-   const pluginSettings=page.getByRole('dialog',{name:'Settings',exact:true});
-   await pluginSettings.waitFor();await page.keyboard.press('Escape');await pluginSettings.waitFor({state:'hidden'});
+   const pluginsPage=page.getByRole('region',{name:'Plugins',exact:true});
+   await pluginsPage.waitFor();
+   await pluginsPage.getByRole('button',{name:'Close plugins',exact:true}).click();await pluginsPage.waitFor({state:'hidden'});
    await page.setViewportSize({width:1440,height:900});
    await sessionOpen.waitFor();
    assert.equal(await sessionRow.getByRole('menuitem',{includeHidden:true}).count(),0);
@@ -396,6 +397,23 @@ try {
      await fixture.frame();
    });
    await page.waitForFunction(()=>fixture.lastMark.action==='acknowledge' && fixture.lastMark.position.sequence==='15');
+   await group.getByRole('button',{name:/Show \d+ more sessions/}).click();
+   const opens=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='command' && JSON.parse(call.payload).action==='open').length);
+   const priorOpens=await opens();
+   await page.getByRole('button',{name:'Open plugins',exact:true}).click();
+   await page.getByRole('region',{name:'Plugins',exact:true}).waitFor();
+   await page.evaluate(async()=>{
+     const entry=fixture.view.navigation.attention.entries[0];
+     entry.status='unread';entry.reading.manual=true;
+     await fixture.frame();
+   });
+   const attached=group.locator('[data-session-id="row-7"]');
+   await attached.getByRole('img',{name:'Unread'}).waitFor();
+   await attached.getByTestId('conversation-open').click();
+   await activeEditor.waitFor();
+   assert.equal(await opens(),priorOpens,'returning from a global page must preserve the attached surface');
+   await page.waitForFunction(()=>fixture.lastMark.action==='read' && fixture.lastMark.position.sequence==='15');
+   await group.getByRole('button',{name:'Show less',exact:true}).click();
    assert.equal(await group.getByTestId('conversation-row').count(),6);
    const alignment=await group.evaluate(node=>{
     const workspace=node.querySelector('.workspace-toggle strong').getBoundingClientRect(),row=node.querySelector('[aria-current=true]'),text=row.querySelector('strong').getBoundingClientRect();

@@ -985,10 +985,10 @@ reuse tab IDs. A retained DOM node does not identify a resource.
 Workflow navigation settles its latest view before closing that resource.
 
 `responsiveness.mjs` uses the real document factory with isolated transport ports.
-It checks tablet navigation and desktop preference behavior, the rail logo's
+It checks tablet navigation, independent desktop window widths, the rail logo's
 hover/focus swap and click/keyboard expansion in both themes, session search
 from the rail and keyboard across viewport widths, modal initial focus
-and return focus, and a frame containing sixty settled code blocks. That frame
+and return focus, plugin list and detail navigation, and a frame containing sixty settled code blocks. That frame
 must ACK its plain-text presentation before optional tokenization runs. This is
 source/DOM evidence; real Service and provider coverage remains in the paired
 product and opt-in live fixtures.

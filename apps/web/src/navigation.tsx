@@ -20,7 +20,7 @@ import {workspaceName} from "../workspace-name.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
-import { input, run, useView, type NavigationEntry } from "./bridge.ts";
+import { input, run, useView, useSelected, type NavigationEntry } from "./bridge.ts";
 import {
   navigationTitles, navigationAttention,
   GroupRestoration,
@@ -30,7 +30,8 @@ function searchInput(value: string) {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 500).replace(/[\uD800-\uDBFF]$/, "");
 }
 
-export interface NavigationSearch {
+export interface NavigationProps {
+  conversationVisible: boolean;
   searchOpen: boolean;
   setSearchOpen(open: boolean): void;
   searchInputRef: React.RefObject<HTMLInputElement>;
@@ -46,7 +47,12 @@ export function NavigationSearchButton({rail=false, open}: {rail?:boolean; open:
   </Tooltip>;
 }
 
-export function Navigation({searchOpen, setSearchOpen, searchInputRef}: NavigationSearch) {
+export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversationVisible}: NavigationProps) {
+  const selected = useSelected(value=>value);
+  const currentSession = useView(view=>{
+    const surface = view?.surfaces[selected];
+    return conversationVisible && surface?.kind === "native" ? surface.session : undefined;
+  });
   const [now, setNow] = useState(Date.now);
   useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()), 60_000);return ()=>clearInterval(timer);}, []);
   const nav = useView((value) => value?.navigation),
@@ -232,6 +238,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef}: Navigati
       now={now}
       key={entry.session}
       entry={entry}
+      active={currentSession===entry.session}
       title={titles.get(entry.session)}
       activity={attention.get(entry.session)}
       workspaceLabel={workspaceLabels && (entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped")}
@@ -345,7 +352,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef}: Navigati
                 ) : device.preferences.view === "flat" ? (
                   device.entries.map(row)
                 ) : (
-                  <WorkspaceNavigation nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row}/>
+                  <WorkspaceNavigation conversationVisible={conversationVisible} nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row}/>
                 )}
                 <div className="manual-pagination">
                   <Button
@@ -405,6 +412,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef}: Navigati
             ) : (
               <>
                 <WorkspaceNavigation
+                  conversationVisible={conversationVisible}
                   nav={nav}
                   device={device}
                   workspaces={workspaces}

@@ -48,7 +48,7 @@ import {
   useSelected,
   settingsPanel,
   compactNavigation, dismissNavigationDrawer,
-  scheduleCatalog, catalogVisible, loadScheduleCatalog, closeScheduleCatalog,
+  workbenchPage, pageKind, openPluginPage, loadScheduleCatalog, closeWorkbenchPage,
   connectionStatus,
 } from "./bridge.ts";
 import { Notices } from "./notices.tsx";
@@ -58,12 +58,13 @@ import settingsCss from "./settings/settings.module.css";
 import { Automation } from "./automation.tsx";
 import { ResourceCleanupNotice } from "./resource-dock.tsx";
 const ScheduleCatalog = lazy(()=>import('./schedule-catalog.tsx'));
+const PluginManager = lazy(()=>import('./plugin-manager.tsx'));
 const defaultNavigationWidth = 280;
 export function Shell({
   renderSlot,
 }: PropsRenderSlots<"rsi.navigation" | "rsi.main" | "rsi.resources">) {
   const [automation, setAutomation] = useState(false);
-  const showTasks = useSyncExternalStore(scheduleCatalog.subscribe,catalogVisible);
+  const page = useSyncExternalStore(workbenchPage.subscribe,pageKind);
   const connection = useSyncExternalStore(
     connectionStatus.subscribe,
     connectionStatus.getSnapshot,
@@ -126,15 +127,16 @@ export function Shell({
     if (!layout.resourcesClosed && compact) compactNavigation.set(undefined);
   }, [layout.resourcesClosed, compact]);
   const newConversation = () => void run(() => input.open({action:"new_conversation"}));
-  const catalogTrigger = useRef<HTMLButtonElement | null>(null);
-  const openTasks = (event: React.MouseEvent<HTMLButtonElement>) => {
-    catalogTrigger.current = event.currentTarget;
-    if (!catalogVisible()) void loadScheduleCatalog();
+  const pageTrigger = useRef<HTMLButtonElement | null>(null);
+  const openPage = (destination:'plugins'|'tasks', trigger:HTMLButtonElement) => {
+    pageTrigger.current = trigger;
+    if (destination === 'plugins') openPluginPage();
+    else if (pageKind() !== 'tasks') void loadScheduleCatalog();
     dismissNavigationDrawer();
   };
-  const closeTasks = () => {
-    closeScheduleCatalog();
-    const trigger = catalogTrigger.current;
+  const closePage = () => {
+    closeWorkbenchPage();
+    const trigger = pageTrigger.current;
     if (trigger?.getClientRects().length) trigger.focus();
     else workbench.current?.querySelector<HTMLButtonElement>('[aria-label="Toggle navigation"], [aria-label="Expand navigation"]')?.focus();
   };
@@ -176,7 +178,7 @@ export function Shell({
   }, [connected, showSessionSearch]);
   useEffect(() => {
     if (!connected) {
-      closeScheduleCatalog();
+      closeWorkbenchPage();
       setPalette(false);
       setSearchOpen(false);
       compactNavigation.set(undefined);
@@ -208,11 +210,11 @@ export function Shell({
         New session
       </Button>
       <nav className={css.shortcuts} aria-label="Workspace tools">
-        <Button aria-label="Open plugins" onClick={()=>setSettings('plugins')}><IconPluginPinwheelOutlineMedium/>Plugins</Button>
-        <Button aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/>Automation tasks</Button>
+        <Button aria-label="Open plugins" aria-pressed={page==='plugins'} onClick={e=>openPage('plugins',e.currentTarget)}><IconPluginPinwheelOutlineMedium/>Plugins</Button>
+        <Button aria-pressed={page==='tasks'} onClick={e=>openPage('tasks',e.currentTarget)}><IconClockOutlineRegular/>Automation tasks</Button>
         {hasAutomation && <Button onClick={()=>{dismissNavigationDrawer();setAutomation(true)}}><IconClockOutlineRegular/>Deployment checks</Button>}
       </nav>
-      {renderSlot("rsi.navigation", {searchOpen, setSearchOpen, searchInputRef})}
+      {renderSlot("rsi.navigation", {searchOpen, setSearchOpen, searchInputRef, conversationVisible: !page})}
       <div className={`sidebar-footer ${css.footer}`}>
         <details className={`application-options ${css.footerOptions}`}>
           <summary aria-label="More">
@@ -413,8 +415,8 @@ export function Shell({
             <Button aria-label="New conversation" onClick={newConversation}>
               <IconNewChatOutlineRegular />
             </Button>
-            <Button aria-label="Open plugins" onClick={()=>setSettings('plugins')}><IconPluginPinwheelOutlineMedium/></Button>
-            <Button aria-label="Automation tasks" aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/></Button>
+            <Button aria-label="Open plugins" aria-pressed={page==='plugins'} onClick={e=>openPage('plugins',e.currentTarget)}><IconPluginPinwheelOutlineMedium/></Button>
+            <Button aria-label="Automation tasks" aria-pressed={page==='tasks'} onClick={e=>openPage('tasks',e.currentTarget)}><IconClockOutlineRegular/></Button>
             <NavigationSearchButton rail open={showSessionSearch}/>
             <Button
               aria-label="Settings"
@@ -425,8 +427,9 @@ export function Shell({
           </aside>
         )}
         {renderSlot("rsi.main", {})}
-        {showTasks && <Suspense fallback={<p role="status">Loading tasks…</p>}><ScheduleCatalog onClose={closeTasks} onDeleted={()=>setDeletedTask(value=>value+1)}/></Suspense>}
-        {!showTasks && <aside className="resources" aria-label="Session resources">
+        {page==='tasks' && <Suspense fallback={<p role="status">Loading tasks…</p>}><ScheduleCatalog onClose={closePage} onDeleted={()=>setDeletedTask(value=>value+1)}/></Suspense>}
+        {page==='plugins' && <Suspense fallback={<p role="status">Loading plugins…</p>}><PluginManager onClose={closePage} onSettings={()=>{closeWorkbenchPage();setSettings('plugins')}}/></Suspense>}
+        {!page && <aside className="resources" aria-label="Session resources">
           <ResizeHandle
             name="resources"
             value={Math.min(resourceWidth ?? openingWidth, viewport.width * .7)}
