@@ -1,5 +1,13 @@
 # Presentation design
 
+A conversation with a nonempty to-do projection shows its progress above the
+composer. The panel starts collapsed and names each status with a nonzero
+count. Expanding it shows the current items in their supplied order with
+accessible status labels. A replacement updates the open panel, and clearing
+the list removes it. An interaction that takes over the composer hides the
+panel until the composer returns. Opening another conversation starts its
+panel collapsed.
+
 The automation task's action menu offers Run now for active, paused and ended
 tasks. It disables delivery while the linked Session is archived, while a
 delivery is running or until the one-minute interval expires. The manager

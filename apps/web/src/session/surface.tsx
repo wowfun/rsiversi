@@ -15,6 +15,7 @@ import { ReferencePicker } from "./reference-picker.tsx";
 import { QueueEditor } from "./queue-editor.tsx";
 import { PendingInputs } from "./queue-dock.tsx";
 import { Composer } from "./composer.tsx";
+import {TodoPanel} from './todo-panel.tsx';
 import { Transcript } from "./transcript.tsx";
 import {SessionMetrics} from './metrics.tsx';
 import {ScheduledTasks} from './scheduled-tasks.tsx';
@@ -228,6 +229,7 @@ function NativeSurface({
         <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
         {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
       </div>
+      {data && !data.protected && !catalogOpen && <TodoPanel key={data.session} projections={data.projections}/>}
       <Composer
         owner={owner}
         data={data}

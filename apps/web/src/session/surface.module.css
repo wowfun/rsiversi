@@ -60,7 +60,7 @@
 :global(.pending:empty):where(.scope, .scope *) {
   display: none;
 }
-.approval ~ :global(.composer) { display: none; }
+.approval ~ :global(.composer), .approval ~ [data-composer-dock] { display: none; }
 .approval {
   width: min(calc(100% - 24px), var(--conversation-width, 880px));
   margin: 4px auto 12px;

@@ -1,0 +1,40 @@
+.panel {
+  flex: none;
+  box-sizing: border-box;
+  width: min(calc(100% - 64px), var(--conversation-width, 880px));
+  margin: 0 auto 4px;
+  padding: 6px 12px;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-specific-menu);
+  backdrop-filter: var(--dsw-menu-backdrop-filter);
+  box-shadow: 0 0 0 0.5px var(--dsw-alias-border-l1), 0 3px 8px rgb(0 0 0 / 3%), 0 0 16px rgb(0 0 0 / 2%);
+}
+@media (max-width: 767px) {
+  .panel {width: calc(100% - 56px);}
+}
+.header, .item {display: flex; align-items: center; gap: 10px; min-width: 0;}
+.header {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: left;
+  cursor: pointer;
+}
+.header svg {flex: none;}
+.title {flex: none; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 24px; font-weight: 500;}
+.progress {flex: 1; font-size: 13px; line-height: 20px;}
+.progress, .content {min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.item {font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary);}
+.glyph {display: grid; flex: none; place-items: center; width: 16px; height: 16px;}

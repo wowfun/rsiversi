@@ -27,10 +27,12 @@ const usedSymbols = [
   'dsw-icon-workspace-tree-outline-regular',
 
   'dsw-icon-check-outline-regular',
+  'dsw-icon-checklist-outline-regular',
   'dsw-icon-check-circle-outline-regular',
   'dsw-icon-chevron-down-outline-regular',
   'dsw-icon-chevron-left-outline-regular',
   'dsw-icon-chevron-right-outline-regular',
+  'dsw-icon-chevron-up-outline-regular',
   'dsw-icon-close-fill-regular',
   'dsw-icon-close-outline-regular',
   'dsw-icon-copy-outline-regular',
