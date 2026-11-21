@@ -648,8 +648,8 @@ a single displayed strip combines docked tabs without changing the saved tree.
 Below 768px, an open resource column fills the viewport. Its Exit fullscreen
 control closes the column and returns its saved mode to push. At wider widths,
 the same control returns the column to its normal width and keeps it open.
-Float rectangles are clamped to the current viewport for display; resizing the
-window never persists these temporary bounds.
+Floating panels keep their saved size wherever it fits. The window edges bound
+their displayed position and size. Resizing the window preserves the saved rectangle.
 Inner split separators support axis arrow keys, Shift for larger steps, and
 Home/End for their bounds. Floating panels expose focused move and resize grips:
 arrow keys adjust either axis, Shift increases the step, and Home/End select

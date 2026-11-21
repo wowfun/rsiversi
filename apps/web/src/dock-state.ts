@@ -4,7 +4,7 @@ import {applyOp} from '../vendor/dsh/dockkit/engine/operations.ts'
 import * as plan from '../vendor/dsh/dockkit/engine/planner.ts'
 import {record,stepBack,stepForward,EMPTY_HISTORY,type History} from '../vendor/dsh/dockkit/engine/sequence.ts'
 import {dockPaneIds,findTabPane,getPane} from '../vendor/dsh/dockkit/engine/tree.ts'
-import type {LayoutState,LayoutOp,TabId,PaneId,SplitId,FloatRect} from '../vendor/dsh/dockkit/contract/types.ts'
+import type {LayoutState,LayoutOp,LayoutNode,NodeId,TabId,PaneId,SplitId,FloatRect} from '../vendor/dsh/dockkit/contract/types.ts'
 
 export type Coordinate = {action:string;[key:string]:unknown}
 export interface DockSnapshot {kind:'session-dock';version:2;counter:number;state:LayoutState}
@@ -197,12 +197,13 @@ export function narrowDock(state:LayoutState):LayoutState {
 
 export function displayDock(state:LayoutState,width:number,height:number,narrow:boolean):LayoutState {
   const shown=narrow?narrowDock(state):state
-  if(!shown.floats.length)return shown
-  const nodes={...shown.nodes}
+  let nodes:Record<NodeId,LayoutNode>|undefined
   for(const id of shown.floats){
     const pane=getPane(shown,id),rect=pane.rect!
-    const w=Math.min(rect.width,Math.max(100,width-16)),h=Math.min(rect.height,Math.max(100,height-16))
-    nodes[id]={...pane,rect:{x:Math.max(8,Math.min(rect.x,width-w-8)),y:Math.max(8,Math.min(rect.y,height-h-8)),width:w,height:h}}
+    if(rect.x>=0&&rect.y>=0&&rect.x+rect.width<=width&&rect.y+rect.height<=height)continue
+    const w=Math.min(rect.width,width),h=Math.min(rect.height,height)
+    nodes??={...shown.nodes}
+    nodes[id]={...pane,rect:{x:Math.max(0,Math.min(rect.x,width-w)),y:Math.max(0,Math.min(rect.y,height-h)),width:w,height:h}}
   }
-  return {...shown,nodes}
+  return nodes?{...shown,nodes}:shown
 }

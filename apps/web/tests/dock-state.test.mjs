@@ -144,8 +144,10 @@ test('identity exhaustion rejects atomically before returning an unusable docume
 
 test('float visibility clamps to a narrow viewport without persisting temporary bounds',()=>{
  let doc=open(emptyDock());doc=act(doc,'float',{tab:Object.keys(doc.state.tabs)[0],rect:{x:900,y:700,width:600,height:500}});
- const saved=JSON.stringify(doc),shown=displayDock(doc.state,390,844,true),rect=shown.nodes[shown.floats[0]].rect;
- assert(rect.x>=8&&rect.y>=8&&rect.x+rect.width<=382&&rect.y+rect.height<=836);
+ const saved=JSON.stringify(doc),float=doc.state.floats[0];
+ assert.equal(displayDock(doc.state,1600,1250,false),doc.state);
+ assert.deepEqual(displayDock(doc.state,390,844,true).nodes[float].rect,{x:0,y:344,width:390,height:500});
+ assert.deepEqual(displayDock(doc.state,650,400,false).nodes[float].rect,{x:50,y:0,width:600,height:400});
  assert.equal(JSON.stringify(doc),saved);
 });
 

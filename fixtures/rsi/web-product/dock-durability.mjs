@@ -1,9 +1,8 @@
-import {navigationMode} from './controls.mjs';
 // Two windows share a saved snapshot and keep independent live resource owners.
 import {paired} from './paired-env.mjs';
 import {startService,waitUntil} from './service.mjs';
 import {connectWorkbench,openWorkspace} from './browser-fixture.mjs';
-import {resources} from './controls.mjs';
+import {navigationMode,resources} from './controls.mjs';
 import {chromium} from 'playwright';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -16,7 +15,18 @@ function record(page){return page.evaluate(()=>{
   return key?{value:JSON.parse(localStorage.getItem(key))}:undefined;
 })}
 async function menu(page,id,action){await page.locator(`[data-dockkit-tab="${id}"]`).click({button:'right'});await page.getByRole('menuitem',{name:action,exact:true}).click()}
-async function resumed(page,service,id,open=true){await page.goto(service.origin);await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await navigationMode(page,'flat');await page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`).click();await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);if(open)await resources(page)}
+async function resumed(page,service,id,open=true){
+  await page.goto(service.origin);
+  await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
+  await page.locator('#workbench').waitFor({state:'visible'});
+  if(!await page.locator(`.pane.selected[data-session-id="${id}"]`).count()){
+    const row=page.locator(`[data-session-id="${id}"] [data-testid=conversation-open]`);
+    if(!await row.isVisible())await navigationMode(page,'flat');
+    await row.click();
+  }
+  await page.waitForFunction(id=>document.querySelector('.resource-dock')?.dataset.session===id,id);
+  if(open)await resources(page);
+}
 try{
  service=await startService({binary:paired.binary,assets:paired.assets,report});
  browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});
@@ -81,7 +91,12 @@ try{
  assert.equal(desktop.value.version,2);assert(!Object.hasOwn(desktop.value,'history'));
  await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>document.querySelector('.resource-dock').classList.contains('resource-fullscreen'));await resources(page);await page.locator('[data-dockkit-float]').waitFor({state:'visible'});
  await page.screenshot({path:join(report,'float-390.png')});
- const bounds=await page.locator('[data-dockkit-float]').boundingBox();assert(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=391&&bounds.y+bounds.height<=845,JSON.stringify(bounds));
+ const float=page.locator('[data-dockkit-float]'),bounds=await float.boundingBox();
+ const savedRect=desktop.value.state.nodes[desktop.value.state.floats[0]].rect;
+ const width=Math.min(savedRect.width,390),height=Math.min(savedRect.height,844);
+ assert.deepEqual(bounds,{x:Math.max(0,Math.min(savedRect.x,390-width)),y:Math.max(0,Math.min(savedRect.y,844-height)),width,height});
+ assert.match(await float.locator('[data-dockkit-float-title]').getAttribute('aria-description'),new RegExp('Position '+bounds.x+', '+bounds.y+' pixels'));
+ assert.match(await float.locator('[data-dockkit-float-resize]').getAttribute('aria-description'),new RegExp(width+' by '+height+' pixels'));
  assert.deepEqual((await record(page)).value,desktop.value,'viewport projection never overwrites desktop state');
  await page.getByRole('button',{name:'Hide resources',exact:true}).click();
  const collapsed=await record(page);
@@ -111,8 +126,7 @@ try{
  assert.deepEqual((await record(page)).value.state,{...desktop.value.state,expanded:false,mode:'push'});
  await resources(page);
  checks.push('Exiting fullscreen at 390 px closes the column and resets manual fullscreen while retaining the layout');
- await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
- await page.locator(`[data-session-id="${session}"] [data-testid=conversation-open]`).click();
+ await resumed(page,service,session,false);
  await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();
  await page.waitForFunction(()=>document.querySelectorAll('.resource-content .ui-contribution').length===2);
  assert.deepEqual((await record(page)).value,desktop.value);
