@@ -159,6 +159,9 @@ NotFound. Commands remain query-only after dispatch, including absent receipts.
 A lost bridge response is unknown. Definitive pre-admission rejection returns to
 prepared; settlement clears only the matching pending incarnation and identity,
 and clears editable input only if its captured edit revision still matches.
+The composer shows an unconfirmed message beside its recovery actions. Delivery
+details expose the saved identity and the current failure, and disappear when
+the message is confirmed. The failure text stays with the current editor.
 A detached no-argument command preserves the editor. A slash-triggered command
 can carry a bounded consume span; successful settlement removes that span only
 when its captured edit revision still matches, including after reload.

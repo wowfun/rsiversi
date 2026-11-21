@@ -13,7 +13,7 @@ export async function verifyComposerBindings(page, report, name) {
       pending: [],
       notice: "",
     };
-    let submitted, entered, release, dispatches = 0;
+    let submitted, entered, release, dispatches = 0, queries = 0;
     const dispatchStarted = new Promise(resolve => { entered = resolve; });
     const receipt = new Promise(resolve => { release = resolve; });
     try {
@@ -28,11 +28,15 @@ export async function verifyComposerBindings(page, report, name) {
           captures: [],
         });
       });
-      fixture.setReply("dispatch_submission", async () => {
+      fixture.setReply("dispatch_submission", async (payload) => {
+        if (payload.mode === "query") {
+          queries++;
+          return JSON.stringify({status: "complete", receipt: "{}"});
+        }
         dispatches++;
         entered();
         await receipt;
-        return JSON.stringify({ status: "complete", receipt: "{}" });
+        return JSON.stringify({status: "unknown", error: "Status temporarily unavailable"});
       });
       await fixture.surface(data.session, data);
       await pane.binding;
@@ -59,11 +63,18 @@ export async function verifyComposerBindings(page, report, name) {
       await pane.submit("primary");
       release();
       await sending;
+      await fixture.tick();
+      const detail = pane.composer.querySelector(".draft-status details");
+      detail.querySelector("summary").click();
+      const recovery = {open: detail.open, reason: detail.innerText.includes("Status temporarily unavailable"),
+        identity: detail.innerText.includes(pane.editor.record.pending.id)};
+      await pane.reconcile("query");
       await fixture.surface(data.session, {
         ...data,
         draft: "locally persisted draft",
       });
-      return { retained, submitted, cleared: pane.input.value, inFlight, dispatches };
+      return {retained, submitted, cleared: pane.input.value, inFlight, dispatches, queries, recovery,
+        settledDetails: !!pane.composer.querySelector(".draft-status details")};
     } finally {
       fixture.setReply("prepare_submission");
       fixture.setReply("dispatch_submission");
@@ -75,6 +86,9 @@ export async function verifyComposerBindings(page, report, name) {
     cleared: "",
     inFlight: { label: "Sending message", busy: "true", disabled: true, spinner: true, recovery: false },
     dispatches: 1,
+    queries: 1,
+    recovery: {open: true, reason: true, identity: true},
+    settledDetails: false,
   });
   const pendingDraftFlush = await page.evaluate(async () => {
     const pane = fixture.runtime.panes.get("main"),

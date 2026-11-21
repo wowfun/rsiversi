@@ -38,6 +38,7 @@ export interface ComposerView {
   failure?: { message: string; resolve(saved: boolean): Promise<void> };
   dirty?: boolean;
   pending?: Pending;
+  deliveryError?: string;
   cleanups: { id: string; message: string; retry(): Promise<unknown> }[];
   images: Media[];
   importingImages?: {files: File[]; next: number};

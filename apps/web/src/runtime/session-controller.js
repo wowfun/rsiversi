@@ -628,6 +628,7 @@ export function createPaneClass(context) {
           : undefined,
         dirty: starting?.dirty ?? editor?.dirty,
         pending,
+        deliveryError: pending && editor.deliveryDetail?.id === pending.id ? editor.deliveryDetail?.error : undefined,
         cleanups: [...(this.referenceCleanup ?? [])]
           .filter(
             ([, cleanup]) =>

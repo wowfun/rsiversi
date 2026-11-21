@@ -73,17 +73,21 @@ export function DraftStatus({
       )}
       {pending && !state?.sendBusy && (
         <>
-          <p className="hint">
+          <p className="hint" role="status">
             {pending.kind === "command"
               ? "Command"
               : pending.kind === "queue"
                 ? "Queue edit"
-                : "Message"}{" "}
-            {pending.id} ·{" "}
+                : "Message"}{pending.kind !== "message" && ` ${pending.id}`} ·{" "}
             {pending.phase === "prepared"
               ? "Saved before execution"
               : "Awaiting confirmation"}
           </p>
+          {pending.kind === "message" && <details className="hint">
+            <summary>Delivery details</summary>
+            <p>{state.deliveryError || pending.id}</p>
+            {state.deliveryError && !state.deliveryError.includes(pending.id) && <p>{pending.id}</p>}
+          </details>}
           {!!pending.captures.length && (
             <p className="hint">
               Saved request includes {pending.captures.length} frozen conversation

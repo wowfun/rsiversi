@@ -159,6 +159,11 @@ export async function executePending(
     }
   }
   await editor.update(() => editor.store.settle(expected, result));
+  if (result.status === "unknown" && expected.pending.kind === "message" && pane.editor === editor) {
+    editor.deliveryDetail = {id: expected.pending.id, error: result.error};
+    return;
+  }
+  if (editor.deliveryDetail?.id === expected.pending.id) editor.deliveryDetail = undefined;
   if (result.status === "complete" && pane.editor === editor && !editor.record.text)
     pane.closeCompletions();
   if (result.notice) context.notify(result.notice);
