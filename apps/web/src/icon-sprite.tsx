@@ -20,6 +20,7 @@ const usedSymbols = [
   'dsw-icon-users-outline-regular',
   'dsw-icon-flat-list-outline-regular',
   'dsw-icon-folder-close-regular',
+  'dsw-icon-folder-open-regular',
   'dsw-icon-folder-open-outline-regular',
   'dsw-icon-project-add-outline-regular',
   'dsw-icon-queue-outline-regular',

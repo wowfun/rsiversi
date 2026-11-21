@@ -35,11 +35,15 @@ fixture.setReply('directory_input',text=>{
  const request=JSON.parse(text);
  if(request.action==='status')return JSON.stringify({status:'ok',value:{supported:true,allowed:true}});
  if(request.action==='create'){
-  const entry={name:request.name,path:request.parent+'/'+request.name,hidden:false,symlink:false};
+  const entry={name:request.name,path:request.parent+'/'+request.name,hidden:request.name.startsWith('.'),symlink:false};
   createdDirectories.push({parent:request.parent,entry});
   return JSON.stringify({status:'ok',value:{path:entry.path}});
  }
  if(request.action==='list'){
+  if(request.path==='C:/delayed')return new Promise(resolve=>{
+    fixture.delayedId=request.request_id;
+    fixture.finishDelayed=()=>resolve(JSON.stringify({status:'ok',value:{path:'C:/delayed',breadcrumbs:['delayed'],entries:[]}}));
+  });
   const path=request.path??'C:/projects';return JSON.stringify({status:'ok',value:{path,home:'C:/projects',breadcrumbs:path.slice(3).split('/').filter(Boolean),entries:path==='C:/projects'?[{name:'demo',path:'C:/projects/demo',hidden:false,symlink:false}]:createdDirectories.filter(item=>item.parent===path).map(item=>item.entry),truncated:false,unrepresentable:false}});
  }
  return '{}';
@@ -218,17 +222,69 @@ try {
    await location.selectOption('local');
    await location.waitFor({state:'detached'});assert.equal(await reads(),1);
    await dialog.getByRole('button',{name:'demo',exact:false}).click();
-   await dialog.getByRole('navigation',{name:'Directory breadcrumbs'}).getByRole('button',{name:'C:/',exact:true}).waitFor();
-   await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();
-   await dialog.getByLabel('Folder name',{exact:true}).fill('picked-on-target');
-   await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
-   await dialog.getByRole('navigation',{name:'Directory breadcrumbs',exact:true}).getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
-   assert.equal(await dialog.getByRole('button',{name:'picked-on-target',exact:true}).count(),2);
+   const breadcrumbs=dialog.getByRole('navigation',{name:'Directory breadcrumbs'});
+   await breadcrumbs.getByRole('button',{name:'demo',exact:true}).waitFor();
+   assert.deepEqual(await breadcrumbs.getByRole('button').allTextContents(),['Home','demo']);
+   const selected=dialog.locator('button[aria-current="true"]');
+   assert(await selected.evaluate(node=>node===document.activeElement));
+   const newFolder=dialog.getByRole('button',{name:'New folder',exact:true});
+   const prompt=page.getByRole('dialog',{name:'New folder',exact:true});
+   const folderName=prompt.getByRole('textbox',{name:'Folder name'});
+   await newFolder.click();await folderName.fill('cancelled');
+   await folderName.press('Escape');await prompt.waitFor({state:'detached'});
+   assert(await newFolder.evaluate(node=>node===document.activeElement));
+   await newFolder.press('Enter');
+   assert.equal(await folderName.inputValue(),'');
+   await folderName.fill('   ');
+   assert(await prompt.getByRole('button',{name:'Create',exact:true}).isDisabled());
+   await folderName.fill('.picked-on-target');
+   await page.screenshot({path:join(report,name+'-new-folder.png')});
+   await folderName.press('Enter');
+   await dialog.getByRole('navigation',{name:'Directory breadcrumbs',exact:true}).getByRole('button',{name:'.picked-on-target',exact:true}).waitFor();
+   assert.equal(await dialog.getByRole('button',{name:'.picked-on-target',exact:true}).count(),2);
+   assert.equal(await selected.textContent(),'.picked-on-target');
+   assert(await selected.evaluate(node=>[...node.querySelectorAll('use')].every(icon=>document.querySelector(icon.getAttribute('href')))));
+   assert(await selected.evaluate(node=>node===document.activeElement)||
+     await newFolder.evaluate(node=>node===document.activeElement),'keyboard focus must remain on the child or its surviving creation trigger');
    assert.equal(await page.evaluate(()=>fixture.calls.filter(call=>call.method==='directory_input'&&JSON.parse(call.payload).action==='create').length),1);
    await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();
    await dialog.waitFor({state:'detached'});
    const registrations=await page.evaluate(()=>fixture.calls.filter(call=>call.method==='command').map(call=>JSON.parse(call.payload)).filter(command=>command.action==='register_workspace'));
-   assert.deepEqual(registrations,[{action:'register_workspace',location:{kind:'local'},path:'C:/projects/demo/picked-on-target'}]);
+   assert.deepEqual(registrations,[{action:'register_workspace',location:{kind:'local'},path:'C:/projects/demo/.picked-on-target'}]);
+   const cancels=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='directory_input').map(call=>JSON.parse(call.payload)).filter(request=>request.action==='cancel').map(request=>request.request_id));
+   assert.deepEqual(await cancels(),[]);
+   await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
+   const editPath=dialog.getByRole('button',{name:'Edit directory path',exact:true});
+   await editPath.click();
+   const pathInput=dialog.getByRole('textbox',{name:'Directory path',exact:true});
+   await pathInput.fill('C:/elsewhere');await pathInput.press('Enter');
+   await dialog.getByRole('navigation',{name:'Directory breadcrumbs'}).getByRole('button',{name:'elsewhere',exact:true}).waitFor();
+   assert.deepEqual(await breadcrumbs.getByRole('button').allTextContents(),['C:/','elsewhere']);
+   await editPath.click();
+   await pathInput.fill('C:/delayed');await pathInput.press('Enter');
+   await page.waitForFunction(()=>!!fixture.delayedId);
+   await pathInput.fill('C:/newer');
+   await page.evaluate(()=>fixture.finishDelayed());
+   await page.waitForFunction(()=>document.querySelector('.directory-columns').getAttribute('aria-busy')==='false');
+   assert.equal(await pathInput.inputValue(),'C:/newer');
+   assert(await newFolder.isDisabled());
+   await pathInput.press('Escape');await editPath.waitFor();
+   assert(await editPath.evaluate(node=>node===document.activeElement));
+   await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+   const delayedId=await page.evaluate(()=>fixture.delayedId);
+   assert.deepEqual(await cancels(),[delayedId]);
+   await page.evaluate(()=>{
+     fixture.setReply('directory_input',text=>{
+       const input=JSON.parse(text);
+       if(input.action==='status')return JSON.stringify({status:'ok',value:{supported:true,allowed:true}});
+       if(input.action==='list')return new Promise(resolve=>{fixture.pendingRead=input.request_id;fixture.finishRead=resolve});
+       if(input.action==='cancel'){fixture.finishRead('{}');return 'null'}
+     });
+   });
+   await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
+   await page.waitForFunction(()=>!!fixture.pendingRead);
+   await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+   assert.deepEqual(await cancels(),[delayedId,await page.evaluate(()=>fixture.pendingRead)]);
    assert.equal(await page.getByRole('button',{name:'Toggle resources',exact:true}).count(),0);
    assert.equal(await page.locator('aside.resources').isVisible(),false);
    await page.screenshot({path:join(report,name+'-starting.png')});

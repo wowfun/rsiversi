@@ -83,7 +83,9 @@ try {
   await dialog.getByLabel('Execution location',{exact:true}).selectOption(target.candidate.target);
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).waitFor();
   await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path',{exact:true}).fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
-  await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name',{exact:true}).fill('picked-on-target');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
+  await dialog.getByRole('button',{name:'New folder',exact:true}).click();
+  const prompt=page.getByRole('dialog',{name:'New folder',exact:true});
+  await prompt.getByLabel('Folder name',{exact:true}).fill('picked-on-target');await prompt.getByRole('button',{name:'Create',exact:true}).click();
   await dialog.getByRole('navigation',{name:'Directory breadcrumbs',exact:true}).getByRole('button',{name:'picked-on-target',exact:true}).waitFor();
   const listed=await picker('list',{path:service.workspace});assert.equal(listed.status(),200);assert((await listed.json()).entries.some(entry=>entry.name==='picked-on-target'));
   checks.push('actual Web picker selects SSH, browses target and creates one directory through current lease');

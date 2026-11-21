@@ -25,7 +25,13 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     const dialog=page.getByRole('dialog',{name:'Select workspace directory'});
     await dialog.locator('.directory-columns[aria-busy=false]').waitFor();
     await dialog.getByRole('button',{name:'Edit directory path',exact:true}).click();await dialog.getByLabel('Directory path').fill(service.workspace);await dialog.getByRole('button',{name:'Go',exact:true}).click();
-    await dialog.getByRole('button',{name:'+ New folder',exact:true}).click();await dialog.getByLabel('Folder name').fill('.');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();await dialog.getByRole('status').filter({hasText:'Invalid directory path or folder name'}).waitFor();assert.equal(await dialog.getByRole('button',{name:'Read parent to check result',exact:true}).count(),0);await dialog.getByLabel('Folder name').fill('ui-folder');await dialog.getByRole('button',{name:'Create folder',exact:true}).click();
+    await dialog.getByRole('button',{name:'New folder',exact:true}).click();
+    const prompt=page.getByRole('dialog',{name:'New folder',exact:true});
+    const folder=prompt.getByLabel('Folder name'),create=prompt.getByRole('button',{name:'Create',exact:true});
+    await folder.fill('.');await create.click();
+    await prompt.getByRole('alert').filter({hasText:'Invalid directory path or folder name'}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'Read parent to check result',exact:true}).count(),0);
+    await folder.fill('ui-folder');await create.click();
     await page.waitForFunction(()=>document.querySelector('.directory-column:last-child')?.getAttribute('aria-label')?.replaceAll('\\','/').endsWith('/ui-folder'));assert.equal(await dialog.locator('.directory-column').count(),2);await page.screenshot({path:join(directory,'directory-dark.png')});
     checks.push({directory:true,create:true});
     await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();await dialog.waitFor({state:'detached'});await page.waitForFunction(()=>!document.querySelector('[aria-label="Main message"]').disabled);
@@ -37,15 +43,15 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
     await page.getByRole('button',{name:'Copy code',exact:true}).click();await page.getByRole('button',{name:'Copied',exact:true}).waitFor();
     checks.push({enterSend:true,composerIdentity:true,clipboard:true});
     const group=page.getByTestId('workspace-group').filter({has:page.getByRole('button',{name:'ui-folder',exact:true})});
-    await group.getByRole('button',{name:'ui-folder',exact:true}).click();
+    const toggle=group.getByRole('button',{name:'ui-folder',exact:true});
+    if(await toggle.getAttribute('aria-expanded')==='false')await toggle.click();
     const sessionRow=group.getByTestId('conversation-row').first();
     await sessionRow.getByRole('button',{name:/^Session actions for /}).click();
     await page.getByRole('menuitem',{name:'Pin session',exact:true}).click();
     await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').waitFor();
-    const refreshGroup = page.getByRole('button', {name:'Refresh conversations in ui-folder',exact:true});
-    await refreshGroup.waitFor();await refreshGroup.click();await refreshGroup.waitFor({state:'detached'});
-    assert.equal(await page.getByTestId('workspace-group').filter({hasText:'ui-folder'}).getByTestId('conversation-row').count(),0);
-    checks.push({pin:true,explicitGroupRefresh:true});
+    await sessionRow.waitFor({state:'detached'});
+    assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+    checks.push({pin:true,openGroupRefreshed:true});
     for(const width of [390,767,768,1023,1024,1440,1920])for(const theme of ['light','dark','system']){
       await page.setViewportSize({width,height:900});
       // Apply through the real Settings owner; same device preference is also used by Desktop.

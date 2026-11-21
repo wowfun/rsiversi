@@ -387,6 +387,14 @@ owns its own keyboard navigation. Escape dismisses only the top dialog and
 returns focus to its opener inside the parent dialog.
 The command palette starts in its search input, and the directory picker starts
 in the path input when manual path entry is shown.
+Picking a directory focuses its current row in the parent column. New folder
+opens a modal for the selected directory. Escape returns to the picker, and
+successful creation selects the new child, including a hidden directory.
+Breadcrumbs begin at Home when it is an ancestor and at the filesystem root
+elsewhere.
+Editing a newer path supersedes a submitted listing. Escape in the path editor
+restores the last listed location and returns focus to the path control.
+Leaving a location or closing the picker cancels its outstanding directory read.
 
 The four transcript detail modes use this presentation policy:
 
