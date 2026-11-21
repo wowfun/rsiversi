@@ -22,7 +22,7 @@ test('submission commits one dispatch claim before sending and settles the exact
   const {pane,context,events}=fixture();
   await submit(pane,context);
   assert.deepEqual(events,['flush','prepare_submission','claim','dispatch_submission','complete']);
-  assert.equal(pane.submitting,false);
+  assert.equal(pane.submitting,undefined);
 });
 
 test('failed dispatch persistence never sends a prepared submission',async()=>{
@@ -61,10 +61,11 @@ for (const mode of ['complete','unknown','missing','replaced']) test(`document c
     return JSON.stringify({status: mode});
   };
   const operation = executeDocumentCommand(pane,context,'plan','off');
+  assert.equal(pane.submitting, 'Running command');
   if (mode === 'complete') await operation;
   else await assert.rejects(operation, mode === 'missing' ? /unavailable/ : mode === 'replaced' ? /changed/ : /confirmation/);
   assert.equal(editor.text, 'input');
-  assert.equal(pane.submitting, false);
+  assert.equal(pane.submitting, undefined);
   assert.equal(events.includes('dispatch_submission'), ['complete','unknown'].includes(mode));
 });
 

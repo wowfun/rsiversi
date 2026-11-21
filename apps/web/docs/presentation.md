@@ -233,8 +233,14 @@ Ordinary draft autosaves are silent and do not insert a status row or move
 composer controls. Save failures, conflicts and pending request recovery retain
 their visible messages and actions.
 The docked input starts at one text line, with a taller empty-conversation input.
-Keyboard help is the input's accessible description. The ordinary Send action uses a labeled arrow; alternate delivery
-and recovery actions retain their visible labels. Session history, commands and
+Keyboard help is the input's accessible description. The ordinary Send action uses
+a labeled arrow. While a local submission is in flight, its button shows a
+spinner and names the current operation for assistive technology. The busy
+button keeps its fill under the pointer, and reduced motion keeps its indicator
+still. A saved request
+whose outcome needs user action exposes its recovery controls once the submitting
+pane is idle. Alternate delivery and recovery actions retain their visible labels.
+Session history, commands and
 extension state share a disclosure beside the transcript tabs.
 
 Registered Settings use schema-directed controls for bounded simple objects and

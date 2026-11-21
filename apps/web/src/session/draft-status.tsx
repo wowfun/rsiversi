@@ -71,7 +71,7 @@ export function DraftStatus({
           </button>
         </>
       )}
-      {pending && (
+      {pending && !state?.sendBusy && (
         <>
           <p className="hint">
             {pending.kind === "command"

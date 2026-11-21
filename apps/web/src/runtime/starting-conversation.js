@@ -54,7 +54,7 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
     ? context.view?.catalog.workspaces.find(entry => entry.id === draft.workspace)
     : context.view?.catalog.workspaces[0];
   if (!workspace) { window.dispatchEvent(new Event('rsi:choose-workspace')); return false; }
-  pane.submitting = true; pane.renderComposer();
+  pane.submitting = "Opening conversation"; pane.renderComposer();
   try {
     await draft.flush();
     current();
@@ -87,7 +87,7 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
     await draft.clearCaptured(serial);
     if (context.connection !== connection || connection.closing || pane.editor !== editor)
       throw new Error('Conversation changed. Input is saved in its original conversation.');
-  } finally { pane.submitting = false; pane.renderComposer(); }
+  } finally { pane.submitting = undefined; pane.renderComposer(); }
   return true;
 }
 export async function startConversation(pane, context) {

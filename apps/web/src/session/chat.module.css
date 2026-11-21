@@ -602,6 +602,10 @@
   background: var(--dsw-alias-button-info-fill); color: var(--dsw-static-neutral-bluish-00);
 }
 :global(.composer [data-testid="composer-send"]:has(svg)):where(.scope, .scope *) { width: 34px; padding: 7px; }
+@media (hover: hover) {
+  :global(.composer [data-testid="composer-send"]:enabled:hover):where(.scope, .scope *) { background: var(--dsw-alias-button-info-hover); }
+}
+:global(.composer [data-testid="composer-send"][aria-busy="true"]:disabled):where(.scope, .scope *) { opacity: 1; cursor: progress; }
 
 :global(.message-clock):where(.scope, .scope *) { font-size: 12px; white-space: nowrap; }
 :global(.message.user .message-actions):where(.scope, .scope *) { justify-content: flex-end; }

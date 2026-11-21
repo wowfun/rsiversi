@@ -38,10 +38,10 @@ test('reference removal uses full identities and refuses mutation during submiss
   assert.deepEqual(pane.composerView.references.map(row=>row.id),references.map(item=>captureKey(captureOf(item))));
   const id=captureKey(captureOf(references[1]));
   pane.previewReference(id);assert.equal(pane.previewed,references[1]);
-  pane.submitting=true;
+  pane.submitting='Sending message';
   await assert.rejects(pane.removeReference(id),/current operation/);
   assert.equal(editor.references.length,2);
-  pane.submitting=false;
+  pane.submitting=undefined;
   pane.referenceState(editor).preparing=[captureOf(references[1])];
   await assert.rejects(pane.removeReference(id),/current operation/);
   pane.referenceState(editor).preparing=undefined;

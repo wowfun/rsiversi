@@ -54,3 +54,5 @@
 .confirm label input {width:14px;height:14px;margin:3px 0 0;}
 .confirm footer {margin-top:24px;justify-content:flex-end;}
 .confirm footer button {min-width:72px;}
+.sendingSpinner { animation: input-sending 800ms linear infinite; }
+@keyframes input-sending { to { transform: rotate(360deg); } }

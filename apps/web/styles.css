@@ -24,7 +24,7 @@ button {
   padding: 0.55rem 0.85rem;
   cursor: pointer;
 }
-button:hover {
+button:hover:where(:enabled) {
   background: var(--blue);
 }
 button:disabled,
@@ -46,7 +46,7 @@ button.primary {
   color: var(--on-action);
   border-color: var(--teal);
 }
-button.primary:hover {
+button.primary:hover:where(:enabled) {
   background: var(--action-hover);
 }
 button.quiet {

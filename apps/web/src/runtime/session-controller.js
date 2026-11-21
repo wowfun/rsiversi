@@ -603,17 +603,18 @@ export function createPaneClass(context) {
         workspace: data?.workspace?.registration.status === 'registered' ? data.workspace.registration.id : data ? undefined : startingWorkspace(this, context)?.id,
         bindingInput: !!(this.submitting && !this.switching && !storageRetired && (!this.generation || !editor)),
         disabled,
-        sendDisabled: storageRetired || (starting ? !!starting.failure || this.submitting || this.switching || !starting.text.trim() : !!sendDisabled),
+        sendDisabled: storageRetired || (starting ? !!starting.failure || !!this.submitting || this.switching || !starting.text.trim() : !!sendDisabled),
+        sendBusy: !!this.submitting,
         alternativeDisabled:
           !!sendDisabled || !!pending || !this.composerActions?.alternative,
         alternative: this.composerActions?.alternative,
-        sendLabel: pending
+        sendLabel: this.submitting ?? (pending
           ? pending.phase === "prepared"
             ? "Send saved request"
             : pending.kind !== "command"
               ? "Retry previous"
               : "Check command result"
-          : (this.composerActions?.primary.label ?? "Send"),
+          : (this.composerActions?.primary.label ?? "Send")),
         exporting: !!this.exportAbort,
         bindingError: this.bindingError,
         storageNotice: storageRetired ? 'Draft storage is retired. Finish the reset or reload before editing.' : context.connection?.storageNotice ?? this.startingStorageError,

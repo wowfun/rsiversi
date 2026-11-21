@@ -26,6 +26,7 @@ export interface ComposerView {
   command?: {name:string;hint:string;end:number};
   disabled: boolean;
   sendDisabled: boolean;
+  sendBusy: boolean;
   sendLabel: string;
   alternative?: { label: string };
   alternativeDisabled: boolean;

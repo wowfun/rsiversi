@@ -68,7 +68,7 @@ test('failed draft creation keeps starting input and releases control admission'
   let cleared=false;
   const pane={index:'main',starting:{text:'retained',async flush(){},async clearCaptured(){cleared=true;}},renderComposer(){}};
   const context={connection:{},view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},boundCall:()=>async()=>{throw Error('creation failed');}};
-  await assert.rejects(prepareComposer(pane,context),/creation failed/);assert.equal(cleared,false);assert.equal(pane.submitting,false);assert.equal(pane.openingComposer,undefined);
+  await assert.rejects(prepareComposer(pane,context),/creation failed/);assert.equal(cleared,false);assert.equal(pane.submitting,undefined);assert.equal(pane.openingComposer,undefined);
 });
 
 test('recovery waits for the newly created attachment and never sends restored input',async t=>{

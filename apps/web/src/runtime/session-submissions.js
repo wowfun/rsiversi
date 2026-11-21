@@ -41,7 +41,9 @@ export async function submit(pane, context, choice = "primary") {
     await pane.exportSession(text.replace(/^\s*\/export/, ""));
     return;
   }
-  pane.submitting = true;
+  const pending = pane.editor?.record.pending;
+  pane.submitting = pending?.kind === "command" && pending.phase !== "prepared"
+    ? "Checking command result" : "Sending message";
   pane.renderComposer();
   try {
     await pane.flush();
@@ -95,7 +97,7 @@ export async function submit(pane, context, choice = "primary") {
     }
     await pane.executePending(editor, generation, current, mode);
   } finally {
-    pane.submitting = false;
+    pane.submitting = undefined;
     pane.renderComposer();
   }
 }
@@ -105,7 +107,7 @@ export async function reconcile(pane, context, mode) {
   const editor = pane.editor,
     generation = pane.generation,
     current = context.connection;
-  pane.submitting = true;
+  pane.submitting = mode === "query" ? "Checking previous result" : "Sending saved request";
   pane.renderComposer();
   try {
     await editor.flush();
@@ -113,7 +115,7 @@ export async function reconcile(pane, context, mode) {
       await editor.update(record => editor.store.claimPrepared(record));
     await pane.executePending(editor, generation, current, mode);
   } finally {
-    pane.submitting = false;
+    pane.submitting = undefined;
     pane.renderComposer();
   }
 }
@@ -173,7 +175,7 @@ export async function submitQueue(pane, context, queue, generation) {
     throw new Error(
       "Resolve the previous saved request before editing the queue",
     );
-  pane.submitting = true;
+  pane.submitting = "Updating queue";
   pane.renderComposer();
   try {
     await editor.flush();
@@ -193,7 +195,7 @@ export async function submitQueue(pane, context, queue, generation) {
     await editor.update((record) => editor.store.startDispatch(record, prepared));
     await pane.executePending(editor, generation, current, "dispatch");
   } finally {
-    pane.submitting = false;
+    pane.submitting = undefined;
     pane.renderComposer();
   }
 }
@@ -245,7 +247,7 @@ export async function executeDocumentCommand(pane, context, name, input = '', co
   const editor = pane.editor, generation = pane.generation, current = context.connection;
   if (!editor || !generation || !current || current.closing || pane.submitting || pane.uploading || pane.switching || editor.record.pending || pane.bindingError)
     throw new Error('Resolve the pending operation before using a Session command');
-  pane.submitting = true;
+  pane.submitting = "Running command";
   pane.renderComposer();
   try {
     await editor.flush();
@@ -261,7 +263,7 @@ export async function executeDocumentCommand(pane, context, name, input = '', co
     await editor.update(() => editor.store.startDispatch(captured, prepared, true, consume));
     await pane.executePending(editor, generation, current, 'dispatch');
   } finally {
-    pane.submitting = false;
+    pane.submitting = undefined;
     pane.renderComposer();
   }
 }

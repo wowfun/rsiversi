@@ -164,11 +164,17 @@ export function Composer({
               type="button"
               className="primary"
               aria-label={state?.sendLabel ?? "Send"}
+              aria-busy={state?.sendBusy}
               title={state?.sendLabel ?? "Send"}
               disabled={state?.sendDisabled ?? true}
               data-testid="composer-send"
             >
-              {(state?.sendLabel ?? "Send") === "Send" ? (
+              {state?.sendBusy ? (
+                <svg className={css.sendingSpinner} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity=".35" strokeWidth="2" />
+                  <path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              ) : (state?.sendLabel ?? "Send") === "Send" ? (
                 <IconSendOutlineMedium />
               ) : (
                 state?.sendLabel

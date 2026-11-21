@@ -13,7 +13,9 @@ export async function verifyComposerBindings(page, report, name) {
       pending: [],
       notice: "",
     };
-    let submitted;
+    let submitted, entered, release, dispatches = 0;
+    const dispatchStarted = new Promise(resolve => { entered = resolve; });
+    const receipt = new Promise(resolve => { release = resolve; });
     try {
       fixture.setReply("prepare_submission", async (payload) => {
         submitted = JSON.parse(payload).text;
@@ -26,9 +28,12 @@ export async function verifyComposerBindings(page, report, name) {
           captures: [],
         });
       });
-      fixture.setReply("dispatch_submission", async () =>
-        JSON.stringify({ status: "complete", receipt: "{}" }),
-      );
+      fixture.setReply("dispatch_submission", async () => {
+        dispatches++;
+        entered();
+        await receipt;
+        return JSON.stringify({ status: "complete", receipt: "{}" });
+      });
       await fixture.surface(data.session, data);
       await pane.binding;
       pane.input.focus();
@@ -41,12 +46,24 @@ export async function verifyComposerBindings(page, report, name) {
         draft: "obsolete Worker input",
       });
       const retained = pane.input.value;
+      const sending = pane.submit("primary");
+      await dispatchStarted;
+      await fixture.tick();
+      const inFlight = {
+        label: pane.send.getAttribute("aria-label"),
+        busy: pane.send.getAttribute("aria-busy"),
+        disabled: pane.send.disabled,
+        spinner: !!pane.send.querySelector('svg[aria-hidden="true"]'),
+        recovery: pane.composer.textContent.includes("Check previous result"),
+      };
       await pane.submit("primary");
+      release();
+      await sending;
       await fixture.surface(data.session, {
         ...data,
         draft: "locally persisted draft",
       });
-      return { retained, submitted, cleared: pane.input.value };
+      return { retained, submitted, cleared: pane.input.value, inFlight, dispatches };
     } finally {
       fixture.setReply("prepare_submission");
       fixture.setReply("dispatch_submission");
@@ -56,6 +73,8 @@ export async function verifyComposerBindings(page, report, name) {
     retained: "locally persisted draft",
     submitted: "locally persisted draft",
     cleared: "",
+    inFlight: { label: "Sending message", busy: "true", disabled: true, spinner: true, recovery: false },
+    dispatches: 1,
   });
   const pendingDraftFlush = await page.evaluate(async () => {
     const pane = fixture.runtime.panes.get("main"),
