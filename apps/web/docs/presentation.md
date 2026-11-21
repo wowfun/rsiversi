@@ -227,7 +227,8 @@ It displays unknown ownership and truncation explicitly; request buttons send ex
 targets back to Rust. The document does not infer execution from recent history,
 persist running flags or maintain its own observation poller. The Session menu
 and Ctrl/Command+Shift+U toggle the shared unread reminder on an unarchived
-Session. A visible, focused transcript acknowledges the displayed completion.
+Session. A visible, focused transcript acknowledges a completion when its terminal
+record or the start of a later displayed turn has arrived.
 An explicit reminder survives repainting the same Session. Opening it again
 clears the reminder after display.
 

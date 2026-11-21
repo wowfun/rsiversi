@@ -21,7 +21,8 @@ the redundant head comparison query in that round.
 Navigation subscribes to the authenticated Host's attention page. The first
 frame establishes the visible baseline. Later frames replace it when the
 caller's visible activity changes. Explicit reading actions use their displayed
-Host and source cut once. A disconnected observation retains the last page
+Host and source cut once. A successful mark changes the projected page on its
+subscription frame. A disconnected observation retains the last page
 with a stale-state notice until reconnection. A missing or retired operation,
 incompatible protocol, or loss of authorization clears the page.
 

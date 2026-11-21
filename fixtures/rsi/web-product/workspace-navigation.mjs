@@ -26,7 +26,8 @@ fixture.setReply('command',async text=>{
  } else if(command.action==='navigate'&&command.command.kind==='mark'){
    const {request}=command.command;
    const entry=nav.attention.entries.find(row=>row.position.conversation.id===request.position.conversation.id);
-   entry.reading.manual=request.action==='unread';
+   if(request.action!=='acknowledge')entry.reading.manual=request.action==='unread';
+   if(request.action!=='unread')entry.reading.unseen=false;
    fixture.lastMark=request;
    await fixture.frame();
  } else if(command.action==='navigate'&&command.command.kind==='replace'&&command.command.session==='archived'){
@@ -361,6 +362,19 @@ try {
    await page.waitForFunction(()=>fixture.lastMark?.position.conversation.id==='row-7' && fixture.lastMark.action==='unread');
    await activeEditor.press('Control+Shift+u');
    await page.waitForFunction(()=>fixture.lastMark?.position.conversation.id==='row-7' && fixture.lastMark.action==='read');
+   await page.evaluate(async()=>{
+     const row=fixture.view.navigation.attention.entries[0];
+     row.position.sequence='15';row.reading.unseen=true;
+     fixture.view.surfaces.main.transcript.turns={entries:{next:{id:'next',status:'Running',running:true,foldable:false,partial:false,blocks:[],process:[],candidate:[],answer:[],reading_sequence:'9'}}};
+     await fixture.frame();
+     await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));
+   });
+   assert.equal(await page.evaluate(()=>fixture.lastMark.action),'read','an earlier boundary must leave a later completion unread');
+   await page.evaluate(async()=>{
+     fixture.view.surfaces.main.transcript.turns.entries.next.reading_sequence='100';
+     await fixture.frame();
+   });
+   await page.waitForFunction(()=>fixture.lastMark.action==='acknowledge' && fixture.lastMark.position.sequence==='15');
    assert.equal(await group.getByTestId('conversation-row').count(),6);
    const alignment=await group.evaluate(node=>{
     const workspace=node.querySelector('.workspace-toggle strong').getBoundingClientRect(),row=node.querySelector('[aria-current=true]'),text=row.querySelector('strong').getBoundingClientRect();

@@ -53,7 +53,7 @@ export function SessionReading({surface, visible}: {surface: NativeSurface; visi
       const through = row.position.sequence;
       if (entry.attempted === through) return;
       if (through !== "0" && !Object.values(surface.transcript.turns?.entries ?? {}).some(turn => {
-        const seq = turn.terminal_sequence;
+        const seq = turn.reading_sequence;
         return seq && (seq.length > through.length || seq.length === through.length && seq >= through);
       })) return;
       entry.attempted = through;

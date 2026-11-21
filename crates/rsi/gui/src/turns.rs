@@ -28,9 +28,9 @@ pub(crate) struct Turn {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub retries: Vec<RetryRow>,
     pub terminal: Option<String>,
-    /// Exact native position when the terminal block is in the displayed window.
+    /// Latest received turn boundary represented in this window, used to acknowledge reading.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_sequence: Option<String>,
+    pub reading_sequence: Option<String>,
     pub timestamps: BTreeMap<String, u64>,
     pub elapsed_ms: Option<u64>,
     pub usage: Option<TokenUsage>,
@@ -69,7 +69,7 @@ struct Model {
 }
 #[derive(Clone, Debug, Default)]
 struct State {
-    accepted: bool,
+    accepted: Option<u64>,
     first: Option<String>,
     lost_start: bool,
     links: BTreeMap<String, Link>,
@@ -188,8 +188,8 @@ impl Index {
             Fact::TurnAccepted { .. }
             | Fact::MessageTurnAccepted { .. }
             | Fact::ImageRequested { .. } => {
-                changed |= !state.accepted;
-                state.accepted = true;
+                changed |= state.accepted != Some(fact.seq());
+                state.accepted = Some(fact.seq());
                 state.started_ms = Some(fact.timestamp_ms());
             }
             Fact::ToolIntent { .. }
@@ -386,7 +386,7 @@ impl State {
         reservations.insert(&decision.effect_id, index);
     }
     fn project(&self, id: &TurnId, blocks: &VecDeque<Block>) -> Turn {
-        let partial = !self.accepted || self.lost_start;
+        let partial = self.accepted.is_none() || self.lost_start;
         let latest = self
             .models
             .iter()
@@ -405,7 +405,7 @@ impl State {
             feedback_message: None,
             retries: vec![],
             terminal: None,
-            terminal_sequence: None,
+            reading_sequence: None,
             timestamps: BTreeMap::new(),
             elapsed_ms: (!partial)
                 .then_some(self.started_ms.zip(self.ended_ms))
@@ -472,7 +472,6 @@ impl State {
                 .is_some_and(|(seq, _, _)| *seq == block.first_seq)
             {
                 turn.terminal = Some(block.key.clone());
-                turn.terminal_sequence = Some(block.first_seq.to_string());
             }
             let candidate = link.role == "assistant"
                 && (link.image
@@ -513,6 +512,12 @@ impl State {
                 turn.process.push(block.key.clone());
             }
         }
+        let boundary = if turn.terminal.is_some() {
+            self.terminal.as_ref().map(|(seq, _, _)| *seq)
+        } else {
+            self.accepted.filter(|_| !self.lost_start)
+        };
+        turn.reading_sequence = boundary.map(|seq| seq.to_string());
         if !routes_known || turn.usage.is_none() {
             turn.usage_routes = vec![];
         }
@@ -804,12 +809,16 @@ mod tests {
     fn terminal_identity_is_explicit_without_removing_chronological_evidence() {
         let mut t = Transcript::default();
         apply(&mut t, accepted());
+        let start = t.seq.to_string();
+        apply(&mut t, text("current", "Visible response"));
+        assert_eq!(turn(&t).reading_sequence.as_ref(), Some(&start));
         apply(&mut t, terminal(TurnOutcome::Completed));
         let key = rsi_conversation::BlockIdentity::Terminal {
             turn: &TurnId::new("turn").unwrap(),
         }
         .key();
         assert_eq!(turn(&t).terminal.as_deref(), Some(key.as_str()));
+        assert_eq!(turn(&t).reading_sequence, Some(t.seq.to_string()));
         assert!(turn(&t).blocks.contains(&key));
     }
     fn turn(transcript: &Transcript) -> &Turn {
@@ -1077,6 +1086,7 @@ mod tests {
         for complete in [true, false] {
             let mut t = Transcript::default();
             apply(&mut t, text("first", "Partial"));
+            assert_eq!(turn(&t).reading_sequence, None);
             apply(&mut t, finish("first", FinishReason::Stop));
             apply(
                 &mut t,

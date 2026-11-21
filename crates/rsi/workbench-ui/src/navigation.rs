@@ -294,11 +294,12 @@ impl NavigationFeature {
         })
     }
     async fn execute(&self, command: NavigationCommand) -> Result<()> {
-        self.state
-            .lock()
-            .expect("navigation view poisoned")
-            .view
-            .diagnostic = None;
+        {
+            let mut state = self.state.lock().expect("navigation view poisoned");
+            if state.view.diagnostic.is_some() {
+                state.view.diagnostic = None;
+            }
+        }
         let mut saved = false;
         let result = self.execute_inner(command, &mut saved).await;
         if let Err(message) = &result {
@@ -932,6 +933,14 @@ mod group_tests {
             operation: &OperationSpec,
             input: RetainedBytes,
         ) -> rsi_api_protocol::Result<ApiOutput> {
+            if operation == &rsi_navigation_api::attention::Operation::Mark.spec() {
+                let request: rsi_navigation_api::attention::Mark =
+                    serde_json::from_slice(input.as_bytes()).unwrap();
+                return Ok(ApiOutput::Reply(ApiMessage {
+                    json: ByteBudget::default().encode(&request.position, 4096)?,
+                    binary: None,
+                }));
+            }
             if operation == &rsi_navigation_api::attention::Operation::Follow.spec() {
                 self.attention_reads
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1083,6 +1092,21 @@ mod group_tests {
         }
         assert_eq!(api.catalog_reads.load(Ordering::SeqCst), 0);
         assert_eq!(api.attention_reads.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn marking_a_session_leaves_the_cached_navigation_page_until_its_update() {
+        let (api, owner) = fixture();
+        let initial = owner.content_revision();
+        let request = serde_json::from_value(json!({
+            "action":"unread", "host_epoch":api.description.host_epoch,
+            "position":{"conversation":{"kind":"native","id":"one"},"epoch":"0","sequence":"0"}
+        }))
+        .unwrap();
+        owner
+            .command(NavigationCommand::Mark { request })
+            .await
+            .unwrap();
+        assert_eq!(owner.content_revision(), initial);
     }
     #[tokio::test]
     async fn full_background_refresh_does_not_issue_a_second_query_for_its_head() {
