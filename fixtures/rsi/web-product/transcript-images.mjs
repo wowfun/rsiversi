@@ -18,7 +18,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     registrationLabel:'Transcript image author',deepseekKey:live?await readDeepseekKey('.local/dev/.env'):undefined,
     async configure({config,workspace}){
       await writeFile(join(workspace,'图 #1%.png'),png(84,52,[64,128,72,255]));
-      await writeFile(join(dirname(workspace),'outside.png'),png(210,90,[175,88,46,255]));
+      await writeFile(join(dirname(workspace),'.outside.png'),png(210,90,[175,88,46,255]));
       await writeFile(join(dirname(workspace),'外部 草图.png'),png(210,90,[85,102,160,255]));
       await writeFile(join(dirname(workspace),'linked.png'),png(210,90,[52,132,165,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
@@ -52,12 +52,14 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     const setup=await browser.newContext();
     try{await registerFixtureWorkspace(setup.request,service);}finally{await setup.close();}
     const author=await connect(first,1440);
-    const abs=join(dirname(service.workspace),'outside.png').replaceAll('\\','/');
+    const abs=join(dirname(service.workspace),'.outside.png');
     const markdown=[
+      '**注意：**内容',
       '![Workspace diagram](./%E5%9B%BE%20%231%25.png)',
-      '![Parent image](../outside.png)',
+      '![Parent image](../.outside.png)',
       '![Spaced image](../外部 草图.png)',
-      '![Absolute image](<'+abs+'>)',
+      '![Absolute image][diagram]',
+      '[diagram]: <'+abs+'>',
       '![Vector drawing](drawing.svg)',
       '![Missing](missing.png)',
       '![Wrong format](ordinary.png)',
@@ -83,6 +85,11 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
         finally{await handle.dispose();}
         assert.deepEqual(sizes[label],[w,h]);
       }
+      const emphasis=article.locator('strong').filter({hasText:'注意：'});
+      assert.equal(await emphasis.count(),1);
+      assert(await emphasis.evaluate(node=>node.textContent==='注意：' && node.nextSibling?.textContent?.startsWith('内容')));
+      await emphasis.scrollIntoViewIfNeeded();
+      await page.screenshot({path:join(dir,stage+'-emphasis.png')});
       for(const label of ['Missing','Wrong format','Too big']){
         const error=article.getByText('Image preview unavailable · '+label,{exact:true});
         if(!await error.count())await article.getByText(label,{exact:true}).scrollIntoViewIfNeeded().catch(()=>{});
@@ -178,7 +185,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     assert(devices.includes(first.id));
     result.readerConfigurationAccess=devices.includes(second.id);
     assert.equal(result.readerConfigurationAccess,false);
-    await writeFile(join(dirname(service.workspace),'outside.png'),png(248,90,[61,106,170,255]));
+    await writeFile(join(dirname(service.workspace),'.outside.png'),png(248,90,[61,106,170,255]));
     await writeFile(join(dirname(service.workspace),'外部 草图.png'),png(248,90,[85,102,160,255]));
     await writeFile(join(dirname(service.workspace),'linked.png'),png(248,90,[52,132,165,255]));
     await connect(second,390);

@@ -38,7 +38,7 @@ rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
 async-trait.workspace = true
 futures-util.workspace = true
-pulldown-cmark.workspace = true
+pulldown-cmark = { workspace = true, features = ["conversation"] }
 url.workspace = true
 percent-encoding.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }

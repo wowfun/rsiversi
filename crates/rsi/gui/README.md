@@ -292,6 +292,10 @@ only its first language token: at most 32 ASCII letters, digits, `_`, `+`, `-`,
 `.` or `#`, normalized to lowercase. Other info strings do not enter the wire.
 Tables and language labels share the existing event, depth, source, encoded and
 retained-memory limits; over-budget tables remain plain text. Raw HTML is text.
+In conversation Markdown, a run of two or more asterisks can open between a
+CJK character and punctuation, and close between punctuation and a CJK
+character. Symbols count as punctuation. Single asterisks and underscores
+follow their ordinary delimiter rules.
 An absolute HTTP(S) Markdown image carries its URL and alt text to the renderer.
 The browser loads it with no referrer and offers a full-size preview. An
 unavailable image falls back to its alt text or destination. Tool/file/source
@@ -299,6 +303,10 @@ contents keep their plain-text presentations.
 Local Markdown image destinations become file-path events. After settlement
 the renderer reads through the attached Session Files service, including local
 absolute paths and parent paths. A read does not change the file picker's selection.
+Inline and reference destinations preserve backslash separators in a Windows
+path, including before punctuation. A path with both separator styles must
+have a backslash before a letter or number. URL schemes of two or more characters keep
+ordinary Markdown escaping, and character references decode in either form.
 A standalone image paragraph can use an unquoted local image path containing
 spaces when it begins with `./`, `../`, a POSIX root, or a Windows drive root.
 An escaped example, a code span, or a larger paragraph containing this

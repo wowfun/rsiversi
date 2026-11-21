@@ -169,7 +169,11 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
     let mut header = false;
     let parser = Parser::new_ext(
         source,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_MATH,
+        Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_MATH
+            | Options::ENABLE_CJK_STRONG
+            | Options::PRESERVE_WINDOWS_PATHS,
     );
     let mut events = TextMergeWithOffset::new(parser.into_offset_iter()).peekable();
     while let Some((event, range)) = events.next() {
@@ -330,6 +334,89 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strong_delimiters_follow_cjk_and_punctuation_boundaries() {
+        for (source, expected) in [
+            ("**注意：**内容", "注意："),
+            ("**Notice:**内容", "Notice:"),
+            ("**事件中间件（waterfall）**实现", "事件中间件（waterfall）"),
+            ("**事件中间件(waterfall)**实现", "事件中间件(waterfall)"),
+            ("**句号。**后续", "句号。"),
+            ("**Period.**后续", "Period."),
+            ("**提醒！**继续", "提醒！"),
+            ("**Warning!**继续", "Warning!"),
+            ("あ**「かな」**カ", "「かな」"),
+            ("한**+값+**글", "+값+"),
+            ("ㄅ**（音）**ㄆ", "（音）"),
+        ] {
+            let nodes = parse(source).unwrap();
+            assert!(
+                nodes.windows(3).any(|run| matches!(run, [
+                Node::Start {element: Element::Strong}, Node::Text { text }, Node::End
+            ] if text == expected)),
+                "{source}"
+            );
+        }
+        for source in [
+            "A**(a)**B",
+            "文*（词）*文",
+            "文__（词）__文",
+            r"文\*\*（词）\*\*文",
+            "前面的代码：`**注意：**内容`",
+        ] {
+            assert!(
+                !parse(source).unwrap().iter().any(|node| matches!(
+                    node,
+                    Node::Start {
+                        element: Element::Strong | Element::Emphasis
+                    }
+                )),
+                "{source}"
+            );
+        }
+        assert!(!Parser::new("**注意：**内容").any(|e| e == Event::Start(Tag::Strong)));
+    }
+
+    #[test]
+    fn windows_separators_survive_inline_and_reference_destination_decoding() {
+        for (raw, expected) in [
+            (r"D:\img\.cache\a.png", r"D:\img\.cache\a.png"),
+            (r"docs\_draft.png", r"docs\_draft.png"),
+            (r"D:/repo\.hidden\a.png", r"D:/repo\.hidden\a.png"),
+            (r"<D:\My Files\.config\a.png>", r"D:\My Files\.config\a.png"),
+            (r"D:\R&amp;D\a&#32;b.png", r"D:\R&D\a b.png"),
+            (r"docs/\_draft.png", "docs/_draft.png"),
+            (r"docs/\图\_draft.png", r"docs/\图\_draft.png"),
+            (r"D:\doc\(v2\).png", r"D:\doc\(v2\).png"),
+        ] {
+            for (label, image) in [("![chart]", true), ("[chart]", false)] {
+                for source in [
+                    format!("{label}({raw} \"title\")"),
+                    format!("{label}[Diagram]\n\n[diagram]: {raw} \"title\""),
+                ] {
+                    let nodes = parse(&source).unwrap();
+                    assert!(
+                        nodes.iter().any(|node| match node {
+                            Node::Start {
+                                element: Element::FileImage { path },
+                            } => image && path == expected,
+                            Node::Start {
+                                element: Element::FileImageLink { path },
+                            } => !image && path == expected,
+                            _ => false,
+                        }),
+                        "{source}"
+                    );
+                }
+            }
+        }
+        let source = r"[remote](https://example.org/r\_s)";
+        assert!(parse(source).unwrap().iter().any(|node|
+            matches!(node, Node::Start {element: Element::Link {href}} if href == "https://example.org/r_s")));
+        assert!(Parser::new(r"[file](docs\_draft.png)").any(|e|
+            matches!(e, Event::Start(Tag::Link {dest_url, ..}) if &*dest_url == "docs_draft.png")));
+    }
     #[test]
     fn tables_preserve_alignment_headers_and_literal_cell_content() {
         let source = "| Left column with enough source text | Center column with enough source text | Right column with enough source text |\n| :--- | :---: | ---: |\n| first value with **emphasis** | second literal `<script>` value | third value |\n| fourth extended value | fifth extended value | sixth extended value |";
