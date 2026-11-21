@@ -1,6 +1,10 @@
-import {memo, useEffect, useId, useLayoutEffect, useRef, useState} from 'react';
+import {memo, useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent} from 'react';
+import {writeClipboard} from '../../mounts.js';
+import {Menu} from '../../vendor/dsh/dockkit-primitives/Menu.tsx';
 import {Tooltip} from '../../vendor/dsh/dockkit-primitives/Tooltip.tsx';
-import {IconFlatListOutlineRegular, IconFolderCloseRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import {IconCopyOutlineRegular, IconEllipsisOutlineRegular, IconFlatListOutlineRegular, IconFolderCloseRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import {run, setNotice} from '../bridge.ts';
+import {rowContextMenu} from '../row-context-menu.ts';
 import css from './session-panel.module.css';
 
 const hiddenDock = 'rsi.session-panel.hidden';
@@ -9,18 +13,42 @@ function dockVisible() {
 }
 
 function WorkingFolder({path}: {path:string}) {
+  const [menu, setMenu] = useState<{opener: HTMLElement; point: {x: number; y: number}}>();
+  const label = useRef<HTMLSpanElement>(null);
+  function showMenu(event: SyntheticEvent<HTMLElement>, point?: {x: number; y: number}) {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const opener = (event.target instanceof Element && event.target.closest('button')) || label.current;
+    if (!opener) return;
+    opener.focus({preventScroll: true});
+    const rect = opener.getBoundingClientRect();
+    setMenu({opener, point: point ?? {x: rect.left, y: rect.bottom}});
+  }
   const trimmed = path.replace(/[/\\]+$/, '');
   const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\')) + 1;
   const directory = trimmed.slice(0, cut);
   const parent = /^(?:[/\\]|[A-Za-z]:[/\\])$/.test(directory) ? directory : directory.slice(0, -1);
   const name = !trimmed || /^[A-Za-z]:$/.test(trimmed) ? path : trimmed.slice(cut);
-  return <div className={css.row}>
+  return <div className={css.row} {...rowContextMenu(showMenu)}>
     <IconFolderCloseRegular size={16} aria-hidden/>
     <Tooltip portal label={`Working folder\n${path}`} side="left" delayMs={500}>
-      <span className={css.folder} tabIndex={0} aria-label={`Working folder: ${path}`}>
+      <span ref={label} className={css.folder} tabIndex={0} aria-haspopup="menu" aria-label={`Working folder: ${path}`}>
         <span>{name}</span>{parent && <span className={css.parent}>{parent}</span>}
       </span>
     </Tooltip>
+    <button className={css.actions} type="button" aria-label="Working folder actions" aria-haspopup="menu"
+      aria-expanded={!!menu} onClick={event => menu ? setMenu(undefined) : showMenu(event)}>
+      <IconEllipsisOutlineRegular size={16} aria-hidden/>
+    </button>
+    {menu && <Menu open portal contextual autoFocus anchor={null} returnFocus={() => menu.opener}
+      anchorPoint={menu.point} isExternalTrigger={node => node === menu.opener || menu.opener.contains(node)}
+      items={[{id:'copy', label:'Copy folder path', icon:<IconCopyOutlineRegular/>}]}
+      onClose={() => setMenu(undefined)} onSelect={() => {
+        menu.opener.focus({preventScroll: true});
+        setMenu(undefined);
+        void run(async () => { await writeClipboard(path); setNotice('Copied'); });
+      }}/>}
   </div>;
 }
 
@@ -49,7 +77,10 @@ export const SessionPanel = memo(function SessionPanel({path, chat}: {path:strin
     if (!chat) setOverlay(false);
     if (!chat || !overlay || fits) return;
     function outside(event: PointerEvent) {
-      if (event.target instanceof Node && !panel.current?.contains(event.target) && !trigger.current?.contains(event.target)) setOverlay(false);
+      const target = event.target;
+      if (!(target instanceof Node) || panel.current?.contains(target) || trigger.current?.contains(target)) return;
+      const menu = panel.current?.querySelector('[aria-controls]')?.getAttribute('aria-controls');
+      if (!menu || !document.getElementById(menu)?.contains(target)) setOverlay(false);
     }
     function escape(event: KeyboardEvent) {
       if (event.key !== 'Escape' || event.defaultPrevented) return;

@@ -10,6 +10,7 @@ import { Button } from "./button.tsx";
 import dialogCss from "./workspace-header.module.css";
 import css from "./navigation.module.css";
 import { ActivityLabel } from "./activity-label.tsx";
+import { rowContextMenu } from "./row-context-menu.ts";
 import {
   input, selection, source, setNotice,
   useSelected,
@@ -64,6 +65,7 @@ export function ConversationRow({
     const rect = opener.getBoundingClientRect();
     onMenu({entry, opener, point: point ?? {x: rect.left, y: rect.bottom}});
   }
+  const gestures = rowContextMenu(showMenu);
   return (
     <div
       ref={row}
@@ -85,20 +87,10 @@ export function ConversationRow({
         const id = event.dataTransfer.getData("application/rsi-session");
         if (id) void run(() => device.move(id, "before", entry.session));
       }}
-      onContextMenu={event => showMenu(event, event.clientX || event.clientY ? {x: event.clientX, y: event.clientY} : undefined)}
-      onKeyUp={event => {
-        if (event.key === "ContextMenu" && !event.nativeEvent.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) showMenu(event);
-      }}
+      {...gestures}
       onKeyDown={(event) => {
-        if (event.key === "ContextMenu" && !event.ctrlKey && !event.altKey && !event.metaKey) {
-          // Windows opens its native menu on release. Keep focus on the opener until then.
-          event.preventDefault();
-          return;
-        }
-        if (event.key === "F10" && event.shiftKey && !event.repeat && !event.nativeEvent.isComposing && !event.ctrlKey && !event.altKey && !event.metaKey) {
-          showMenu(event);
-          return;
-        }
+        gestures.onKeyDown(event);
+        if (event.defaultPrevented) return;
         if (
           event.altKey &&
           ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)

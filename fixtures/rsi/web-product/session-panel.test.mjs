@@ -9,7 +9,16 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
     import {createRoot} from 'react-dom/client';
     import {SessionPanel} from '/src/session/session-panel.tsx';
     import {IconSprite} from '/src/icon-sprite.tsx';
+    import {notices} from '/src/bridge.ts';
+    import {setClipboardWriter} from '/mounts.js';
+    window.copyResult=()=>({writes:window.writes, notice:notices.getSnapshot().transient});
+    window.writes=[];
+    setClipboardWriter(async text=>{
+      if(window.rejectCopy) throw new Error('Clipboard permission denied');
+      window.writes.push(text);
+    });
     document.body.style.margin='0';
+    document.body.style.setProperty('--dsw-menu-backdrop-filter','blur(14px)');
     const root=createRoot(document.querySelector('#root'));
     window.show=(path='/home/work/project',chat=true)=>root.render(<><IconSprite/>
       <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} path={path} chat={chat}/></div></header>
@@ -29,6 +38,26 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
       assert.equal(await panel.getAttribute('data-presentation'),'overlay');
       const folder=panel.getByLabel('Working folder: /home/work/project',{exact:true});
       await folder.focus();await page.getByRole('tooltip',{name:/Working folder.*project/s}).waitFor();
+      const actions=panel.getByRole('button',{name:'Working folder actions'});
+      const copy=page.getByRole('menuitem',{name:'Copy folder path',exact:true});
+      await folder.press('Shift+F10');await copy.waitFor();
+      assert(await copy.evaluate(node=>node===document.activeElement));
+      await page.keyboard.press('Escape');await copy.waitFor({state:'detached'});
+      assert(await folder.evaluate(node=>node===document.activeElement));
+      await folder.press('ContextMenu');await copy.waitFor();await copy.press('Enter');
+      await copy.waitFor({state:'detached'});
+      assert.deepEqual(await page.evaluate(()=>window.copyResult()),{writes:['/home/work/project'],notice:'Copied'});
+      assert(await panel.isVisible());
+      await folder.click({button:'right'});await copy.waitFor();await copy.click();await copy.waitFor({state:'detached'});
+      assert(await panel.isVisible());
+      await actions.click();await copy.waitFor();await page.evaluate(()=>{window.rejectCopy=true;});
+      const anchor=await page.locator('span[style*="--dsh-menu-trigger-"]').boundingBox(), opener=await actions.boundingBox();
+      assert(Math.abs(anchor.x-opener.x)<=1 && Math.abs(anchor.y-opener.y-opener.height)<=1,JSON.stringify({anchor,opener}));
+      const boundsAfterClick=await page.getByRole('menu').boundingBox();
+      assert(Math.abs(boundsAfterClick.y-opener.y-opener.height)<=5,JSON.stringify({boundsAfterClick,opener}));
+      await copy.click();await copy.waitFor({state:'detached'});
+      assert.deepEqual(await page.evaluate(()=>window.copyResult()),{writes:['/home/work/project','/home/work/project'],notice:'Clipboard permission denied'});
+      assert(await panel.isVisible());assert(await actions.evaluate(node=>node===document.activeElement));
       await page.keyboard.press('Escape');await panel.waitFor({state:'detached'});
       assert(await trigger.evaluate(node=>node===document.activeElement));
       await trigger.click();await page.getByRole('button',{name:'Outside'}).click();await panel.waitFor({state:'detached'});
@@ -43,6 +72,10 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
       const path='C:\\work\\project';await page.evaluate(path=>window.show(path),path);
       await trigger.press('Space');await panel.getByLabel('Working folder: '+path,{exact:true}).waitFor();
       assert.deepEqual(await panel.locator('[tabindex="0"] span').allTextContents(),['project','C:\\work']);
+      await page.evaluate(()=>{window.rejectCopy=false;});
+      await actions.click();const box=await copy.boundingBox();assert(box && box.x>=0 && box.x+box.width<=390);
+      await copy.click();await copy.waitFor({state:'detached'});assert(await panel.isVisible());
+      assert.equal((await page.evaluate(()=>window.copyResult())).writes.at(-1),path);
       await page.evaluate(path=>window.show(path,false),path);await panel.waitFor({state:'detached'});
       assert(await trigger.isDisabled());await page.evaluate(()=>window.show('/'));
       await trigger.click();await panel.getByText('/',{exact:true}).waitFor();

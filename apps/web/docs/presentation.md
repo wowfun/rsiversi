@@ -1,7 +1,10 @@
 # Presentation design
 
 The Chat header's Session panel shows the attached working folder and its parent.
-The folder exposes its full path to pointer and keyboard users. With 348 px of
+The folder exposes its full path to pointer and keyboard users. Its actions
+button, context click and keyboard context menu offer Copy folder path, which
+copies the exact attached path and reports the clipboard result. Escape returns
+focus to the control that opened the menu and keeps the panel open. With 348 px of
 space beside the transcript the panel docks there and follows the browser's
 docking preference. In a narrower pane its button opens a temporary overlay.
 Escape or a press outside closes it. The panel belongs to the selected Chat;

@@ -13,14 +13,23 @@
 .panel {
   top: calc(100% + 12px); right: 8px; z-index: 8; box-sizing: border-box;
   width: clamp(300px, calc(var(--gutter) - 48px), 360px); padding: 6px;
-  border-radius: var(--dsw-radius-lg); background: var(--dsw-specific-menu);
-  box-shadow: var(--dsw-elevation-panel); backdrop-filter: var(--dsw-menu-backdrop-filter);
+  border-radius: var(--dsw-radius-lg); box-shadow: var(--dsw-elevation-panel);
 }
+/* Keep the menu's viewport anchor outside the backdrop filter's containing block. */
+.panel::before {content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--dsw-specific-menu); backdrop-filter: var(--dsw-menu-backdrop-filter);}
 .panel[data-presentation=overlay] {width: min(280px, calc(100% - 16px)); box-shadow: var(--dsw-elevation-prominent);}
 .panel h2 {margin: 0; padding: 4px 6px; font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary);}
 .row, .folder {display: flex; align-items: center; min-width: 0;}
 .row {height: 28px; padding: 0 6px; font-size: 13px;}
-.row svg {flex: none; margin-right: 6px; color: var(--dsw-alias-label-secondary);}
+.row > svg {flex: none; margin-right: 6px; color: var(--dsw-alias-label-secondary);}
+.actions {
+  flex: none; margin-left: auto; display: grid; place-items: center; height: 22px; width: 22px; padding: 0;
+  color: var(--dsw-alias-label-secondary); background: transparent; border: 0; border-radius: var(--radius-compact); cursor: pointer;
+}
+.actions:hover, .actions[aria-expanded=true] {background: var(--hover);}
+@media (hover: hover) {
+  .row:not(:hover):not(:focus-within) .actions[aria-expanded=false] {opacity: 0;}
+}
 .folder {flex-wrap: wrap; align-items: baseline; height: 1lh; overflow: hidden;}
 .folder span {overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
 .folder span:first-child {flex: 0 1 auto; max-width: 100%;}
