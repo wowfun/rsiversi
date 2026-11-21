@@ -140,7 +140,7 @@ async function startProvider(onRequest) {
     async close() { const closed = new Promise(resolve => server.close(resolve)); for (const socket of sockets) socket.destroy(); await closed; } };
 }
 
-export async function startService({ binary, assets, report, configure, registrationLabel, onRequest, deepseekKey, networkProxy, watchAssets = false, developmentHttp = false, embedded = false, foregroundHost = false }) {
+export async function startService({ binary, assets, report, configure, registrationLabel, onRequest, deepseekKey, networkProxy, watchAssets = false, localWeb = false, developmentHttp = false, embedded = false, foregroundHost = false }) {
   assert(!(embedded && watchAssets), "embedded fixture uses an explicit application Profile");
   const networkEnvironment = liveProxyEnvironment(networkProxy);
   const temporary = await mkdtemp(join(tmpdir(), "rsi-web-"));
@@ -292,15 +292,15 @@ export async function startService({ binary, assets, report, configure, registra
         return run(['host','status']).stdout.startsWith('running\t');
       }, 'fixture foreground Host readiness');
     }
-    const argumentsValue = watchAssets
-      ? ["--watch", "web", "--port", "0", "--no-open"]
+    const argumentsValue = watchAssets || localWeb
+      ? [...(watchAssets ? ["--watch"] : []), "web", "--port", "0", "--no-open", ...(watchAssets ? [] : ["--assets",assets])]
       : [embedded ? "--profile" : "run", "browser-fixture", ...(embedded ? [] : ["--assets", assets]), "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
     child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });
     const lines = createInterface({ input: child.stdout });
     const [ready] = await deadline(Promise.race([once(lines, "line"), stopped.then(() => { throw new Error(`Service exited before readiness: ${stderr}`); })]), "service readiness", 210_000);
-    if (watchAssets) {
+    if (watchAssets || localWeb) {
       assert(ready.startsWith("rsi web: "));
       launchUrl = ready.slice("rsi web: ".length);
       origin = new URL(launchUrl).origin;

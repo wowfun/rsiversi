@@ -3,13 +3,9 @@ import {useEffect,useRef,useState} from 'react'
 import {input,useView,type ExecutionLocation} from './bridge.ts'
 import {Modal} from './presentation.tsx'
 import {Button} from './button.tsx'
+import {directory} from './directory-input.ts';
 interface Entry {name:string;path:string;hidden:boolean;symlink:boolean}
 interface Listing {path:string;home:string|null;breadcrumbs:string[];entries:Entry[];truncated:boolean;unrepresentable:boolean}
-async function directory<T>(request:unknown):Promise<T> {
-  const reply=JSON.parse(await input.directory(request))
-  if(reply.status==='failed')throw Object.assign(new Error(reply.message),{kind:reply.failure.kind})
-  return reply.value
-}
 export function chooseWorkspace() {window.dispatchEvent(new Event('rsi:choose-workspace'))}
 export function DirectoryPickerHost() {
   const [open,setOpen]=useState(false)

@@ -4,7 +4,10 @@
 #![allow(clippy::missing_errors_doc)]
 use async_trait::async_trait;
 use rsi_api_protocol::ApiError;
-use rsi_api_protocol::{ApiRegistrarContract, CallOrigin, json_handler};
+use rsi_api_protocol::{
+    ApiRegistrarContract, CallOrigin, DeviceAdministration, DeviceAdministrationContract,
+    json_handler,
+};
 use rsi_configuration_access::{ConfigurationAccess, ConfigurationAccessContract};
 use rsi_directory_picker_api::{
     AtLocation, CreateRequest, Created, ExecutionLocation, Failure, ListRequest, Listing,
@@ -19,6 +22,7 @@ use std::{sync::Mutex, time::Duration};
 use tokio::sync::Semaphore;
 #[cfg(any(unix, windows))]
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+mod desktop;
 #[cfg(any(unix, windows))]
 mod native;
 #[cfg(any(unix, windows))]
@@ -118,7 +122,23 @@ impl Work {
         execution: rsi_execution::ExecutionLease,
         request: target::Request,
     ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<target::Reply>> {
-        let mutation = matches!(request, target::Request::Create(_));
+        let uncertain =
+            matches!(request, target::Request::Create(_)).then_some(Failure::OutcomeUnknown);
+        self.run_async(uncertain, move |stop| {
+            target::exchange(execution, request, stop)
+        })
+        .await
+    }
+    async fn run_async<T, F, Fut>(
+        &self,
+        uncertain: Option<Failure>,
+        work: F,
+    ) -> rsi_api_protocol::Result<rsi_directory_picker_api::Result<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = rsi_directory_picker_api::Result<T>> + Send + 'static,
+    {
         let (task, cancel) = {
             let closed = self.closed.lock().expect("directory admission poisoned");
             if *closed {
@@ -134,17 +154,16 @@ impl Work {
             let cancel = CancelOnDrop(stop.clone());
             let task = tokio::spawn(async move {
                 let (_token, _slot) = (token, slot);
-                target::exchange(execution, request, stop).await
+                work(stop).await
             });
             (task, cancel)
         };
         let result = match tokio::time::timeout(self.deadline, task).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) if mutation => Err(Failure::OutcomeUnknown),
-            Ok(Err(_)) => Err(Failure::Io {
+            Ok(Err(_)) => Err(uncertain.unwrap_or_else(|| Failure::Io {
                 message: "target directory worker failed".into(),
-            }),
-            Err(_) => Err(Failure::TimedOut),
+            })),
+            Err(_) => Err(uncertain.unwrap_or(Failure::TimedOut)),
         };
         drop(cancel);
         Ok(result)
@@ -177,6 +196,8 @@ mod status_tests {
 
 #[derive(Debug)]
 struct Owner {
+    devices: Arc<dyn DeviceAdministration>,
+    browser_slot: &'static str,
     access: Arc<ConfigurationAccess>,
     execution: Arc<dyn ExecutionResolver>,
     #[cfg(any(unix, windows))]
@@ -185,6 +206,18 @@ struct Owner {
     work: Work,
 }
 impl Owner {
+    fn owns_desktop(&self, origin: &CallOrigin) -> rsi_api_protocol::Result<bool> {
+        match origin {
+            CallOrigin::Local => Ok(true),
+            CallOrigin::Device(device) if device.revoked.is_cancelled() => {
+                Err(ApiError::Unauthorized)
+            }
+            CallOrigin::Device(device) => Ok(self
+                .devices
+                .managed_device(self.browser_slot)?
+                .is_some_and(|owner| owner.id == device.id)),
+        }
+    }
     #[cfg(not(any(unix, windows)))]
     fn unsupported<T>(
         &self,
@@ -278,12 +311,13 @@ impl Owner {
 /// Ordinary Service factory; no ambient home is read during activation.
 #[derive(Clone, Debug)]
 pub struct DirectoryPickerFactory {
+    browser_slot: &'static str,
     home: Option<PathBuf>,
 }
 impl DirectoryPickerFactory {
     /// Captures composition's explicit default browse directory.
-    pub fn new(home: Option<PathBuf>) -> Self {
-        Self { home }
+    pub fn new(home: Option<PathBuf>, browser_slot: &'static str) -> Self {
+        Self { home, browser_slot }
     }
 }
 #[async_trait]
@@ -298,11 +332,14 @@ impl PluginFactory for DirectoryPickerFactory {
         }
         Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<ApiRegistrarContract>()
+            .requiring_local::<DeviceAdministrationContract>()
             .requiring_local::<ExecutionResolverContract>()
             .requiring_local::<ConfigurationAccessContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let owner = Arc::new(Owner {
+            devices: plan.local::<DeviceAdministrationContract>()?,
+            browser_slot: self.browser_slot,
             access: plan.local::<ConfigurationAccessContract>()?,
             execution: plan.local::<ExecutionResolverContract>()?,
             #[cfg(any(unix, windows))]
@@ -311,6 +348,53 @@ impl PluginFactory for DirectoryPickerFactory {
             work: Work::new(Duration::from_secs(5)),
         });
         let registrar = plan.local::<ApiRegistrarContract>()?;
+        let desktop_owner = owner.clone();
+        let desktop = registrar
+            .register(
+                Operation::Desktop.spec(),
+                json_handler(move |context, (): ()| {
+                    let owner = desktop_owner.clone();
+                    async move {
+                        Ok(Ok::<_, Failure>(
+                            owner.owns_desktop(&context.origin)? && desktop::available(),
+                        ))
+                    }
+                }),
+            )
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
+        let desktop_owner = owner.clone();
+        let reveal = registrar
+            .register(
+                Operation::Reveal.spec(),
+                json_handler(move |context, path: String| {
+                    let owner = desktop_owner.clone();
+                    async move {
+                        if !owner.owns_desktop(&context.origin)? {
+                            return Err(ApiError::Unauthorized);
+                        }
+                        if !desktop::available() {
+                            return Ok(Err(Failure::DesktopUnavailable));
+                        }
+                        if let Err(failure) = rsi_directory_picker_api::validate_path(&path) {
+                            return Ok(Err(failure));
+                        }
+                        #[cfg(any(unix, windows))]
+                        {
+                            owner
+                                .work
+                                .run_async(Some(Failure::RevealUnknown), move |stop| {
+                                    desktop::reveal(path, stop)
+                                })
+                                .await
+                        }
+                        #[cfg(not(any(unix, windows)))]
+                        {
+                            Ok(Err(Failure::DesktopUnavailable))
+                        }
+                    }
+                }),
+            )
+            .map_err(|error| MetaError::Activation(error.to_string()))?;
         let status_owner = owner.clone();
         let status = registrar
             .register(
@@ -367,7 +451,7 @@ impl PluginFactory for DirectoryPickerFactory {
             "drain actual directory work",
             Box::new(move || {
                 Box::pin(async move {
-                    drop((status, list, create));
+                    drop((status, list, create, desktop, reveal));
                     #[cfg(any(unix, windows))]
                     owner.work.close().await;
                     drop(owner);

@@ -1078,3 +1078,9 @@ open chat disclosure and the terminal refusal. With `--cancel-reopen` it stops t
 the Host on the same store and checks the reopened chat and provider count
 after the original retry deadline. Set `RSI_WEB_BINARY`, `RSI_WEB_ASSETS`
 and a fresh `RSI_WEB_REPORT` directory for each run.
+
+## Host desktop verification
+
+The service fixture's `localWeb` option starts the installed `rsi web`
+listener and returns its one-use launch URL. It supports tests that distinguish
+the Host owner's browser credential from an ordinary paired device.

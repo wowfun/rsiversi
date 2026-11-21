@@ -103,7 +103,10 @@ pub(crate) fn register(
         "rsi.directory-picker",
         env!("CARGO_PKG_VERSION"),
         UpdateMode::RestartRequired,
-        std::sync::Arc::new(rsi_directory_picker::DirectoryPickerFactory::new(home)),
+        std::sync::Arc::new(rsi_directory_picker::DirectoryPickerFactory::new(
+            home,
+            crate::application_services::LOCAL_WEB_SLOT,
+        )),
     )?;
     entries.push(ProfileEntry::new(
         "rsi.directory-picker",

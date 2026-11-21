@@ -17,7 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 rsi-directory-picker-api = { path = "../directory-picker-api" }
 rsi-configuration-access = { path = "../configuration-access" }
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "process"] }
 tokio-util.workspace = true
 
 [target.'cfg(any(unix, windows))'.dependencies]

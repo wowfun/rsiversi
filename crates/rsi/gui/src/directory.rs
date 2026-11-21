@@ -31,6 +31,10 @@ fn reply<T: serde::Serialize>(
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Desktop,
+    Reveal {
+        path: String,
+    },
     Status {
         location: ExecutionLocation,
     },
@@ -94,6 +98,8 @@ impl GuiApplication {
                 .as_ref()
                 .ok_or("Directory browsing is unavailable; enter a path manually")?;
             match request {
+                Request::Desktop => reply(client.desktop().await.map_err(error)?),
+                Request::Reveal { path } => reply(client.reveal(&path).await.map_err(error)?),
                 Request::Status { location } => reply(client.status(location).await.map_err(error)?),
                 Request::List { location, path, request_id } => {
                     if request_id.is_empty()

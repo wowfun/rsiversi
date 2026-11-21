@@ -23,6 +23,8 @@ pub const MAXIMUM_PATH: usize = 16 * 1024;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Failure {
+    /// The serving Host cannot reveal a directory on a desktop.
+    DesktopUnavailable,
     /// No native implementation on this Host.
     Unsupported,
     /// Composition did not supply a default home.
@@ -40,17 +42,27 @@ pub enum Failure {
     TimedOut,
     /// Creation may have succeeded; read back explicitly before another action.
     OutcomeUnknown,
+    /// The desktop may already have received the directory.
+    RevealUnknown,
 }
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported=>f.write_str("Directory browsing is unsupported on this Host; enter a path manually"),
-            Self::HomeUnavailable=>f.write_str("Host home is unavailable; enter an absolute directory path"),
-            Self::Invalid=>f.write_str("Invalid directory path or folder name"),
-            Self::Io{message}=>write!(f,"Directory access failed: {message}"),
-            Self::Cancelled=>f.write_str("Directory request cancelled"),
-            Self::TimedOut=>f.write_str("Directory read timed out"),
-            Self::OutcomeUnknown=>f.write_str("Folder creation outcome is unknown. Read the parent directory to check before creating again"),
+            Self::DesktopUnavailable => f.write_str("The Host file manager is unavailable"),
+            Self::Unsupported => {
+                f.write_str("Directory browsing is unsupported on this Host; enter a path manually")
+            }
+            Self::HomeUnavailable => {
+                f.write_str("Host home is unavailable; enter an absolute directory path")
+            }
+            Self::Invalid => f.write_str("Invalid directory path or folder name"),
+            Self::Io { message } => write!(f, "Directory access failed: {message}"),
+            Self::Cancelled => f.write_str("Directory request cancelled"),
+            Self::TimedOut => f.write_str("Directory read timed out"),
+            Self::OutcomeUnknown => f.write_str(
+                "Folder creation outcome is unknown. Read the parent directory to check before creating again",
+            ),
+            Self::RevealUnknown => f.write_str("The file manager handoff outcome is unknown. Check the Host desktop before trying again"),
         }
     }
 }
@@ -236,6 +248,10 @@ impl Listing {
 /// Versioned picker operations.
 #[derive(Clone, Copy, Debug)]
 pub enum Operation {
+    /// Availability of the serving desktop for this credential.
+    Desktop,
+    /// Reveal one local directory on the serving desktop.
+    Reveal,
     /// Platform status.
     Status,
     /// Physical directory window.
@@ -254,22 +270,36 @@ impl Operation {
             id: OperationId::new(
                 "directory-picker",
                 match self {
+                    Self::Desktop => "desktop",
+                    Self::Reveal => "reveal",
                     Self::Status => "status",
                     Self::List => "list",
                     Self::Create => "create",
                 },
-                2,
+                match self {
+                    Self::Desktop | Self::Reveal => 1,
+                    _ => 2,
+                },
             )
             .expect("static operation"),
-            access: OperationAccess::Authenticated,
+            access: match self {
+                Self::Desktop | Self::Reveal => OperationAccess::Credential,
+                _ => OperationAccess::Authenticated,
+            },
             class: OperationClass::Data,
             effect: match self {
-                Self::Create => OperationEffect::Mutation,
+                Self::Create | Self::Reveal => OperationEffect::Mutation,
                 _ => OperationEffect::Read,
             },
             encoding: RequestEncoding::Json,
-            maximum_request_bytes: 128 * 1024,
-            maximum_response_bytes: MAXIMUM_REPLY,
+            maximum_request_bytes: match self {
+                Self::Desktop => 16,
+                _ => 128 * 1024,
+            },
+            maximum_response_bytes: match self {
+                Self::Desktop | Self::Reveal => 4096,
+                _ => MAXIMUM_REPLY,
+            },
         }
     }
 }
@@ -296,6 +326,17 @@ impl Client {
         Ok(result)
     }
     /// Reads platform/grant status without filesystem access.
+    pub async fn desktop(&self) -> rsi_api_protocol::Result<Result<bool>> {
+        self.call(Operation::Desktop, &()).await
+    }
+    /// Reveals an absolute local directory through the serving Host's desktop.
+    pub async fn reveal(&self, path: &str) -> rsi_api_protocol::Result<Result<()>> {
+        if let Err(error) = validate_path(path) {
+            return Ok(Err(error));
+        }
+        self.call(Operation::Reveal, &path).await
+    }
+    /// Reads directory browsing support and grant status without filesystem access.
     pub async fn status(
         &self,
         location: ExecutionLocation,

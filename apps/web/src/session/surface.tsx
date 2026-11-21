@@ -134,7 +134,7 @@ function NativeSurface({
             {(['conversation','activity'] as const).map(value=><button key={value} type="button" role="tab" id={`${tabId}-${value}`} aria-controls={`${tabId}-panel`} aria-selected={tab===value} tabIndex={tab===value?0:-1} onClick={()=>setTab(value)} onKeyDown={event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?'conversation':event.key==='End'?'activity':tab==='conversation'?'activity':'conversation';setTab(next);document.getElementById(`${tabId}-${next}`)?.focus();}}}>{value==='conversation'?'Chat':'Trajectory'}</button>)}
           </nav>
           {!empty && data?.agent_preset && <PresetLabel id={data.agent_preset}/>}
-          {selected && !empty && data && <SessionPanel key={`panel:${data.session}`} path={data.workspace.coordinates.path} chat={tab === 'conversation'}/>}
+          {selected && !empty && data && <SessionPanel key={`panel:${data.session}`} path={data.workspace.coordinates.path} local={data.workspace.coordinates.location.kind === 'local'} chat={tab === 'conversation'}/>}
           {selected && !empty && data && <ScheduledTasks key={data.generation} pane={owner.index} surface={data}/>}
           <details className="session-menu">
             <summary aria-label="Session tools">

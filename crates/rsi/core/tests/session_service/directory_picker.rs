@@ -198,6 +198,27 @@ async fn directory_discovery_and_single_creation_require_actual_configuration_gr
     ));
     assert!(!fixture.workspace.join("ungranted").exists());
     set_configuration_grant(&running, &device.record.id, "0", true).await;
+    assert_eq!(
+        wire_at(
+            &running,
+            origin.clone(),
+            Operation::Desktop.spec(),
+            Value::Null
+        )
+        .await
+        .unwrap(),
+        false
+    );
+    assert!(matches!(
+        wire_at(
+            &running,
+            origin.clone(),
+            Operation::Reveal.spec(),
+            json!(fixture.workspace)
+        )
+        .await,
+        Err(ApiError::Unauthorized)
+    ));
     let listing = wire(
         &running,
         origin.clone(),

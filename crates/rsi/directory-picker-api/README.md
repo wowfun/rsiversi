@@ -1,5 +1,14 @@
 # rsi-directory-picker-api
 
+The Host desktop operations use the actual authenticated credential. The local
+operator and the Host's managed local-web credential can reveal an existing
+local directory. A regular paired device keeps ordinary browsing access under
+the picker grants below. The desktop status reports whether this caller can
+use the serving Host's file manager. Reveal takes a local directory path and
+acknowledges the native handoff. It produces no durable record.
+Windows and WSL use Explorer, including WSL services that inherit no interactive
+shell variables. A graphical Linux Host opens the parent directory.
+
 The standard product's directory picker uses authenticated version-2 `status`,
 `list` and `create` operations. Its ordinary client plugin is shared by Worker
 and native GUI transports. Status reports platform support and grant availability;

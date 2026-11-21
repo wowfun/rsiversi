@@ -63,6 +63,12 @@ fn physical(path: &Path, stop: &CancellationToken) -> Result<PathBuf> {
     }
 }
 
+pub(super) fn desktop_directory(path: &str, stop: &CancellationToken) -> Result<PathBuf> {
+    let directory = physical(Path::new(path), stop)?;
+    open_absolute_directory_no_follow(&directory).map_err(io)?;
+    Ok(directory)
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;

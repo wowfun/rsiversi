@@ -3,7 +3,10 @@
 The Chat header's Session panel shows the attached working folder and its parent.
 The folder exposes its full path to pointer and keyboard users. Its actions
 button, context click and keyboard context menu offer Copy folder path, which
-copies the exact attached path and reports the clipboard result. Escape returns
+copies the exact attached path and reports the clipboard result. Show in folder
+uses the serving Host's file manager when the caller owns that desktop and the
+attached folder is local. The first directory menu on a connection checks desktop
+availability, and opening later menus reuses the answer. Escape returns
 focus to the control that opened the menu and keeps the panel open. With 348 px of
 space beside the transcript the panel docks there and follows the browser's
 docking preference. In a narrower pane its button opens a temporary overlay.

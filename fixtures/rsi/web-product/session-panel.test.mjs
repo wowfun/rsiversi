@@ -9,10 +9,17 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
     import {createRoot} from 'react-dom/client';
     import {SessionPanel} from '/src/session/session-panel.tsx';
     import {IconSprite} from '/src/icon-sprite.tsx';
-    import {notices} from '/src/bridge.ts';
+    import {installActions,notices} from '/src/bridge.ts';
+    import {presentationIdentity} from '/src/presentation.tsx';
     import {setClipboardWriter} from '/mounts.js';
     window.copyResult=()=>({writes:window.writes, notice:notices.getSnapshot().transient});
     window.writes=[];
+    window.ownerChanged=()=>{window.hostOwner=true;presentationIdentity.set('owner');};
+    window.folderRequests=[];
+    installActions({call:async (method,payload)=>{
+      const request=JSON.parse(payload);window.folderRequests.push(request);
+      return JSON.stringify({status:'ok',value:request.action==='desktop'?window.hostOwner===true:null});
+    }});
     setClipboardWriter(async text=>{
       if(window.rejectCopy) throw new Error('Clipboard permission denied');
       window.writes.push(text);
@@ -20,8 +27,8 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
     document.body.style.margin='0';
     document.body.style.setProperty('--dsw-menu-backdrop-filter','blur(14px)');
     const root=createRoot(document.querySelector('#root'));
-    window.show=(path='/home/work/project',chat=true)=>root.render(<><IconSprite/>
-      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} path={path} chat={chat}/></div></header>
+    window.show=(path='/home/work/project',chat=true,local=true)=>root.render(<><IconSprite/>
+      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} path={path} local={local} chat={chat}/></div></header>
       <button style={{marginTop:'160px'}}>Outside</button></>);
     window.show();
   `});
@@ -40,7 +47,9 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
       await folder.focus();await page.getByRole('tooltip',{name:/Working folder.*project/s}).waitFor();
       const actions=panel.getByRole('button',{name:'Working folder actions'});
       const copy=page.getByRole('menuitem',{name:'Copy folder path',exact:true});
+      const reveal=page.getByRole('menuitem',{name:'Show in folder',exact:true});
       await folder.press('Shift+F10');await copy.waitFor();
+      assert(await reveal.isDisabled());
       assert(await copy.evaluate(node=>node===document.activeElement));
       await page.keyboard.press('Escape');await copy.waitFor({state:'detached'});
       assert(await folder.evaluate(node=>node===document.activeElement));
@@ -81,6 +90,15 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
       await trigger.click();await panel.getByText('/',{exact:true}).waitFor();
       await page.evaluate(()=>window.show('D:\\'));await panel.waitFor({state:'detached'});
       await trigger.click();await panel.getByText('D:\\',{exact:true}).waitFor();
+      await page.evaluate(()=>{window.ownerChanged();window.folderRequests=[];});
+      await actions.click();await reveal.click();await reveal.waitFor({state:'detached'});
+      assert.deepEqual(await page.evaluate(()=>window.folderRequests),[{action:'desktop'},{action:'reveal',path:'D:\\'}]);
+      await actions.click();await reveal.click();assert.equal(await page.evaluate(()=>window.folderRequests.length),3);
+      await trigger.click();await panel.waitFor({state:'detached'});await trigger.click();await actions.click();
+      await reveal.click();assert.equal(await page.evaluate(()=>window.folderRequests.length),4);
+      await page.evaluate(()=>{window.folderRequests=[];window.show('/srv/ssh',true,false);});
+      await trigger.click();await actions.click();assert(await reveal.isDisabled());assert(await copy.isEnabled());
+      assert.deepEqual(await page.evaluate(()=>window.folderRequests),[]);
     });
   }
 });

@@ -2,9 +2,10 @@ import {memo, useEffect, useId, useLayoutEffect, useRef, useState, type Syntheti
 import {writeClipboard} from '../../mounts.js';
 import {Menu} from '../../vendor/dsh/dockkit-primitives/Menu.tsx';
 import {Tooltip} from '../../vendor/dsh/dockkit-primitives/Tooltip.tsx';
-import {IconCopyOutlineRegular, IconEllipsisOutlineRegular, IconFlatListOutlineRegular, IconFolderCloseRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import {IconCopyOutlineRegular, IconEllipsisOutlineRegular, IconFlatListOutlineRegular, IconFolderCloseRegular, IconFolderOpenOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import {run, setNotice} from '../bridge.ts';
 import {rowContextMenu} from '../row-context-menu.ts';
+import {directory, hostDesktop} from '../directory-input.ts';
 import css from './session-panel.module.css';
 
 const hiddenDock = 'rsi.session-panel.hidden';
@@ -12,8 +13,16 @@ function dockVisible() {
   try { return localStorage.getItem(hiddenDock) !== '1'; } catch { return true; }
 }
 
-function WorkingFolder({path}: {path:string}) {
+function WorkingFolder({path, local}: {path:string; local:boolean}) {
   const [menu, setMenu] = useState<{opener: HTMLElement; point: {x: number; y: number}}>();
+  const [desktop, setDesktop] = useState<boolean>();
+  const open = !!menu;
+  useEffect(() => {
+    if (!open || !local || desktop !== undefined) return;
+    let current = true;
+    void hostDesktop().then(value => { if (current) setDesktop(value); });
+    return () => { current = false; };
+  }, [open, local, desktop]);
   const label = useRef<HTMLSpanElement>(null);
   function showMenu(event: SyntheticEvent<HTMLElement>, point?: {x: number; y: number}) {
     if (event.defaultPrevented) return;
@@ -27,8 +36,8 @@ function WorkingFolder({path}: {path:string}) {
   }
   const trimmed = path.replace(/[/\\]+$/, '');
   const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\')) + 1;
-  const directory = trimmed.slice(0, cut);
-  const parent = /^(?:[/\\]|[A-Za-z]:[/\\])$/.test(directory) ? directory : directory.slice(0, -1);
+  const prefix = trimmed.slice(0, cut);
+  const parent = /^(?:[/\\]|[A-Za-z]:[/\\])$/.test(prefix) ? prefix : prefix.slice(0, -1);
   const name = !trimmed || /^[A-Za-z]:$/.test(trimmed) ? path : trimmed.slice(cut);
   return <div className={css.row} {...rowContextMenu(showMenu)}>
     <IconFolderCloseRegular size={16} aria-hidden/>
@@ -43,16 +52,18 @@ function WorkingFolder({path}: {path:string}) {
     </button>
     {menu && <Menu open portal contextual autoFocus anchor={null} returnFocus={() => menu.opener}
       anchorPoint={menu.point} isExternalTrigger={node => node === menu.opener || menu.opener.contains(node)}
-      items={[{id:'copy', label:'Copy folder path', icon:<IconCopyOutlineRegular/>}]}
-      onClose={() => setMenu(undefined)} onSelect={() => {
+      items={[{id:'reveal', label:'Show in folder', icon:<IconFolderOpenOutlineRegular/>, disabled:!local || desktop !== true},
+        {id:'copy', label:'Copy folder path', icon:<IconCopyOutlineRegular/>}]}
+      onClose={() => setMenu(undefined)} onSelect={id => {
         menu.opener.focus({preventScroll: true});
         setMenu(undefined);
-        void run(async () => { await writeClipboard(path); setNotice('Copied'); });
+        if (id === 'reveal') void run(() => directory({action:'reveal', path}));
+        else void run(async () => { await writeClipboard(path); setNotice('Copied'); });
       }}/>}
   </div>;
 }
 
-export const SessionPanel = memo(function SessionPanel({path, chat}: {path:string; chat:boolean}) {
+export const SessionPanel = memo(function SessionPanel({path, local, chat}: {path:string; local:boolean; chat:boolean}) {
   const [fits, setFits] = useState(false), [pinned, setPinned] = useState(dockVisible);
   const [overlay, setOverlay] = useState(false);
   const probe = useRef<HTMLSpanElement>(null), trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLElement>(null);
@@ -104,7 +115,7 @@ export const SessionPanel = memo(function SessionPanel({path, chat}: {path:strin
     </Tooltip>
     {chat && <span ref={probe} className={css.probe} aria-hidden/>}
     {shown && <aside ref={panel} id={id} className={css.panel} data-presentation={fits ? 'docked' : 'overlay'} aria-label="Session panel">
-      <h2>Environment</h2><WorkingFolder path={path}/>
+      <h2>Environment</h2><WorkingFolder path={path} local={local}/>
     </aside>}
   </div>;
 });
