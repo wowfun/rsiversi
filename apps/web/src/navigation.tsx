@@ -1,12 +1,15 @@
-import { ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
+import { archivedSessionHint, ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
 import { WorkspaceNavigation } from "./navigation-workspaces.tsx";
 import {NavigationOptions, type ConversationFilter} from "./navigation-options.tsx";
 import { AttentionNavigation } from "./navigation-attention.tsx";
 import { ExternalNavigation } from "./navigation-external.tsx";
+import {Toast} from "../vendor/dsh/dockkit-primitives/Toast.tsx";
+import {writeClipboard} from "../mounts.js";
 import {
   IconSearchOutlineRegular,
   IconProjectAddOutlineRegular,
   IconCloseOutlineRegular,
+  IconWarningOutlineRegular,
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import css from "./navigation.module.css";
 import { useLayout } from "./presentation.tsx";
@@ -16,7 +19,7 @@ import {workspaceName} from "../workspace-name.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
-import { input, run, setNotice, useView, type NavigationEntry } from "./bridge.ts";
+import { input, run, useView, type NavigationEntry } from "./bridge.ts";
 import {
   navigationTitles, navigationAttention,
   GroupRestoration,
@@ -107,6 +110,17 @@ export function Navigation() {
   const dispatchedQuery = useRef<string | undefined>("");
   const [menu, setMenu] = useState<SessionMenuTarget>();
   const [edit, setEdit] = useState<SessionMenuTarget>();
+  const [feedback, setFeedback] = useState<{sequence: number; text: string; success: boolean}>();
+  const notify = (text: string, success = false) =>
+    setFeedback(previous => ({sequence: (previous?.sequence ?? 0) + 1, text, success}));
+  const copySessionId = async (session: string) => {
+    try {
+      await writeClipboard(session);
+      notify("Session ID copied", true);
+    } catch {
+      notify("Copy failed. Try again.");
+    }
+  };
   const filter = {
     query,
     archived,
@@ -190,7 +204,7 @@ export function Navigation() {
   const searchEntries = useMemo(() => searchIndex?.search(query) ?? [], [searchIndex, query]);
   const openSearchResult = (entry: NavigationEntry) => {
     if (entry.metadata.archived) {
-      setNotice("Unarchive this session to open it.");
+      notify(archivedSessionHint);
       return;
     }
     closeSearch();
@@ -400,8 +414,11 @@ export function Navigation() {
         </>
       )}
       <ExternalNavigation />
+      {feedback && <Toast key={feedback.sequence} text={feedback.text}
+        tone={feedback.success ? "success" : undefined} icon={<IconWarningOutlineRegular/>}
+        onDone={() => setFeedback(undefined)}/>}
       {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} reading={attention.get(menu.entry.session)} epoch={nav?.attention_notice ? undefined : nav?.attention?.host_epoch} close={() => setMenu(undefined)}
-        rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
+        copy={() => void copySessionId(menu.entry.session)} rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
       {edit && <RenameSession title={edit.entry.metadata.title ?? titles.get(edit.entry.session) ?? ""}
         close={() => setEdit(undefined)}
         save={title => mutate(edit.entry.session, {...edit.entry.metadata, title: title || null}, edit.revision)}/>}

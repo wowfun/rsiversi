@@ -64,6 +64,7 @@ const usedSymbols = [
   'dsw-icon-settings-outline-regular',
   'dsw-icon-sliders-two-outline-medium',
   'dsw-icon-trash-outline-regular',
+  'dsw-icon-warning-outline-regular',
   'dsw-icon-wrap-fill-regular',
 ] as const satisfies readonly IconSymbolId[]
 const symbols = usedSymbols

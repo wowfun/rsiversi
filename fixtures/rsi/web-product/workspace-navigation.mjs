@@ -7,6 +7,11 @@ import {sourceFixture} from './source-fixture.mjs';
 import {navigationOptions,navigationFilter,navigationMode} from './controls.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR);await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
+import {setClipboardWriter} from './mounts.js';
+setClipboardWriter(async text=>{
+  if(fixture.rejectCopy)throw new Error('fixture clipboard unavailable');
+  fixture.copied=text;
+});
 fixture.savedMain=fixture.view.surfaces.main;
 fixture.view.surfaces.main=null;
 fixture.view.setup.agent.default_model=null;
@@ -129,11 +134,15 @@ try {
    assert.equal(await page.getByTestId('conversation-row').count(),1);
    await searchButton.click();await searchInput.fill('archived');
    const archivedResult=page.getByTestId('conversation-row').filter({hasText:'Archived conversation'});
+   assert.equal(await archivedResult.getByTestId('conversation-open').getAttribute('aria-description'),'Unarchive this session to open it.');
    await archivedResult.getByTestId('conversation-open').click();
-   await page.getByText('Unarchive this session to open it.',{exact:true}).waitFor();
+   const archiveWarning=page.getByRole('alert').filter({hasText:'Unarchive this session to open it.'});
+   await archiveWarning.waitFor();
+   assert(await archiveWarning.evaluate(node=>getComputedStyle(node).position==='fixed'));
    await archivedResult.getByRole('button',{name:'Unarchive session',exact:true}).click();
    await archivedResult.waitFor({state:'detached'});
    await page.getByText('No matching conversations.',{exact:true}).waitFor();
+   await archiveWarning.waitFor({state:'detached'});
    await searchInput.press('Escape');
    await navigationFilter(page,'active');
    const sessionRow=page.getByTestId('conversation-row').filter({hasText:'Active conversation'});
@@ -192,6 +201,18 @@ try {
    await page.screenshot({path:join(report,name+'-session-actions.png')});
    await page.keyboard.press('Escape');
    const actions=sessionRow.getByRole('button',{name:/Session actions for/});
+   await actions.click();await page.getByRole('menuitem',{name:'Copy Session ID',exact:true}).click();
+   const copied=page.getByRole('alert').filter({hasText:'Session ID copied'});
+   await copied.waitFor();
+   assert.equal(await page.evaluate(()=>fixture.copied),'active');
+   await page.evaluate(()=>{fixture.rejectCopy=true});
+   await actions.click();await page.getByRole('menuitem',{name:'Copy Session ID',exact:true}).click();
+   const copyFailed=page.getByRole('alert').filter({hasText:'Copy failed. Try again.'});
+   await copyFailed.waitFor();assert.equal(await copied.count(),0);
+   assert(await copyFailed.locator('svg use').evaluate(use=>!!document.querySelector(use.getAttribute('href'))));
+   await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent==='Copy failed. Try again.' && Number(getComputedStyle(el).opacity)>.98));
+   await page.screenshot({path:join(report,name+'-copy-warning.png')});
+   await copyFailed.waitFor({state:'detached'});
    await actions.click();await pin.waitFor();
    await actions.click();await pin.waitFor({state:'detached'});
    await page.evaluate(async()=>{
@@ -426,7 +447,8 @@ try {
    await page.evaluate(()=>window.finishClose());
    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
    assert.equal(await page.evaluate(()=>window.groupOpens),0,'closing the active workspace must not enqueue an automatic reopen');
-   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,composerReadShortcut:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
+   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,composerReadShortcut:true,
+     acknowledgedOnlyAfterLaterTurn:true,archiveAndCopyFeedbackExpires:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
   } catch (error) {
    const failure=join(report,name+'-failure.txt');
    await writeFile(failure,[error.stack,...errors].join('\n'));

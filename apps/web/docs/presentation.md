@@ -566,7 +566,9 @@ Escape clears and closes search. Clicking outside an empty search closes it.
 Search rows show the workspace below the session title so identically named
 conversations can be distinguished before opening them. Selecting an active
 result closes search and reveals the session in its workspace. Archived search
-results offer an Unarchive button on the row so they can be restored in place.
+results describe how to reopen them and offer an Unarchive button on the row.
+Selecting one shows a temporary warning above the workspace and keeps the query.
+Copy Session ID reports success or failure in the same temporary notification.
 Archiving the selected idle conversation returns that pane to its starting
 composer once the Host accepts the change. Switching to a different conversation
 while the archive is pending keeps the new selection. Reopening the archived

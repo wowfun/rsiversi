@@ -4,7 +4,6 @@ import { IconArchiveOffOutlineRegular, IconArchiveOutlineRegular, IconCloseOutli
   IconEditOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { useRef, useState, type SyntheticEvent } from "react";
 import { Menu } from "../vendor/dsh/dockkit-primitives/Menu.tsx";
-import { writeClipboard } from "../mounts.js";
 import { Modal, presentationIdentity } from "./presentation.tsx";
 import { Button } from "./button.tsx";
 import dialogCss from "./workspace-header.module.css";
@@ -13,7 +12,7 @@ import {isUnread, markReading} from "./session-reading.ts";
 import { ActivityLabel } from "./activity-label.tsx";
 import { rowContextMenu } from "./row-context-menu.ts";
 import {
-  input, selection, source, setNotice,
+  input, selection, source,
   useSelected,
   useView,
   run,
@@ -21,6 +20,7 @@ import {
   type AttentionEntry,
 } from "./bridge.ts";
 import type { useDeviceNavigation } from "./navigation-device.ts";
+export const archivedSessionHint = "Unarchive this session to open it.";
 export interface SessionMenuTarget {
   entry: NavigationEntry;
   opener: HTMLElement;
@@ -116,6 +116,7 @@ export function ConversationRow({
         className="nav-item"
         data-testid="conversation-open"
         aria-current={active||undefined}
+        aria-description={openSearchResult && entry.metadata.archived ? archivedSessionHint : undefined}
         aria-haspopup="menu"
         title={`${entry.path}\n${entry.session}`}
         onClick={() =>
@@ -138,12 +139,13 @@ export function ConversationRow({
   );
 }
 
-export function SessionMenu({target, device, reading, epoch, close, rename, mutate}: {
+export function SessionMenu({target, device, reading, epoch, close, copy, rename, mutate}: {
   target: SessionMenuTarget;
   reading?: AttentionEntry;
   epoch?: string;
   device: ReturnType<typeof useDeviceNavigation>;
   close(): void;
+  copy(): void;
   rename(): void;
   mutate(metadata: NavigationEntry["metadata"]): Promise<unknown>;
 }) {
@@ -174,7 +176,7 @@ export function SessionMenu({target, device, reading, epoch, close, rename, muta
         break;
       case "pin": void run(() => mutate({...metadata, pinned: !metadata.pinned})); break;
       case "archive": void run(toggleArchive); break;
-      case "copy": void run(async () => { await writeClipboard(session); setNotice("Session ID copied"); }); break;
+      case "copy": copy(); break;
       case "first": case "last": void run(() => device.move(session, id)); break;
     }
   };
