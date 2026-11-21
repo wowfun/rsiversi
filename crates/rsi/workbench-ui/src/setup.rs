@@ -11,7 +11,7 @@ use rsi_configuration_api::{
 };
 use rsi_credentials_protocol::{CredentialStatus, SecretValue};
 use rsi_settings_protocol::{
-    SettingsAccess, SettingsAccessContract, SettingsSnapshot, SettingsVersion,
+    SettingsAccess, SettingsAccessContract, SettingsError, SettingsSnapshot, SettingsVersion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -204,7 +204,7 @@ impl SetupFeature {
                                 .lock()
                                 .expect("setup view poisoned")
                                 .view
-                                .diagnostic = Some(problem)
+                                .diagnostic = Some(problem);
                         }
                     }
                     owner
@@ -222,28 +222,53 @@ impl SetupFeature {
     ) -> Result<bool> {
         let model = serde_json::to_value(selection.model).map_err(error)?;
         let effort = serde_json::to_value(selection.reasoning_effort).map_err(error)?;
-        let ticket = {
+        let selected = |settings: &Value| {
+            settings["default_model"] == model && settings["default_reasoning_effort"] == effort
+        };
+        let (mut version, mut document) = {
             let state = self.state.lock().expect("setup view poisoned");
-            if !state.view.settings_writable
-                || (state.view.agent["default_model"] == model
-                    && state.view.agent["default_reasoning_effort"] == effort)
-            {
+            if !state.view.settings_writable {
                 return Ok(false);
             }
-            state.view.ticket.clone()
-        };
-        let snapshot = self
-            .replace_selection(
-                &ticket,
-                "rsi.agent",
-                "default_model",
-                model,
-                Some(("default_reasoning_effort", effort)),
+            (
+                state
+                    .agent_version
+                    .clone()
+                    .ok_or("Setup has not been loaded")?,
+                state.view.agent.clone(),
             )
-            .await?;
+        };
+        let mut refreshed = false;
+        let snapshot = loop {
+            if !selected(&document) {
+                document["default_model"] = model.clone();
+                document["default_reasoning_effort"] = effort.clone();
+                let result = self.settings.replace("rsi.agent", &version, document).await;
+                if refreshed || !matches!(result, Err(SettingsError::Conflict { .. })) {
+                    self.settings_receipt("default_model", &result);
+                    break result.map_err(error)?;
+                }
+            }
+            let current = self.settings.read("rsi.agent").await.map_err(error)?;
+            if current.scope_id != version.scope_id {
+                return Err(error(SettingsError::StaleRegistration("rsi.agent".into())));
+            }
+            if selected(&current.value) {
+                break current;
+            }
+            version = current.version();
+            document = current.value;
+            refreshed = true;
+        };
+        let version = snapshot.version();
         let mut state = self.state.lock().expect("setup view poisoned");
+        if state.agent_version.as_ref() == Some(&version)
+            && state.view.default_model_description == description
+        {
+            return Ok(false);
+        }
         state.view.ticket = rsi_ui::fresh_identity("setup")?;
-        state.agent_version = Some(snapshot.version());
+        state.agent_version = Some(version);
         state.view.agent = snapshot.value;
         state.view.default_model_description = description;
         state.view.diagnostic = None;
@@ -611,18 +636,6 @@ impl SetupFeature {
         value: Value,
         extra: Option<(&str, Value)>,
     ) -> Result<()> {
-        self.replace_selection(ticket, namespace, field, value, extra)
-            .await?;
-        self.refresh().await
-    }
-    async fn replace_selection(
-        &self,
-        ticket: &str,
-        namespace: &str,
-        field: &str,
-        value: Value,
-        extra: Option<(&str, Value)>,
-    ) -> Result<SettingsSnapshot> {
         let (version, mut replacement) = {
             let state = self.state.lock().expect("setup view poisoned");
             if state.view.ticket != ticket {
@@ -646,6 +659,11 @@ impl SetupFeature {
             .settings
             .replace(namespace, &version, replacement)
             .await;
+        self.settings_receipt(field, &result);
+        result.map_err(error)?;
+        self.refresh().await
+    }
+    fn settings_receipt<T>(&self, field: &str, result: &rsi_settings_protocol::Result<T>) {
         let receipt_result = result
             .as_ref()
             .map(|_| ())
@@ -661,7 +679,6 @@ impl SetupFeature {
                 _ => rsi_api_protocol::ApiError::Invalid(error(failure)),
             });
         self.receipt(field, &receipt_result);
-        result.map_err(error)
     }
 }
 /// Nominal setup presentation capability.
@@ -688,7 +705,7 @@ impl PluginFactory for SetupFeatureFactory {
             credentials: ProviderCredentialsClient::new(api),
             settings: plan.local::<SettingsAccessContract>()?,
             state: PresentationState::default(),
-            previous_default: Default::default(),
+            previous_default: std::sync::Mutex::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
         });
         let _initial = feature.command(SetupCommand::Refresh).await;

@@ -71,7 +71,21 @@ impl ApiClient for Remote {
 }
 
 #[derive(Debug)]
-struct DefaultSettings(Mutex<Value>);
+struct DefaultSettings(Mutex<SettingsSnapshot>);
+impl DefaultSettings {
+    fn new(value: Value) -> Self {
+        Self(Mutex::new(SettingsSnapshot {
+            scope_id: rsi_settings_protocol::SettingsScopeId::parse("a".repeat(32)).unwrap(),
+            revision: 1,
+            value,
+        }))
+    }
+    fn peer_write(&self, value: Value) {
+        let mut agent = self.0.lock().unwrap();
+        agent.revision += 1;
+        agent.value = value;
+    }
+}
 #[async_trait::async_trait]
 impl SettingsAccess for DefaultSettings {
     async fn list(&self, _: Option<&str>, _: usize) -> rsi_settings_protocol::Result<SettingsPage> {
@@ -81,15 +95,11 @@ impl SettingsAccess for DefaultSettings {
         unreachable!()
     }
     async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
-        Ok(SettingsSnapshot {
-            scope_id: rsi_settings_protocol::SettingsScopeId::parse("a".repeat(32)).unwrap(),
-            revision: 1,
-            value: if namespace == "rsi.agent" {
-                self.0.lock().unwrap().clone()
-            } else {
-                json!({})
-            },
-        })
+        let mut snapshot = self.0.lock().unwrap().clone();
+        if namespace != "rsi.agent" {
+            snapshot.value = json!({});
+        }
+        Ok(snapshot)
     }
     async fn replace(
         &self,
@@ -98,9 +108,17 @@ impl SettingsAccess for DefaultSettings {
         value: Value,
     ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
         assert_eq!(namespace, "rsi.agent");
-        assert_eq!(expected, &self.read(namespace).await?.version());
-        *self.0.lock().unwrap() = value;
-        self.read(namespace).await
+        let mut agent = self.0.lock().unwrap();
+        assert_eq!(expected.scope_id, agent.scope_id);
+        if expected.revision != agent.revision {
+            return Err(SettingsError::Conflict {
+                expected: expected.revision,
+                actual: agent.revision,
+            });
+        }
+        agent.revision += 1;
+        agent.value = value;
+        Ok(agent.clone())
     }
     async fn clear(
         &self,
@@ -161,9 +179,9 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         discovery_failed: false.into(),
         reads: 0.into(),
     });
-    let settings = Arc::new(DefaultSettings(Mutex::new(
+    let settings = Arc::new(DefaultSettings::new(
         json!({"default_model":model,"default_reasoning_effort":"high"}),
-    )));
+    ));
     let runtime = rsi_meta::Runtime::default();
     let feature = Arc::new(SetupFeature {
         api: remote.clone(),
@@ -172,7 +190,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: settings.clone(),
         state: PresentationState::default(),
-        previous_default: Default::default(),
+        previous_default: Mutex::default(),
         work: Work::new(runtime.execution().clone()),
     });
     feature.command(SetupCommand::Refresh).await.unwrap();
@@ -186,8 +204,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         "off"
     );
     assert_eq!(remote.writes.load(Ordering::SeqCst), 0);
-    *settings.0.lock().unwrap() =
-        json!({"default_model":{"deployment":"custom","model":"replacement"}});
+    settings.peer_write(json!({"default_model":{"deployment":"custom","model":"replacement"}}));
     *remote.result.lock().unwrap() = Some(Ok(json!(description)));
     feature.command(SetupCommand::Refresh).await.unwrap();
     assert!(feature.snapshot().default_model_description.is_none());
@@ -198,7 +215,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
     *remote.result.lock().unwrap() = Some(Err(ApiError::Capacity));
     feature.command(SetupCommand::Refresh).await.unwrap();
     assert!(feature.snapshot().default_model_description.is_none());
-    *settings.0.lock().unwrap() = json!({"sandbox":"read-only"});
+    settings.peer_write(json!({"sandbox":"read-only"}));
     feature.command(SetupCommand::Refresh).await.unwrap();
     assert_eq!(remote.reads.load(Ordering::SeqCst), 3);
     assert!(feature.snapshot().default_model_description.is_none());
@@ -211,7 +228,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
     *remote.result.lock().unwrap() = Some(Ok(json!(description)));
     feature.command(select()).await.unwrap();
     assert_eq!(
-        *settings.0.lock().unwrap(),
+        settings.0.lock().unwrap().value,
         json!({"default_model":model,"default_reasoning_effort":"high","sandbox":"read-only"})
     );
     assert!(feature.command(select()).await.is_err());
@@ -237,7 +254,7 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
         discovery_failed: false.into(),
         reads: 0.into(),
     });
-    let settings = Arc::new(DefaultSettings(Mutex::new(json!({"extra":"retained"}))));
+    let settings = Arc::new(DefaultSettings::new(json!({"extra":"original"})));
     let runtime = rsi_meta::Runtime::default();
     let feature = Arc::new(SetupFeature {
         api: remote.clone(),
@@ -246,7 +263,7 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: settings.clone(),
         state: PresentationState::default(),
-        previous_default: Default::default(),
+        previous_default: Mutex::default(),
         work: Work::new(runtime.execution().clone()),
     });
     let first = ModelSelection {
@@ -261,11 +278,26 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
     feature.remember_model(&first, None);
     assert!(feature.previous_default.lock().unwrap().is_none());
     feature.command(SetupCommand::Refresh).await.unwrap();
+    settings.peer_write(json!({"extra":"first peer change"}));
+    assert!(
+        feature
+            .save_composer_default(first.clone(), None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        settings.0.lock().unwrap().value["extra"],
+        "first peer change"
+    );
+    settings.peer_write(json!({"extra":"retained","default_model":last.model}));
     let busy = feature.work.slot.acquire().await.unwrap();
     feature.remember_model(&first, None);
     feature.remember_model(&last, Some(&description));
     feature.remember_model(&last, Some(&description));
-    assert_eq!(*settings.0.lock().unwrap(), json!({"extra":"retained"}));
+    assert_eq!(
+        settings.0.lock().unwrap().value["default_model"],
+        json!(last.model)
+    );
     drop(busy);
     feature.work.close().await;
     let view = feature.snapshot();
@@ -273,9 +305,15 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
         view.agent,
         json!({"extra":"retained","default_model":last.model,"default_reasoning_effort":"high"})
     );
-    assert_eq!(view.agent, *settings.0.lock().unwrap());
+    assert_eq!(view.agent, settings.0.lock().unwrap().value);
     assert_eq!(view.default_model_description, Some(description));
-    assert_eq!(view.receipts.len(), 2);
+    assert_eq!(view.receipts.len(), 3);
+    assert!(
+        view.receipts
+            .iter()
+            .all(|receipt| receipt.outcome == "confirmed")
+    );
+    assert_eq!(settings.0.lock().unwrap().revision, 6);
     assert_eq!(remote.reads.load(Ordering::SeqCst), 0);
     assert!(runtime.shutdown().await.is_clean());
 }
@@ -362,7 +400,7 @@ async fn failed_unknown_or_unapplied_provider_writes_never_save_a_default_or_rep
             credentials: ProviderCredentialsClient::new(remote.clone()),
             settings: settings.clone(),
             state: crate::PresentationState::default(),
-            previous_default: Default::default(),
+            previous_default: Mutex::default(),
             work: Work::new(runtime.execution().clone()),
         });
         let view = SetupView {
@@ -479,7 +517,7 @@ async fn setup_refresh_uses_last_catalog_when_discovery_fails() {
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: Arc::new(NoSettings::default()),
         state: crate::PresentationState::default(),
-        previous_default: Default::default(),
+        previous_default: Mutex::default(),
         work: Work::new(runtime.execution().clone()),
     };
     remote.discovery_failed.store(true, Ordering::SeqCst);

@@ -32,8 +32,11 @@ rejected before provider writes; incomplete entries cannot match one another by
 their absent JSON fields.
 
 Setup persists confirmed composer selections in order when the Host grants
-Settings replacement. Each write uses the current agent settings revision and
-preserves the rest of that namespace. The confirmed settings document and the
+Settings replacement. A selection updates the model and effort together and
+preserves other devices' unrelated agent settings. The composer checks apparent
+no-ops against the Host. A rejected stale revision can be rebased on the same
+registration; an uncertain write must be reconciled explicitly. Setup forms
+remain bound to the revision the operator reviewed. The confirmed document and the
 selected model's description supply the new default to starting composers.
 A failed default write leaves the accepted Session selection usable.
 
