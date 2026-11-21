@@ -16,6 +16,7 @@ import { QueueEditor } from "./queue-editor.tsx";
 import { PendingInputs } from "./queue-dock.tsx";
 import { Composer } from "./composer.tsx";
 import {TodoPanel} from './todo-panel.tsx';
+import {GoalBar} from './goal-bar.tsx';
 import {SessionReading} from "../session-reading.ts";
 import { Transcript } from "./transcript.tsx";
 import {SessionMetrics} from './metrics.tsx';
@@ -235,7 +236,10 @@ function NativeSurface({
         <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
         {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
       </div>
-      {data && !data.protected && !pageOpen && <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>}
+      {data && !data.protected && !pageOpen && <>
+        <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>
+        <GoalBar projections={data.projections} surfaces={data.ui_surfaces} owner={owner}/>
+      </>}
       <Composer
         owner={owner}
         data={data}

@@ -30,9 +30,9 @@ preservation and refusal of the older writer's reopen after upgrade. Set
 CI runs these recovery fixtures and `command-visibility.mjs` directly, including
 their migration, reset and older-writer helpers. Their paths resolve from the
 module location so the fixture-directory CI entry point matches local execution.
-Goal lifecycle probes read
-the current Session status and assert the visible driver and control state;
-the status mirror itself is not a visible workbench label.
+Goal lifecycle probes read the current Session status and assert the visible
+driver, composer objective and control state. They open the Goal controls
+from the paused composer strip and read the status mirror for diagnostics.
 
 The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks
@@ -388,6 +388,8 @@ response gates. With `RSI_WEB_ASSETS`, `RSI_WEB_BINARY` and a new `RSI_WEB_REPOR
 it checks recorded inline patch evidence after a later filesystem edit, Goal
 create/pause/resume/cancel with distinct durable and live state, and an actual
 background Bash job observed without reporting its output. Both browsers retain
+their Goal coverage with `node tasks.mjs --goal` when the Host has no Linux
+patch tool. Both modes keep
 desktop/narrow screenshots, containment and Send hit-test measurements. Gates
 hold the model stream while the fixture observes actual process state; they
 measure lifecycle mechanisms, not model ability. The unreported completed job

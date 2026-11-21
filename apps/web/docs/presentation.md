@@ -15,6 +15,12 @@ docking preference. In a narrower pane its button opens a temporary overlay.
 Escape or a press outside closes it. The panel belongs to the selected Chat;
 the header control is unavailable in Trajectory.
 
+A conversation with an active, paused or blocked Goal shows its recorded phase
+and objective above the composer. Completed goals, protected interactions and
+global workbench pages leave the strip out of the composer. A current Goal
+surface lets the user open its controls from the strip. Reading the strip uses
+the attached conversation's projection without opening a resource.
+
 A conversation with a nonempty to-do projection shows its progress above the
 composer. The panel starts collapsed and names each status with a nonzero
 count. Expanding it shows the current items in their supplied order with

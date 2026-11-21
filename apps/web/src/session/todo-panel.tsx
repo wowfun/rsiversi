@@ -2,7 +2,7 @@ import {memo, useState} from 'react';
 import {IconChecklistOutlineRegular, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import {StateDot} from '../../vendor/dsh/primitives/StateDot.tsx';
 import type {SessionProjections} from './projection-types.ts';
-import css from './todo-panel.module.css';
+import css from './composer-dock.module.css';
 
 const statuses = {
   completed: {label: 'Completed', dot: 'done'},

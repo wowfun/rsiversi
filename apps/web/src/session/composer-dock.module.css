@@ -38,3 +38,6 @@
 }
 .item {font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary);}
 .glyph {display: grid; flex: none; place-items: center; width: 16px; height: 16px;}
+.goal {display: flex; align-items: center; gap: 10px; min-height: 36px;}
+.goal > svg {flex: none;}
+.goal button {flex: none; margin-inline-start: auto;}

@@ -10,6 +10,7 @@ import { chromium, firefox } from "playwright";
 import { startService } from "./service.mjs";
 import { browserNames, assertControls, assertNoNotices, recordTaskFailure } from "./task-checks.mjs";
 
+const goalOnly = process.argv.includes("--goal");
 const names = browserNames(process.env.RSI_WEB_BROWSER);
 const report = process.env.RSI_WEB_REPORT;
 const assets = process.env.RSI_WEB_ASSETS;
@@ -194,22 +195,27 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
       }, "submitted Turn");
     };
 
-    await send("Please record an inline patch");
-    const inline = pane.locator(".inline-card:visible");
-    await inline.locator("pre").filter({ hasText: "+after · 界" }).waitFor();
-    assert.equal(await readFile(join(service.workspace, "card.txt"), "utf8"), "after · 界\n");
-    await writeFile(join(service.workspace, "card.txt"), "unrelated later edit\n");
-    assert.match(await inline.innerText(), /-before/);
-    assert.doesNotMatch(await inline.innerText(), /unrelated later edit/);
-    await capture("recorded-inline-patch", false, ["Complete result"],
-      () => pane.locator(".message.tool").scrollIntoViewIfNeeded());
-    const visibilityRetry = await page.evaluate(() => window.taskVisibleRequests.slice(0, 2));
-    assert.equal(visibilityRetry.length, 2);
-    assert.deepEqual(visibilityRetry[0], visibilityRetry[1], "visible-hint retry must retain its sequence and selection");
-    await inline.getByRole("button", { name: "Complete result", exact: true }).click();
-    await inline.locator("pre").filter({ hasText: '"status": "applied"' }).waitFor();
+    let visibilityRetry;
+    if (!goalOnly) {
+      await send("Please record an inline patch");
+      const inline = pane.locator(".inline-card:visible");
+      await inline.locator("pre").filter({ hasText: "+after · 界" }).waitFor();
+      assert.equal(await readFile(join(service.workspace, "card.txt"), "utf8"), "after · 界\n");
+      await writeFile(join(service.workspace, "card.txt"), "unrelated later edit\n");
+      assert.match(await inline.innerText(), /-before/);
+      assert.doesNotMatch(await inline.innerText(), /unrelated later edit/);
+      await capture("recorded-inline-patch", false, ["Complete result"],
+        () => pane.locator(".message.tool").scrollIntoViewIfNeeded());
+      visibilityRetry = await page.evaluate(() => window.taskVisibleRequests.slice(0, 2));
+      assert.equal(visibilityRetry.length, 2);
+      assert.deepEqual(visibilityRetry[0], visibilityRetry[1], "visible-hint retry must retain its sequence and selection");
+      await inline.getByRole("button", { name: "Complete result", exact: true }).click();
+      await inline.locator("pre").filter({ hasText: '"status": "applied"' }).waitFor();
+    }
 
     await surface("Goal");
+    const goalBar=pane.getByRole("region",{name:"Goal",exact:true});
+    assert.equal(await goalBar.count(),0);
     await detail.getByLabel("Goal objective", { exact: true }).fill("UI Goal hold for explicit control evidence");
     await detail.getByLabel("Maximum automatic rounds", { exact: true }).fill("3");
     await capture("goal-create", true, ["Create and start Goal"]);
@@ -217,12 +223,18 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await detail.getByRole("button", { name: "Create and start Goal", exact: true }).click();
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Allocated rounds: 1 / 3" }), "first Goal allocation");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Armed" }), "first Goal armed");
+    await goalVisible(goalBar.getByText("Active Goal",{exact:true}),"active Goal above composer");
+    await goalVisible(goalBar.getByText("UI Goal hold for explicit control evidence",{exact:true}),"composer Goal objective");
     await goalUntil(() => service.provider.requests.length === beforeGoal + 1, "Goal stream entered");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Waiting" }), "first Goal waiting");
     await capture("goal-armed", true, ["Pause after current round", "Cancel automatic round"]);
     await detail.getByRole("button", { name: "Pause after current round", exact: true }).click();
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Durable phase: Paused" }), "Goal paused");
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Current driving: Disarmed" }), "Goal scheduling disarmed");
+    await goalVisible(goalBar.getByText("Paused Goal",{exact:true}),"paused Goal above composer");
+    await close();
+    await goalBar.getByRole("button",{name:"Open goal controls"}).click();
+    await goalVisible(detail.getByRole("button",{name:"Resume Goal",exact:true}),"Goal controls opened from the composer");
     assert.equal(service.provider.requests.length, beforeGoal + 1);
     await capture("goal-paused-claimed", true, ["Resume Goal", "Cancel automatic round"]);
     service.provider.release("UI Goal hold");
@@ -241,33 +253,36 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
 
-    const beforeJob = service.provider.requests.length;
-    await send("Please observe background job");
-    await until(() => {
-      const requests = service.provider.requests.slice(beforeJob);
-      assert(requests.length <= 2, "background job must use exactly one tool request and one held follow-up");
-      return requests.length === 2 && requests.every(request => request.prompt === "Please observe background job") &&
-        !requests[0].completedTool && requests[1].completedTool;
-    }, "current background job tool-result follow-up entered provider gate");
-    await surface("Current-Turn Jobs");
-    await detail.locator("pre").filter({ hasText: "Running" }).waitFor();
-    assert.match(await detail.innerText(), /Reported: false/);
-    const requestsBeforeRead = service.provider.requests.length;
-    await capture("jobs-running", true, ["Refresh current Turn"]);
-    await writeFile(join(service.workspace, "job-release"), "release\n");
-    await until(async () => {
+    if (!goalOnly) {
+      const beforeJob = service.provider.requests.length;
+      await send("Please observe background job");
+      await until(() => {
+        const requests = service.provider.requests.slice(beforeJob);
+        assert(requests.length <= 2, "background job must use exactly one tool request and one held follow-up");
+        return requests.length === 2 && requests.every(request => request.prompt === "Please observe background job") &&
+          !requests[0].completedTool && requests[1].completedTool;
+      }, "current background job tool-result follow-up entered provider gate");
+      await surface("Current-Turn Jobs");
+      await detail.locator("pre").filter({ hasText: "Running" }).waitFor();
+      assert.match(await detail.innerText(), /Reported: false/);
+      const requestsBeforeRead = service.provider.requests.length;
+      await capture("jobs-running", true, ["Refresh current Turn"]);
+      await writeFile(join(service.workspace, "job-release"), "release\n");
+      await until(async () => {
+        await detail.getByRole("button", { name: "Refresh current Turn", exact: true }).click();
+        return /Completed/.test(await detail.innerText());
+      }, "job completion status");
+      assert.match(await detail.innerText(), /Reported: false · Output retained: true/);
+      assert.equal(service.provider.requests.length, requestsBeforeRead);
+      await capture("jobs-completed-unreported", true, ["Refresh current Turn"]);
+      service.provider.release("observe background job");
+      await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor({state:'attached'});
+      await pane.locator(".transcript").getByText("background jobs completed without an explicit report: job-1", { exact: true }).waitFor();
       await detail.getByRole("button", { name: "Refresh current Turn", exact: true }).click();
-      return /Completed/.test(await detail.innerText());
-    }, "job completion status");
-    assert.match(await detail.innerText(), /Reported: false · Output retained: true/);
-    assert.equal(service.provider.requests.length, requestsBeforeRead);
-    await capture("jobs-completed-unreported", true, ["Refresh current Turn"]);
-    service.provider.release("observe background job");
-    await pane.locator(".pane-status").filter({ hasText: "Failed" }).waitFor({state:'attached'});
-    await pane.locator(".transcript").getByText("background jobs completed without an explicit report: job-1", { exact: true }).waitFor();
-    await detail.getByRole("button", { name: "Refresh current Turn", exact: true }).click();
-    await detail.getByText("No active Turn. Jobs are unavailable after their Turn finishes.", { exact: true }).waitFor();
-    await capture("jobs-revoked", true, ["Refresh current Turn"]);
+      await detail.getByText("No active Turn. Jobs are unavailable after their Turn finishes.", { exact: true }).waitFor();
+      await capture("jobs-revoked", true, ["Refresh current Turn"]);
+    }
+
     await assertNoNotices(page);
     await close();
     await disconnect(page);
@@ -275,7 +290,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.deepEqual(errors, []);
     results.push({ browser: name, version: browser.version(), binary_sha256: paired.sha256, ok: true,
       ui_invocations: await page.evaluate(() => window.taskInvocations), goal_errors: await page.evaluate(() => window.taskGoalErrors),
-      measurements, visibility_retry: visibilityRetry, requests: service.provider.requests, jobs_terminal: "failed_unreported_job", clean_sign_out: true });
+      measurements, requests: service.provider.requests, clean_sign_out: true,
+      ...(goalOnly ? {} : { visibility_retry: visibilityRetry, jobs_terminal: "failed_unreported_job" }) });
   } catch (error) {
     await recordTaskFailure(page, directory, { error: String(error), errors, measurements, requests: service?.provider.requests,
       ui_invocations: await page?.evaluate(() => window.taskInvocations).catch(() => []),

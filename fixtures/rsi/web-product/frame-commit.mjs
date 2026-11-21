@@ -715,6 +715,20 @@ export async function verifyFrameCommit(browser, url, report, name) {
       });
       const todo = page.getByRole("region", {name: "To-dos"});
       await todo.getByRole("button").click();
+      const goal = page.getByRole("region", {name:"Goal",exact:true});
+      const showGoal = phase => page.evaluate(async phase => {
+        const entries=fixture.view.surfaces.main.projections.entries;
+        entries.splice(1,entries.length-1,{producer:'rsi.goal.view',content:{kind:'value',value:{goal:{objective:'Check the edited draft',phase}}}});
+        await fixture.frame();
+      },phase);
+      assert.equal(await goal.count(),0);
+      await showGoal('active');
+      await goal.getByText('Active Goal',{exact:true}).waitFor();
+      assert.equal(await goal.getByRole('button').count(),0,'a missing surface cannot offer controls');
+      await showGoal('blocked');
+      await goal.getByText('Blocked Goal',{exact:true}).waitFor();
+      assert(await goal.getByText('Check the edited draft',{exact:true}).isVisible());
+      await showGoal('completed');await goal.waitFor({state:'detached'});
       const pending = page.getByRole("region", {name: "Pending inputs"});
       for (const id of ["first", "second"]) {
         await page.evaluate(async id => {
