@@ -27,6 +27,13 @@ export function draftRows(entry?:Provider):Row[] {
   if(!entry)return [newRow('deepseek-flash')];
   return Object.entries((entry.config.language_models??{}) as Record<string,Limits>).map(([name,limits])=>({...newRow(name),limits:{...limits}}));
 }
+export function sameModelRows(rows:Row[],saved:Row[]):boolean {
+  return rows===saved || rows.length===saved.length && rows.every((row,index)=>{
+    const original=saved[index];
+    return row.name.trim()===original.name && (Object.keys(row.limits) as (keyof Limits)[]).every(field=>
+      tokenLimit(row.limits[field])===original.limits[field]);
+  });
+}
 export function providerModelConfig(provider:Provider['provider'],models:Record<string,Limits>,original:Record<string,unknown>={}):Record<string,unknown> {
   const config:Record<string,unknown>={...original,language_models:models};
   for(const field of ['default_output_tokens','reasoning_efforts']){

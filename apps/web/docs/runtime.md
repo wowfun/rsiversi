@@ -349,7 +349,8 @@ scope for commands and setup observations; editor teardown, Settings dismissal,
 and connection retirement cancel its waiters and prevent further dispatch.
 Dispatched requests still settle with their original connection. A successful
 provider replacement waits for its exact successor revision to finish applying.
-Only then does the editor save an entered API key for that provider. A failed
+Applying unchanged profile fields keeps the opened revision. A key-only edit
+writes the credential after confirming that revision. A failed
 credential write leaves the applied profile visible and lets the user enter the
 key again. Finish setup refreshes the saved revision before continuing. A newer
 revision requires reopening the editor.

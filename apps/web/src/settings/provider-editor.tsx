@@ -5,7 +5,7 @@ import {Button} from '../button.tsx';
 import {Modal} from '../presentation.tsx';
 import type {SetupActions} from './setup-actions.ts';
 import {ModelDefinitions} from './model-definitions.tsx';
-import {draftRows,modelDefinitions,newRow,providerLabels,providerOwners,providerModelConfig,replaceProvider,type Limits} from './provider-draft.ts';
+import {draftRows,modelDefinitions,newRow,providerLabels,providerOwners,providerModelConfig,replaceProvider,sameModelRows,type Limits} from './provider-draft.ts';
 import css from './models.module.css';
 
 export function ProviderEditor({original,revision,deployments,binding,actions,close}:{original?:Provider;revision:string;deployments:Provider[];binding:SetupBinding;actions:SetupActions;close:()=>void}) {
@@ -19,6 +19,8 @@ export function ProviderEditor({original,revision,deployments,binding,actions,cl
   const [protocol,setProtocol]=useState(String(original?.config.protocol??'responses')),[path,setPath]=useState(String(original?.config.path??'/chat/completions'));
   const [images,setImages]=useState(original?.config.allow_image_input===true),[imageOutput,setImageOutput]=useState(original?.config.image===true),[language,setLanguage]=useState(original?.config.language!==false);
   const [rows,setRows]=useState(()=>draftRows(original)),[error,setError]=useState(''),[note,setNote]=useState(''),[removing,setRemoving]=useState(false);
+  const profileFields=()=>[provider,deployment,endpoint,slot,protocol,path,images,imageOutput,language];
+  const [opened]=useState(()=>({fields:profileFields(),rows}));
   const [candidates,setCandidates]=useState<{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]>();
   const [advanced,setAdvanced]=useState(false),[applied,setApplied]=useState<string>();
   const [needsKey,setNeedsKey]=useState(false);
@@ -51,21 +53,29 @@ export function ProviderEditor({original,revision,deployments,binding,actions,cl
     const owner=scope.current!;
     const missingKey='Provider saved. Enter the API key again to finish setup.';
     if(needsKey&&!secret.current?.value)throw new Error(missingKey);
-    const target=applied??String(BigInt(revision)+1n);
-    if(!applied){
-      if(owner.snapshot()?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
-      const models=modelDefinitions(rows);
-      if(!Object.keys(models).length&&(provider!=='openai'||language))throw new Error('Add at least one model ID.');
-      if(!/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/.test(deployment))throw new Error('Provider ID must start with a letter and contain only letters, numbers, dots, underscores or hyphens.');
-      const url=new URL(endpoint);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error('Enter an HTTP or HTTPS API base URL without credentials, query or fragment.');
-      const config:Record<string,unknown>={...providerModelConfig(provider,models,original?.config),deployment,endpoint,credential:{owner:providerOwners[provider],slot}};
-      if(provider==='deepseek')config.protocol=protocol;
-      if(provider==='openai'){config.language=language;config.image=imageOutput;}
-      if(provider==='openai-compatible'){config.path=path;config.allow_image_input=images;}
-      const next=replaceProvider(deployments,{provider,config},original?String(original.config.deployment):undefined);
-      await owner.command({kind:'providers_replace',expected_revision:revision,deployments:next});
+    let target=applied??revision;
+    if(applied)await owner.command({kind:'refresh'});
+    else{
+      const snapshot=owner.snapshot();
+      const sameFields=original&&profileFields().every((value,index)=>value===opened.fields[index]);
+      const unchanged=sameFields&&sameModelRows(rows,opened.rows);
+      if(unchanged&&!secret.current?.value&&snapshot?.agent?.default_model){close();return;}
+      if(snapshot?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
+      if(!unchanged){
+        const models=modelDefinitions(rows);
+        if(!Object.keys(models).length&&(provider!=='openai'||language))throw new Error('Add at least one model ID.');
+        if(!/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/.test(deployment))throw new Error('Provider ID must start with a letter and contain only letters, numbers, dots, underscores or hyphens.');
+        const url=new URL(endpoint);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error('Enter an HTTP or HTTPS API base URL without credentials, query or fragment.');
+        const config:Record<string,unknown>={...providerModelConfig(provider,models,original?.config),deployment,endpoint,credential:{owner:providerOwners[provider],slot}};
+        if(provider==='deepseek')config.protocol=protocol;
+        if(provider==='openai'){config.language=language;config.image=imageOutput;}
+        if(provider==='openai-compatible'){config.path=path;config.allow_image_input=images;}
+        const next=replaceProvider(deployments,{provider,config},original?String(original.config.deployment):undefined);
+        await owner.command({kind:'providers_replace',expected_revision:revision,deployments:next});
+        target=String(BigInt(revision)+1n);
+      }
       if(owner.active)setApplied(target);
-    }else await owner.command({kind:'refresh'});
+    }
     let current=await owner.waitSetup(value=>providerApplied(value,target));
     const field=secret.current;
     if(field?.value){

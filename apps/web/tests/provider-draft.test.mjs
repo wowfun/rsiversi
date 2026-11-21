@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {modelDefinitions,newRow,providerModelConfig,replaceProvider,tokenLimit} from '../src/settings/provider-draft.ts';
+import {modelDefinitions,newRow,providerModelConfig,replaceProvider,sameModelRows,tokenLimit} from '../src/settings/provider-draft.ts';
+test('restoring the same model order and numeric capacities keeps the profile unchanged',()=>{
+  const saved=[newRow('first'),newRow('second')];
+  const edited=structuredClone(saved);
+  edited[0].limits.context_window_tokens='128k';
+  assert(sameModelRows(edited,saved));
+  edited[0].limits.max_output_reserve_tokens='8k';
+  assert(!sameModelRows(edited,saved));
+  assert(!sameModelRows([...saved].reverse(),saved));
+});
 test('model limits accept compact units and reject fractional, overflowing or inconsistent capacity',()=>{
   assert.equal(tokenLimit('1M'),1000000);assert.equal(tokenLimit('2.5k'),2500);
   for(const value of ['','1.1','0','-1','Infinity','4294967296'])assert.throws(()=>tokenLimit(value));
