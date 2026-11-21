@@ -74,7 +74,6 @@ impl Work {
         {
             let mut open = self.admission.lock().expect("workbench admission poisoned");
             *open = false;
-            self.slot.close();
             self.tasks.close();
         }
         self.tasks.wait().await;

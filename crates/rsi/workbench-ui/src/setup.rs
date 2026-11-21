@@ -150,9 +150,106 @@ pub struct SetupFeature {
     credentials: ProviderCredentialsClient,
     settings: Arc<dyn SettingsAccess>,
     state: PresentationState<State>,
+    previous_default: std::sync::Mutex<Option<rsi_meta::Task<()>>>,
     work: Work,
 }
 impl SetupFeature {
+    /// Saves a confirmed composer selection without delaying the Session command.
+    /// The Host's Settings capability and the retained version govern the write.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned the setup owner.
+    pub fn remember_model(
+        self: &Arc<Self>,
+        selection: &rsi_agent_session_protocol::ModelSelection,
+        description: Option<&rsi_ai_protocol::LanguageModelDescription>,
+    ) {
+        let open = self
+            .work
+            .admission
+            .lock()
+            .expect("workbench admission poisoned");
+        if !*open
+            || !self
+                .state
+                .lock()
+                .expect("setup view poisoned")
+                .view
+                .settings_writable
+        {
+            return;
+        }
+        let mut tail = self
+            .previous_default
+            .lock()
+            .expect("default model saves poisoned");
+        let previous = tail.take();
+        let owner = self.clone();
+        let selection = selection.clone();
+        let description = description.cloned();
+        *tail = Some(
+            self.work
+                .execution
+                .spawn(self.work.tasks.track_future(async move {
+                    if let Some(previous) = previous {
+                        let _ = previous.await;
+                    }
+                    let _permit = owner.work.slot.acquire().await.expect("setup slot is open");
+                    match owner.save_composer_default(selection, description).await {
+                        Ok(false) => return,
+                        Ok(true) => {}
+                        Err(problem) => {
+                            owner
+                                .state
+                                .lock()
+                                .expect("setup view poisoned")
+                                .view
+                                .diagnostic = Some(problem)
+                        }
+                    }
+                    owner
+                        .work
+                        .changed
+                        .send_modify(|revision| *revision = revision.wrapping_add(1));
+                })),
+        );
+    }
+
+    async fn save_composer_default(
+        &self,
+        selection: rsi_agent_session_protocol::ModelSelection,
+        description: Option<rsi_ai_protocol::LanguageModelDescription>,
+    ) -> Result<bool> {
+        let model = serde_json::to_value(selection.model).map_err(error)?;
+        let effort = serde_json::to_value(selection.reasoning_effort).map_err(error)?;
+        let ticket = {
+            let state = self.state.lock().expect("setup view poisoned");
+            if !state.view.settings_writable
+                || (state.view.agent["default_model"] == model
+                    && state.view.agent["default_reasoning_effort"] == effort)
+            {
+                return Ok(false);
+            }
+            state.view.ticket.clone()
+        };
+        let snapshot = self
+            .replace_selection(
+                &ticket,
+                "rsi.agent",
+                "default_model",
+                model,
+                Some(("default_reasoning_effort", effort)),
+            )
+            .await?;
+        let mut state = self.state.lock().expect("setup view poisoned");
+        state.view.ticket = rsi_ui::fresh_identity("setup")?;
+        state.agent_version = Some(snapshot.version());
+        state.view.agent = snapshot.value;
+        state.view.default_model_description = description;
+        state.view.diagnostic = None;
+        Ok(true)
+    }
+
     /// Captures a coherent revision and document projection only when changed.
     /// # Panics
     /// Panics if a previous mutation poisoned this presentation owner.
@@ -514,6 +611,18 @@ impl SetupFeature {
         value: Value,
         extra: Option<(&str, Value)>,
     ) -> Result<()> {
+        self.replace_selection(ticket, namespace, field, value, extra)
+            .await?;
+        self.refresh().await
+    }
+    async fn replace_selection(
+        &self,
+        ticket: &str,
+        namespace: &str,
+        field: &str,
+        value: Value,
+        extra: Option<(&str, Value)>,
+    ) -> Result<SettingsSnapshot> {
         let (version, mut replacement) = {
             let state = self.state.lock().expect("setup view poisoned");
             if state.view.ticket != ticket {
@@ -552,8 +661,7 @@ impl SetupFeature {
                 _ => rsi_api_protocol::ApiError::Invalid(error(failure)),
             });
         self.receipt(field, &receipt_result);
-        result.map_err(error)?;
-        self.refresh().await
+        result.map_err(error)
     }
 }
 /// Nominal setup presentation capability.
@@ -580,6 +688,7 @@ impl PluginFactory for SetupFeatureFactory {
             credentials: ProviderCredentialsClient::new(api),
             settings: plan.local::<SettingsAccessContract>()?,
             state: PresentationState::default(),
+            previous_default: Default::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
         });
         let _initial = feature.command(SetupCommand::Refresh).await;

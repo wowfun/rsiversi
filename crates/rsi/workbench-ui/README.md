@@ -31,6 +31,12 @@ that matches the selected model. Missing, null or mismatched identities are
 rejected before provider writes; incomplete entries cannot match one another by
 their absent JSON fields.
 
+Setup persists confirmed composer selections in order when the Host grants
+Settings replacement. Each write uses the current agent settings revision and
+preserves the rest of that namespace. The confirmed settings document and the
+selected model's description supply the new default to starting composers.
+A failed default write leaves the accepted Session selection usable.
+
 Setup exposes typed snapshots to native consumers and the same redacted JSON
 projection to GUI consumers. Discovery candidates are ephemeral and never imply
 provider application or default selection. Each retained write keeps its own

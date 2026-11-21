@@ -56,6 +56,9 @@ impl GuiApplication {
             )
             .await;
         if result.is_ok() {
+            if let Some(setup) = &self.setup {
+                setup.remember_model(&selection, Some(&description));
+            }
             *attached.model.lock().expect("model selection poisoned") = selection;
             *attached
                 .model_description
@@ -71,7 +74,7 @@ impl GuiApplication {
         generation: &str,
     ) -> Result<()> {
         let attached = self.pane(pane)?.attachment(generation)?;
-        if let Some(pending) = attached.submission.model_command.view().pending {
+        let recovered = if let Some(pending) = attached.submission.model_command.view().pending {
             let result = attached
                 .submission
                 .model_command
@@ -81,13 +84,20 @@ impl GuiApplication {
             result.map_err(error)?;
             let selection: ModelSelection =
                 serde_json::from_value(pending.arguments.value().clone()).map_err(error)?;
-            *attached.model.lock().expect("model selection poisoned") = selection;
-        }
-        let selection = {
+            *attached.model.lock().expect("model selection poisoned") = selection.clone();
+            Some(selection)
+        } else {
+            None
+        };
+        let was_recovered = recovered.is_some();
+        let selection = recovered.unwrap_or_else(|| {
             let state = attached.renderer.state.lock().expect("renderer poisoned");
             attached.selection(state.projections.as_ref())
-        };
+        });
         let description = self.models.describe_model(&selection.model).await;
+        if was_recovered && let Some(setup) = &self.setup {
+            setup.remember_model(&selection, description.as_ref().ok());
+        }
         self.pane(pane)?.attachment(generation)?;
         let state = attached.renderer.state.lock().expect("renderer poisoned");
         if attached.selection(state.projections.as_ref()).model == selection.model

@@ -172,6 +172,7 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: settings.clone(),
         state: PresentationState::default(),
+        previous_default: Default::default(),
         work: Work::new(runtime.execution().clone()),
     });
     feature.command(SetupCommand::Refresh).await.unwrap();
@@ -217,6 +218,68 @@ async fn setup_describes_default_model_before_a_session_and_clears_stale_capabil
     feature.work.close().await;
     assert!(runtime.shutdown().await.is_clean());
 }
+#[tokio::test]
+async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() {
+    use rsi_agent_session_protocol::ModelSelection;
+    use rsi_ai_protocol::{ModelRef, ReasoningEffortId};
+    let remote = Arc::new(Remote {
+        description: ConnectionDescription {
+            wire_version: rsi_api_protocol::API_WIRE_VERSION,
+            endpoint_id: EndpointId::from_bytes([1; 16]),
+            host_epoch: HostEpoch::from_bytes([2; 16]),
+        },
+        operations: vec![
+            rsi_settings_api::Operation::Read.spec(),
+            rsi_settings_api::Operation::Replace.spec(),
+        ],
+        result: Mutex::new(None),
+        writes: 0.into(),
+        discovery_failed: false.into(),
+        reads: 0.into(),
+    });
+    let settings = Arc::new(DefaultSettings(Mutex::new(json!({"extra":"retained"}))));
+    let runtime = rsi_meta::Runtime::default();
+    let feature = Arc::new(SetupFeature {
+        api: remote.clone(),
+        authority: ConfigurationClient::new(remote.clone()),
+        providers: ManagedProvidersClient::new(remote.clone()),
+        credentials: ProviderCredentialsClient::new(remote.clone()),
+        settings: settings.clone(),
+        state: PresentationState::default(),
+        previous_default: Default::default(),
+        work: Work::new(runtime.execution().clone()),
+    });
+    let first = ModelSelection {
+        model: ModelRef::new("custom", "first").unwrap(),
+        reasoning_effort: None,
+    };
+    let last = ModelSelection {
+        model: ModelRef::new("custom", "last").unwrap(),
+        reasoning_effort: Some(ReasoningEffortId::new("high").unwrap()),
+    };
+    let description = model_with_optional_reasoning(last.model.clone());
+    feature.remember_model(&first, None);
+    assert!(feature.previous_default.lock().unwrap().is_none());
+    feature.command(SetupCommand::Refresh).await.unwrap();
+    let busy = feature.work.slot.acquire().await.unwrap();
+    feature.remember_model(&first, None);
+    feature.remember_model(&last, Some(&description));
+    feature.remember_model(&last, Some(&description));
+    assert_eq!(*settings.0.lock().unwrap(), json!({"extra":"retained"}));
+    drop(busy);
+    feature.work.close().await;
+    let view = feature.snapshot();
+    assert_eq!(
+        view.agent,
+        json!({"extra":"retained","default_model":last.model,"default_reasoning_effort":"high"})
+    );
+    assert_eq!(view.agent, *settings.0.lock().unwrap());
+    assert_eq!(view.default_model_description, Some(description));
+    assert_eq!(view.receipts.len(), 2);
+    assert_eq!(remote.reads.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 #[derive(Debug, Default)]
 struct NoSettings(AtomicUsize);
 #[async_trait::async_trait]
@@ -299,6 +362,7 @@ async fn failed_unknown_or_unapplied_provider_writes_never_save_a_default_or_rep
             credentials: ProviderCredentialsClient::new(remote.clone()),
             settings: settings.clone(),
             state: crate::PresentationState::default(),
+            previous_default: Default::default(),
             work: Work::new(runtime.execution().clone()),
         });
         let view = SetupView {
@@ -415,6 +479,7 @@ async fn setup_refresh_uses_last_catalog_when_discovery_fails() {
         credentials: ProviderCredentialsClient::new(remote.clone()),
         settings: Arc::new(NoSettings::default()),
         state: crate::PresentationState::default(),
+        previous_default: Default::default(),
         work: Work::new(runtime.execution().clone()),
     };
     remote.discovery_failed.store(true, Ordering::SeqCst);

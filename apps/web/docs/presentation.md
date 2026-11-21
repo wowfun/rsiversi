@@ -789,6 +789,11 @@ For new DeepSeek models it explicitly uses the default output reserve as the
 request cap. Existing caps are retained unless the new maximum is smaller;
 per-model settings for removed model IDs are removed with their definition.
 
+After a confirmed composer model or effort change, the selection also becomes the
+default for future conversations when the connected Host permits Settings writes.
+The Session selection takes effect immediately. Background saves run in the order
+the selections are confirmed. Other conversations retain their own selections.
+
 The composer offers the same model/effort, add-input and access menus before and
 after the first message. Menus mount their contents while open. Browsing the
 model, access or Add menu leaves the starting draft unattached. Choosing the
