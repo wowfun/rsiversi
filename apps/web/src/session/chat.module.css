@@ -615,8 +615,9 @@
     opacity: 0;
   }
 }
-:global(.turn-tail):where(.scope, .scope *) { margin-bottom: 28px; }
-:global(.message.assistant:has(+ .turn-tail)):where(.scope, .scope *) { margin-bottom: 4px; }
+:global(.turn-tail):where(.scope, .scope *) { display: flex; flex-direction: column; gap: 16px; margin-bottom: 28px; }
+:global(.turn-tail > .message-actions):where(.scope, .scope *) { margin-top: 4px; }
+:global(.message.assistant[data-closing-reply]):where(.scope, .scope *) { margin-bottom: 12px; }
 
 
 :global(.composer [data-testid="composer-send"]):where(.scope, .scope *) {

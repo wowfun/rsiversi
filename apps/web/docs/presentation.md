@@ -808,6 +808,9 @@ Message clocks use durable Fact timestamps; transient blocks have no fabricated 
 Completed Turn headings show recorded elapsed time when both boundaries are known.
 Assistant action rows expose copy, source inspection and **Turn usage** for a
 complete Turn whose conversational requests all reported token counts.
+In Standard and Compact modes the closing reply shares a single action row
+with its Turn, below any delivered files. Its source menu inspects that
+reply. Earlier prose keeps its own source menu.
 The panel identifies each contributing deployment and model when the complete
 set of routes is available.
 On hover-capable devices the latest user message and the latest closing assistant

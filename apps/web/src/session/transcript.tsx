@@ -123,11 +123,19 @@ function CompactionRow({block}: {block: TranscriptBlock}) {
   </article>;
 }
 
-function SourceMenu({block, cards, mode, action}: {
-  block: TranscriptBlock; cards: boolean; mode: string;
-  action: (label: string, name: string, fields: Record<string, unknown>) => ReactNode;
+function hasSources(block: TranscriptBlock, cards: boolean) {
+  return !!(cards || block.sources || block.tool || block.request_intent_seq);
+}
+
+function SourceMenu({block, cards, mode, owner}: {
+  block: TranscriptBlock; cards: boolean; mode: string; owner: TranscriptOwner;
 }) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const action = (label:string, name:string, fields:Record<string,unknown>) =>
+    <button type="button" className="quiet" onClick={event=>{
+      closeDisclosure(event.currentTarget);
+      void run(()=>owner.action(name,fields));
+    }}>{label}</button>;
   return <details open={mode === 'verbose' || undefined} className="source-menu" onToggle={event=>setSourcesOpen(event.currentTarget.open)}>
     <summary aria-label="Message options">···</summary>
     {(sourcesOpen || mode === 'verbose') && <div className="actions source-actions">
@@ -170,6 +178,7 @@ const Message = memo(function Message({
   streaming,
   timestamp,
   turnAssistant,
+  closingReply,
   revealActions,
 }: {
   block: TranscriptBlock;
@@ -182,6 +191,7 @@ const Message = memo(function Message({
   streaming: boolean;
   timestamp?: number;
   turnAssistant: boolean;
+  closingReply: boolean;
   revealActions: boolean;
 }) {
   const clock = messageClock(timestamp);
@@ -193,7 +203,7 @@ const Message = memo(function Message({
   const foldable = block.role === "tool" || block.role === "reasoning";
   const showHeader = (!(context || block.trigger) || summary) && (!hidden || !!block.external);
   const showBody = showHeader && (!foldable || summary || expanded);
-  const sources = !!(cards || block.sources || block.tool || block.request_intent_seq);
+  const sources = !closingReply && hasSources(block, cards);
   useLayoutEffect(() => {
     const transcript = article.current?.closest<HTMLElement>('.transcript');
     if (transcript && owner.readingSummary !== awayFromBottom(transcript)) owner.setReadingSummary(awayFromBottom(transcript));
@@ -216,27 +226,12 @@ const Message = memo(function Message({
       if (owner.blocks.get(block.key) === entry) owner.blocks.delete(block.key);
     };
   }, [owner, block.key, sourceKey, hasCardHost]);
-  const action = (
-    label: string,
-    name: string,
-    fields: Record<string, unknown>,
-  ) => (
-    <button
-      type="button"
-      className={name === "delegation_open" ? "quiet delegation-action" : "quiet"}
-      onClick={(event) => {
-        closeDisclosure(event.currentTarget);
-        void run(() => owner.action(name, fields));
-      }}
-    >
-      {label}
-    </button>
-  );
   const policy = presentationPolicy(mode);
   const preview = streaming ? policy.liveDetail : block.role !== 'reasoning' || policy.reasoningPreview;
   return (
     <article
       ref={article}
+      data-closing-reply={closingReply || undefined}
       data-actions-reveal={revealActions ? 'hover' : undefined}
       className={`message ${block.role}${block.trigger ? " turn-trigger" : ""}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
       hidden={hidden && !block.external}
@@ -265,14 +260,14 @@ const Message = memo(function Message({
         className="inline-card"
         hidden={!card?.model || !card.ticket}
       />}
-      {!!block.external &&
-        action("Open external conversation", "delegation_open", {
-          key: block.key,
-        })}
+      {!!block.external && <button type="button" className="quiet delegation-action" onClick={event=>{
+        closeDisclosure(event.currentTarget);
+        void run(()=>owner.action('delegation_open',{key:block.key}));
+      }}>Open external conversation</button>}
       {showBody && (sources || !turnAssistant && !!(time || block.text)) && <div className="message-actions">
         {block.role === 'user' && time}
         {!turnAssistant && block.text && <CopyButton text={block.text} label="Copy message"/>}
-      {sources && <SourceMenu block={block} cards={cards} mode={mode} action={action}/>}
+      {sources && <SourceMenu block={block} cards={cards} mode={mode} owner={owner}/>}
       {!turnAssistant && block.role !== 'user' && !block.trigger && time}
       </div>}
     </article>
@@ -343,7 +338,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
       </div>;
     const visibility = new Map<
         string,
-        { hidden: boolean; expanded: boolean; streaming: boolean; timestamp?: number }
+        { hidden: boolean; expanded: boolean; streaming: boolean; closingReply:boolean; timestamp?: number }
       >(),
       summaries = new Map<string, ReactNode>();
     const completed = new Map<string,TranscriptTurn>();
@@ -373,11 +368,15 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         this.state.expanded.has(turn.id),
         replies,
       );
+      const lastProse = turn.closing_prose?.at(-1);
+      const closing = mode !== 'verbose' && turn.terminal && !turn.running && blocks.has(turn.terminal) && lastProse !== undefined
+        ? turn.blocks[lastProse] : undefined;
       for (const key of turn.blocks)
         visibility.set(key, {
           hidden: state.hidden.has(key),
           expanded: state.expanded,
           streaming: turn.running,
+          closingReply: key === closing,
           timestamp: turn.timestamps?.[key],
         });
       const first = turn.process.find(key => blocks.has(key))
@@ -443,6 +442,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
           streaming={state?.streaming ?? false}
           timestamp={state?.timestamp}
           turnAssistant={!!state && block.role === 'assistant'}
+          closingReply={state?.closingReply ?? false}
           revealActions={block.role === 'assistant' || (block.role === 'user' && !block.trigger && block.key !== latestUser)}
         />,
       );
@@ -452,6 +452,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         const keys = terminal.closing_prose?.map(index => terminal.blocks[index]) ?? [];
         const text = keys.map(key => blocks.get(key)!.text);
         const last = keys.at(-1);
+        const closing = last && visibility.get(last)?.closingReply ? blocks.get(last) : undefined;
         const clock = last && messageClock(terminal.timestamps?.[last]);
         let taskCards: ReactNode;
         if (hasCreatedTasks && pane && generation) {
@@ -475,6 +476,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
               pane={pane} generation={generation} message={terminal.feedback_message}/>}
             <ForkTurn turn={terminal.id} owner={owner}/>
             {terminal.usage && <TurnUsage usage={terminal.usage} routes={terminal.usage_routes}/>}
+            {closing && hasSources(closing,cards) && <SourceMenu block={closing} cards={cards} mode={mode} owner={owner}/>}
             {clock && <time className="message-clock" dateTime={clock.iso} title={clock.title}>{clock.label}</time>}
           </div>
         </div>);

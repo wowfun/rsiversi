@@ -40,6 +40,17 @@ async function checkPresentedFiles(page,name) {
   const cards=tail.locator('[data-presented-file]');
   const reportCard=tail.getByRole('button',{name:'Preview report.txt in sidebar',exact:true});
   assert.equal(await cards.count(),4);
+  const reply=page.locator('article[data-closing-reply]').filter({hasText:'The report is ready.'});
+  assert.equal(await reply.count(),1);
+  assert.equal(await reply.locator('.message-actions').count(),0);
+  const options=tail.getByLabel('Message options',{exact:true});
+  await options.focus();await options.press('Enter');
+  await tail.getByRole('button',{name:'Inspect sources',exact:true}).click();
+  await page.waitForFunction(()=>fixture.calls.some(call=>{
+    if(call.method!=='command')return false;
+    const request=JSON.parse(call.payload);
+    return request.action==='inspect_block'&&request.key==='reply';
+  }));
   assert.equal(await reportCard.locator('small span').first().textContent(),'Final report');
   await tail.getByRole('button',{name:'Show all 5 delivered files'}).click();
   assert.equal(await cards.count(),5);
@@ -284,7 +295,7 @@ try {
      await touchPage.goto(server.url);await touchPage.waitForFunction(()=>window.ready);
      await checkMessageActions(touchPage,true);
    } finally {await touchPage.close();}
-   assert.deepEqual(errors,[]);results.push({browser:name,measurements,collapsedBodies,nodeRetained,more:true,reducedMotion:true,narrow:true,settlement:true,actionRows:{mouse:true,keyboard:true,touch:true},reading:{wheel:true,keyboardReturn:true}});
+   assert.deepEqual(errors,[]);results.push({browser:name,measurements,collapsedBodies,nodeRetained,more:true,reducedMotion:true,narrow:true,settlement:true,actionRows:{mouse:true,keyboard:true,touch:true,closingReplySources:true},reading:{wheel:true,keyboardReturn:true}});
   } finally {await browser.close();}
  }
  await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));
