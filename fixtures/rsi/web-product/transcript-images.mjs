@@ -157,8 +157,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
         await page.reload();
         await page.getByLabel('Allow local HTTP for development',{exact:true}).check();
         await page.locator('#reconnect').click();
-        await page.locator('#workbench').waitFor({state:'visible'});
-        if(await session()!==sessionId)await page.locator('[data-testid="conversation-row"][data-session-id="'+sessionId+'"]').getByTestId('conversation-open').click();
+        await page.waitForFunction(id=>document.querySelector('.pane.selected')?.dataset.sessionId===id,sessionId);
         await image.waitFor();
         assert.deepEqual(await image.evaluate(el=>[el.naturalWidth,el.naturalHeight]),[84,52]);
         assert.equal(mediaReads.length,1);
