@@ -203,8 +203,17 @@ impl Block {
         self.sources = sources;
     }
 
-    pub(crate) fn sources(&self) -> SourceIndex {
-        self.sources.clone()
+    pub(crate) fn sources(&self) -> &SourceIndex {
+        &self.sources
+    }
+
+    pub(crate) fn ui_input(&self) -> rsi_ui::BlockInput<'_> {
+        rsi_ui::BlockInput {
+            key: &self.key,
+            text: &self.text,
+            tool: self.tool.as_ref(),
+            sources: &self.sources,
+        }
     }
 }
 

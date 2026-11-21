@@ -248,39 +248,20 @@ impl GuiApplication {
                 .find(|block| block.key == key)
                 .cloned()
         };
-        if let Some(block) = &block {
-            let sources = block.sources();
-            if let Some(lease) = self
+        if let Some(block) = &block
+            && let Some(lease) = self
                 .ui
-                .present_inline(
-                    &attached.ui_target,
-                    &rsi_ui::BlockInput {
-                        key: &block.key,
-                        text: &block.text,
-                        tool: block.tool.as_ref(),
-                        sources: &sources,
-                    },
-                )
+                .present_inline(&attached.ui_target, &block.ui_input())
                 .map_err(error)?
-            {
-                return self.present_lease(revision, Arc::new(lease)).await;
-            }
+        {
+            return self.present_lease(revision, Arc::new(lease)).await;
         }
         // Plugin code runs after releasing both application and renderer locks.
         let result = block
             .ok_or_else(|| "This block is no longer retained".to_owned())
             .and_then(|block| {
-                let sources = block.sources();
                 self.ui
-                    .block(
-                        &attached.ui_target,
-                        &rsi_ui::BlockInput {
-                            key: &block.key,
-                            text: &block.text,
-                            tool: block.tool.as_ref(),
-                            sources: &sources,
-                        },
-                    )
+                    .block(&attached.ui_target, &block.ui_input())
                     .map_err(error)?
                     .ok_or_else(|| "No active contribution renders this block".into())
             });

@@ -30,6 +30,7 @@ impl GuiApplication {
                 .find(|block| block.key == key)
                 .ok_or("This block is no longer in the retained view")?
                 .sources()
+                .clone()
         };
         let mut registry = self.details.lock().expect("Web details poisoned");
         let details = registry.open(Some((index, generation.into(), attached.id.clone())), serde_json::json!({"action":"inspect_block","pane":index,"generation":generation,"key":key}))?;

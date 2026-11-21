@@ -6,6 +6,8 @@ use rsi_session_protocol::*;
 use std::sync::{Arc, Mutex};
 #[path = "submission/admission.rs"]
 mod admission;
+#[path = "../src/frame_allocations.rs"]
+mod allocations;
 #[path = "submission/automation.rs"]
 mod automation;
 #[path = "submission/catalog.rs"]

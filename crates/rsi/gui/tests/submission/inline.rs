@@ -222,6 +222,72 @@ async fn application_shutdown_drains_a_visible_inline_read() {
     assert_eq!(backend.active_source.load(Ordering::SeqCst), 0);
 }
 
+#[test]
+fn scrolling_a_visible_card_into_an_overlapping_set_reuses_its_body() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (runtime, backend, app) = executor.block_on(fixture());
+    let (next, ticket, key, text_bytes) = executor.block_on(async {
+        let mut history = facts();
+        history.push(
+            SessionFact::new(
+                10,
+                2,
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new("next").unwrap(),
+                    text: "next question".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        );
+        history.push(prepared_claim(TurnId::new("next").unwrap(), 11, 10));
+        *backend.facts.lock().unwrap() = history;
+        let session = view(&app)["surfaces"]["main"]["session"].clone();
+        app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+            .await
+            .unwrap();
+        let pane = &view(&app)["surfaces"]["main"];
+        let block = &pane["transcript"]["blocks"][0];
+        let key = block["key"].as_str().unwrap();
+        let visible = |sequence, keys: Value| {
+            json!({"action":"ui_visible","pane":"main",
+            "generation":pane["generation"],"sequence":sequence,"keys":keys})
+            .to_string()
+        };
+        app.command(&visible("1", json!([key]))).await.unwrap();
+        until(|| view(&app)["surfaces"]["main"]["inline"][key]["model"].is_object()).await;
+        let next_key = pane["transcript"]["blocks"][1]["key"].as_str().unwrap();
+        let next = visible("2", json!([key, next_key]));
+        let ticket = view(&app)["surfaces"]["main"]["inline"][key]["ticket"].clone();
+        (
+            next,
+            ticket,
+            key.to_owned(),
+            block["text"].as_str().unwrap().len(),
+        )
+    });
+    let reads = backend.history_requests.lock().unwrap().len();
+    let (result, stats) = super::allocations::measure(|| executor.block_on(app.command(&next)));
+    result.unwrap();
+    assert_eq!(
+        view(&app)["surfaces"]["main"]["inline"][key]["ticket"],
+        ticket
+    );
+    assert_eq!(backend.history_requests.lock().unwrap().len(), reads);
+    assert!(executor.block_on(runtime.shutdown()).is_clean());
+    eprintln!(
+        "retained {text_bytes}-byte card requested {} bytes",
+        stats.requested
+    );
+    assert!(text_bytes >= 64 * 1024 && stats.requested < text_bytes);
+}
+
 #[tokio::test]
 async fn inline_patch_uses_exact_evidence_and_retires_blocked_reads_and_old_tickets() {
     let (runtime, backend, app) = fixture().await;

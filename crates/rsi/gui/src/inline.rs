@@ -81,36 +81,32 @@ impl GuiApplication {
         if sequence <= *last {
             return Ok(());
         }
-        let blocks = {
+        let (blocks, retired) = {
             let state = attached.renderer.state.lock().expect("renderer poisoned");
             let transcript = state.history.as_ref().unwrap_or(&state.transcript);
-            keys.iter()
-                .filter_map(|key| {
-                    transcript
-                        .blocks
-                        .iter()
-                        .find(|block| block.key == *key)
-                        .cloned()
-                })
-                .collect::<Vec<_>>()
-        };
-        let retired = {
+            let visible: Vec<_> = keys
+                .iter()
+                .filter_map(|key| transcript.blocks.iter().find(|block| block.key == *key))
+                .collect();
             let mut cards = attached.inline.lock().expect("inline cards poisoned");
-            let old = std::mem::take(&mut *cards);
             let mut retired = Vec::new();
-            for (key, card) in old {
-                if blocks
-                    .iter()
-                    .any(|block| block.key == key && Arc::ptr_eq(&block.revision, &card.revision))
-                    && !card.stop.is_cancelled()
-                {
-                    cards.insert(key, card);
-                } else {
+            cards.retain(|key, card| {
+                let keep = !card.stop.is_cancelled()
+                    && visible.iter().any(|block| {
+                        block.key == *key && Arc::ptr_eq(&block.revision, &card.revision)
+                    });
+                if !keep {
                     card.stop.cancel();
-                    retired.push(card);
+                    retired.push(Arc::clone(card));
                 }
-            }
-            retired
+                keep
+            });
+            let blocks: Vec<_> = visible
+                .into_iter()
+                .filter(|block| !cards.contains_key(&block.key))
+                .cloned()
+                .collect();
+            (blocks, retired)
         };
         for card in retired {
             if let Err(failure) = card.lease.close().await {
@@ -119,26 +115,9 @@ impl GuiApplication {
             }
         }
         for block in blocks {
-            if attached
-                .inline
-                .lock()
-                .expect("inline cards poisoned")
-                .contains_key(&block.key)
-            {
-                continue;
-            }
-            let sources = block.sources();
             let Some(lease) = self
                 .ui
-                .present_inline(
-                    &attached.ui_target,
-                    &rsi_ui::BlockInput {
-                        key: &block.key,
-                        text: &block.text,
-                        tool: block.tool.as_ref(),
-                        sources: &sources,
-                    },
-                )
+                .present_inline(&attached.ui_target, &block.ui_input())
                 .map_err(error)?
             else {
                 continue;

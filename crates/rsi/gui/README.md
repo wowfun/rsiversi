@@ -601,7 +601,9 @@ block action contract and are converted to the neutral standard model.
 Each pane admits at most four visible inline block presentations (eight across
 the two-pane application), leaving shared UI capacity for details and panels.
 The document sends a monotonically numbered visible-key replacement; the GUI
-validates retained block membership and captures its exact revision. Eviction,
+validates retained block membership and captures its exact revision. Overlapping
+visible sets reuse cards of the same revision without copying their displayed
+text or source indexes. Eviction,
 history replacement, Session switch and plugin retirement cancel and drain the
 same PresentationLease. Frames contain only captured models, never business
 reads. Inline and detail cards use the same assets, action membership, source
