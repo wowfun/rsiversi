@@ -73,17 +73,26 @@ async function verify() {
   }
   const usageButton = pane.locator('.message-usage button');
   const completeTotal = readings === attempts.length && Number.isSafeInteger(total) ? total : null;
+  const routes = new Set();
   if (completeTotal != null) {
     await usageButton.click();
     const usagePanel = page.getByRole('dialog', {name:'Turn usage',exact:true});
     const headline = await page.evaluate(value => value.toLocaleString()+' tok', completeTotal);
     await usagePanel.getByText(headline,{exact:true}).first().waitFor();
+    const snapshots = new Map(initial.filter(fact => fact.type === 'model_intent' && fact.turn_id === creates[0].turn_id)
+      .map(fact => [fact.effect_id, fact.snapshot]));
+    for (const attempt of attempts) {
+      const intent = snapshots.get(attempt.effect_id);
+      assert(intent?.deployment_id && intent.model, 'each billed request has a model route');
+      routes.add(intent.deployment_id+'/'+intent.model);
+    }
+    await usagePanel.getByText([...routes].join(', '),{exact:true}).waitFor();
     await page.screenshot({path:join(report,'created-turn-usage.png')});
     await page.keyboard.press('Escape');
   } else {
     assert.equal(await usageButton.count(), 0);
   }
-  await writeFile(join(report,'created-turn-usage.json'),JSON.stringify({attempts:attempts.length,readings,total:completeTotal},null,2));
+  await writeFile(join(report,'created-turn-usage.json'),JSON.stringify({attempts:attempts.length,readings,total:completeTotal,routes:[...routes]},null,2));
   await page.screenshot({path:join(report,'created-task.png')});
   if (process.argv.includes('--delete-before-due')) {
     await page.getByRole('button',{name:'Automation tasks',exact:true}).click();
