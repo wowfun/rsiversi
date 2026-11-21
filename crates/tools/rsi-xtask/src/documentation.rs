@@ -525,7 +525,11 @@ fn is_recognized_package_path(repository: &Path, package: &Path) -> bool {
     };
     let components = relative.components().collect::<Vec<_>>();
     match components.as_slice() {
-        [Component::Normal(first), Component::Normal(_)] if *first == OsStr::new("apps") => true,
+        [Component::Normal(first), Component::Normal(_)]
+            if *first == OsStr::new("apps") || *first == OsStr::new("vendor") =>
+        {
+            true
+        }
         [
             Component::Normal(first),
             Component::Normal(_),

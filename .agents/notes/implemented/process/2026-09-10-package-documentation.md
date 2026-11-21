@@ -10,6 +10,10 @@ only at repository and product-family roots.
 
 ## Decision
 
+Vendored Rust libraries have a package README under `vendor/<package>`.
+This keeps the upstream revision and license beside the imported source and
+lets the ordinary package README check cover locally maintained changes.
+
 Keep those tutorials and references in the terminal package's own `docs`
 directory, with a repository-level development tutorial limited to starting the
 standard debug product and selecting explicit fixture checks. Package documentation owns

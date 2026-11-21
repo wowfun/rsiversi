@@ -312,6 +312,26 @@ fn rsi_meta_docs_use_the_product_parent_governance() {
 }
 
 #[test]
+fn vendored_libraries_follow_the_package_readme_contract() {
+    let repository = valid_repository();
+    write(
+        repository.path(),
+        "vendor/parser/Cargo.toml",
+        &manifest("parser"),
+    );
+    let missing = verify(repository.path());
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("vendor/parser/README.md"));
+    write(
+        repository.path(),
+        "vendor/parser/README.md",
+        &readme("parser", "Upstream parser with local extensions."),
+    );
+    let valid = verify(repository.path());
+    assert!(valid.status.success(), "{}", stderr(&valid));
+}
+
+#[test]
 fn readme_errors_and_unknown_packages_are_aggregated_and_sorted() {
     let repository = valid_repository();
     fs::remove_file(repository.path().join("crates/rsi-meta/core/README.md"))

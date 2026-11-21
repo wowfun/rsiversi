@@ -120,6 +120,9 @@ standalone schemas, fixtures and examples retain their product namespaces.
 Repository verification tools live below `crates/tools/`; application development
 and distribution belong to the application layer. Current behavior is documented
 at its owning product or package rather than duplicated at root.
+An upstream Rust library maintained with local changes lives under
+`vendor/<package>`. Its package README identifies the upstream revision,
+license and local behavior. Workspace consumers share the same library source.
 English RSIversi user tutorials live in `docs/user`, with translations under
 `docs/i18n`; their links lead to those owning contracts for implementation details.
 The repository [development guide](development.md) describes ordinary debug
