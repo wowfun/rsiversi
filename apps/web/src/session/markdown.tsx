@@ -48,7 +48,7 @@ type Element =
 export type MarkdownEvent =
   | { kind: "start"; element: Element }
   | { kind: "end" }
-  | { kind: "text" | "code"; text: string }
+  | { kind: "text" | "code" | "code_link"; text: string }
   | { kind: "math"; text: string; display: boolean }
   | { kind: "break" | "rule" };
 type Tree =
@@ -87,8 +87,11 @@ function tree(events: readonly MarkdownEvent[]) {
       if (stack.length === 1) throw new Error("Unbalanced Markdown");
       stack.pop();
     } else if (event.kind === "text") parent.push(event.text);
-    else if (event.kind === "code")
-      parent.push({ element: { kind: "code" }, children: [event.text] });
+    else if (event.kind === "code" || event.kind === "code_link") {
+      const content = event.kind === "code" ? event.text :
+        {element: {kind: "link" as const, href: event.text}, children: [event.text]};
+      parent.push({element: {kind: "code"}, children: [content]});
+    }
     else if (event.kind === "math")
       parent.push({element:{kind:"math",display:event.display},children:[event.text]});
     else if (event.kind === "break" || event.kind === "rule")
@@ -230,6 +233,7 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
         return streaming ? children() : <ImageFileLink key={`${key}:${element.path}`} path={element.path} imagesOnly={imagesOnly}>{children()}</ImageFileLink>;
       }
       case "link":
+        if (inLink) return children();
         return (
           <a
             key={key}

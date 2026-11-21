@@ -16,6 +16,7 @@ pub(crate) enum Node {
     End,
     Text { text: String },
     Code { text: String },
+    CodeLink { text: String },
     Math { text: String, display: bool },
     Break,
     Rule,
@@ -58,12 +59,12 @@ fn language(info: &str) -> Option<String> {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_+-.#".contains(&byte)))
     .then(|| token.to_ascii_lowercase())
 }
-fn link(value: &str) -> Option<String> {
+fn link(value: &str) -> Option<url::Url> {
     if value.len() > 2048 {
         return None;
     }
     let parsed = url::Url::parse(value).ok()?;
-    matches!(parsed.scheme(), "http" | "https").then(|| parsed.into())
+    matches!(parsed.scheme(), "http" | "https").then_some(parsed)
 }
 
 fn file_image(value: &str) -> Option<String> {
@@ -139,6 +140,15 @@ fn leaf(event: Event<'_>) -> Option<Node> {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => Node::Text {
             text: text.into_string(),
         },
+        Event::Code(text)
+            if text.starts_with(['h', 'H'])
+                && !text.contains(char::is_whitespace)
+                && link(&text).is_some() =>
+        {
+            Node::CodeLink {
+                text: text.into_string(),
+            }
+        }
         Event::Code(text) => Node::Code {
             text: text.into_string(),
         },
@@ -221,7 +231,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                     }
                     Tag::HtmlBlock => Element::Span,
                     Tag::Image { dest_url, .. } => link(&dest_url)
-                        .map(|src| Element::Image { src })
+                        .map(|url| Element::Image { src: url.into() })
                         .or_else(|| file_image(&dest_url).map(|path| Element::FileImage { path }))
                         .unwrap_or(Element::Span),
                     Tag::List(start) => Element::List {
@@ -232,7 +242,7 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                     Tag::Strong => Element::Strong,
                     Tag::Strikethrough => Element::Strike,
                     Tag::Link { dest_url, .. } => link(&dest_url)
-                        .map(|href| Element::Link { href })
+                        .map(|url| Element::Link { href: url.into() })
                         .or_else(|| {
                             image_link(&dest_url).map(|path| Element::FileImageLink { path })
                         })
@@ -310,9 +320,10 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
         + nodes
             .iter()
             .map(|node| match node {
-                Node::Text { text } | Node::Code { text } | Node::Math { text, .. } => {
-                    text.capacity()
-                }
+                Node::Text { text }
+                | Node::Code { text }
+                | Node::CodeLink { text }
+                | Node::Math { text, .. } => text.capacity(),
                 Node::Start {
                     element:
                         Element::Link { href }
@@ -545,6 +556,28 @@ mod tests {
         ] {
             assert!(link(invalid).is_none());
         }
+    }
+    #[test]
+    fn whole_http_code_spans_link_without_rewriting_the_authored_label() {
+        let nodes = parse("`HTTPS://example.test:443/a?b=1&c=2` `http://x:8080` `curl https://x` `https://x --verbose` `mailto:a@example.test` `//x` `http://`").unwrap();
+        let linked: Vec<_> = nodes
+            .iter()
+            .filter_map(|node| match node {
+                Node::CodeLink { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            linked,
+            ["HTTPS://example.test:443/a?b=1&c=2", "http://x:8080"]
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|n| matches!(n, Node::Code { .. }))
+                .count(),
+            5
+        );
     }
     #[test]
     fn local_images_resolve_encoded_filenames_and_native_paths_after_markdown_parsing() {

@@ -287,7 +287,10 @@ Markdown and frame size checks use the shared bounded JSON counting writer,
 without allocating an encoded buffer just to measure its length. This limits
 aggregate frame expansion with the existing transcript budget.
 Headings, paragraphs, lists, quotes, emphasis, GFM tables with closed cell
-alignment, code and absolute HTTP(S) links are supported. Fenced code retains
+alignment, code and absolute HTTP(S) links are supported. An inline code span
+whose entire value is an absolute HTTP(S) URL without whitespace keeps its
+authored text and opens that URL. Inside another link it remains a code label.
+Fenced code retains
 only its first language token: at most 32 ASCII letters, digits, `_`, `+`, `-`,
 `.` or `#`, normalized to lowercase. Other info strings do not enter the wire.
 Tables and language labels share the existing event, depth, source, encoded and

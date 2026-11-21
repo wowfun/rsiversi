@@ -69,6 +69,10 @@ window.renderLocal=(streaming,generation,content='image')=>{const view={session:
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
+window.renderCodeLinks=()=>flushSync(()=>root.render(React.createElement(Markdown,{events:[
+  start('paragraph'),{kind:'code_link',text:'HTTPS://example.test:443/api?q=1&b=2'},end,
+  start('paragraph'),start('link',{href:'https://outer.test/'}),{kind:'code_link',text:'http://inner.test/path'},end,end,
+  start('paragraph'),{kind:'code',text:'curl https://example.test'},end]})));
 window.ready=true;
 `;
 const server=await sourceFixture({name:'markdown-scene',source:script});const results=[];
@@ -276,8 +280,14 @@ try{
           assert.equal(await height(),resting,'showing a scrollbar keeps the table height');
         }
       }
+      await page.evaluate(()=>window.renderCodeLinks());
+      const codeUrl=page.getByRole('link',{name:'HTTPS://example.test:443/api?q=1&b=2',exact:true});
+      const codeLink=await codeUrl.evaluate(el=>[el.parentElement.tagName,el.getAttribute('href'),el.target,el.rel]);
+      assert.deepEqual(codeLink,['CODE','HTTPS://example.test:443/api?q=1&b=2','_blank','noopener noreferrer']);
+      assert.equal(await page.locator('article a').count(),2);
+      assert.equal(await page.locator('a[href="https://outer.test/"] > code').innerText(),'http://inner.test/path');
       assert.deepEqual(errors,[]);
-      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,linkedImage:true,
+      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,codeLink,linkedImage:true,
         imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
         localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});
