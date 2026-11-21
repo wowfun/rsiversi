@@ -48,9 +48,15 @@ try {
    });
    const checks={browser:name,version:browser.version(),navigation:[],focus:[]};
    // Observe each case before asserting, so a failing branch does not hide the others.
-   for(const width of [767,768,900,1023]) {
+   for(const width of [390,767,768,900,1023]) {
     await page.setViewportSize({width,height:900});await page.evaluate(()=>fixture.tick());
     const button=page.getByRole('button',{name:width<768?'Toggle navigation':'Expand navigation',exact:true});
+    if(width<768){
+     const title=page.locator('#pane-tab-main');
+     const [openerBox,titleBox]=await Promise.all([button.boundingBox(),title.boundingBox()]);
+     assert(titleBox && openerBox && openerBox.x+openerBox.width<=titleBox.x,'mobile navigation precedes the visible conversation title');
+     assert((await title.innerText()).trim());
+    }
     await button.click();await page.evaluate(()=>fixture.tick());
     const drawer=page.getByRole('dialog',{name:'Workspace navigation',exact:true});
     const collapse=page.getByRole('button',{name:'Collapse navigation',exact:true});

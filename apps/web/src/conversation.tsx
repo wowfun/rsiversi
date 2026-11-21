@@ -1,18 +1,15 @@
 import css from "./conversation.module.css";
 import {conversationTitle} from '../conversation-title.js';
 import { SessionSurfaces } from "./session/surface.tsx";
-import { useState, useLayoutEffect, useSyncExternalStore } from "react";
+import { useState, useLayoutEffect, useSyncExternalStore, type ReactNode } from "react";
 import { useLayout } from "./presentation.tsx";
 import { Button } from "./button.tsx";
 import { input, run, useView, useSelected, workbenchPage, pageKind } from "./bridge.ts";
 import { openTerminals } from "./resource-dock.tsx";
-export function Conversation() {
+export function Conversation({navigationOpener}: {navigationOpener?: ReactNode}) {
   const pageOpen = useSyncExternalStore(workbenchPage.subscribe, () => pageKind() !== undefined);
   const [column, setColumn] = useState<HTMLElement | null>(null);
   const [titleActions, setTitleActions] = useState<HTMLDivElement | null>(null);
-  const surfaceKeys = useView((view) =>
-    Object.keys(view?.surfaces ?? {}).join(","),
-  );
   const selected = useSelected((value) => value);
   const { layout, update } = useLayout();
   const mode = layout.detail;
@@ -23,7 +20,6 @@ export function Conversation() {
   const surface = useView((view) => view?.surfaces[selected]);
   const titles = useView(view => Object.keys(view?.surfaces ?? {}).map(key=>[key,conversationTitle(view,key)]),
     (before,after)=>before.length===after.length && before.every(([key,title],index)=>key===after[index][0] && title===after[index][1]));
-  const title = (key:string) => titles?.find(([id])=>id===key)?.[1] ?? key;
   return (
     <section
       ref={setColumn}
@@ -32,33 +28,31 @@ export function Conversation() {
       aria-label="Conversations"
     >
       <div className="session-toolbar">
+        {navigationOpener}
         <nav className="pane-tabs" aria-label="Conversation surfaces">
-          {surfaceKeys
-            .split(",")
-            .filter(Boolean)
-            .map((key) => (
-              <span key={key}>
+          {titles.map(([key, title]) => (
+            <span key={key}>
+              <Button
+                size="sm"
+                id={`pane-tab-${key}`}
+                aria-pressed={selected === key}
+                onClick={() => input.select(key)}
+              >
+                {title}
+              </Button>
+              {key !== "main" && (
                 <Button
                   size="sm"
-                  id={`pane-tab-${key}`}
-                  aria-pressed={selected === key}
-                  onClick={() => input.select(key)}
+                  aria-label={`Close ${key}`}
+                  onClick={() => run(() => input.close(key))}
                 >
-                  {title(key)}
+                  ×
                 </Button>
-                {key !== "main" && (
-                  <Button
-                    size="sm"
-                    aria-label={`Close ${key}`}
-                    onClick={() => run(() => input.close(key))}
-                  >
-                    ×
-                  </Button>
-                )}
-              </span>
-            ))}
+              )}
+            </span>
+          ))}
         </nav>
-        {surfaceKeys.split(",").filter(Boolean).length > 1 && (
+        {titles.length > 1 && (
           <label className="mobile-surface">
             Conversation
             <select
@@ -66,14 +60,11 @@ export function Conversation() {
               value={selected}
               onChange={(event) => input.select(event.target.value)}
             >
-              {surfaceKeys
-                .split(",")
-                .filter(Boolean)
-                .map((key) => (
-                  <option key={key} value={key}>
-                    {title(key)}
-                  </option>
-                ))}
+              {titles.map(([key, title]) => (
+                <option key={key} value={key}>
+                  {title}
+                </option>
+              ))}
             </select>
           </label>
         )}
@@ -106,7 +97,7 @@ export function Conversation() {
                 ))}
               </select>
             </label>
-            {surfaceKeys.split(",").filter(Boolean).length < 2 && (
+            {titles.length < 2 && (
               <Button
                 size="sm"
                 id="add-surface"

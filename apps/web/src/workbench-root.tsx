@@ -10,6 +10,7 @@ import { IconSprite } from "./icon-sprite.tsx";
 import { FrameCommitObserver, PresentationBoundary } from "./frame-commit.tsx";
 import { Shell } from "./shell.tsx";
 import { Conversation } from "./conversation.tsx";
+import type { ComponentProps } from "react";
 import { ResourceDocks } from "./resource-dock.tsx";
 import type { Viewport } from "./presentation.tsx";
 import { Navigation, type NavigationProps } from "./navigation.tsx";
@@ -19,7 +20,7 @@ declare module "@rsi/dsh-slots" {
   interface SlotMap {
     root: { kind: "single"; scope: "root" };
     "rsi.navigation": { kind: "single"; scope: "root"; owner: NavigationProps };
-    "rsi.main": { kind: "single"; scope: "root"; owner: Record<string, never> };
+    "rsi.main": { kind: "single"; scope: "root"; owner: ComponentProps<typeof Conversation> };
     "rsi.resources": { kind: "single"; scope: "session-maybe"; owner: { viewport: Viewport } };
   }
 }

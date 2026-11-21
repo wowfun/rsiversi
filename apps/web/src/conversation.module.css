@@ -132,6 +132,20 @@
   :global(.pane-tabs):where(.scope, .scope *) {
     display: none;
   }
+  :global(.pane-tabs:has(> span:only-child)):where(.scope, .scope *) {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+  }
+  :global(.pane-tabs > span:only-child):where(.scope, .scope *) {
+    min-width: 0;
+  }
+  :global(.pane-tabs > span:only-child button):where(.scope, .scope *) {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   :global(.mobile-surface):where(.scope, .scope *) {
     display: grid;
     max-width: 100%;

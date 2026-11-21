@@ -259,14 +259,6 @@ export function Shell({
           <Brand />
           {connected && (
             <div className="shell-actions">
-              {narrow && <Button
-                size="sm"
-                aria-label="Toggle navigation"
-                aria-expanded={drawer}
-                onClick={navigation}
-              >
-                <IconPanelLeftOutlineRegular />
-              </Button>}
               <Button
                 size="sm"
                 aria-label="Commands"
@@ -426,7 +418,11 @@ export function Shell({
             </Button>
           </aside>
         )}
-        {renderSlot("rsi.main", {})}
+        {renderSlot("rsi.main", {navigationOpener: connected && narrow && (
+          <Button size="sm" aria-label="Toggle navigation" aria-expanded={drawer} onClick={navigation}>
+            <IconPanelLeftOutlineRegular size={16}/>
+          </Button>
+        )})}
         {page==='tasks' && <Suspense fallback={<p role="status">Loading tasks…</p>}><ScheduleCatalog onClose={closePage} onDeleted={()=>setDeletedTask(value=>value+1)}/></Suspense>}
         {page==='plugins' && <Suspense fallback={<p role="status">Loading plugins…</p>}><PluginManager onClose={closePage} onSettings={()=>{closeWorkbenchPage();setSettings('plugins')}}/></Suspense>}
         {!page && <aside className="resources" aria-label="Session resources">

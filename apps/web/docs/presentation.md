@@ -433,7 +433,10 @@ The four transcript detail modes use this presentation policy:
 | Verbose | Bodies expanded | Bodies expanded | Settled reasoning preview; no duplicate live preview |
 
 Native conversation tabs and narrow-screen options always have a nonempty title:
-the saved conversation title, workspace name, or “New conversation”. Unrelated
+the saved conversation title, workspace name, or “New conversation”. A single
+surface keeps its title visible in a narrow column. Multiple surfaces use the
+compact selector there. On phones the navigation opener precedes the title and
+receives focus when the drawer is dismissed. Unrelated
 view publication does not rerender the conversation container when its surface
 keys, selected surface and titles are unchanged. Command-input announcements
 contain only the command label and hint; the Leave command input action is outside
