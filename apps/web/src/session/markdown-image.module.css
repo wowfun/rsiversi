@@ -17,10 +17,21 @@ code .linkIcon { margin-inline-start: 0; }
 .fileHeader { display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-bottom: 1px solid var(--line); color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .fileHeader span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fileHeader button { display: grid; place-items: center; width: 28px; height: 28px; }
-.fileScroll { flex: 1; min-height: 0; overflow: auto; }
+.fileScroll { position: relative; flex: 1; min-height: 0; overflow: auto; }
 .documentSource { margin: 0; padding: 8px 18px; font: var(--dsw-font-markdown-code-block, 13px/1.6 monospace); tab-size: 4; }
-.documentSource mark { color: inherit; background: var(--dsw-alias-interactive-bg-hover-accent); }
+.documentSource mark { display: inline-block; color: inherit; background: transparent; }
 .documentSource mark:empty::after { content: '\200b'; }
+.lineMark {
+  position: absolute;
+  left: 0;
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+  pointer-events: none;
+  animation: line-mark-fade 2s ease-in forwards;
+}
+@keyframes line-mark-fade {
+  0%, 30% { opacity: 1; }
+  100% { opacity: 0; }
+}
 .fileFrame { display: flex; box-sizing: border-box; min-height: 100%; padding: 12px; }
 .fileFrame > * { margin: auto; }
 .fileFrame img { display: block; width: auto; height: auto; max-width: 100%; flex: none; user-select: none; }

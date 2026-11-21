@@ -12,6 +12,7 @@ import {verifyAttachmentRail} from './images.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR);
 const live=process.env.RSI_LIVE_DEEPSEEK==='1';
 const binary=resolve(process.env.RSI_WEB_BINARY),assets=resolve(process.env.RSI_WEB_ASSETS);
+const documentText=line=>['First line',line,'Third line',...Array.from({length:90},(_,i)=>'Body line '+(i+4))].join('\n');
 for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
   const dir=join(report,name);await mkdir(dir,{recursive:true});
   const service=await startService({binary,assets,report:dir,developmentHttp:true,foregroundHost:process.platform==='win32',
@@ -23,7 +24,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await writeFile(join(dirname(workspace),'linked.png'),png(210,90,[52,132,165,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
       await writeFile(join(workspace,'ordinary.png'),'An ordinary text document');
-      await writeFile(join(workspace,'notes.md'),'First line\nSelected source line\nLast line');
+      await writeFile(join(workspace,'notes.md'),documentText('Selected source line'));
       await writeFile(join(dirname(workspace),'outside.txt'),'Fixture outside document');
       const sibling=join(dirname(workspace),'sibling-documents');
       await mkdir(sibling);
@@ -152,8 +153,25 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       const file=dock.getByRole('region',{name:'Document file'});
       const line=stage==='author'?'Selected source line':'Changed since first read';
       await file.locator('mark').filter({hasText:line}).waitFor();
-      assert.equal(await file.locator('pre').textContent(),'First line\n'+line+'\nLast line');
+      assert.equal(await file.locator('pre').textContent(),documentText(line));
+      const band=file.locator('pre + [aria-hidden=true]');
+      await band.waitFor();
+      const landing=await band.evaluate(node=>{
+        const body=node.parentElement, row=body.querySelector('mark').getBoundingClientRect(), area=body.getBoundingClientRect(), mark=node.getBoundingClientRect();
+        return {offset:body.scrollTop,rowOffset:row.top-area.top,bandOffset:mark.top-row.top,width:mark.width,scrollWidth:body.scrollWidth,duration:getComputedStyle(node).animationDuration};
+      });
+      assert(landing.offset>0 && Math.abs(landing.rowOffset)<=1 && Math.abs(landing.bandOffset)<=1,JSON.stringify(landing));
+      assert.equal(landing.width,landing.scrollWidth);assert.equal(landing.duration,'2s');
       await page.screenshot({path:join(dir,stage+'-document.png')});
+      await band.waitFor({state:'detached',timeout:5000});
+      const viewport=page.viewportSize();
+      if(viewport.width<768)await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      await article.getByRole('button',{name:'Source line',exact:true}).click();
+      await band.waitFor();
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      await page.setViewportSize({...viewport,height:viewport.height-40});
+      await band.waitFor({state:'detached',timeout:1200});
+      await page.setViewportSize(viewport);
       // The isolated device also exercises the Host boundary directly.
       const request=accepted.request();
       const headers=await request.allHeaders();
@@ -170,10 +188,10 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       }
       await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
       await article.getByRole('button',{name:'Absolute source',exact:true}).click();
-      await file.locator('mark').filter({hasText:'Last line'}).waitFor();
+      await file.locator('mark').filter({hasText:'Third line'}).waitFor();
       assert.equal(await dock.getByRole('tab').filter({hasText:'notes.md'}).count(),1);
       await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
-      (result.documents??=[]).push({stage,line,absoluteLine:3,blocked});
+      (result.documents??=[]).push({stage,line,absoluteLine:3,blocked,landing,repeatMark:true});
       result.observations.push({stage,sizes,unreadable:await unreadable.innerText(),imageLink:{hover:true,keyboard:true,dock:[imageBounds.width,imageBounds.height],reloadedWidth:width+8,tabs:1}});
     }
     await inspect('author',210);
@@ -226,7 +244,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     assert(devices.includes(first.id));
     result.readerConfigurationAccess=devices.includes(second.id);
     assert.equal(result.readerConfigurationAccess,false);
-    await writeFile(join(service.workspace,'notes.md'),'First line\nChanged since first read\nLast line');
+    await writeFile(join(service.workspace,'notes.md'),documentText('Changed since first read'));
     await writeFile(join(dirname(service.workspace),'.outside.png'),png(248,90,[61,106,170,255]));
     await writeFile(join(dirname(service.workspace),'外部 草图.png'),png(248,90,[85,102,160,255]));
     await writeFile(join(dirname(service.workspace),'linked.png'),png(248,90,[52,132,165,255]));

@@ -128,7 +128,9 @@ If the browser cannot decode a local image, the transcript immediately releases
 its original file and preview URL and shows the author's alt text or file path.
 A settled Markdown document link opens its UTF-8 source in the file panel
 when the destination resolves inside the conversation workspace. A line
-reference selects the requested line. Outside-workspace document labels
+reference scrolls the file panel to the requested line, up to the end of the
+scrollable range. A full-width band marks the line and fades over two seconds.
+Following the same link again repeats the cue. Outside-workspace document labels
 remain plain text. Document bytes are requested when the panel opens.
 
 Completed turns show declared workspace files below the closing reply.
