@@ -3,7 +3,7 @@ import {appendFile, readFile, writeFile} from 'node:fs/promises';
 import {basename,join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
-import {assistantText} from './model-attempt.mjs';
+import {assistantText, modelEvents} from './model-attempt.mjs';
 import {openConversation, setSessionArchived} from './controls.mjs';
 import {openBrowserPage, connectWorkbench, chooseStartingWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
@@ -62,6 +62,28 @@ async function verify() {
   const reminder = creation.state.reminders[0];
   const createdCard = pane.locator('[data-turn-tail]').getByRole('button', {name:'Open automation task: '+reminder.prompt.split('\n',1)[0]});
   await createdCard.waitFor();
+  const attempts = initial.filter(fact => fact.type === 'model_attempt_settled' &&
+    fact.turn_id === creates[0].turn_id && fact.purpose === 'conversation');
+  assert(attempts.length >= 2);
+  let total = 0, readings = 0;
+  for (const {event} of modelEvents(attempts)) {
+    if (event.type !== 'usage') continue;
+    readings++;
+    total += event.usage.input_tokens + event.usage.output_tokens;
+  }
+  const usageButton = pane.locator('.message-usage button');
+  const completeTotal = readings === attempts.length && Number.isSafeInteger(total) ? total : null;
+  if (completeTotal != null) {
+    await usageButton.click();
+    const usagePanel = page.getByRole('dialog', {name:'Turn usage',exact:true});
+    const headline = await page.evaluate(value => value.toLocaleString()+' tok', completeTotal);
+    await usagePanel.getByText(headline,{exact:true}).first().waitFor();
+    await page.screenshot({path:join(report,'created-turn-usage.png')});
+    await page.keyboard.press('Escape');
+  } else {
+    assert.equal(await usageButton.count(), 0);
+  }
+  await writeFile(join(report,'created-turn-usage.json'),JSON.stringify({attempts:attempts.length,readings,total:completeTotal},null,2));
   await page.screenshot({path:join(report,'created-task.png')});
   if (process.argv.includes('--delete-before-due')) {
     await page.getByRole('button',{name:'Automation tasks',exact:true}).click();
