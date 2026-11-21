@@ -86,6 +86,11 @@ try{
  await page.getByRole('button',{name:'Hide resources',exact:true}).click();
  const collapsed=await record(page);
  assert.deepEqual(collapsed.value.state,{...desktop.value.state,expanded:false});
+ const floatingFiles=page.locator('[data-dockkit-float]').filter({has:page.locator('.ui-contribution')});
+ const dockFloat=floatingFiles.getByRole('button',{name:'Dock resource',exact:true});
+ await dockFloat.click({trial:true});
+ await page.getByLabel('Main message',{exact:true}).click({trial:true});
+ assert.equal(await page.getByRole('button',{name:'Hide resources',exact:true}).count(),0);
  await page.setViewportSize({width:1440,height:900});
  const toggle=page.getByRole('button',{name:'Toggle resources',exact:true});
  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
@@ -93,6 +98,9 @@ try{
  await page.screenshot({path:join(report,'widened-closed.png')});
  await resumed(page,service,session,false);
  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+ await dockFloat.click({trial:true});
+ assert.equal(await peer.locator('[data-dockkit-float]').count(),0);
+ checks.push('A collapsed column keeps its Files float interactive at phone width and after desktop reload, with chat still reachable');
  await resources(page);
  checks.push('Closing at 390 px stays closed after widening and reload, preserving the other window and float geometry');
  await page.getByRole('button',{name:'Resource fullscreen',exact:true}).click();

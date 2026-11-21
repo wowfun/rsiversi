@@ -5,7 +5,7 @@ import {IconFullscreenOutlineRegular,IconPanelLeftOutlineRegular} from '../vendo
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
 import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
-import {dockIntent,dockStorageKey,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,paneFor,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
+import {dockIntent,dockStorageKey,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,findTabPane,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
 import {composerInteraction,resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
 import {input,source,useSelected,useView} from './bridge.ts'
 import {activeResourceDock,openDockWindow,presentationIdentity,useLayout,type Viewport} from './presentation.tsx'
@@ -200,18 +200,24 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
   },[pane,surface.generation])
   const intents:DockIntents={focusTab:tab=>apply('focus',{tab}),focusPane:pane=>apply('focus-pane',{pane}),splitPane:pane=>apply('split',{pane}),addTab:pane=>apply('open',{coordinate:{action:'resources'},title:'Resources',pane}),closeTab:tab=>apply('close',{tab}),duplicateTab:tab=>apply('duplicate',{tab}),floatTab:(tab,rect)=>apply('float',{tab,rect}),unfloatPane:pane=>apply('dock',{pane}),placeTab:(tab,pane,index)=>apply('place',{tab,pane,index}),dropTab:(tab,pane,zone)=>apply('drop',{tab,pane,zone}),moveFloat:(pane,x,y)=>apply('move-float',{pane,x,y}),resizeFloat:(pane,rect)=>apply('resize-float',{pane,rect}),resizeSplit:(split,sizes)=>apply('resize',{split,sizes})}
   const displayed=useMemo(()=>displayDock(doc.state,viewport.width,viewport.height,narrow),[doc.state,viewport.width,viewport.height,narrow])
-  const visible=active&&doc.state.expanded
+  const columnVisible=active&&doc.state.expanded
+  const floatsOnly=active&&!columnVisible&&displayed.floats.length>0
   const list=useCallback(()=>terminal({type:'list'}),[owner,pane,surface.generation])
   const guide=<ResourceGuide surface={surface} pane={pane} terminals={{open:openTerminal,list}}/>
   const body=(tab:TabRecord)=>{
     const c=JSON.parse(tab.contentId) as Coordinate,binding=bindings.current.get(tab.id)
     if(c.action==='schedule_task')return <ScheduledTaskDetail surface={surface} id={String(c.task)}/>
-    if(c.action==='workspace_document')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?
-      <DocumentFilePanel key={tab.contentId} pane={pane} generation={surface.generation} path={String(c.path)} location={documentLocation?.path===c.path?documentLocation:undefined}/>:null
-    if(c.action==='file_image')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?
-      <FileImagePanel pane={pane} generation={surface.generation} path={String(c.path)}/>:null
-    if(c.action==='resources')return visible&&getPane(displayed,paneFor(displayed,tab.id)!).activeTabId===tab.id?guide:null
-    if(c.action==='terminal')return <Terminals owner={owner} pane={pane} surface={surface} selected={visible&&getPane(displayed,displayed.activePaneId).activeTabId===tab.id} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
+    if(c.action==='workspace_document'||c.action==='file_image'||c.action==='resources'){
+      const seat=findTabPane(displayed,tab.id)
+      if(!active||(seat.host!=='float'&&(!doc.state.expanded||seat.activeTabId!==tab.id)))return null
+      if(c.action==='resources')return guide
+      if(c.action==='file_image')return <FileImagePanel pane={pane} generation={surface.generation} path={String(c.path)}/>
+      return <DocumentFilePanel key={tab.contentId} pane={pane} generation={surface.generation} path={String(c.path)} location={documentLocation?.path===c.path?documentLocation:undefined}/>
+    }
+    if(c.action==='terminal'){
+      const focused=getPane(displayed,displayed.activePaneId)
+      return <Terminals owner={owner} pane={pane} surface={surface} selected={active&&(doc.state.expanded||focused.host==='float')&&focused.activeTabId===tab.id} initial={String(c.terminal)} created={binding?.created} onOpen={openTerminal} hide={()=>apply('close',{tab:tab.id})}/>
+    }
     if(binding?.view&&resourceHosts.has(binding.view))return <ResourceBody view={binding.view}/>
     return <div className="resource-unavailable"><p role="status">{binding?.error??(binding?.view?'This resource has retired.':'Opening resource…')}</p><Button disabled={!binding?.error&&!binding?.view} onClick={()=>{try{const old=bindings.current.get(tab.id);if(old)release(old)?.commit();bindings.current.delete(tab.id);reconcile(dock.getSnapshot())}catch(error){setNotice(String(error))}}}>Reopen resource</Button></div>
   }
@@ -225,12 +231,12 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
     </button>
     <button type="button" className={css.dockAction} aria-label="Hide resources" onClick={()=>dock.expand(false)}><IconPanelLeftOutlineRegular size={15} className={css.collapseGlyph}/></button>
   </>
-  return <section className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!visible} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
+  return <section className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!columnVisible&&!floatsOnly} data-floats-only={floatsOnly||undefined} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
       if(!(event.ctrlKey||event.metaKey)||event.altKey||event.nativeEvent.isComposing||(event.target as HTMLElement).closest('input,textarea,[contenteditable=true]'))return
       if(event.key.toLowerCase()==='z'){event.preventDefault();apply(event.shiftKey?'redo':'undo')}
     }}>
-    {notice&&<p className="resource-notice" role="alert">{notice}</p>}
-    {visible&&!Object.keys(doc.state.tabs).length&&guide}
-    <DockLayout state={displayed} active={visible} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={chrome}/>
+    {columnVisible&&notice&&<p className="resource-notice" role="alert">{notice}</p>}
+    {columnVisible&&!Object.keys(doc.state.tabs).length&&guide}
+    <DockLayout state={displayed} active={active} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={chrome}/>
   </section>
 }

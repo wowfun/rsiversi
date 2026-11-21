@@ -165,6 +165,11 @@
 :global(.resource-dock[hidden]):where(.scope, .scope *) {
   display: none;
 }
+.scope[data-floats-only] :global([data-dockkit-host='dock']),
+.scope[data-floats-only] :global([data-dockkit-divider]),
+.scope[data-floats-only] :global([data-dockkit-empty]) {
+  display: none;
+}
 :global(.resource-dock > [data-dockkit-surface]):where(.scope, .scope *) {
   flex: 1;
   min-height: 0;
@@ -206,7 +211,7 @@
 :global(.resource-unavailable):where(.scope, .scope *) {
   padding: 24px;
 }
-:global(.resource-fullscreen):where(.scope, .scope *) {
+:global(.resource-fullscreen:not([data-floats-only])):where(.scope, .scope *) {
   position: fixed;
   inset: 0;
   z-index: 25;

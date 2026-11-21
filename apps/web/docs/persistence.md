@@ -294,7 +294,8 @@ the order it cleared, including when another window made that choice.
 
 Each window owns its Session resource dock. Opening, closing and focusing
 tabs or changing the column's visibility at any width immediately changes
-that window's layout. Resizing preserves whether the column is open.
+that window's layout. Collapsing the column keeps the selected Session's
+floating panels visible and interactive. Resizing preserves whether the column is open.
 Resource surfaces without a Session dock keep their visibility in memory. A localStorage
 entry for each endpoint, authenticated principal and Session holds the latest
 saved layout and ID counter. Other open windows continue using their own

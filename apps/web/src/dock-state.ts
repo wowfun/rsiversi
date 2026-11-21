@@ -179,9 +179,8 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
   const history=result.history.entries.length>64?{entries:result.history.entries.slice(-64),cursor:64}:result.history
   return {...value,counter,state:result.state,history}
 }
-export function floatingTab(state:LayoutState,tab:TabId) {return findTabPane(state,tab)?.host==='float'}
-export function paneFor(state:LayoutState,tab:TabId){return findTabPane(state,tab)?.id}
-export {dockPaneIds,getPane}
+export function floatingTab(state:LayoutState,tab:TabId) {return findTabPane(state,tab).host==='float'}
+export {dockPaneIds,findTabPane,getPane}
 
 // Display-only geometry keeps the desktop layout intact on narrow screens.
 export function narrowDock(state:LayoutState):LayoutState {
