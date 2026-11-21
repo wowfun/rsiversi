@@ -222,7 +222,8 @@ that record and validates its envelope, content and replacement size. Adding a
 key checks the bucket's envelopes, sizes and cardinality before eviction. Each
 bucket's total limit equals its record limit multiplied by its maximum count.
 Internally generated Dock transitions check the resulting state and storage
-budget. LRU ordering is computed only when a write needs eviction.
+budget. At capacity, a new key evicts the least recently used record. Equal
+timestamps are resolved by the lowest logical key.
 Session Dock primary keys store the endpoint and device identity as their 16 bytes,
 an empty principal for local access, and the exact scope. A Web-generated Session
 scope stores the 16 bytes after its fixed `dock:web-` prefix. All other scopes

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {applyIntent,boundedRecords,reconcileOrder,defaultPreferences,budgets} from '../device-store.js';
+import {applyIntent,planPresentationWrite,reconcileOrder,defaultPreferences,budgets} from '../device-store.js';
 import {defaultLayout} from '../presentation-store.js';
 const members=Array.from({length:65},(_,i)=>({id:`s-${String(i).padStart(2,'0')}`,partition:'local/project/unpinned'}));
 const move=(id,position,relative=null,list=members)=>({kind:'move',members:list,id,position,relative});
@@ -43,16 +43,19 @@ test('first visit opens its workspace once and preserves a committed collapse',(
 test('each store independently enforces record, cardinality, bytes and monotonic revision',()=>{
   for(const [bucket,value] of [['preferences',defaultPreferences],['layouts',defaultLayout],['orders',{ids:members.map(m=>m.id)}]]){
     const count=budgets[bucket].count;
-    let records=Array.from({length:count},(_,i)=>({key:`key-${i}`,value,revision:'1',used:i}));
-    records=boundedRecords(bucket,records,'key-0',value,100).records;
-    const next=boundedRecords(bucket,records,'new',value,101);
-    assert.equal(next.records.length,count);assert(next.records.some(r=>r.key==='key-0'));assert(!next.records.some(r=>r.key==='key-1'));
-    assert.equal(records.find(r=>r.key==='key-0').revision,'2');
-    assert.throws(()=>boundedRecords(bucket,[records[0],records[0]],'new',value,102));
+    const records=Array.from({length:count},(_,i)=>({key:`key-${i}`,value,revision:'1',used:i}));
+    const touched=planPresentationWrite(bucket,records,'key-0',value,100);
+    assert.equal(touched.evicted,undefined);
+    assert.equal(touched.replacement.revision,'2');
+    records[0]=touched.replacement;
+    const added=planPresentationWrite(bucket,records,'new',value,101);
+    assert.equal(added.evicted,'key-1');
+    assert.equal(added.replacement.key,'new');
+    assert.throws(()=>planPresentationWrite(bucket,[records[0],records[0]],'new',value,102));
   }
   const tooLarge={ids:Array.from({length:1024},(_,i)=>`${String(i).padStart(4,'0')}${'x'.repeat(252)}`)};
-  assert.throws(()=>boundedRecords('orders',[],'large',tooLarge,1),/too large/);
-  assert.throws(()=>boundedRecords('preferences',[{key:'one',value:defaultPreferences,revision:'18446744073709551615',used:1}],'one',defaultPreferences,2),/exhausted/);
+  assert.throws(()=>planPresentationWrite('orders',[],'large',tooLarge,1),/too large/);
+  assert.throws(()=>planPresentationWrite('preferences',[{key:'one',value:defaultPreferences,revision:'18446744073709551615',used:1}],'one',defaultPreferences,2),/exhausted/);
 });
 
 test('workspace tree partitions machines before ancestry and keeps foreign path roots',async()=>{
@@ -90,11 +93,12 @@ test('workspace order preserves exact location and immediate parent partitions',
 
 test('bucket accounting does not replay another Sessions history or rewrite its value',()=>{
   const unrelated={key:'dock:other',value:{kind:'session-dock',history:{invalid:'unread'}},revision:'8',used:1};
-  const next=boundedRecords('layouts',[unrelated],'current',defaultLayout,2);
-  assert.equal(next.records[0],unrelated);
+  const next=planPresentationWrite('layouts',[unrelated],'current',defaultLayout,2);
+  assert.equal(next.evicted,undefined);
+  assert.equal(next.replacement.key,'current');
   assert.throws(()=>applyIntent('layouts',unrelated.value,{kind:'dock',operation:'undo'}),/Invalid resource layout/);
-  assert.throws(()=>boundedRecords('layouts',[{...unrelated,value:'x'.repeat(32768)}],'current',defaultLayout,2),/too large/);
-  assert.throws(()=>boundedRecords('layouts',[{...unrelated,revision:'invalid'}],'current',defaultLayout,2),/record/);
+  assert.throws(()=>planPresentationWrite('layouts',[{...unrelated,value:'x'.repeat(32768)}],'current',defaultLayout,2),/too large/);
+  assert.throws(()=>planPresentationWrite('layouts',[{...unrelated,revision:'invalid'}],'current',defaultLayout,2),/record/);
 });
 
 test('POSIX backslashes cannot collapse distinct workspaces or their order partitions', async()=>{

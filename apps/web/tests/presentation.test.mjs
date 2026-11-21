@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {defaultLayout,validateLayout,presentationKey} from '../presentation-store.js';
-import {boundedRecords} from '../device-store.js';
+import {planPresentationWrite} from '../device-store.js';
 import {parseLayout,conversationWidth} from '../presentation-layout.js';
 test('layout storage is closed, clamped and scoped to the authenticated principal',()=>{
   assert.throws(()=>parseLayout({...defaultLayout,navigationWidth:280}),/Invalid layout/);
@@ -12,12 +12,15 @@ test('layout storage is closed, clamped and scoped to the authenticated principa
 });
 test('layout eviction is bounded and retains the recently touched identity',()=>{
   const records=Array.from({length:64},(_,i)=>({key:String(i),used:i,value:defaultLayout,revision:'1'}));
-  const touched=boundedRecords('layouts',records,'0',defaultLayout,70).records;
-  const added=boundedRecords('layouts',touched,'new',defaultLayout,71).records;
-  assert.equal(added.length,64);assert(added.some(record=>record.key==='0'));assert(!added.some(record=>record.key==='1'));
-  assert.throws(()=>boundedRecords('layouts',[...records,records[0]],'new',defaultLayout,71));
-  assert.throws(()=>boundedRecords('layouts',[{...records[0],key:'x'.repeat(4096)}],'new',defaultLayout,71));
-  assert.throws(()=>boundedRecords('layouts',[records[0],records[0]],'new',defaultLayout,71));
+  const touched=planPresentationWrite('layouts',records,'0',defaultLayout,70);
+  assert.equal(touched.evicted,undefined);
+  records[0]=touched.replacement;
+  assert.equal(planPresentationWrite('layouts',records,'new',defaultLayout,71).evicted,'1');
+  const tied=records.map(record=>({...record,used:1})).reverse();
+  assert.equal(planPresentationWrite('layouts',tied,'new',defaultLayout,71).evicted,'0');
+  assert.throws(()=>planPresentationWrite('layouts',[...records,records[0]],'new',defaultLayout,71));
+  assert.throws(()=>planPresentationWrite('layouts',[{...records[0],key:'x'.repeat(4096)}],'new',defaultLayout,71));
+  assert.throws(()=>planPresentationWrite('layouts',[records[0],records[0]],'new',defaultLayout,71));
 });
 
 test('obsolete pixel layouts reset without touching current preferences',()=>{

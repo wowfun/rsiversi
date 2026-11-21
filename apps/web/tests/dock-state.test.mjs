@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import 'fake-indexeddb/auto';
 import {IDBFactory} from 'fake-indexeddb';
 import {emptyDock,dockIntent,savedDock,restoreDock,validateDock,dockPaneIds,floatingTab,narrowDock,displayDock} from '../src/dock-state.ts';
-import {applyIntent,boundedRecords,DeviceStore} from '../device-store.js';
+import {applyIntent,planPresentationWrite,DeviceStore} from '../device-store.js';
 import {storedNamespace} from '../storage-namespace.js';
 import {defaultLayout} from '../presentation-layout.js';
 const act=(doc,operation,fields={})=>dockIntent(doc,{kind:'dock',operation,...fields});
@@ -228,7 +228,7 @@ test('only validated current layouts are durable; undo belongs to the matching l
  assert.equal(act(current,'undo').state.tabs[Object.keys(doc.state.tabs)[0]].title,'Files');
  const next=applyIntent('layouts',savedDock(current),{kind:'dock',operation:'undo'});assert.equal(Object.keys(next.state.tabs).length,0);
  assert(!Object.hasOwn(next,'history'));
- assert.equal(boundedRecords('layouts',[],'session',next,1).records.length,1);
+ assert.equal(planPresentationWrite('layouts',[],'session',next,1).replacement.value,next);
 });
 
 test('a second window can restore the layout without borrowing undo or overwriting newer edits',async()=>{

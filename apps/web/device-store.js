@@ -3,9 +3,9 @@ import {defaultLayout,validateLayout,parseLayout,workspacePreference} from './pr
 import {storedNamespace,readNamespace,idBytes,idHex} from './storage-namespace.js';
 
 export const budgets = Object.freeze({
-  preferences:{record:4096,count:64,total:256*1024},
-  orders:{record:128*1024,count:16,total:2*1024*1024},
-  layouts:{record:32*1024,count:64,total:2*1024*1024},
+  preferences:{record:4096,count:64},
+  orders:{record:128*1024,count:16},
+  layouts:{record:32*1024,count:64},
 });
 export const defaultPreferences = Object.freeze({view:'workspace',sessionOrder:'updated',workspaceOrder:'updated'});
 const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
@@ -114,36 +114,31 @@ export function applyIntent(bucket,value,intent) {
   return validate(bucket,result);
 }
 
-export function boundedRecords(bucket,records,key,value,now) {
-  return boundedValidatedRecords(bucket,records,key,validate(bucket,value),now);
-}
-
-// Only intent results or the public validating wrapper enter this synchronous path.
-function boundedValidatedRecords(bucket,records,key,value,now,unchanged=false) {
+// The intent owner has validated value. This boundary validates stored envelopes and sizes.
+export function planPresentationWrite(bucket,records,key,value,now,unchanged=false) {
   const bound=budgets[bucket];
   if(!bound || records.length>bound.count || !identity(key) || !Number.isSafeInteger(now) || now<0)throw new Error('Invalid presentation storage');
-  let total=0;const seen=new Set(),sizes=new Map();
+  const seen=new Set();
   for(const record of records){
     if(!keys(record,'key,value,revision,used') || !identity(record.key) || !revision(record.revision) || !Number.isSafeInteger(record.used) || record.used<0 || seen.has(record.key))throw new Error('Invalid presentation record');
     seen.add(record.key);
-    const size=bytes(record);if(size>bound.record)throw new Error('Presentation record is too large');total+=size;sizes.set(record.key,size);
+    if(bytes(record)>bound.record)throw new Error('Presentation record is too large');
   }
-  if(total>bound.total)throw new Error('Presentation storage is full');
   const previous=records.find(record=>record.key===key);
-  if(unchanged)return {records,replacement:previous??{key,value,revision:'0',used:now},changed:false};
+  if(unchanged)return {replacement:previous??{key,value,revision:'0',used:now},changed:false};
   const nextRevision=BigInt(previous?.revision??'0')+1n;
   if(nextRevision>18446744073709551615n)throw new Error('Presentation revision exhausted');
   const replacement={key,value,revision:String(nextRevision),used:now};
-  const replacementSize=bytes(replacement);
-  if(replacementSize>bound.record)throw new Error('Presentation record is too large');
-  const next=records.filter(record=>record.key!==key);
-  total=total-(sizes.get(key)??0)+replacementSize;
-  if(next.length+1>bound.count || total>bound.total){
-    next.sort((a,b)=>a.used-b.used || (a.key<b.key?-1:1));
-    while(next.length+1>bound.count || total>bound.total)total-=sizes.get(next.shift().key);
+  if(bytes(replacement)>bound.record)throw new Error('Presentation record is too large');
+  let evicted;
+  if(!previous && records.length===bound.count){
+    const oldest=records.reduce((oldest,record)=>{
+      if(record.used!==oldest.used)return record.used<oldest.used?record:oldest;
+      return record.key<oldest.key?record:oldest;
+    });
+    evicted=oldest.key;
   }
-  next.push(replacement);
-  return {records:next,replacement,changed:true};
+  return {replacement,evicted,changed:true};
 }
 
 export class DeviceStore {
@@ -273,12 +268,12 @@ export class DeviceStore {
             else if(dock)applied=dockIntent(value,intent);
             else applied=applyIntent(bucket,value,intent);
             const stored=dock?savedDock(applied):applied;
-            const next=boundedValidatedRecords(bucket,records,key,stored,Date.now(),!reset&&applied===value);
+            const next=planPresentationWrite(bucket,records,key,stored,Date.now(),!reset&&applied===value);
             results[index]=dock?{...next.replacement,value:applied}:next.replacement;
             if(!next.changed)return;
             changed.add(index);
-            const store=tx.objectStore(bucket),retained=new Set(next.records.map(record=>record.key));
-            for(const record of records)if(!retained.has(record.key))store.delete(bucket==='layouts'?layoutAddress(record.key):record.key);
+            const store=tx.objectStore(bucket);
+            if(next.evicted!==undefined)store.delete(bucket==='layouts'?layoutAddress(next.evicted):next.evicted);
             store.put(bucket==='layouts'?{...next.replacement,key:layoutAddress(key)}:next.replacement);
           });
           // A synchronous owner can reserve effects for the actual latest
