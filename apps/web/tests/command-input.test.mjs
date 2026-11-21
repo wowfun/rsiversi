@@ -8,6 +8,24 @@ import {DraftStore,DraftEditor} from '../drafts.js';
 import {clearDraftRecords} from './clear-draft-records.mjs';
 
 const plan={name:'plan',composer_input:{kind:'text',hint:'on | off | toggle'}};
+test('skill completion places the caret before arguments and only changes an admitted draft',()=>{
+  const item={group:'skill',replacement:'/audit-proof'};
+  for(const tail of ['', ' prior text', '\tprior text']){
+    const token={start:0,end:3,cursor:3,text:'/au'+tail};
+    const input={value:token.text,setSelectionRange(start,end){this.selectionStart=start;this.selectionEnd=end;},focus(){}};
+    const pane={input,generation:'one',completionState:{...token,generation:'one'},completionToken:()=>token,
+      closeCompletions(){},edit(){throw new Error('Draft capacity');}};
+    assert.throws(()=>pickCompletion(pane,{},item),/Draft capacity/);
+    assert.equal(input.value,token.text);
+    let saved;
+    pane.edit=text=>{saved=text;};
+    pickCompletion(pane,{},item);
+    assert.equal(saved,item.replacement+(tail||' '));
+    assert.equal(input.value,saved);
+    assert.equal(input.selectionStart, '/audit-proof '.length);
+    assert.equal(input.selectionEnd, input.selectionStart);
+  }
+});
 test('rejected command insertion preserves displayed text and command state at both draft limits',async()=>{
   const store=await DraftStore.open('e'.repeat(32),{kind:'local'});
   try {

@@ -97,8 +97,14 @@ export function pickCompletion(pane, context, item) {
     context.perform(() => pane.selectCommand(item,selection));
     return;
   }
-  pane.input.setRangeText(item.replacement, token.start, token.end, "end");
-  pane.edit(pane.input.value);
+  const tail = token.text.slice(token.end);
+  const skill = item.group === 'skill';
+  const separator = skill && !/^\s/u.test(tail) ? ' ' : '';
+  const text = token.text.slice(0, token.start) + item.replacement + separator + tail;
+  const cursor = token.start + item.replacement.length + (skill ? 1 : 0);
+  pane.edit(text);
+  pane.input.value = text;
+  pane.input.setSelectionRange(cursor, cursor);
   pane.completionRequestKey = JSON.stringify([
     pane.generation,
     pane.input.value,

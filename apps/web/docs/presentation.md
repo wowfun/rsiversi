@@ -492,6 +492,8 @@ Choosing an argument-taking command from the menu preserves the entire current
 draft as its arguments, regardless of selection. Completion replaces only its
 leading trigger; it refuses a trigger following non-whitespace prose.
 Selecting the already entered command keeps its existing prefix and arguments.
+Selecting a Skill in slash completion places the caret after the separator,
+ready for its arguments. Existing arguments and whitespace remain in the draft.
 A menu capture is consumed by one selection attempt; later explicit selections
 capture the current editor again, while stale attempts still fail before editing.
 The sending-options menu exposes the displayed alternate delivery to touch and
