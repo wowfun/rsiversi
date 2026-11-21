@@ -1,0 +1,25 @@
+{
+  "session_format": 41,
+  "store_schema": 55,
+  "schema_sha256": "96d8af713fa830a7e772f40fac589620775b8702d50a15e0f0347d9b90954eb3",
+  "files": {
+    "domains/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "domains/sessions.sqlite3": "1778c178e6ca71e64406c1a684308a07724f326734eb0aaccb60eb9b552a78e3",
+    "generations/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "generations/sessions.sqlite3": "dacc581efe8e3c97a5c570714b14616f43f35a280a70017cc3b4a4aedad572fb",
+    "mechanical/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "mechanical/cas/a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7": "a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7",
+    "mechanical/sessions.sqlite3": "cd72f210d6e47381254fa74c9ec454706ef0f91eeb3bf012ab9b49101c3e8436",
+    "mechanical/sessions.sqlite3-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "mechanical/sessions.sqlite3-wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/media-fixture.png": "559c2b5a952c931a1d3794d806dcb4eecde89c58a3f8f0e26c1673374483bad9",
+    "model-tools/sessions.sqlite3": "cae7c501f5d9c41ced61ad4c2b8d38671c1c265804419c4e3075ddd5590bb408",
+    "program/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "program/sessions.sqlite3": "32257d90bcb76a9434dfb4dad57d12233c7538ef77d14518f1bae8527c8df58a",
+    "queue/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "queue/sessions.sqlite3": "23f6f188bb9f35550b5a0c72bf9bc26f3599f46161b9f15704511693631afd54"
+  }
+}

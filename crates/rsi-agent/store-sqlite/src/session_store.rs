@@ -2322,7 +2322,7 @@ impl SessionStore for SqliteStore {
                             CASE WHEN c.through_seq IS NOT NULL THEN length(CAST(s.header_json AS BLOB)) END,
                             CASE WHEN c.through_seq IS NOT NULL AND length(CAST(s.header_json AS BLOB)) <= ?2
                                  THEN s.header_json END,
-                            s.durable_seq
+                            s.durable_seq, c.uncompressed_bytes
                      FROM sessions s LEFT JOIN context_checkpoints c USING (session_id)
                      WHERE s.session_id = ?1 AND s.session_id NOT IN (SELECT session_id FROM session_tombstones)",
                 )
@@ -2337,16 +2337,15 @@ impl SessionStore for SqliteStore {
                         let Some(through_seq) = row.get(1)? else {
                             return Ok(None);
                         };
-                        let length = row.get::<_, i64>(3)?;
                         Ok(Some(cas::ContextCheckpointProjection {
                             header_fingerprint: bounded_text(row, 0, 64)?,
                             through_seq,
                             fact_prefix_sha256: bounded_text(row, 2, 64)?,
-                            encoded_len: usize::try_from(length)
-                                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, length))?,
+                            encoded_len: row.get(3)?,
                             header_encoded_len: row.get(4)?,
                             header_json: row.get(5)?,
                             durable_seq: row.get(6)?,
+                            uncompressed_len: row.get(7)?,
                         }))
                     },
                 )
@@ -2354,13 +2353,15 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?
                 .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
             let checkpoint = if let Some(value) = projection {
-                let length = value.encoded_len;
-                if length == 0 {
+                if value.encoded_len == 0 {
                     return Err(StoreError::Corrupt("checkpoint bytes are empty".into()));
                 }
-                if length > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
+                let length = value.uncompressed_len.unwrap_or(value.encoded_len) as usize;
+                if value.uncompressed_len.is_some_and(|raw| raw <= value.encoded_len)
+                    || length > MAXIMUM_CONTEXT_CHECKPOINT_BYTES
+                {
                     return Err(StoreError::Corrupt(
-                        "checkpoint length exceeds its durable bound".into(),
+                        "checkpoint lengths are outside their durable bounds".into(),
                     ));
                 }
                 let reservation = reservation
@@ -2380,14 +2381,18 @@ impl SessionStore for SqliteStore {
                     .map_err(sql_error)?
                     .as_blob()
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-                if bytes.len() != length {
-                    return Err(StoreError::Corrupt(
-                        "checkpoint byte length changed within its read snapshot".into(),
-                    ));
+                let bytes = if value.uncompressed_len.is_some() {
+                    let decoded = zstd::bulk::decompress(bytes, length).map_err(|error| {
+                        StoreError::Corrupt(format!("invalid checkpoint frame: {error}"))
+                    })?;
+                    if decoded.len() != length {
+                        return Err(StoreError::Corrupt("checkpoint decoded length mismatch".into()));
+                    }
+                    reservation.retain_vec(decoded)
+                } else {
+                    reservation.copy(bytes)
                 }
-                let bytes = reservation
-                    .copy(bytes)
-                    .map_err(StoreError::read_admission)?;
+                .map_err(StoreError::read_admission)?;
                 Some(decode_context_checkpoint(value, bytes)?)
             } else {
                 None
@@ -2464,23 +2469,33 @@ impl SessionStore for SqliteStore {
                     "checkpoint Fact-prefix digest differs from the durable session".into(),
                 ));
             }
+            let raw = write.checkpoint.bytes.as_ref();
+            let encoded = zstd::bulk::compress(raw, 3)
+                .map_err(|error| StoreError::Io(format!("compressing checkpoint: {error}")))?;
+            let (body, uncompressed_bytes) = if encoded.len() < raw.len() {
+                (encoded.as_slice(), Some(i64::try_from(raw.len()).expect("bounded checkpoint")))
+            } else {
+                (raw, None)
+            };
             transaction
                 .execute(
                     "INSERT INTO context_checkpoints
                          (session_id, header_fingerprint, through_seq,
-                          fact_prefix_sha256, checkpoint_bytes)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                          fact_prefix_sha256, checkpoint_bytes, uncompressed_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(session_id) DO UPDATE SET
                          header_fingerprint = excluded.header_fingerprint,
                          through_seq = excluded.through_seq,
                          fact_prefix_sha256 = excluded.fact_prefix_sha256,
-                         checkpoint_bytes = excluded.checkpoint_bytes",
+                         checkpoint_bytes = excluded.checkpoint_bytes,
+                         uncompressed_bytes = excluded.uncompressed_bytes",
                     params![
                         write.session_id.as_str(),
                         write.checkpoint.header_fingerprint,
                         sqlite_u64("checkpoint sequence", write.checkpoint.through_seq)?,
                         write.checkpoint.fact_prefix_sha256,
-                        write.checkpoint.bytes.as_ref(),
+                        body,
+                        uncompressed_bytes,
                     ],
                 )
                 .map_err(sql_error)?;

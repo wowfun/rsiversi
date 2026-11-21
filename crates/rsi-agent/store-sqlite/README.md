@@ -18,7 +18,7 @@ Message feedback is stored once in its canonical control. A partial index on
 Session, answer sequence and control sequence seeks the last change for one
 answer. Appends and replay check the predecessor and local Fact anchor.
 
-Schema 54 stores Header format 41 with separate history provenance and Agent
+Schema 55 stores Header format 41 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -569,10 +569,13 @@ Opt-in control decode counters observe each record as it is decoded, including i
 
 Context checkpoint reads look up the live Session and its optional checkpoint
 in one metadata query. A Session without a checkpoint returns an empty result
-without requesting byte admission. For a stored checkpoint, reads reserve the
-projected body length through the caller's deferred admission, then copy a borrowed
-SQLite blob in the same read transaction. Byte pressure returns `ReadCapacity`;
-it never labels a valid cache corrupt or reserves the 64 MiB format maximum.
+without requesting byte admission. The writer stores a Zstandard frame when it
+is smaller than the original checkpoint. A compressed row records the original
+byte count in `uncompressed_bytes`. A NULL count denotes a raw blob. Readers
+bound both lengths and reserve the exact original byte count before fetching the
+blob in the same read transaction. Decompression writes directly into the
+admitted buffer and must reconstruct that exact length. Byte pressure returns
+`ReadCapacity`. Invalid framing or a length mismatch is corruption.
 
 Program runs retain an indexed accepted_control_seq projection, checked against
 canonical head_json and controls. The Session acceptance index orders fixed-seed

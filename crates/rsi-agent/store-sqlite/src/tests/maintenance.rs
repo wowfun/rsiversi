@@ -517,6 +517,20 @@ async fn maximum_checkpoint_purges_in_bounded_batches_and_offline_maintenance_re
         } else {
             128 * 1024
         };
+        // The purge limit counts physical blob bytes. Keep these fixtures
+        // incompressible so their stored payload crosses the transaction limit.
+        let reservation = rsi_api_protocol::ByteBudget::new(length)
+            .unwrap()
+            .reserve(length)
+            .unwrap();
+        let mut bytes = vec![0; length];
+        let mut state = 1_u64;
+        for chunk in bytes.chunks_exact_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk.copy_from_slice(&state.to_le_bytes());
+        }
         store
             .write_context_checkpoint(WriteContextCheckpoint {
                 session_id: target.session_id.clone(),
@@ -528,10 +542,7 @@ async fn maximum_checkpoint_purges_in_bounded_batches_and_offline_maintenance_re
                         &facts.facts,
                     )
                     .unwrap(),
-                    bytes: rsi_api_protocol::ByteBudget::new(length)
-                        .unwrap()
-                        .copy(&vec![7; length])
-                        .unwrap(),
+                    bytes: reservation.retain_vec(bytes).unwrap(),
                 },
             })
             .await

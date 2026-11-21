@@ -3353,15 +3353,11 @@ async fn queued_proof_reuses_subtree_validation_published_before_lane_admission(
     assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 1);
 }
 
-#[tokio::test]
 #[cfg(any(unix, windows))]
-async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
-    let root = private_tempdir();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let id = seed_session(&store, "checkpoint-read-snapshot").await;
+async fn write_test_checkpoint(store: &SqliteStore, id: &SessionId, bytes: &[u8]) {
     let facts = store
         .read_facts(
-            &id,
+            id,
             0,
             1,
             rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
@@ -3373,30 +3369,52 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
             session_id: id.clone(),
             expected_durable_seq: 1,
             checkpoint: StoredContextCheckpoint {
-                header_fingerprint: test_header("checkpoint-read-snapshot")
-                    .fingerprint()
-                    .unwrap(),
+                header_fingerprint: test_header(id.as_str()).fingerprint().unwrap(),
                 through_seq: 1,
                 fact_prefix_sha256: rsi_agent_session_protocol::fact_prefix_sha256(&facts.facts)
                     .unwrap(),
-                bytes: rsi_api_protocol::ByteBudget::default()
-                    .copy(b"original")
-                    .unwrap(),
+                bytes: rsi_api_protocol::ByteBudget::default().copy(bytes).unwrap(),
             },
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "checkpoint-read-snapshot").await;
+    let original = vec![b'x'; 65_536];
+    write_test_checkpoint(&store, &id, &original).await;
     let database = root.path().join("sessions.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    let (stored, decoded): (u32, u32) = connection
+        .query_row(
+            "SELECT length(checkpoint_bytes), uncompressed_bytes FROM context_checkpoints",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(stored < decoded);
+    let decoded = decoded as usize;
+    assert_eq!(decoded, original.len());
+    let too_small = rsi_api_protocol::ByteBudget::new(stored as usize).unwrap();
+    assert!(matches!(
+        store.read_context_checkpoint(&id, too_small.into()).await,
+        Err(StoreError::ReadCapacity)
+    ));
     let selected = id.clone();
-    let pool = rsi_api_protocol::ByteBudget::new(8).unwrap();
+    let pool = rsi_api_protocol::ByteBudget::new(decoded).unwrap();
     let reading = pool.clone();
     let admission = rsi_api_protocol::ByteAdmission::new(move |length| {
-        assert_eq!(length, 8);
+        assert_eq!(length, decoded);
         let writer = Connection::open(database).unwrap();
         writer
             .execute(
-                "UPDATE context_checkpoints SET checkpoint_bytes=?1 WHERE session_id=?2",
-                params![vec![b'x'; 65536], selected.as_str()],
+                "UPDATE context_checkpoints SET checkpoint_bytes=?1, uncompressed_bytes=NULL WHERE session_id=?2",
+                params![b"replacement", selected.as_str()],
             )
             .unwrap();
         reading.reserve(length)
@@ -3406,8 +3424,8 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(checkpoint.bytes.as_bytes(), b"original");
-    assert_eq!(pool.used(), 8);
+    assert_eq!(checkpoint.bytes.as_bytes(), original);
+    assert_eq!(pool.used(), decoded);
     drop(checkpoint);
     assert_eq!(pool.used(), 0);
     assert_eq!(
@@ -3417,11 +3435,10 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
             .unwrap()
             .unwrap()
             .bytes
-            .len(),
-        65536
+            .as_bytes(),
+        b"replacement"
     );
-    Connection::open(root.path().join("sessions.sqlite3"))
-        .unwrap()
+    connection
         .execute(
             "UPDATE context_checkpoints SET checkpoint_bytes=x'' WHERE session_id=?1",
             [id.as_str()],
@@ -3432,6 +3449,77 @@ async fn checkpoint_length_and_body_share_a_snapshot_across_admission() {
     });
     assert!(
         matches!(store.read_context_checkpoint(&id, refuse).await, Err(StoreError::Corrupt(reason)) if reason.contains("empty"))
+    );
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn checkpoint_codec_rejects_damaged_frames_and_clears_encoding_on_raw_replacement() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let id = seed_session(&store, "checkpoint-format").await;
+    write_test_checkpoint(&store, &id, &[42; 1024]).await;
+    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    for length in [1023, 1025] {
+        connection
+            .execute(
+                "UPDATE context_checkpoints SET uncompressed_bytes=?1",
+                [length],
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .read_context_checkpoint(&id, rsi_api_protocol::ByteBudget::default().into())
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+    for length in [-1, 1, i64::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES).unwrap() + 1] {
+        connection
+            .execute(
+                "UPDATE context_checkpoints SET uncompressed_bytes=?1",
+                [length],
+            )
+            .unwrap();
+        let refuse = rsi_api_protocol::ByteAdmission::new(|_| {
+            panic!("invalid length reached allocation admission")
+        });
+        assert!(matches!(
+            store.read_context_checkpoint(&id, refuse).await,
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+    connection
+        .execute(
+            "UPDATE context_checkpoints SET checkpoint_bytes=x'1234', uncompressed_bytes=1024",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        store
+            .read_context_checkpoint(&id, rsi_api_protocol::ByteBudget::default().into())
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    write_test_checkpoint(&store, &id, b"raw").await;
+    let (bytes, length): (Vec<u8>, Option<i64>) = connection
+        .query_row(
+            "SELECT checkpoint_bytes, uncompressed_bytes FROM context_checkpoints",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(bytes, b"raw");
+    assert_eq!(length, None);
+    assert_eq!(
+        store
+            .read_context_checkpoint(&id, rsi_api_protocol::ByteBudget::default().into())
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .as_bytes(),
+        b"raw"
     );
 }
 

@@ -83,6 +83,7 @@ unicode-segmentation = "1.13"
 unicode-width = "0.2"
 yaml_serde = "0.10"
 zeroize = "1.8"
+zstd = { version = "0.14", default-features = false }
 url = "2.5"
 
 [profile.dev.package.sha2]

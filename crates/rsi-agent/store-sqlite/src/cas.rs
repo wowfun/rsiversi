@@ -381,7 +381,8 @@ pub(super) struct ContextCheckpointProjection {
     pub(super) header_fingerprint: String,
     pub(super) through_seq: i64,
     pub(super) fact_prefix_sha256: String,
-    pub(super) encoded_len: usize,
+    pub(super) encoded_len: u32,
+    pub(super) uncompressed_len: Option<u32>,
     pub(super) header_encoded_len: i64,
     pub(super) header_json: Option<String>,
     pub(super) durable_seq: i64,
@@ -395,16 +396,11 @@ pub(super) fn decode_context_checkpoint(
         header_fingerprint,
         through_seq,
         fact_prefix_sha256,
-        encoded_len,
         header_encoded_len,
         header_json,
         durable_seq,
+        ..
     } = projection;
-    if bytes.len() != encoded_len {
-        return Err(StoreError::Corrupt(
-            "checkpoint byte length changed during read".into(),
-        ));
-    }
     let checkpoint = StoredContextCheckpoint {
         header_fingerprint,
         through_seq: decode_u64("checkpoint sequence", through_seq)?,

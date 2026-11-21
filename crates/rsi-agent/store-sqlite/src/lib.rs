@@ -322,7 +322,8 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             header_fingerprint TEXT NOT NULL,
             through_seq INTEGER NOT NULL CHECK (through_seq > 0),
             fact_prefix_sha256 TEXT NOT NULL,
-            checkpoint_bytes BLOB NOT NULL
+            checkpoint_bytes BLOB NOT NULL,
+            uncompressed_bytes INTEGER
          ) STRICT",
     ),
     (
