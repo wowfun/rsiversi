@@ -228,11 +228,17 @@ async fn assert_commands_survive_unavailable_skills(
     assert_eq!(
         entries
             .iter()
-            .map(|entry| entry["name"].as_str().unwrap())
+            .map(|entry| (
+                entry["name"].as_str().unwrap(),
+                entry["replacement"].as_str().unwrap()
+            ))
             .collect::<Vec<_>>(),
-        ["export", "plan"]
+        [
+            ("compact", "/compact"),
+            ("export", "/export"),
+            ("plan", "/plan")
+        ]
     );
-    assert_eq!(entries[1]["replacement"], "/plan");
     assert!(
         completion["notice"]
             .as_str()
