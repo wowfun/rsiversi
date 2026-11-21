@@ -130,9 +130,14 @@ fn full_builder_preserves_v22_payload_and_v6_envelope_without_a_third_full_copy(
         );
     }
     let facts: Vec<_> = facts.into_iter().map(Arc::new).collect();
+    let first_ingest = ALLOCATED.load(Ordering::Relaxed);
     state.ingest(ContextPage::Canonical(&facts[..12])).unwrap();
+    let first_allocated = ALLOCATED.load(Ordering::Relaxed) - first_ingest;
     assert_preparation_allocations(&state);
+    let remaining_ingest = ALLOCATED.load(Ordering::Relaxed);
     state.ingest(ContextPage::Canonical(&facts[12..])).unwrap();
+    let ingest_bytes = first_allocated + (ALLOCATED.load(Ordering::Relaxed) - remaining_ingest);
+    println!("ingest_allocated_bytes={ingest_bytes}");
     drop(facts);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
@@ -162,7 +167,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     // v22 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions,
     // plus entered context timestamps per producer and retained Turn;
-    // the v6 outer envelope, Session 39 and builder 2.17.0 bind the cache.
+    // the v6 outer envelope, Session 41 and builder 2.17.0 bind the cache.
     let prefix = b"rsi-agent-model-context-v6\0".len() + 32;
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
@@ -205,7 +210,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "fb0a4a11d975fa0b46ab2164a53c6ac22a825aec7760b5f325de9fdeb1cd86d4"
+        "09631bcb4dcd0a0a91b1456feef141d25723cd6e7a330944cbc10574aa5768f2"
     );
 }
 

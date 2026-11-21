@@ -92,7 +92,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.17.0, Session format 39, the v22 fold
+The allocation golden binds builder 2.17.0, Session format 41, the v22 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -271,6 +271,10 @@ compaction over an internal ContextFold and accepts only null configuration;
 selecting it is an explicit Agent Profile choice. Direct whole-Turn omission is
 not a supported projection policy. A usable fold always has semantic state;
 poisoning releases that state along with its other retained allocations.
+
+During Fact ingestion the fold updates the metadata weight for the qualified
+Turn whose source advanced. Replacing instructions also updates prior Turns
+whose protected inputs changed. Whole-view changes recompute the retained total.
 
 Cursor preparation returns either a request or a compaction plan. The default
 builder projects once per unchanged preparation, sharing the view and credit

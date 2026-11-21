@@ -231,18 +231,17 @@ impl SemanticState {
         }
     }
 
-    pub fn record(&mut self, session: &SessionId, fact: &SessionFact) -> Result<Vec<TurnKey>> {
+    pub fn record(&mut self, session: &SessionId, fact: &SessionFact) -> Result<Option<TurnKey>> {
         let Some(turn) = fact.body().turn_id() else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let key = TurnKey::new(session, turn);
-        let turn = &key;
         let source = self
             .sources
-            .entry(turn.clone())
+            .entry(key.clone())
             .or_insert_with(|| CompactionSource {
                 session: session.clone(),
-                turn: turn.turn.clone(),
+                turn: turn.clone(),
                 after_seq: fact.seq() - 1,
                 through_seq: fact.seq(),
                 facts_sha256: hex::encode([0_u8; 32]),
@@ -253,7 +252,7 @@ impl SemanticState {
         if self.sources.len() > crate::MAXIMUM_CONTEXT_MESSAGES {
             return Err(ContextError::TooLarge);
         }
-        Ok(Vec::new())
+        Ok(Some(key))
     }
 
     fn protect_instruction(
@@ -410,14 +409,6 @@ fn retain_plan(
 }
 
 impl ContextFold {
-    pub(crate) fn record_semantic_fact(
-        &mut self,
-        session: &SessionId,
-        fact: &SessionFact,
-    ) -> Result<Vec<TurnKey>> {
-        self.semantic_mut().record(session, fact)
-    }
-
     pub(crate) fn validate_builder(&self, identity: &ContextBuilderIdentity) -> Result<()> {
         let cached = &self.semantic().identity;
         if cached.id != identity.id()

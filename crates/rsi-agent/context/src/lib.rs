@@ -451,7 +451,7 @@ impl ContextFold {
             .and_then(|n| n.checked_add(semantic))
             .ok_or(ContextError::Capacity)
     }
-    fn reaccount_fact(&mut self, fact: &SessionFact, changed: Vec<TurnKey>) -> Result<()> {
+    fn reaccount_fact(&mut self, turn: Option<TurnKey>) -> Result<()> {
         if self.accounting_impact == AccountingImpact::Full {
             return self.reaccount();
         }
@@ -459,36 +459,28 @@ impl ContextFold {
             self.global_weights[1] = self.semantic().usage_weight()?;
             self.global_metadata_bytes = self.global_weight()?;
         }
-        let changed: std::collections::BTreeSet<_> = changed
-            .into_iter()
-            .chain(fact.body().turn_id().map(|turn| self.turn_key(turn)))
-            .collect();
-        for id in changed {
-            self.reaccount_turn(&id)?;
+        if let Some(turn) = turn {
+            self.reaccount_turn(turn)?;
         }
         self.credit.resize(self.retained_weight()?)
     }
-    fn reaccount_turn(&mut self, id: &TurnKey) -> Result<()> {
+    fn reaccount_turn(&mut self, id: TurnKey) -> Result<()> {
         let next = self
             .turn_index
-            .get(id)
+            .get(&id)
             .map(|ordinal| self.relative_index(*ordinal))
             .transpose()?
             .map(|index| self.turn_metadata_weight(&self.turns[index]))
             .transpose()?;
-        if let Some(previous) = self.metadata_weights.remove(id) {
-            self.metadata_bytes = self
-                .metadata_bytes
-                .checked_sub(previous)
-                .ok_or(ContextError::Capacity)?;
-        }
-        if let Some(next) = next {
-            self.metadata_bytes = self
-                .metadata_bytes
-                .checked_add(next)
-                .ok_or(ContextError::Capacity)?;
-            self.metadata_weights.insert(id.clone(), next);
-        }
+        let previous = match next {
+            Some(weight) => self.metadata_weights.insert(id, weight),
+            None => self.metadata_weights.remove(&id),
+        };
+        self.metadata_bytes = self
+            .metadata_bytes
+            .checked_sub(previous.unwrap_or_default())
+            .and_then(|bytes| bytes.checked_add(next.unwrap_or_default()))
+            .ok_or(ContextError::Capacity)?;
         Ok(())
     }
     fn admit_fact(&mut self, fact: &SessionFact) -> Result<()> {
@@ -531,9 +523,9 @@ impl ContextFold {
         self.accounting_impact = AccountingImpact::Turns;
         let result = (|| {
             self.apply_body(fact)?;
-            let changed = self.record_semantic_fact(source, fact)?;
+            let turn = self.semantic_mut().record(source, fact)?;
             self.compact_retained()?;
-            self.reaccount_fact(fact, changed)
+            self.reaccount_fact(turn)
         })();
         self.ingesting_source = None;
         if result.is_err() {

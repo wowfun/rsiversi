@@ -119,7 +119,7 @@ impl ContextFold {
                     let index = self.turn_mut(turn)?.messages.len() - 1;
                     let changed = self.semantic_mut().record_input(&key, fact.body(), index);
                     for affected in changed {
-                        self.reaccount_turn(&affected)?;
+                        self.reaccount_turn(affected)?;
                     }
                 }
             }
