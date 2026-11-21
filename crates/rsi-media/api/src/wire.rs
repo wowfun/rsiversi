@@ -1,5 +1,6 @@
 use rsi_api_protocol::{
-    ApiError, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
+    ApiError, ByteBudget, OperationClass, OperationEffect, OperationId, OperationSpec,
+    RequestEncoding, RetainedBytes,
 };
 use rsi_media_protocol::{
     MAXIMUM_IMAGE_DESCRIPTOR_BYTES, MediaError, MediaId, MediaRef, StoredMedia,
@@ -59,9 +60,10 @@ impl Operation {
 }
 
 pub(crate) fn import_frame(
+    budget: &ByteBudget,
     source: &[u8],
     options: &rsi_media_protocol::ImageImportOptions,
-) -> rsi_media_protocol::Result<Vec<u8>> {
+) -> rsi_media_protocol::Result<RetainedBytes> {
     options.validate()?;
     if source.is_empty() || source.len() > 64 * 1024 * 1024 {
         return Err(MediaError::InvalidInput(
@@ -70,12 +72,14 @@ pub(crate) fn import_frame(
     }
     let header = serde_json::to_vec(options)
         .map_err(|_| MediaError::InvalidInput("invalid Media import options".into()))?;
-    if source.len() + header.len() + 2 > 64 * 1024 * 1024 {
+    let length = 2 + header.len() + source.len();
+    if length > 64 * 1024 * 1024 {
         return Err(MediaError::InvalidInput(
             "API Media import frame exceeds 64 MiB".into(),
         ));
     }
-    let mut frame = Vec::with_capacity(2 + header.len() + source.len());
+    let reservation = budget.reserve(length).map_err(MediaError::Api)?;
+    let mut frame = Vec::with_capacity(length);
     frame.extend_from_slice(
         &u16::try_from(header.len())
             .expect("bounded import options")
@@ -83,7 +87,7 @@ pub(crate) fn import_frame(
     );
     frame.extend_from_slice(&header);
     frame.extend_from_slice(source);
-    Ok(frame)
+    reservation.retain_vec(frame).map_err(MediaError::Api)
 }
 
 pub(crate) fn parse_import(
@@ -156,6 +160,29 @@ pub(crate) fn validate_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_source_slice_keeps_the_exact_frame_reservation() {
+        let source = b"source bytes";
+        let options = rsi_media_protocol::ImageImportOptions {
+            source_mime: Some("image/png".into()),
+            ..Default::default()
+        };
+        let length = 2 + serde_json::to_vec(&options).unwrap().len() + source.len();
+        let budget = ByteBudget::new(length).unwrap();
+        let frame = import_frame(&budget, source, &options).unwrap();
+        assert_eq!(budget.used(), length);
+        assert!(matches!(
+            import_frame(&budget, source, &options),
+            Err(MediaError::Api(ApiError::Capacity))
+        ));
+        let (decoded, received) = parse_import(&frame.into_bytes()).unwrap();
+        assert_eq!(received, options);
+        assert_eq!(decoded.as_ref(), source);
+        assert_eq!(budget.used(), length);
+        drop(decoded);
+        assert_eq!(budget.used(), 0);
+    }
 
     #[test]
     fn unsupported_capability_is_distinct_from_invalid_input_and_redacts_backend_text() {

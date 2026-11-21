@@ -23,12 +23,9 @@ impl Media for MediaClient {
         options: rsi_media_protocol::ImageImportOptions,
     ) -> rsi_media_protocol::Result<MediaRef> {
         let spec = Operation::Import.spec();
-        let frame = crate::wire::import_frame(&source, &options)?;
-        let input = self
-            .api
-            .input_budget(spec.class)
-            .copy(&frame)
-            .map_err(MediaError::Api)?;
+        let input =
+            crate::wire::import_frame(&self.api.input_budget(spec.class), &source, &options)?;
+        drop(source);
         match self.api.call(&spec, input).await {
             Ok(ApiOutput::Reply(message)) if message.binary.is_none() => {
                 let reference: MediaRef = serde_json::from_slice(message.json.as_bytes())
