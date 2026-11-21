@@ -525,6 +525,32 @@
   min-height: 0;
   min-width: 0;
 }
+.transcriptArea > :global(.transcript:not(.trajectory)) {
+  container-type: inline-size;
+}
+@media (min-width: 1024px) {
+  .transcriptArea > :global(.transcript:not(.trajectory)) {
+    padding-inline: 24px;
+  }
+}
+:global(.transcript-flow):where(.scope *) {
+  max-width: var(--text-width);
+  margin-inline: auto;
+  display: flow-root;
+}
+:global(.transcript-flow .message.assistant .md-table-wide):where(.scope *) {
+  --table-spare: max(0px, calc((100cqw - var(--text-width)) / 2));
+  --table-lead: calc(var(--table-spare) + min(var(--text-width), 100cqw) - 100%);
+  box-sizing: border-box;
+  width: calc(100% + var(--table-lead) + var(--table-spare));
+  max-width: none;
+  margin-left: calc(-1 * var(--table-lead));
+  padding-left: var(--table-lead);
+}
+:global(.transcript-flow .message.assistant .md-table-wide > table):where(.scope *) {
+  position: relative;
+  z-index: 1;
+}
 :global(.transcript.trajectory):where(.scope, .scope *) {
   padding: 0;
   overflow: hidden;

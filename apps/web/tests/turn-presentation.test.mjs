@@ -7,7 +7,8 @@ test('reading midway through a long history measures nearby fallback anchors',()
   let reads=0,shift=0;
   const rows=Array.from({length:1024},(_,i)=>({isConnected:true,hidden:false,getClientRects:()=>[{}],
     getBoundingClientRect(){reads++;const top=(i-512)*40+shift;return {top,bottom:top+30};}}));
-  const port={scrollHeight:40960,clientHeight:100,scrollTop:20480,children:rows,querySelectorAll:()=>rows,
+  const flow={classList:{contains:name=>name==='transcript-flow'},querySelectorAll:()=>rows};
+  const port={scrollHeight:40960,clientHeight:100,scrollTop:20480,firstElementChild:flow,
     getBoundingClientRect:()=>({top:0,bottom:100})};
   const {anchors}=presentation.readingPosition(port,false);
   assert.deepEqual(anchors.map(a=>rows.indexOf(a.node)),[512,513,514,515]);

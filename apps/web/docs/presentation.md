@@ -960,10 +960,12 @@ inside their independently admitted renderer bundle. Its queue and grammar insta
 are separate from the main document bundle and obey the same bounds. Plain lines
 appear immediately; preview retirement cancels pending highlighting.
 
-Transcript tables with at least four columns use their natural width and scroll
-inside the message. On hover-capable devices their scrollbar appears on hover or
-keyboard focus. Tables with fewer columns and tables inside a quotation fill the
-text column and wrap their cells.
+Assistant tables with at least four columns start at the surrounding text and
+can scroll across the available transcript width. On narrow screens the scroll
+area stays within the text column. On hover-capable devices the scrollbar
+appears on hover or keyboard focus. The Chromium scrollbar occupies the same
+height as the space reserved at rest. Tables with fewer columns and tables
+inside a quotation fill the text column and wrap their cells.
 
 Settled transcript equations use KaTeX with its bundled fonts, accessible MathML
 and trusted commands disabled. The first visible equation loads the renderer and

@@ -483,7 +483,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         aria-label="Conversation transcript"
         tabIndex={0}
       >
-        {nodes}
+        <div className="transcript-flow">{nodes}</div>
       </div>
     );
   }

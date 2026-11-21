@@ -11,6 +11,7 @@ const script=`
 import React from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
 import {IconSprite} from '/src/icon-sprite.tsx';
 import {Markdown} from '/src/session/markdown.tsx';import {setClipboardWriter} from '/mounts.js';
+import {Transcript} from '/src/session/transcript.tsx';import chat from '/src/session/chat.module.css';
 import {DocumentSessionScope} from '/src/document-plugins.tsx';import {installActions} from '/src/bridge.ts';
 import {bindImageIntake} from '/src/session/image-intake.ts';
 import '/styles.css';import '/vendor/dsh/theme-base.css';import session from '/src/session/surface.module.css';import '/vendor/dsh/dockkit-tokens.css';import '/code-highlight.css';
@@ -54,6 +55,14 @@ window.mountImageDrop=()=>{
     upload:async files=>{for(const file of files)window.dropped.push({name:file.name,type:file.type,text:await file.text()});}},active=>window.dropOverlay.push(active));
 };
 const root=createRoot(article);
+window.renderTableTranscript=()=>{
+  article.removeAttribute('style');article.className=session.scope+' '+chat.scope;
+  const block={key:'table-reply',role:'assistant',title:'Assistant',text:'',markdown:[
+    start('paragraph'),text('Column start'),end,...table,start('quote'),...table,end]};
+  flushSync(()=>root.render(React.createElement('div',{className:chat.transcriptArea},
+    React.createElement(Transcript,{owner:{index:'main',setReadingSummary(){}},transcript:{blocks:[block],turns:{entries:{}}},
+      generation:'1',mode:'standard',cards:false,register(){}}))));
+};
 window.renderLocal=(streaming,generation,content='image')=>{const view={session:'document',generation};
   flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
     React.createElement(Markdown,{events:content==='broken'?brokenImage:content==='link'?fileLink:localImage,streaming}))))};
@@ -65,7 +74,7 @@ window.ready=true;
 const server=await sourceFixture({name:'markdown-scene',source:script});const results=[];
 try{
   for(const [name,engine] of Object.entries({chromium,firefox})){
-    const browser=await engine.launch();
+    const browser=await engine.launch(name==='chromium'?{ignoreDefaultArgs:['--hide-scrollbars']}:{});
     try{
       const page=await browser.newPage(),errors=[];page.on('pageerror',error=>{errors.push(error.message);console.error(name,error.message)});
       await page.clock.install({time:new Date('2026-01-01T00:00:00Z')});
@@ -243,8 +252,30 @@ try{
       await fileLink.press('Enter');
       assert.deepEqual(await page.evaluate(()=>window.actions),[{pane:'main',generation:'4',path:'../diagram.svg'}]);
       await preview.waitFor({state:'detached'});
+      await page.evaluate(()=>window.renderTableTranscript());
+      const tableLayout=[];
+      for(const width of [1680,640]){
+        await page.setViewportSize({width,height:900});
+        const bounds=await page.locator('.transcript .markdown').evaluate(markdown=>{
+          const wide=markdown.querySelector('.md-table-wide'),quote=markdown.querySelector('blockquote .markdown-table');
+          const prose=markdown.querySelector('p').getBoundingClientRect();
+          return {column:prose.width,wide:wide.clientWidth,alignment:wide.querySelector('table').getBoundingClientRect().left-prose.left,
+            quoted:quote.clientWidth,overflow:wide.scrollWidth-wide.clientWidth,documentWidth:document.documentElement.scrollWidth};
+        });
+        assert(Math.abs(bounds.alignment)<=1 && bounds.quoted<=bounds.column && bounds.documentWidth===width);
+        if(width===1680)assert(bounds.wide>bounds.column+100,'wide table uses transcript gutters');
+        else assert(Math.abs(bounds.wide-bounds.column)<=1 && bounds.overflow>0);
+        tableLayout.push(bounds);
+        if(name==='chromium' && width===1680){
+          const table=page.locator('.transcript .md-table-wide');
+          await page.mouse.move(0,0);await table.evaluate(el=>el.blur());
+          const height=()=>table.evaluate(el=>el.getBoundingClientRect().height);
+          const resting=await height();await table.getByRole('columnheader').first().hover();
+          assert.equal(await height(),resting,'showing a scrollbar keeps the table height');
+        }
+      }
       assert.deepEqual(errors,[]);
-      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,
+      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,linkedImage:true,
         imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
         localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});

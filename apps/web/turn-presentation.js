@@ -47,7 +47,9 @@ export function readingPosition(container, readingSummary, heading) {
 }
 function readingAnchor(container) {
   const {top,bottom}=container.getBoundingClientRect();
-  const rows=container.querySelectorAll(':scope > :not([hidden])');
+  const rowParent = container.firstElementChild?.classList.contains('transcript-flow')
+    ? container.firstElementChild : container;
+  const rows=rowParent.querySelectorAll(':scope > :not([hidden])');
   let low=0,high=rows.length;
   while(low<high) {
     const mid=Math.floor((low+high)/2);
