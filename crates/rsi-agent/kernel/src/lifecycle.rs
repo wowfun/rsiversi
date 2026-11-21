@@ -110,6 +110,7 @@ impl AgentKernel {
             clock,
             ValidatedKernelLimits::new(limits)?,
             None,
+            None,
         )
         .await
     }
@@ -120,6 +121,7 @@ impl AgentKernel {
         clock: Arc<dyn Clock>,
         limits: ValidatedKernelLimits,
         receipts: Option<&dyn ApplicationReceiptReader>,
+        event_context: Option<rsi_meta::Context>,
     ) -> Result<Self> {
         let limits = limits.0;
         let mut after = None;
@@ -145,6 +147,7 @@ impl AgentKernel {
         })?;
         let kernel = Self {
             inner: Arc::new(KernelInner {
+                event_context,
                 model_live: model_live::Models::new(limits.maximum_live_model_bytes),
                 program_bytes: rsi_api_protocol::ByteBudget::default(),
                 execution_messages: execution_admission::Messages::default(),

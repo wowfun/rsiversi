@@ -156,6 +156,13 @@ impl Drop for SessionWatch {
 }
 
 impl KernelInner {
+    pub(super) fn emit_activity(&self, event: rsi_agent_turn_protocol::SessionActivityEvent) {
+        if let Some(context) = &self.event_context {
+            // Retirement can close delivery after the Store has already committed.
+            let _ = context.dispatch_local::<rsi_agent_turn_protocol::SessionActivityEvent>(event);
+        }
+    }
+
     pub(super) fn notify_committed(
         &self,
         committed: &rsi_agent_store_protocol::AtomicAgentCommitResult,
@@ -169,7 +176,12 @@ impl KernelInner {
         &self,
         mut commit: AtomicAgentCommit,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::AtomicAgentCommitResult> {
-        correlate_terminal_boundaries(&mut commit)?;
+        let mut completions = Vec::new();
+        correlate_terminal_boundaries(&mut commit, |id, fact| {
+            if self.event_context.is_some() {
+                completions.push(completion_event(id, fact));
+            }
+        })?;
         let created = commit
             .sessions
             .iter()
@@ -255,6 +267,9 @@ impl KernelInner {
             for (session, message) in &retired_messages {
                 self.execution_messages.remove(session, message);
             }
+            for event in completions {
+                self.emit_activity(event);
+            }
             self.notify_committed(committed);
         }
         // An I/O error can lose the acknowledgement of a committed creation.
@@ -266,9 +281,27 @@ impl KernelInner {
     }
 }
 
+pub(super) fn completion_event(
+    session: &SessionId,
+    terminal: &SessionFact,
+) -> rsi_agent_turn_protocol::SessionActivityEvent {
+    let SessionFactBody::TurnTerminal { outcome, .. } = terminal.body() else {
+        unreachable!("terminal publication")
+    };
+    rsi_agent_turn_protocol::SessionActivityEvent::TurnEnded {
+        session: session.clone(),
+        sequence: terminal.seq(),
+        failed: matches!(
+            outcome,
+            TurnOutcome::Failed { .. } | TurnOutcome::PartialFailed { .. }
+        ),
+    }
+}
+
 /// The only Kernel producer of terminal correlation records, including startup recovery.
 pub(super) fn correlate_terminal_boundaries(
     commit: &mut AtomicAgentCommit,
+    mut on_terminal: impl FnMut(&SessionId, &SessionFact),
 ) -> rsi_agent_store_protocol::Result<()> {
     for append in &mut commit.sessions {
         if let Some(terminal) = append.facts.iter().find(|fact| is_terminal_fact(fact)) {
@@ -278,6 +311,7 @@ pub(super) fn correlate_terminal_boundaries(
                 .map_or(append.expected_control_seq, AgentControlRecord::seq)
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Invalid("terminal control sequence exhausted".into()))?;
+            on_terminal(&append.session_id, terminal);
             append.controls.push(
                 terminal_boundary_record(seq, terminal)
                     .map_err(|error| StoreError::Invalid(error.to_string()))?,

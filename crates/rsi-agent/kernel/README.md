@@ -836,3 +836,5 @@ durability, uncertain cleanup and live Program owners before returning a guard.
 The guard holds those keys through the Store retirement commit. Only after that
 commit may it release the selected resident composition pins; shared generations
 and unselected Sessions remain owned normally. Unknown capability means refusal.
+
+The Host Kernel emits a local Session activity event for a confirmed new Turn terminal, carrying the Session ID, terminal Fact sequence and failure classification. Startup replay and historical reads emit no completions. The event conveys no Session access.

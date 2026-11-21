@@ -27,6 +27,9 @@ impl rsi_agent_turn_protocol::SessionRetirement for Retirement {
         }
         drop(state);
         for id in &self.ids {
+            self.kernel.inner.emit_activity(
+                rsi_agent_turn_protocol::SessionActivityEvent::Retired(id.clone()),
+            );
             self.kernel.inner.session_changes.committed(id);
         }
         self.kernel.inner.session_changes.domains_retired();

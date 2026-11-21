@@ -55,7 +55,13 @@ impl AgentKernel {
             return Err(turn_store_error(error));
         }
         match read_turn_boundary_bounded(&self.inner, claim.session_id(), claim.turn_id()).await {
-            Ok(boundary) if boundary.terminal() == Some(terminal) => Ok(()),
+            Ok(boundary) if boundary.terminal() == Some(terminal) => {
+                self.inner.emit_activity(notifications::completion_event(
+                    claim.session_id(),
+                    terminal,
+                ));
+                Ok(())
+            }
             Ok(boundary) if boundary.terminal().is_none() => Err(turn_store_error(error)),
             _ => {
                 let error = turn_store_error(error);

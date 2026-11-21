@@ -51,8 +51,8 @@ pub use continuation::{
 mod projection;
 mod resource;
 pub use projection::{
-    ResidentActivity, ResidentActivityPage, ResidentComposition, SessionProjectionChanges,
-    SessionProjections, SessionProjectionsContract,
+    ResidentActivity, ResidentActivityPage, ResidentComposition, SessionActivityEvent,
+    SessionProjectionChanges, SessionProjections, SessionProjectionsContract,
 };
 pub use resource::{SessionResources, SessionResourcesContract};
 mod domain;

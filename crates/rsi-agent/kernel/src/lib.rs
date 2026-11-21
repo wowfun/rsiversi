@@ -241,6 +241,7 @@ impl fmt::Debug for AgentKernel {
 mod model_live;
 
 struct KernelInner {
+    event_context: Option<rsi_meta::Context>,
     model_live: model_live::Models,
     execution_messages: execution_admission::Messages,
     tasks: TaskTracker,
@@ -1101,6 +1102,7 @@ impl PluginFactory for KernelFactory {
             Arc::new(SystemClock),
             limits,
             self.receipts.as_deref(),
+            Some(plan.context().clone()),
         )
         .await
         .map_err(|error| MetaError::Activation(error.to_string()))?;

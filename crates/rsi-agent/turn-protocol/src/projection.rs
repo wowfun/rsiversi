@@ -5,6 +5,30 @@ use rsi_agent_session_protocol::{SessionId, SessionProjectionSnapshot};
 use rsi_meta_contract::LocalContract;
 use std::fmt;
 
+/// Live metadata changes emitted after durable publication. Observers authorize
+/// Session visibility separately. Historical reads and replay never emit them.
+#[derive(Debug)]
+pub enum SessionActivityEvent {
+    /// A confirmed terminal Fact from the running Kernel.
+    TurnEnded {
+        /// Session whose turn completed.
+        session: SessionId,
+        /// Exact terminal position, including after acknowledgment loss.
+        sequence: u64,
+        /// A provider or execution failure ended the turn.
+        failed: bool,
+    },
+    /// The Session has entered irreversible retirement.
+    Retired(SessionId),
+}
+
+impl rsi_meta::LocalEvent for SessionActivityEvent {
+    const KEY: &'static str = "rsi.agent.session.activity";
+    type Value = Self;
+    type Error = std::convert::Infallible;
+    type Mode = rsi_meta::Emit;
+}
+
 /// An instantaneous observation that never resolves a cold generation.
 #[derive(Clone, Debug)]
 pub enum ResidentComposition {

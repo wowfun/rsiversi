@@ -255,7 +255,7 @@ pub(super) async fn repair_unfinished_session(
             required_active_activations: guards,
             quiescent_descendants_of: None,
         };
-        notifications::correlate_terminal_boundaries(&mut commit)?;
+        notifications::correlate_terminal_boundaries(&mut commit, |_, _| {})?;
         let committed = store.commit_agent(commit).await?;
         let watermark = committed
             .sessions
