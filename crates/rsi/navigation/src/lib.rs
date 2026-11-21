@@ -894,7 +894,8 @@ impl Navigation {
         Ok(state.document.clone())
     }
     async fn close(&self) {
-        self.admission.close(&self.writer).await;
+        self.writer.close();
+        self.admission.close().await;
         self.domain.close().await;
     }
 }

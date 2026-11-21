@@ -17,6 +17,7 @@ rsi-navigation-api = { path = "../navigation-api" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-session-protocol = { path = "../session-protocol" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
+rsi-agent-turn-protocol = { path = "../../rsi-agent/turn-protocol" }
 rsi-agent-store-protocol = { path = "../../rsi-agent/store-protocol" }
 rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
@@ -24,12 +25,12 @@ rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-storage = { path = "../../rsi-storage/core" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 hex.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 jsonschema.workspace = true
 schemars.workspace = true
 rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }

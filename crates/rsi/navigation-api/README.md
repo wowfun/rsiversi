@@ -12,11 +12,13 @@ manual views may retain their own order; Workspace clients use this Host positio
 The separate `attention` operations expose at most 136 current-owner conversation
 candidates, each with at most 32 exact interaction targets. Pending interactions
 sort before running work, unknown ownership and unread idle activity. Reading
-positions contain lossless decimal epoch/sequence coordinates, are explicit
-per-principal mutations and cannot acknowledge a future or replaced source cut.
-Unknown ownership is never persisted as running state. A 256 KiB response cap
-can truncate rows; clients display that fact. Polling never opens a Session or
-starts a peer. The Host retains at most 4,096 read positions within 1 MiB.
+positions use lossless decimal epoch and sequence coordinates. A caller can
+mark an accessible conversation unread, explicitly read an observed position
+or acknowledge it after display. Positions belong to the live Host and apply
+to every caller with access. Acknowledgment preserves a manual reminder.
+Future positions and positions from a replaced source or Host are rejected.
+A 256 KiB response cap can truncate rows. Polling never opens a Session or
+starts a peer.
 
 The authenticated navigation API reads durable Session truth and edits only
 Host-owned title/archive metadata. It never stops or deletes a Session. Titles

@@ -85,13 +85,12 @@ impl Admission {
         }))
     }
 
-    pub(super) async fn close(&self, writer: &Semaphore) {
+    pub(super) async fn close(&self) {
         {
             let mut closed = self.closed.lock().expect("request admission poisoned");
             *closed = true;
             self.read_stop.cancel();
             self.slots.close();
-            writer.close();
             self.tasks.close();
         }
         self.tasks.wait().await;
@@ -108,12 +107,9 @@ mod tests {
             .run_read(|| Box::pin(std::future::pending::<Result<()>>()))
             .unwrap();
         assert!(futures_util::poll!(&mut read).is_pending());
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            admission.close(&Semaphore::new(1)),
-        )
-        .await
-        .expect("retirement must not require the caller to resume polling");
+        tokio::time::timeout(std::time::Duration::from_millis(100), admission.close())
+            .await
+            .expect("retirement must not require the caller to resume polling");
         assert_eq!(admission.slots.available_permits(), 1);
         assert_eq!(read.await, Err(ApiError::ShuttingDown));
     }
@@ -135,7 +131,7 @@ mod tests {
             .unwrap()
             .await
             .unwrap();
-        admission.close(&Semaphore::new(1)).await;
+        admission.close().await;
         assert_eq!(lazy.await, Err(ApiError::ShuttingDown));
         assert!(!constructed.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -143,7 +139,6 @@ mod tests {
     #[tokio::test]
     async fn retirement_drains_an_accepted_mutation_after_its_waiter_is_dropped() {
         let admission = Admission::new(2, Execution::native(tokio::runtime::Handle::current()));
-        let writer = Semaphore::new(1);
         let (release, wait) = tokio::sync::oneshot::channel();
         let (published, receipt) = tokio::sync::oneshot::channel();
         let waiter = admission
@@ -156,7 +151,7 @@ mod tests {
             })
             .unwrap();
         drop(waiter);
-        let mut close = Box::pin(admission.close(&writer));
+        let mut close = Box::pin(admission.close());
         assert!(futures_util::poll!(&mut close).is_pending());
         assert_eq!(admission.slots.available_permits(), 1);
         release.send(()).unwrap();
@@ -168,7 +163,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_first_poll_and_two_closes_settle_without_leaking_admission() {
         let admission = Admission::new(2, Execution::native(tokio::runtime::Handle::current()));
-        let writer = Arc::new(Semaphore::new(1));
         let start = Arc::new(tokio::sync::Barrier::new(3));
         let read = admission
             .run_read(|| Box::pin(std::future::pending::<Result<()>>()))
@@ -183,11 +177,10 @@ mod tests {
         let mut closing = Vec::new();
         for _ in 0..2 {
             let admission = admission.clone();
-            let writer = writer.clone();
             let start = start.clone();
             closing.push(tokio::spawn(async move {
                 start.wait().await;
-                admission.close(&writer).await;
+                admission.close().await;
             }));
         }
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -206,15 +199,14 @@ mod tests {
     async fn first_poll_and_two_retirements_share_one_registration_boundary() {
         for poll_first in [false, true] {
             let admission = Admission::new(2, Execution::native(tokio::runtime::Handle::current()));
-            let writer = Semaphore::new(1);
             let mut read = admission
                 .run_read(|| Box::pin(std::future::pending::<Result<()>>()))
                 .unwrap();
             if poll_first {
                 assert!(futures_util::poll!(&mut read).is_pending());
             }
-            let mut first = Box::pin(admission.close(&writer));
-            let mut second = Box::pin(admission.close(&writer));
+            let mut first = Box::pin(admission.close());
+            let mut second = Box::pin(admission.close());
             if poll_first {
                 assert!(futures_util::poll!(&mut first).is_pending());
                 assert!(futures_util::poll!(&mut second).is_pending());

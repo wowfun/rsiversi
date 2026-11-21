@@ -25,24 +25,18 @@ Status is read-only; cleanup is idempotent and preserves unrelated records. Writ
 capacity refusal leaves the document unchanged and permits explicit retry. A
 pending durable purge cannot authorize navigation removal.
 
-The ordinary `AttentionFactory` owns a separate version-2 Storage domain with a
-typed `positions` table of
-explicit per-principal reading positions. It combines bounded Session activity
-metadata with eight ACP resident observations, never scans recent history, and
-does not persist runtime status. Two nonqueued request slots shared by reads and
-marks, and one nonqueued writer, bound work. A mark reserves its writer before
-dispatch; accepted writes survive waiter loss and retirement drains them. Finite
-reads start a cancellable owner task on first poll, release their slots on
-settled abandonment, and stop on retirement independently of further caller polls.
-A returned read reserves a slot, constructs work, and registers with
-retirement only when first polled; an unpolled future consumes no request capacity
-and cannot keep retirement waiting. Already dispatched backend
-blocking reads retain their own lower-level admission until I/O ends. The API
-returns pending targets before running, unknown and unread activity. A closed
-native durable cut is an unread update, not a guarantee of effect settlement.
-Native attention candidates use the actual caller's Session ingress view for
-both listing and acknowledgments. Per-principal reading positions never grant
-access to another location's Session activity.
+Reading state belongs to the live Host. Devices authorized to see the same
+conversation share its read position and explicit unread flag. A new native
+Turn completion advances the reminder even when no client is observing.
+Opening historical Sessions after restart starts with their history read.
+Reading changes write no storage. Acknowledging a rendered cut preserves an
+explicit unread flag. Marking it read clears that flag and advances only
+through the observed cut. Both use the caller's current Session visibility.
+
+Pending targets precede running, unknown and unread idle activity. Two
+nonqueued request slots bound concurrent attention operations. A finite read
+starts on first poll and retires on abandonment or shutdown. An accepted mark
+settles even if its caller disconnects. Neither operation hydrates a Session.
 
 Storage failures use the [Domain API projection](../../rsi-storage/domain/README.md).
 Unknown commit outcomes close query and mutation admission until Host restart
@@ -98,23 +92,6 @@ grant. Archiving hides the Session and suspends future scheduled deliveries to
 it. Already admitted work keeps its identity. Local scheduling observes the same
 committed membership that the navigation list displays. Restoring the Session
 makes its outstanding reminder eligible again.
-
-Reading positions retain at most 4,096 records / 1 MiB. Admission evicts least
-recently acknowledged positions until both bounds fit; restart seeds that order
-from the durable key order. Eviction may show old activity as unread again, but
-cannot acknowledge it for another principal or prevent future acknowledgments.
-Reading positions cache their entry sizes and use the
-[Storage record-object accounting](../../rsi-storage/core/README.md) for projected
-bounds. An acknowledgment measures only its new position; it neither clones nor
-encodes unrelated positions. Eviction walks recency only until both bounds fit.
-Eviction and the requested acknowledgment are separate record commits. Confirmed
-evictions remain effective even if a later deletion or acknowledgment fails;
-each confirmed deletion is also immediately reflected in the cache. A known
-failure leaves the requested position unacknowledged and allows a later explicit
-retry. Unknown outcomes fence the retained Storage generation. Observing sources
-is rejected before I/O when that generation is already unavailable. Ready and
-closed external conversations retain unread observations according to their epoch
-and sequence, including history loaded from a remote peer.
 
 The metadata records retain the pinned field and bounds owned by the
 [wire contract](../navigation-api/README.md). Missing activity may remain explicit when the Header still authorizes the read;

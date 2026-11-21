@@ -7331,6 +7331,7 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-store-sqlite",
  "rsi-agent-testkit",
+ "rsi-agent-turn-protocol",
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-conversation",

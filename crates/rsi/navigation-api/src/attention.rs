@@ -15,7 +15,7 @@ pub struct Position {
     pub conversation: ConversationIdentity,
     /// Zero for append-only native history, otherwise the external replay epoch.
     pub epoch: String,
-    /// Last observed durable/locally journaled record.
+    /// Latest observed live native terminal or external journal record.
     pub sequence: String,
 }
 impl Position {
@@ -59,9 +59,28 @@ pub enum Status {
     Running,
     /// Current ownership cannot establish a running or settled state.
     Unknown,
-    /// Idle history has advanced beyond this principal's reading position.
+    /// A live completion or an explicit reminder awaits reading.
     Unread,
 }
+/// Host-shared reminder state for one authorized conversation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reading {
+    /// A completion beyond the latest acknowledged cut.
+    pub unseen: bool,
+    /// An explicit reminder that survives automatic acknowledgments.
+    pub manual: bool,
+    /// The most recent completion ended in error.
+    pub failed: bool,
+}
+
+impl Reading {
+    /// Whether the conversation should show an unread reminder.
+    pub fn unread(self) -> bool {
+        self.manual || self.unseen
+    }
+}
+
 /// One attention candidate without transcript text, configuration or credentials.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +89,8 @@ pub struct Entry {
     pub position: Position,
     /// Current presentation priority.
     pub status: Status,
+    /// Reading state, independent of the current running/waiting priority.
+    pub reading: Reading,
     /// At most 32 pending interaction identities.
     pub targets: Vec<Target>,
 }
@@ -135,7 +156,7 @@ pub enum Operation {
     /// Read current-owner metadata.
     Read,
     /// Acknowledge one explicitly displayed source cut.
-    MarkRead,
+    Mark,
 }
 impl Operation {
     /// Returns the exact bounded authenticated operation descriptor.
@@ -149,7 +170,7 @@ impl Operation {
                 "attention",
                 match self {
                     Self::Read => "read",
-                    Self::MarkRead => "mark_read",
+                    Self::Mark => "mark",
                 },
                 1,
             )
@@ -158,7 +179,7 @@ impl Operation {
             class: OperationClass::Data,
             effect: match self {
                 Self::Read => OperationEffect::Read,
-                Self::MarkRead => OperationEffect::Mutation,
+                Self::Mark => OperationEffect::Mutation,
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: 4096,
@@ -166,10 +187,24 @@ impl Operation {
         }
     }
 }
-/// One explicit acknowledgment, fenced to the observed Host generation.
+/// User or visible-transcript reading action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadAction {
+    /// Clear the manual reminder and advance through the observed completion.
+    Read,
+    /// Set a reminder without moving the shared read position.
+    Unread,
+    /// Advance the shared position and preserve the manual reminder.
+    Acknowledge,
+}
+
+/// A reading action fenced to the observed Host generation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarkRead {
+pub struct Mark {
+    /// Intent from the authenticated caller.
+    pub action: ReadAction,
     /// Exact observed Host.
     pub host_epoch: HostEpoch,
     /// Exact source cut displayed to this caller.
@@ -203,16 +238,26 @@ impl Client {
         }
         Ok(page)
     }
-    /// Marks only the displayed source position read for this authenticated caller.
+    /// Clears the shared reminder through the displayed position.
     pub async fn mark_read(&self, position: Position) -> Result<Position> {
-        position.validate()?;
-        let request = MarkRead {
+        self.mark(Mark {
             host_epoch: self.api.description().host_epoch.clone(),
-            position: position.clone(),
-        };
+            position,
+            action: ReadAction::Read,
+        })
+        .await
+    }
+
+    /// Changes the shared reminder through an observed cut.
+    pub async fn mark(&self, request: Mark) -> Result<Position> {
+        let position = &request.position;
+        position.validate()?;
+        if request.host_epoch != self.api.description().host_epoch {
+            return Err(ApiError::Unavailable);
+        }
         let result = match call_json::<_, Position, Never>(
             self.api.as_ref(),
-            &Operation::MarkRead.spec(),
+            &Operation::Mark.spec(),
             &request,
         )
         .await?

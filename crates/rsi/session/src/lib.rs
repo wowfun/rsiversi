@@ -691,6 +691,10 @@ impl SessionService for LocalSessionService {
         let _admission = self.admit(summary.header.coordinates().location())?;
         Ok(summary)
     }
+    async fn visible_activity_sessions(&self, sessions: &[SessionId]) -> Result<Vec<SessionId>> {
+        self.filter_activity_sessions(sessions).await
+    }
+
     async fn activity(&self) -> Result<rsi_session_protocol::SessionActivityPage> {
         self.collect_activity().await
     }

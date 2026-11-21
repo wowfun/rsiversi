@@ -156,6 +156,31 @@ impl LocalSessionService {
         }
         Ok(leases)
     }
+    pub(super) async fn filter_activity_sessions(
+        &self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<SessionId>> {
+        self.check_origin()?;
+        if sessions.len() > 64 {
+            return Err(SessionError::Invalid(
+                "at most 64 activity identities".into(),
+            ));
+        }
+        let visibility = self.visibility()?;
+        let mut selected = sessions.iter().cloned().map(|id| (id, false)).collect();
+        let leases = self
+            .retain_visible_activity(&mut selected, visibility.locations())
+            .await?;
+        self.check_origin()?;
+        if leases
+            .iter()
+            .any(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
+        Ok(selected.into_keys().collect())
+    }
+
     async fn activity_snapshot(&self) -> Result<SessionActivityPage> {
         let residents = self
             .projection_service

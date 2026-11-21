@@ -76,7 +76,6 @@ pub(crate) fn register(
                 | "rsi.configuration.access"
                 | "rsi.managed-providers"
                 | "rsi.navigation"
-                | "rsi.attention"
         ) {
             json!({"backend": "base"})
         } else {

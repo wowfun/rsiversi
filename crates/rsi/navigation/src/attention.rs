@@ -1,356 +1,306 @@
 use super::admission::Admission;
 use super::{
-    Arc, BTreeMap, BoxFuture, Config, ConfigValue, Deserialize, Domain, DomainFacilityContract,
-    DomainSpec, Mutex, PluginFactory, PreparedActivation, Result, Schema, Semaphore, activation,
-    session_error, storage_error,
+    Arc, BTreeMap, ConfigValue, Deserialize, Mutex, PluginFactory, PreparedActivation, Result,
+    activation, session_error,
 };
 use async_trait::async_trait;
 use rsi_acp_protocol::{
     observation::Status as ExternalStatus,
     service::{ExternalConversations, ExternalConversationsContract},
 };
+use rsi_agent_turn_protocol::SessionActivityEvent;
 use rsi_api_protocol::{
     ApiError, ApiRegistrarContract, CallOrigin, ConnectionDescriptionContract, HostEpoch,
     json_handler,
 };
 use rsi_conversation::ConversationIdentity;
-use rsi_meta::ActivationPlan;
+use rsi_meta::{ActivationPlan, EmitEventHandler};
 use rsi_navigation_api::{
-    attention::{Entry, MarkRead, Operation, Page, Position, Status, Target},
+    attention::{Entry, Mark, Operation, Page, Position, ReadAction, Reading, Status, Target},
     revision,
 };
 use rsi_session_protocol::{ActivityStatus, SessionIngress, SessionIngressContract};
-use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
-use sha2::Digest as _;
 
-struct ReadingPosition {
-    position: Position,
-    encoded_bytes: usize,
+#[derive(Debug, Default, Clone, Copy)]
+struct Record {
+    epoch: u64,
+    completed: u64,
+    read: u64,
+    manual: bool,
+    failed: bool,
 }
-struct State {
-    positions: BTreeMap<String, ReadingPosition>,
-    recency: std::collections::VecDeque<String>,
-    size: RecordObjectSize,
-}
-impl State {
-    // Snapshot bounds, keys and Position values are validated before construction.
-    // Cached sizes stay paired with their values; a one-entry projection cannot
-    // overflow usize, and removal always names an existing entry.
-    fn from_positions(positions: BTreeMap<String, Position>) -> Self {
-        let mut size = RecordObjectSize::default();
-        let recency = positions.keys().cloned().collect();
-        let positions = positions
-            .into_iter()
-            .map(|(key, position)| {
-                let encoded_bytes = position_bytes(&key, &position);
-                size = size
-                    .with_entry(None, encoded_bytes)
-                    .expect("bounded positions");
-                (
-                    key,
-                    ReadingPosition {
-                        position,
-                        encoded_bytes,
-                    },
-                )
-            })
-            .collect();
-        Self {
-            positions,
-            recency,
-            size,
+
+impl Record {
+    fn reading(self) -> Reading {
+        Reading {
+            unseen: self.completed > self.read,
+            manual: self.manual,
+            failed: self.failed,
         }
     }
 
-    fn remove(&mut self, key: &str) {
-        let previous = self
-            .positions
-            .remove(key)
-            .expect("retained reading position");
-        self.size = self
-            .size
-            .without_entry(previous.encoded_bytes)
-            .expect("bounded positions");
-        self.recency.retain(|entry| entry != key);
+    fn mark(&mut self, action: ReadAction, through: u64) {
+        if action != ReadAction::Unread {
+            self.read = self.read.max(through);
+        }
+        if action != ReadAction::Acknowledge {
+            self.manual = action == ReadAction::Unread;
+        }
     }
+}
 
-    fn put(&mut self, key: String, position: Position, encoded_bytes: usize) {
-        let previous = self.positions.insert(
-            key.clone(),
-            ReadingPosition {
-                position,
-                encoded_bytes,
-            },
-        );
-        self.size = self
-            .size
-            .with_entry(previous.map(|record| record.encoded_bytes), encoded_bytes)
-            .expect("bounded positions");
-        self.recency.retain(|entry| entry != &key);
-        self.recency.push_back(key);
+#[derive(Default, Debug)]
+struct Records(Mutex<BTreeMap<ConversationIdentity, Record>>);
+
+impl EmitEventHandler<SessionActivityEvent> for Records {
+    fn handle(&self, event: &SessionActivityEvent) {
+        let mut records = self.0.lock().expect("reading records");
+        match event {
+            SessionActivityEvent::TurnEnded {
+                session,
+                sequence,
+                failed,
+            } => {
+                let record = records
+                    .entry(ConversationIdentity::Native(session.clone()))
+                    .or_default();
+                if *sequence > record.completed {
+                    record.completed = *sequence;
+                    record.failed = *failed;
+                }
+            }
+            SessionActivityEvent::Retired(session) => {
+                records.remove(&ConversationIdentity::Native(session.clone()));
+            }
+        }
     }
 }
-fn position_bytes(key: &str, position: &Position) -> usize {
-    encoded_entry_bytes(
-        &format!("positions/{key}"),
-        serde_json::to_vec(position)
-            .expect("typed reading position")
-            .len(),
-    )
-    .expect("bounded reading position")
-}
+
 struct Attention {
     session: Arc<dyn SessionIngress>,
     external: Arc<dyn ExternalConversations>,
     epoch: HostEpoch,
-    domain: Domain,
-    state: Mutex<State>,
-    writer: Arc<Semaphore>,
+    records: Arc<Records>,
     admission: Arc<Admission>,
 }
-fn key(origin: &CallOrigin, id: &ConversationIdentity) -> String {
-    let principal = match origin {
-        CallOrigin::Local => "local".to_owned(),
-        CallOrigin::Device(device) => format!("device:{}", device.id.as_str()),
-    };
-    hex::encode(sha2::Sha256::digest(
-        serde_json::to_vec(&(principal, id)).expect("typed identity"),
-    ))
+
+fn native_entry(
+    id: ConversationIdentity,
+    record: Record,
+    status: Status,
+    targets: Vec<Target>,
+) -> Entry {
+    Entry {
+        position: Position {
+            conversation: id,
+            epoch: "0".into(),
+            sequence: record.completed.to_string(),
+        },
+        reading: record.reading(),
+        status,
+        targets,
+    }
 }
+
 impl Attention {
-    fn run_mutation<T: Send + 'static>(
-        self: &Arc<Self>,
-        work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>>,
-    ) -> Result<BoxFuture<'static, Result<T>>> {
-        self.domain.ensure_available().map_err(storage_error)?;
-        self.admission.run_mutation(|| work(self.clone()))
-    }
-    fn run_read<T: Send + 'static>(
-        self: &Arc<Self>,
-        work: impl FnOnce(Arc<Self>) -> BoxFuture<'static, Result<T>> + Send + 'static,
-    ) -> Result<BoxFuture<'static, Result<T>>> {
-        self.domain.ensure_available().map_err(storage_error)?;
-        let owner = self.clone();
-        self.admission.run_read(move || work(owner))
-    }
-    async fn candidates(&self, origin: &CallOrigin) -> Result<Page> {
-        self.domain.ensure_available().map_err(storage_error)?;
-        let native = self
-            .session
-            .scoped(origin.clone())
-            .activity()
-            .await
-            .map_err(session_error)?;
+    async fn read(&self, origin: &CallOrigin) -> Result<Page> {
+        let scoped = self.session.scoped(origin.clone());
+        let native = scoped.activity().await.map_err(session_error)?;
         let external = self
             .external
             .residents()
             .await
             .map_err(|_| ApiError::Unavailable)?;
-        let mut entries: Vec<_> = native
-            .entries
-            .into_iter()
-            .map(|row| Entry {
-                position: Position {
-                    conversation: ConversationIdentity::Native(row.session),
-                    epoch: "0".into(),
-                    sequence: row.fact_seq,
-                },
-                status: if row.requests.is_empty() {
+        let mut truncated = native.truncated;
+        let mut entries = Vec::new();
+        let cold = {
+            let records = self.records.0.lock().expect("reading records");
+            let mut managed = std::collections::BTreeSet::new();
+            for row in native.entries {
+                let id = ConversationIdentity::Native(row.session);
+                let record = records.get(&id).copied().unwrap_or_default();
+                managed.insert(id.clone());
+                let status = if !row.requests.is_empty() {
+                    Status::Waiting
+                } else {
                     match row.status {
                         ActivityStatus::Running => Status::Running,
-                        ActivityStatus::Idle => Status::Unread,
                         ActivityStatus::Unknown => Status::Unknown,
+                        ActivityStatus::Idle if record.reading().unread() => Status::Unread,
+                        ActivityStatus::Idle => continue,
                     }
-                } else {
+                };
+                entries.push(native_entry(
+                    id,
+                    record,
+                    status,
+                    row.requests
+                        .into_iter()
+                        .map(|request| Target::Native { request })
+                        .collect(),
+                ));
+            }
+            for row in external {
+                let status = if (!row.connected && row.snapshot.status != ExternalStatus::Closed)
+                    || row.snapshot.status == ExternalStatus::Unknown
+                {
+                    Status::Unknown
+                } else if !row.permissions.is_empty() {
                     Status::Waiting
-                },
-                targets: row
-                    .requests
-                    .into_iter()
-                    .map(|request| Target::Native { request })
-                    .collect(),
-            })
-            .collect();
-        for row in external {
-            let status = if (!row.connected && row.snapshot.status != ExternalStatus::Closed)
-                || row.snapshot.status == ExternalStatus::Unknown
-            {
-                Status::Unknown
-            } else if !row.permissions.is_empty() {
-                Status::Waiting
-            } else if matches!(
-                row.snapshot.status,
-                ExternalStatus::Starting | ExternalStatus::Loading | ExternalStatus::Running
-            ) {
-                Status::Running
-            } else {
-                Status::Unread
-            };
-            let targets = if status == Status::Waiting {
-                row.permissions
-                    .into_iter()
-                    .map(|permission| Target::External {
-                        generation: permission.generation,
-                        request: permission.id,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            entries.push(Entry {
-                position: Position {
-                    conversation: ConversationIdentity::External(row.snapshot.id),
-                    epoch: row.snapshot.epoch.to_string(),
-                    sequence: row.sequence,
-                },
-                status,
-                targets,
-            });
+                } else if matches!(
+                    row.snapshot.status,
+                    ExternalStatus::Starting | ExternalStatus::Loading | ExternalStatus::Running
+                ) {
+                    Status::Running
+                } else {
+                    Status::Unread
+                };
+                let targets = if status == Status::Waiting {
+                    row.permissions
+                        .into_iter()
+                        .map(|permission| Target::External {
+                            generation: permission.generation,
+                            request: permission.id,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let id = ConversationIdentity::External(row.snapshot.id);
+                let epoch = row.snapshot.epoch;
+                let sequence = revision(&row.sequence)?;
+                let saved = records.get(&id).filter(|record| record.epoch == epoch);
+                let reading = Reading {
+                    manual: saved.is_some_and(|record| record.manual),
+                    unseen: sequence > saved.map_or(0, |record| record.read),
+                    failed: row.snapshot.status == ExternalStatus::Failed,
+                };
+                if status == Status::Unread && !reading.unread() {
+                    continue;
+                }
+                entries.push(Entry {
+                    reading,
+                    position: Position {
+                        conversation: id,
+                        epoch: epoch.to_string(),
+                        sequence: row.sequence,
+                    },
+                    status,
+                    targets,
+                });
+            }
+
+            records
+                .iter()
+                .filter_map(|(id, record)| match id {
+                    ConversationIdentity::Native(session)
+                        if record.reading().unread() && !managed.contains(id) =>
+                    {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for batch in cold.chunks(64) {
+            let visible = scoped
+                .visible_activity_sessions(batch)
+                .await
+                .map_err(session_error)?;
+            let records = self.records.0.lock().expect("reading records");
+            for session in visible {
+                let id = ConversationIdentity::Native(session);
+                if let Some(record) = records.get(&id).filter(|r| r.reading().unread()) {
+                    entries.push(native_entry(id, *record, Status::Unread, Vec::new()));
+                }
+            }
+            if entries.len() > 136 {
+                break;
+            }
         }
-        Ok(Page {
-            host_epoch: self.epoch.clone(),
-            entries,
-            truncated: native.truncated,
-        })
-    }
-    async fn read(&self, origin: &CallOrigin) -> Result<Page> {
-        let mut page = self.candidates(origin).await?;
-        page.entries.sort_by(|a, b| {
+        entries.sort_by(|a, b| {
             (&a.status, &a.position.conversation).cmp(&(&b.status, &b.position.conversation))
         });
-        let keys: Vec<_> = page
-            .entries
-            .iter()
-            .map(|row| key(origin, &row.position.conversation))
-            .collect();
-        let mut keys = keys.iter();
-        let state = self.state.lock().expect("attention reading positions");
-        self.domain.ensure_available().map_err(storage_error)?;
-        page.entries.retain(|row| {
-            let key = keys.next().expect("one key per candidate");
-            row.status != Status::Unread
-                || (row.position.sequence != "0"
-                    && state.positions.get(key).is_none_or(|read| {
-                        read.position.epoch != row.position.epoch
-                            || revision(&read.position.sequence).unwrap_or(0)
-                                < revision(&row.position.sequence).unwrap_or(0)
-                    }))
-        });
-        drop(state);
+        if entries.len() > 136 {
+            truncated = true;
+            entries.truncate(136);
+        }
         let mut bytes = 1024;
-        page.entries.retain(|row| {
+        entries.retain(|row| {
             bytes += serde_json::to_vec(row).expect("typed attention row").len() + 1;
             if bytes <= 256 * 1024 {
                 true
             } else {
-                page.truncated = true;
+                truncated = true;
                 false
             }
         });
-        page.validate()?;
-        Ok(page)
-    }
-    fn mark(
-        self: &Arc<Self>,
-        origin: CallOrigin,
-        request: MarkRead,
-    ) -> Result<BoxFuture<'static, Result<Position>>> {
-        self.domain.ensure_available().map_err(storage_error)?;
-        let writer = self
-            .writer
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ApiError::Capacity)?;
-        self.run_mutation(move |owner| {
-            Box::pin(async move {
-                let _writer = writer;
-                owner.commit_mark(origin, request).await
-            })
+        Ok(Page {
+            host_epoch: self.epoch.clone(),
+            entries,
+            truncated,
         })
     }
-    async fn commit_mark(&self, origin: CallOrigin, request: MarkRead) -> Result<Position> {
+
+    async fn mark(&self, origin: CallOrigin, request: Mark) -> Result<Position> {
         request.position.validate()?;
         if request.host_epoch != self.epoch {
             return Err(ApiError::Invalid("attention Host changed".into()));
         }
-        let page = self.candidates(&origin).await?;
-        self.domain.ensure_available().map_err(storage_error)?;
-        let current = page
-            .entries
-            .iter()
-            .find(|row| row.position.conversation == request.position.conversation)
-            .ok_or_else(|| ApiError::Invalid("attention source is no longer managed".into()))?;
-        if current.position.epoch != request.position.epoch
-            || revision(&request.position.sequence)? > revision(&current.position.sequence)?
+        let mut position = request.position;
+        let through = revision(&position.sequence)?;
+        let epoch = revision(&position.epoch)?;
+        let current = match &position.conversation {
+            ConversationIdentity::Native(id) => {
+                self.session
+                    .scoped(origin.clone())
+                    .read_summary(id)
+                    .await
+                    .map_err(session_error)?
+                    .durable_fact_seq
+            }
+            ConversationIdentity::External(id) => {
+                let row = self
+                    .external
+                    .residents()
+                    .await
+                    .map_err(|_| ApiError::Unavailable)?
+                    .into_iter()
+                    .find(|row| &row.snapshot.id == id && row.snapshot.epoch == epoch)
+                    .ok_or_else(|| ApiError::Invalid("attention source changed".into()))?;
+                revision(&row.sequence)?
+            }
+        };
+        if matches!(origin, CallOrigin::Device(ref device) if device.revoked.is_cancelled()) {
+            return Err(ApiError::Unauthorized);
+        }
+        let mut records = self.records.0.lock().expect("reading records");
+        let native = matches!(position.conversation, ConversationIdentity::Native(_));
+        if through > current
+            || native
+                && through
+                    > records
+                        .get(&position.conversation)
+                        .map_or(0, |r| r.completed)
         {
             return Err(ApiError::Invalid(
-                "attention source changed or position is in the future".into(),
+                "attention position is in the future".into(),
             ));
         }
-        let key = key(&origin, &request.position.conversation);
-        let mut position = request.position;
-        {
-            let state = self.state.lock().expect("attention reading positions");
-            self.domain.ensure_available().map_err(storage_error)?;
-            if let Some(previous) = state.positions.get(&key)
-                && previous.position.epoch == position.epoch
-                && revision(&previous.position.sequence)? > revision(&position.sequence)?
-            {
-                position.sequence.clone_from(&previous.position.sequence);
-            }
+        let record = records.entry(position.conversation.clone()).or_default();
+        if record.epoch != epoch {
+            *record = Record {
+                epoch,
+                ..Record::default()
+            };
         }
-        // The writer permit keeps these cached sizes stable through durable publication.
-        let encoded_bytes = position_bytes(&key, &position);
-        let evicted = {
-            let state = self.state.lock().expect("attention reading positions");
-            let mut projected = state
-                .size
-                .with_entry(
-                    state.positions.get(&key).map(|record| record.encoded_bytes),
-                    encoded_bytes,
-                )
-                .expect("bounded positions");
-            let mut evicted = Vec::new();
-            let mut candidates = state.recency.iter().filter(|candidate| *candidate != &key);
-            let spec = self.domain.spec();
-            while projected.records() > spec.maximum_records
-                || projected.bytes() > spec.maximum_bytes
-            {
-                let oldest = candidates.next().ok_or(ApiError::Capacity)?;
-                projected = projected
-                    .without_entry(state.positions[oldest].encoded_bytes)
-                    .expect("bounded positions");
-                evicted.push(oldest.clone());
-            }
-            evicted
-        };
-        for oldest in &evicted {
-            self.domain
-                .table::<Position>("positions")
-                .map_err(storage_error)?
-                .delete(oldest)
-                .await
-                .map_err(storage_error)?;
-            // Each acknowledged eviction is already durable even if the next write fails.
-            let mut state = self.state.lock().expect("attention reading positions");
-            state.remove(oldest);
-        }
-        self.domain
-            .table::<Position>("positions")
-            .map_err(storage_error)?
-            .put(&key, position.clone())
-            .await
-            .map_err(storage_error)?;
-        let mut state = self.state.lock().expect("attention reading positions");
-        state.put(key, position.clone(), encoded_bytes);
+        record.mark(request.action, through);
+        position.sequence = through.max(record.read).to_string();
         Ok(position)
     }
-    async fn close(&self) {
-        self.admission.close(&self.writer).await;
-        self.domain.close().await;
-    }
 }
-/// Ordinary Host owner of bounded native/external attention and reading positions.
+
+/// Host owner of shared, generation-local Session reminders.
 #[derive(Clone, Debug, Default)]
 pub struct AttentionFactory;
 #[derive(Deserialize)]
@@ -361,58 +311,21 @@ enum Never {}
 #[async_trait]
 impl PluginFactory for AttentionFactory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        let input: Config = serde_json::from_value(config.clone()).map_err(|_| {
-            rsi_meta::MetaError::InvalidInput("invalid attention configuration".into())
-        })?;
-        if input.backend.is_empty() || input.backend.len() > 256 {
+        if !config.is_null() {
             return Err(rsi_meta::MetaError::InvalidInput(
-                "invalid attention backend".into(),
+                "attention accepts no configuration".into(),
             ));
         }
-        Ok(PreparedActivation::new(config.clone())
-            .requiring_local::<DomainFacilityContract>()
+        Ok(PreparedActivation::new(ConfigValue::Null)
             .requiring_local::<SessionIngressContract>()
             .requiring_local::<ExternalConversationsContract>()
             .requiring_local::<ConnectionDescriptionContract>()
             .requiring_local::<ApiRegistrarContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let input: Config =
-            serde_json::from_value(plan.config().as_ref().clone()).map_err(activation)?;
-        let domain = plan
-            .local::<DomainFacilityContract>()?
-            .open(
-                DomainSpec {
-                    id: "rsi.attention".into(),
-                    backend: input.backend,
-                    version: STORAGE_VERSION,
-                    maximum_records: 4096,
-                    maximum_bytes: 1024 * 1024,
-                    ..DomainSpec::default()
-                },
-                Schema::default()
-                    .table::<Position>("positions")
-                    .map_err(activation)?,
-            )
-            .await
-            .map_err(activation)?;
-        let mut positions = BTreeMap::new();
-        for (key, position) in domain
-            .table::<Position>("positions")
-            .and_then(|table| table.snapshot())
-            .map_err(activation)?
-            .entries()
-        {
-            if key.len() != 64
-                || !key
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return Err(activation("invalid attention reading key"));
-            }
-            position.validate().map_err(activation)?;
-            positions.insert(key.to_owned(), (*position).clone());
-        }
+        let records = Arc::new(Records::default());
+        plan.context()
+            .on_emit::<SessionActivityEvent, _>(records.clone(), Default::default())?;
         let owner = Arc::new(Attention {
             session: plan.local::<SessionIngressContract>()?,
             external: plan.local::<ExternalConversationsContract>()?,
@@ -420,10 +333,8 @@ impl PluginFactory for AttentionFactory {
                 .local::<ConnectionDescriptionContract>()?
                 .host_epoch
                 .clone(),
-            domain,
-            state: Mutex::new(State::from_positions(positions)),
+            records,
             admission: Admission::new(2, plan.context().runtime().execution().clone()),
-            writer: Arc::new(Semaphore::new(1)),
         });
         let registrar = plan.local::<ApiRegistrarContract>()?;
         let read = owner.clone();
@@ -433,11 +344,13 @@ impl PluginFactory for AttentionFactory {
                 json_handler(move |context, _: Empty| {
                     let read = read.clone();
                     async move {
-                        read.run_read(move |owner| {
-                            Box::pin(async move { owner.read(&context.origin).await })
-                        })?
-                        .await
-                        .map(Ok::<_, Never>)
+                        read.admission
+                            .clone()
+                            .run_read(move || {
+                                Box::pin(async move { read.read(&context.origin).await })
+                            })?
+                            .await
+                            .map(Ok::<_, Never>)
                     }
                 }),
             )
@@ -445,12 +358,16 @@ impl PluginFactory for AttentionFactory {
         let write = owner.clone();
         let write = registrar
             .register(
-                Operation::MarkRead.spec(),
-                json_handler(move |context, request: MarkRead| {
+                Operation::Mark.spec(),
+                json_handler(move |context, request: Mark| {
                     let write = write.clone();
                     async move {
                         write
-                            .mark(context.origin, request)?
+                            .admission
+                            .run_mutation(|| {
+                                let write = write.clone();
+                                Box::pin(async move { write.mark(context.origin, request).await })
+                            })?
                             .await
                             .map(Ok::<_, Never>)
                     }
@@ -461,7 +378,7 @@ impl PluginFactory for AttentionFactory {
             "drain attention navigation",
             Box::new(move || {
                 Box::pin(async move {
-                    futures_util::join!(owner.close(), read.close(), write.close());
+                    futures_util::join!(owner.admission.close(), read.close(), write.close());
                     Ok(())
                 })
             }),
@@ -472,38 +389,3 @@ impl PluginFactory for AttentionFactory {
 #[cfg(test)]
 #[path = "attention_tests.rs"]
 mod tests;
-
-const STORAGE_VERSION: u32 = 2;
-
-#[cfg(test)]
-rsi_persistence_testkit::payload_contract!(
-    persistence_attention,
-    Position,
-    STORAGE_VERSION,
-    format!(
-        "tests/fixtures/attention/attention-v{}.json",
-        STORAGE_VERSION
-    ),
-    {
-        let samples: Vec<Position> = vec![
-            Position {
-                conversation: ConversationIdentity::Native(
-                    rsi_agent_session_protocol::SessionId::new("fixture").unwrap(),
-                ),
-                epoch: "0".into(),
-                sequence: "123".into(),
-            },
-            Position {
-                conversation: ConversationIdentity::External(
-                    rsi_acp_protocol::observation::ConversationId::new("external").unwrap(),
-                ),
-                epoch: "2".into(),
-                sequence: "9".into(),
-            },
-        ];
-        for sample in &samples {
-            sample.validate().unwrap();
-        }
-        samples
-    }
-);

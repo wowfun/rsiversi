@@ -36,10 +36,9 @@ async fn read(running: &RunningRsi, origin: CallOrigin) -> Page {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[expect(
     clippy::too_many_lines,
-    reason = "One public lifecycle verifies fast completion and per-principal durable reading positions"
+    reason = "One public lifecycle covers shared reminders, exact cuts, and restart"
 )]
-async fn attention_preserves_fast_completion_without_hydration_and_persists_exact_per_principal_reads()
- {
+async fn attention_shares_live_completions_and_manual_reminders_and_resets_on_restart() {
     let (endpoint, provider) = provider().await;
     let fixture = fixture(&endpoint);
     let profile = host_profile(&fixture);
@@ -79,8 +78,8 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
         wire(
             &running,
             CallOrigin::Local,
-            Operation::MarkRead,
-            json!({"host_epoch":page.host_epoch,"position":future})
+            Operation::Mark,
+            json!({"action":"read","host_epoch":page.host_epoch,"position":future})
         )
         .await,
         Err(ApiError::Invalid(_))
@@ -89,8 +88,8 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
         wire(
             &running,
             CallOrigin::Local,
-            Operation::MarkRead,
-            json!({"host_epoch":HostEpoch::generate().unwrap(),"position":position})
+            Operation::Mark,
+            json!({"action":"read","host_epoch":HostEpoch::generate().unwrap(),"position":position})
         )
         .await,
         Err(ApiError::Invalid(_))
@@ -98,8 +97,8 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
     wire(
         &running,
         CallOrigin::Local,
-        Operation::MarkRead,
-        json!({"host_epoch":page.host_epoch,"position":position}),
+        Operation::Mark,
+        json!({"action":"read","host_epoch":page.host_epoch,"position":position}),
     )
     .await
     .unwrap();
@@ -117,19 +116,29 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
             .authenticate(&device.token)
             .unwrap(),
     );
-    assert_eq!(
-        read(&running, origin.clone()).await.entries.len(),
-        1,
-        "Local reading does not clear another principal"
+    assert!(
+        read(&running, origin.clone()).await.entries.is_empty(),
+        "Another device sees the Local read"
     );
     wire(
         &running,
-        origin,
-        Operation::MarkRead,
-        json!({"host_epoch":page.host_epoch,"position":position}),
+        origin.clone(),
+        Operation::Mark,
+        json!({"action":"unread","host_epoch":page.host_epoch,"position":position}),
     )
     .await
     .unwrap();
+    wire(
+        &running,
+        CallOrigin::Local,
+        Operation::Mark,
+        json!({"action":"acknowledge","host_epoch":page.host_epoch,"position":position}),
+    )
+    .await
+    .unwrap();
+    let shared = read(&running, CallOrigin::Local).await;
+    assert!(shared.entries[0].reading.manual);
+    assert!(!shared.entries[0].reading.unseen);
     assert_eq!(
         handle.inspect().await.unwrap(),
         before,
@@ -143,6 +152,30 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
         read(&running, CallOrigin::Local).await.entries.is_empty(),
         "Startup does not discover cold history"
     );
+    let cold = json!({"conversation":position.conversation,"epoch":"0","sequence":"0"});
+    let fresh_epoch = read(&running, CallOrigin::Local).await.host_epoch;
+    wire(
+        &running,
+        CallOrigin::Local,
+        Operation::Mark,
+        json!({"action":"unread","host_epoch":fresh_epoch,"position":cold}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        read(&running, CallOrigin::Local).await.entries[0]
+            .reading
+            .manual,
+        "A cold sidebar row can be marked without attachment"
+    );
+    wire(
+        &running,
+        CallOrigin::Local,
+        Operation::Mark,
+        json!({"action":"read","host_epoch":fresh_epoch,"position":cold}),
+    )
+    .await
+    .unwrap();
     let handle = running
         .session_service()
         .unwrap()
@@ -151,7 +184,7 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
         .unwrap();
     assert!(
         read(&running, CallOrigin::Local).await.entries.is_empty(),
-        "Saved reading position survives restart"
+        "Reopening old history does not synthesize a new completion"
     );
     run_message_to_terminal(&handle, "attention-second").await;
     let advanced = read(&running, CallOrigin::Local).await;
@@ -171,7 +204,21 @@ async fn attention_preserves_fast_completion_without_hydration_and_persists_exac
             .authenticate(&device.token)
             .unwrap(),
     );
-    assert_eq!(read(&running, origin).await.entries.len(), 1);
+    wire(
+        &running,
+        origin.clone(),
+        Operation::Mark,
+        json!({"action":"read","host_epoch":fresh_epoch,"position":position}),
+    )
+    .await
+    .unwrap();
+    let stale = read(&running, origin).await;
+    assert_eq!(
+        stale.entries.len(),
+        1,
+        "Reading an older observed cut preserves the latest completion"
+    );
+    assert!(stale.entries[0].reading.unseen);
     drop(handle);
     assert!(running.shutdown().await.is_clean());
     provider.abort();

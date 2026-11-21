@@ -1076,6 +1076,10 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     async fn activity(&self) -> Result<SessionActivityPage> {
         Err(SessionError::NotFound("Session activity owner".into()))
     }
+    /// Filters up to 64 exact reminder identities by current Session access without opening them.
+    async fn visible_activity_sessions(&self, _sessions: &[SessionId]) -> Result<Vec<SessionId>> {
+        Err(SessionError::NotFound("Session activity owner".into()))
+    }
     /// Reads a fresh durable Header and activity/cut summary from one metadata snapshot.
     /// Does not create a handle, load transcript, or touch activity.
     async fn read_summary(&self, session_id: &SessionId) -> Result<SessionSummary>;

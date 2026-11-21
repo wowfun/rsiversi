@@ -68,7 +68,7 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
             .await
             .unwrap();
         let roster = Arc::new(Roster {
-            ids: vec![id],
+            ids: vec![id.clone()],
             present: std::sync::atomic::AtomicBool::new(true),
             revision: std::sync::atomic::AtomicU64::new(0),
         });
@@ -101,6 +101,7 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
                 revoked: device_stop.clone(),
             },
         ));
+        assert_eq!(scoped.visible_activity_sessions(std::slice::from_ref(&id)).await.unwrap(), vec![id.clone()]);
         let mut reading = Box::pin(scoped.activity());
         assert!(futures_util::poll!(&mut reading).is_pending());
         assert_eq!(
@@ -108,8 +109,8 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
                 policy.reads.load(Ordering::SeqCst),
                 approvals.reads.load(Ordering::SeqCst)
             ),
-            (1, 1),
-            "collection is blocked after authorization"
+            (2, 1),
+            "the exact reminder lookup and the activity collection both authorize the Session"
         );
         if revoke_scope {
             policy.lease.cancel();
@@ -118,6 +119,12 @@ async fn activity_revocation_during_collection_refuses_protected_and_device_deli
         }
         drop(gate);
         let reply = reading.await;
+        let cold = scoped.visible_activity_sessions(std::slice::from_ref(&id)).await;
+        if revoke_scope {
+            assert!(cold.unwrap().is_empty());
+        } else {
+            assert!(matches!(cold, Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))));
+        }
         service.stop().await.unwrap();
         assert!(
             matches!(
