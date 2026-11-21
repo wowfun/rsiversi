@@ -11,6 +11,7 @@ const script=`
 import React from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
 import {IconSprite} from '/src/icon-sprite.tsx';
 import {Markdown} from '/src/session/markdown.tsx';import {setClipboardWriter} from '/mounts.js';
+import {DocumentSessionScope} from '/src/document-plugins.tsx';import {installActions} from '/src/bridge.ts';
 import '/styles.css';import '/vendor/dsh/theme-base.css';import session from '/src/session/surface.module.css';import '/vendor/dsh/dockkit-tokens.css';import '/code-highlight.css';
 const start=(kind,fields={})=>({kind:'start',element:{kind,...fields}}),end={kind:'end'},text=value=>({kind:'text',text:value});
 window.code='const value = "<img src=x onerror=alert(1)>";\\nconsole.log("MARKDOWN_OK");\\n';
@@ -29,7 +30,18 @@ const table=[start('table'),start('table_head'),...['城市','结果','日期','
 const tables=[...table,start('quote'),...table,end];
 const linkedImage=[start('paragraph'),start('link',{href:'https://media.example.test/original'}),
   start('image',{src:'https://media.example.test/diagram.png'}),text('Diagram'),end,end,end];
+const localImage=[start('paragraph'),start('file_image',{path:'../diagram.svg'}),text('Local diagram'),end,end];
+window.reads=[];window.revoked=[];
+const revoke=URL.revokeObjectURL.bind(URL);
+URL.revokeObjectURL=url=>{window.revoked.push(url);revoke(url)};
+installActions({call:async(method,raw)=>{
+  window.reads.push([method,JSON.parse(raw)]);
+  return ['image/svg+xml',new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="teal"/></svg>')];
+}});
 const root=createRoot(article);
+window.renderLocal=(streaming,generation)=>{const view={session:'document',generation};
+  flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
+    React.createElement(Markdown,{events:localImage,streaming}))))};
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
@@ -123,12 +135,30 @@ try{
         await route.fulfill({contentType:'image/png',body:png(24,16,[32,120,145,255])});
       });
       await page.evaluate(()=>window.render(false,'image'));
-      const imageLink=page.getByRole('link',{name:'Diagram',exact:true});
-      await imageLink.scrollIntoViewIfNeeded();
+      const imageLink=page.locator('article a[href="https://media.example.test/original"]');
+      await page.locator('article').evaluate(el=>el.scrollIntoView({block:'start'}));
       await page.waitForFunction(()=>document.querySelector('article a img')?.naturalWidth===24);
+      assert.equal(await page.getByRole('link',{name:'Diagram',exact:true}).count(),1);
       assert.equal(await imageLink.getAttribute('href'),'https://media.example.test/original');
       assert.equal(await imageLink.locator('button').count(),0);
       assert.equal(imageHeaders.referer,undefined);
+      await page.evaluate(()=>window.renderLocal(true,'1'));
+      assert.equal(await page.locator('article').innerText(),'Local diagram');
+      assert.deepEqual(await page.evaluate(()=>window.reads),[]);
+      await page.evaluate(()=>window.renderLocal(false,'1'));
+      const local=page.getByRole('button',{name:'View full image: Local diagram'}).getByRole('img');
+      await local.evaluate(element=>element.decode());
+      const firstUrl=await local.getAttribute('src');
+      assert(firstUrl.startsWith('blob:'));
+      await page.evaluate(()=>window.renderLocal(false,'2'));
+      await local.evaluate(element=>element.decode());
+      assert.notEqual(await local.getAttribute('src'),firstUrl);
+      assert.deepEqual(await local.evaluate(el=>[el.naturalWidth,el.naturalHeight]),[96,48]);
+      await local.scrollIntoViewIfNeeded();
+      await page.screenshot({path:join(report,name+'-local-image.png')});
+      await page.evaluate(()=>window.render());
+      assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_image',{pane:'main',generation,path:'../diagram.svg'}]));
+      assert.equal(await page.evaluate(()=>new Set(window.revoked).size),2);
       assert.deepEqual(errors,[]);
       results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,errors});
     }finally{await browser.close()}

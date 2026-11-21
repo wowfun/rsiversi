@@ -16,12 +16,43 @@ use tokio_util::sync::CancellationToken;
 const SCRATCH_BYTES: usize =
     4 * rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES + 4 * wire::MAXIMUM_RESPONSE_BYTES;
 #[derive(Clone, Debug)]
-struct Services {
+pub(super) struct Services {
     reads: Arc<dyn SessionReads>,
     resolver: Arc<dyn ExecutionResolver>,
     owners: Arc<FileOwners>,
     caller: FilesCaller,
-    scratch: Arc<tokio::sync::Semaphore>,
+    pub(super) scratch: Arc<tokio::sync::Semaphore>,
+}
+impl Services {
+    pub(super) async fn access(
+        &self,
+        origin: &CallOrigin,
+        target: &rsi_session_protocol::SessionTarget,
+    ) -> Result<
+        (
+            rsi_session_protocol::SessionReadLease,
+            rsi_execution::ExecutionLease,
+            FilesBinding,
+        ),
+        SessionFilesError,
+    > {
+        target.validate().map_err(session_error)?;
+        let lease = self
+            .reads
+            .acquire(origin.clone(), target)
+            .await
+            .map_err(session_error)?;
+        let execution = self
+            .resolver
+            .lease(origin.clone(), lease.header().coordinates().location())?;
+        let binding = FilesBinding::new(
+            self.caller.clone(),
+            target.session_id.as_str(),
+            &target.header_key,
+            lease.header().canonical_cwd().into(),
+        )?;
+        Ok((lease, execution, binding))
+    }
 }
 #[derive(Serialize)]
 #[serde(transparent)]
@@ -84,24 +115,10 @@ where
                 .await
                 .map_err(|_| ApiError::ShuttingDown)?;
             let operation = async {
-                request.target.validate().map_err(session_error)?;
                 request.input.validate()?;
-                let lease = services
-                    .reads
-                    .acquire(context.origin.clone(), &request.target)
-                    .await
-                    .map_err(session_error)?;
+                let (lease, execution, binding) =
+                    services.access(&context.origin, &request.target).await?;
                 let lease = Arc::new(lease);
-                let binding = FilesBinding::new(
-                    services.caller.clone(),
-                    request.target.session_id.as_str(),
-                    &request.target.header_key,
-                    lease.header().canonical_cwd().into(),
-                )?;
-                let execution = services.resolver.lease(
-                    context.origin.clone(),
-                    lease.header().coordinates().location(),
-                )?;
                 let files = Arc::new(FilesView::new(
                     services.owners.clone(),
                     execution,
@@ -221,6 +238,10 @@ impl SessionFilesApi {
                         Ok(page)
                     },
                 ),
+            ),
+            (
+                FilesOperation::Image,
+                Arc::new(super::image_read::ImageHandler(services.clone())) as Arc<dyn ApiHandler>,
             ),
             (FilesOperation::Release, release(services.owners)),
         ];

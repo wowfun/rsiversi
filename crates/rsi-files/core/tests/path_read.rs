@@ -7,6 +7,37 @@ fn request(cwd: &std::path::Path, path: &[u8], kind: FileKind) -> PathRead {
 }
 
 #[tokio::test]
+async fn whole_file_reads_use_the_selected_host_and_bound_the_complete_body() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = rsi_workspace_path::canonical_native_path(temporary.path().canonicalize().unwrap());
+    let cwd = root.join("work");
+    std::fs::create_dir(&cwd).unwrap();
+    let bytes = vec![37; MAXIMUM_FILE_PAGE_BYTES + 19];
+    std::fs::write(root.join("sample"), &bytes).unwrap();
+    let files = LocalFiles::new().unwrap();
+    let binding = FilesBinding::new(FilesCaller::default(), "session", "header", cwd).unwrap();
+    let path = ReadPath::new(b"../sample").unwrap();
+    assert_eq!(
+        files
+            .read_body(
+                binding.clone(),
+                path.clone(),
+                bytes.len(),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(
+        files
+            .read_body(binding, path, bytes.len() - 1, CancellationToken::new())
+            .await,
+        Err(FilesError::Capacity)
+    );
+}
+
+#[tokio::test]
 async fn finite_reads_resolve_on_host_without_tokens_and_observe_fresh_contents() {
     let temporary = tempfile::tempdir().unwrap();
     let root = rsi_workspace_path::canonical_native_path(temporary.path().canonicalize().unwrap());

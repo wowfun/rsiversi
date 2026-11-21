@@ -6,7 +6,7 @@ use rsi_api_protocol::{
 };
 use std::sync::Arc;
 
-/// Private trusted adapter: only the four Files reads are reachable, with the
+/// Private trusted adapter: only the Files reads are reachable, with the
 /// same registry-owned input pool and invocation lifecycle as remote requests.
 #[derive(Debug)]
 struct LocalReads {
@@ -25,6 +25,7 @@ pub(crate) fn client(
         FilesOperation::Read,
         FilesOperation::List,
         FilesOperation::Release,
+        FilesOperation::Image,
     ]
     .map(|op| op.spec().key())
     .to_vec();

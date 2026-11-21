@@ -8,6 +8,7 @@ import {resources} from './resource-hosts.ts';
 type Question = Extract<InteractionData,{kind:'question'}>['request'];
 
 export interface DocumentSession {
+  readonly pane: string;
   readonly view: NativeSurface;
   action(name: string, fields?: Record<string, unknown>): Promise<unknown>;
 }
@@ -44,7 +45,7 @@ export function useDocumentSession() {
 }
 export function DocumentSessionScope({view, owner, children}: {
   view?: NativeSurface | null;
-  owner: {staged?: {data: NativeSurface | null}; action(name: string, fields?: Record<string, unknown>): Promise<unknown>};
+  owner: {index: string; staged?: {data: NativeSurface | null}; action(name: string, fields?: Record<string, unknown>): Promise<unknown>};
   children: React.ReactNode;
 }) {
   const lifetime = React.useMemo(() => ({active: true}), [view?.session, view?.generation]);
@@ -53,6 +54,7 @@ export function DocumentSessionScope({view, owner, children}: {
     return () => { lifetime.active = false; };
   }, [lifetime]);
   const scope = view && {
+    pane: owner.index,
     view,
     action(name: string, fields: Record<string, unknown> = {}) {
       if (!lifetime.active || owner.staged?.data?.session !== view.session || owner.staged.data.generation !== view.generation)

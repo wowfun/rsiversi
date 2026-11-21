@@ -32,6 +32,7 @@ bytes.workspace = true
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-client-preferences = { path = "../client-preferences" }
 rsi-session-files = { path = "../session-files" }
+rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-session-files-ui = { path = "../session-files-ui" }
 rsi-ui = { path = "../ui" }
 rsi-session-ui = { path = "../session-ui" }
@@ -39,6 +40,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 pulldown-cmark.workspace = true
 url.workspace = true
+percent-encoding.workspace = true
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-ui-api = { path = "../ui-api" }
 rsi-application = { path = "../application" }
@@ -73,7 +75,6 @@ rsi-agent-goal = { path = "../../rsi-agent/goal" }
 image.workspace = true
 sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }
-rsi-files-protocol = { path = "../../rsi-files/protocol" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [lints]

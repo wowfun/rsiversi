@@ -83,3 +83,8 @@ it does not silently repeat the operation or convert it to ordinary Tool text.
 returned native not-found. Missing roots, unavailable providers, expired tokens
 and transport failures do not prove absence. Consumers may infer deletion only
 from `Missing`; all other failures preserve incomplete evidence.
+
+Whole-file display consumers can request a finite regular-file body by native
+path. The caller supplies the execution cwd and byte ceiling and owns the
+authority for reading outside that cwd. A successful read returns one file
+version. The local provider reads the retained file directly into its result.

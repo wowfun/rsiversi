@@ -37,6 +37,7 @@ pub(crate) enum Element {
     Strike,
     Link { href: String },
     Image { src: String },
+    FileImage { path: String },
     Span,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -61,6 +62,40 @@ fn link(value: &str) -> Option<String> {
     }
     let parsed = url::Url::parse(value).ok()?;
     matches!(parsed.scheme(), "http" | "https").then(|| parsed.into())
+}
+
+fn file_image(value: &str) -> Option<String> {
+    let raw = value.split('#').next()?;
+    if raw.strip_prefix(r"\\?\").unwrap_or(raw).contains('?')
+        || raw.as_bytes().iter().enumerate().any(|(i, b)| {
+            *b == b'%'
+                && !raw
+                    .as_bytes()
+                    .get(i + 1..i + 3)
+                    .is_some_and(|s| s.iter().all(u8::is_ascii_hexdigit))
+        })
+    {
+        return None;
+    }
+    let path = percent_encoding::percent_decode_str(raw)
+        .decode_utf8()
+        .ok()?;
+    if path.is_empty()
+        || !rsi_session_files::is_local_image_path(path.as_bytes())
+        || path.len() > rsi_files_protocol::MAXIMUM_FILE_PATH_BYTES
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    if !drive && url::Url::parse(&path).is_ok() {
+        return None;
+    }
+    Some(path.into_owned())
 }
 
 fn leaf(event: Event<'_>) -> Option<Node> {
@@ -143,9 +178,10 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                         Element::TableCell { alignment, header }
                     }
                     Tag::HtmlBlock => Element::Span,
-                    Tag::Image { dest_url, .. } => {
-                        link(&dest_url).map_or(Element::Span, |src| Element::Image { src })
-                    }
+                    Tag::Image { dest_url, .. } => link(&dest_url)
+                        .map(|src| Element::Image { src })
+                        .or_else(|| file_image(&dest_url).map(|path| Element::FileImage { path }))
+                        .unwrap_or(Element::Span),
                     Tag::List(start) => Element::List {
                         start: start.map(u32::try_from).transpose().ok()?,
                     },
@@ -197,7 +233,10 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
                     text.capacity()
                 }
                 Node::Start {
-                    element: Element::Link { href } | Element::Image { src: href },
+                    element:
+                        Element::Link { href }
+                        | Element::Image { src: href }
+                        | Element::FileImage { path: href },
                 } => href.capacity(),
                 Node::Start {
                     element:
@@ -340,6 +379,29 @@ mod tests {
             "//remote/x",
         ] {
             assert!(link(invalid).is_none());
+        }
+    }
+    #[test]
+    fn local_images_resolve_encoded_filenames_and_native_paths_after_markdown_parsing() {
+        for (src, expected) in [
+            ("./diagram.png", "./diagram.png"),
+            ("../a%20b%231%25.png", "../a b#1%.png"),
+            ("/home/art/猫.jpg", "/home/art/猫.jpg"),
+            ("C:/Photos/a.png", "C:/Photos/a.png"),
+        ] {
+            let nodes = parse(&format!("![caption]({src})")).unwrap();
+            assert!(nodes.iter().any(|node|matches!(node,Node::Start{element:Element::FileImage{path}} if path==expected)));
+        }
+        for invalid in [
+            "https://example.com/a",
+            "file:///home/private",
+            "//another-host/a",
+            "bad%zz",
+            "bad%00.jpg",
+            "data:text/plain,hello",
+            "#fragment",
+        ] {
+            assert!(file_image(invalid).is_none(), "{invalid}");
         }
     }
     #[test]

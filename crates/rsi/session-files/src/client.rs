@@ -47,6 +47,54 @@ fn malformed() -> SessionFilesError {
 }
 #[async_trait]
 impl SessionFiles for SessionFilesClient {
+    async fn image(
+        &self,
+        target: SessionTarget,
+        path: rsi_files_protocol::ReadPath,
+    ) -> Result<(String, rsi_api_protocol::RetainedBytes)> {
+        use rsi_api_protocol::ApiOutput;
+        let spec = FilesOperation::Image.spec();
+        let input = self.api.input_budget(spec.class).encode(
+            &Request {
+                target,
+                input: path,
+            },
+            spec.maximum_request_bytes,
+        )?;
+        match self.api.call(&spec, input).await {
+            Ok(ApiOutput::Reply(message)) => {
+                let mime = serde_json::from_slice::<String>(message.json.as_bytes())
+                    .map_err(|_| malformed())?;
+                let bytes = message
+                    .binary
+                    .filter(|part| {
+                        !part.is_empty()
+                            && part.len() <= rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES
+                    })
+                    .ok_or_else(malformed)?;
+                if !matches!(
+                    mime.as_str(),
+                    "image/png"
+                        | "image/jpeg"
+                        | "image/gif"
+                        | "image/webp"
+                        | "image/bmp"
+                        | "image/x-icon"
+                        | "image/svg+xml"
+                ) {
+                    return Err(malformed());
+                }
+                Ok((mime, bytes))
+            }
+            Err(ApiError::Domain(reason)) => {
+                Err(serde_json::from_slice::<FilesError>(reason.as_bytes())
+                    .map_err(|_| malformed())?
+                    .into())
+            }
+            Err(error) => Err(error.into()),
+            _ => Err(malformed()),
+        }
+    }
     async fn open(
         &self,
         target: SessionTarget,

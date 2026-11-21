@@ -12,6 +12,7 @@ use rsi_session_protocol::SessionTarget;
 use std::fmt;
 
 mod client;
+mod image_read;
 mod local;
 mod plugin;
 mod resources;
@@ -34,10 +35,24 @@ pub enum SessionFilesError {
 }
 /// Session-bound file operation result.
 pub type Result<T> = std::result::Result<T, SessionFilesError>;
+/// Sniffed media type and the finite response's retained image allocation.
+pub type SessionImage = (String, rsi_api_protocol::RetainedBytes);
+
+/// A local Host image reference cannot select a network share or device namespace.
+pub fn is_local_image_path(path: &[u8]) -> bool {
+    !matches!(path, [b'/' | b'\\', b'/' | b'\\', ..])
+        || matches!(path, [b'\\', b'\\', b'?', b'\\', drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
+}
 
 /// Human workspace browsing over one authenticated API connection generation.
 #[async_trait]
 pub trait SessionFiles: fmt::Debug + Send + Sync + 'static {
+    /// Read one displayable image through the Session and execution grants.
+    async fn image(
+        &self,
+        target: SessionTarget,
+        path: rsi_files_protocol::ReadPath,
+    ) -> Result<SessionImage>;
     /// Open a new read snapshot for the currently bound Session workspace.
     async fn open(
         &self,

@@ -3,18 +3,27 @@
 This standard-product adapter exposes authenticated, finite workspace browsing
 through ordinary endpoint and client plugins. The API consumes the execution
 resolver and the actual Session read-lease service. `files/open`, `read`,
-`list` and `release` are version-one authenticated Data/Read operations: a lost
+`list` and `release` are authenticated Data/Read operations. A lost
 waiter cancels work. They accept a Session/Header target and relative paths or
 retained file descriptors, never an absolute root override.
 
+The separate transcript image read accepts a native image path and the same
+authenticated Session/Header target. A device with read access to that Session
+and its execution location may display an image outside its workspace. Relative
+paths use the frozen Header cwd. The execution provider resolves absolute paths,
+parents and links on the selected host. The reply contains a bounded image
+body, with no durable Media import, file token or directory access.
+The maximum is 50 MiB, with 16,777,216 pixels for raster previews and 256 KiB
+for SVG. Network-share and device prefixes are outside this local-path operation.
+
 The endpoint plugin also publishes the same typed client for trusted embedded
-applications. Its private adapter admits only these four exact read operations
+applications. Its private adapter admits these Files read operations
 with Local origin through the same registry, byte pools, decoders and Session
 leases. It inherits the endpoint generation's retirement. Remote applications
 obtain this capability from the ordinary authenticated domain client plugin.
 
-Every call decodes its closed bounded request, reserves materialization
-scratch and validates ranges before acquiring the actual Session read lease. The Header's canonical cwd
+Each file read decodes its closed bounded request and holds materialization
+capacity during I/O. The Header's canonical cwd
 selects the root for an authenticated caller. Each call forwards its actual
 ingress origin to Session admission and selects a fresh execution lease for the
 Header location; remote paths never enter the Service's native Files reader.
@@ -52,7 +61,8 @@ Retirement drains endpoint admission, then releases all retained resources. Ever
 continuation receives a freshly authorized binding and retains the finite Session
 lease through I/O. Tokens never retain draft activity. Files owns retained native
 handles and all page/snapshot/token/job limits; this adapter owns bounded wire
-and Header materialization scratch. A response echoes its exact request. Clients
+and Header materialization scratch. Token operations echo their exact request.
+An image reply carries its detected MIME type and one finite binary part. Clients
 check that echo, file kind/length, exact byte offsets, byte counts, directory
 ordering, descendant names and limits before publishing decoded values. The same
 malformed-peer scenarios run through public client interfaces natively and in

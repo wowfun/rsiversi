@@ -196,6 +196,20 @@ impl BoundFiles {
 }
 #[async_trait]
 impl Files for BoundFiles {
+    async fn read_body(
+        &self,
+        binding: FilesBinding,
+        path: rsi_files_protocol::ReadPath,
+        maximum: usize,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let permit = self.admit()?;
+        let inner = self.inner.clone();
+        self.operation(permit, async move {
+            inner.read_body(binding, path, maximum, cancellation).await
+        })
+        .await
+    }
     async fn read_path(
         &self,
         request: rsi_files_protocol::PathRead,

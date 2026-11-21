@@ -167,6 +167,93 @@ impl PathPage {
     }
 }
 
+// Page-only providers resolve once, then pin a single version for a large body.
+pub(super) async fn read_body<F: crate::Files + ?Sized>(
+    files: &F,
+    binding: crate::FilesBinding,
+    path: ReadPath,
+    maximum: usize,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<Vec<u8>> {
+    if !(1..=crate::MAXIMUM_FILE_BODY_BYTES).contains(&maximum) {
+        return Err(FilesError::Invalid);
+    }
+    let first = files
+        .read_path(
+            PathRead::new(
+                binding.workspace().into(),
+                path,
+                FileKind::File,
+                0,
+                maximum.min(MAXIMUM_FILE_PAGE_BYTES),
+            )?,
+            cancellation.clone(),
+        )
+        .await?;
+    let ReadPage::File(page) = first.page else {
+        return Err(FilesError::Invalid);
+    };
+    if page.total > maximum as u64 {
+        return Err(FilesError::Capacity);
+    }
+    if page.total <= MAXIMUM_FILE_PAGE_BYTES as u64 {
+        return hex::decode(page.bytes_hex).map_err(|_| FilesError::Invalid);
+    }
+    let resolved = first.path.as_bytes();
+    let split = resolved
+        .iter()
+        .rposition(|byte| *byte == b'/' || (!resolved.starts_with(b"/") && *byte == b'\\'))
+        .ok_or(FilesError::Invalid)?;
+    let parent = if split == 0 || (split == 2 && resolved[1] == b':') {
+        &resolved[..=split]
+    } else {
+        &resolved[..split]
+    };
+    #[cfg(unix)]
+    let workspace =
+        PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(parent));
+    #[cfg(not(unix))]
+    let workspace = PathBuf::from(std::str::from_utf8(parent).map_err(|_| FilesError::Invalid)?);
+    let binding = crate::FilesBinding {
+        workspace,
+        ..binding
+    };
+    let relative = crate::RelativePath::new(&resolved[split + 1..])?;
+    let opened = files
+        .open(
+            binding.clone(),
+            relative,
+            FileKind::File,
+            cancellation.clone(),
+        )
+        .await?;
+    struct Hold<'a, F: crate::Files + ?Sized>(&'a F, crate::FilesBinding, crate::FileToken);
+    impl<F: crate::Files + ?Sized> Drop for Hold<'_, F> {
+        fn drop(&mut self) {
+            let _ = self.0.release(&self.1, &self.2);
+        }
+    }
+    let hold = Hold(files, binding, opened.token);
+    if opened.length > maximum as u64 {
+        return Err(FilesError::Capacity);
+    }
+    let mut bytes = vec![0; usize::try_from(opened.length).map_err(|_| FilesError::Capacity)?];
+    for (index, destination) in bytes.chunks_mut(MAXIMUM_FILE_PAGE_BYTES).enumerate() {
+        let offset = (index * MAXIMUM_FILE_PAGE_BYTES) as u64;
+        let page = files
+            .read(
+                hold.1.clone(),
+                hold.2.clone(),
+                offset,
+                destination.len(),
+                cancellation.clone(),
+            )
+            .await?;
+        hex::decode_to_slice(page.bytes_hex, destination).map_err(|_| FilesError::Invalid)?;
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

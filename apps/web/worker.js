@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, directory_input, scheduled_tasks, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_image, directory_input, scheduled_tasks, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -89,6 +89,8 @@ async function dispatch(data) {
     result = await scheduled_tasks(data.payload.action, data.payload.id);
   } else if (data.method === "directory_input") {
     result = await directory_input(data.payload);
+  } else if (data.method === "transcript_image") {
+    result = await transcript_image(data.payload);
   } else if (data.method === "file_input") {
     result = await file_input(data.payload);
   } else if (data.method === "export_input") {
@@ -125,7 +127,8 @@ self.onmessage = ({ data }) => {
   const task = (async () => {
     try {
       const result = await dispatch(data);
-      postMessage({ kind: "reply", id: data.id, result }, result instanceof Uint8Array ? [result.buffer] : []);
+      const bytes = data.method === "transcript_image" ? result[1] : result;
+      postMessage({ kind: "reply", id: data.id, result }, bytes instanceof Uint8Array ? [bytes.buffer] : []);
     } catch (error) {
       postMessage({ kind: "reply", id: data.id, error: String(error), notAdmitted: error?.notAdmitted === true, retryable: error?.notAdmitted === true && error?.retryable !== false });
     } finally { calls[selected]--; }

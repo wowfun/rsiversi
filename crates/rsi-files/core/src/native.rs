@@ -218,31 +218,9 @@ pub(super) fn read_path(
     request: &rsi_files_protocol::PathRead,
     cancellation: &CancellationToken,
 ) -> Result<rsi_files_protocol::PathPage> {
-    use rsi_files_protocol::{PathPage, ReadPage, ReadPath};
-    check(cancellation)?;
-    if !request.cwd().is_absolute() {
-        return Err(FilesError::Invalid);
-    }
-    #[cfg(unix)]
-    let path = PathBuf::from(std::ffi::OsStr::from_bytes(request.path().as_bytes()));
-    #[cfg(windows)]
-    let path = PathBuf::from(
-        std::str::from_utf8(request.path().as_bytes()).map_err(|_| FilesError::Invalid)?,
-    );
-    // Resolve once on the execution host. Subsequent I/O uses retained handles.
-    let path = rsi_workspace_path::canonical_native_path(
-        std::fs::canonicalize(request.cwd().join(path)).map_err(relative_open_error)?,
-    );
-    check(cancellation)?;
-    let resolved = ReadPath::new(&name_bytes(path.as_os_str())?)?;
-    let (root, relative) = match request.kind() {
-        FileKind::File => (
-            path.parent().ok_or(FilesError::Invalid)?,
-            RelativePath::new(&name_bytes(path.file_name().ok_or(FilesError::Invalid)?)?)?,
-        ),
-        FileKind::Directory => (path.as_path(), RelativePath::default()),
-    };
-    let resource = open_at(root, relative, request.kind(), cancellation)?;
+    use rsi_files_protocol::{PathPage, ReadPage};
+    let (resolved, resource) =
+        resolve(request.cwd(), request.path(), request.kind(), cancellation)?;
     let page = match request.kind() {
         FileKind::File => {
             ReadPage::File(resource.read(request.offset(), request.maximum(), cancellation)?)
@@ -257,6 +235,53 @@ pub(super) fn read_path(
         path: resolved,
         page,
     })
+}
+
+fn resolve(
+    cwd: &std::path::Path,
+    input: &rsi_files_protocol::ReadPath,
+    kind: FileKind,
+    cancellation: &CancellationToken,
+) -> Result<(rsi_files_protocol::ReadPath, Resource)> {
+    use rsi_files_protocol::ReadPath;
+    check(cancellation)?;
+    if !cwd.is_absolute() {
+        return Err(FilesError::Invalid);
+    }
+    #[cfg(unix)]
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(input.as_bytes()));
+    #[cfg(windows)]
+    let path =
+        PathBuf::from(std::str::from_utf8(input.as_bytes()).map_err(|_| FilesError::Invalid)?);
+    // Resolve once on the execution host. Subsequent I/O uses retained handles.
+    let path = rsi_workspace_path::canonical_native_path(
+        std::fs::canonicalize(cwd.join(path)).map_err(relative_open_error)?,
+    );
+    check(cancellation)?;
+    let resolved = ReadPath::new(&name_bytes(path.as_os_str())?)?;
+    let (root, relative) = match kind {
+        FileKind::File => (
+            path.parent().ok_or(FilesError::Invalid)?,
+            RelativePath::new(&name_bytes(path.file_name().ok_or(FilesError::Invalid)?)?)?,
+        ),
+        FileKind::Directory => (path.as_path(), RelativePath::default()),
+    };
+    Ok((resolved, open_at(root, relative, kind, cancellation)?))
+}
+pub(super) fn read_body(
+    binding: &FilesBinding,
+    path: &rsi_files_protocol::ReadPath,
+    maximum: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>> {
+    if !(1..=rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES).contains(&maximum) {
+        return Err(FilesError::Invalid);
+    }
+    let (_, resource) = resolve(binding.workspace(), path, FileKind::File, cancellation)?;
+    if resource.length() > maximum as u64 {
+        return Err(FilesError::Capacity);
+    }
+    resource.read_bytes(0, maximum, cancellation)
 }
 impl Resource {
     pub(super) fn describe(&self, token: FileToken) -> OpenedFile {
@@ -307,6 +332,18 @@ impl Resource {
         maximum: usize,
         cancellation: &CancellationToken,
     ) -> Result<FilePage> {
+        Ok(FilePage {
+            offset,
+            total: self.version.length,
+            bytes_hex: hex::encode(self.read_bytes(offset, maximum, cancellation)?),
+        })
+    }
+    fn read_bytes(
+        &self,
+        offset: u64,
+        maximum: usize,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>> {
         let Object::File(file) = &self.object else {
             return Err(FilesError::Invalid);
         };
@@ -332,11 +369,7 @@ impl Resource {
             }
         }
         self.verify(cancellation)?;
-        Ok(FilePage {
-            offset,
-            total: self.version.length,
-            bytes_hex: hex::encode(bytes),
-        })
+        Ok(bytes)
     }
     pub(super) fn list(
         &self,

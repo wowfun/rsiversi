@@ -5,6 +5,14 @@ use rsi_files_protocol::{FileToken, OpenedFile};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(super) enum Resource {}
+pub(super) fn read_body(
+    _: &FilesBinding,
+    _: &rsi_files_protocol::ReadPath,
+    _: usize,
+    _: &CancellationToken,
+) -> Result<Vec<u8>> {
+    Err(FilesError::Unsupported)
+}
 pub(super) fn read_path(
     _: &rsi_files_protocol::PathRead,
     _: &CancellationToken,

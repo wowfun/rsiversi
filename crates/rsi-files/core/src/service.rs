@@ -216,6 +216,18 @@ fn check(cancellation: &CancellationToken) -> Result<()> {
 }
 #[async_trait]
 impl Files for LocalFiles {
+    async fn read_body(
+        &self,
+        binding: FilesBinding,
+        path: rsi_files_protocol::ReadPath,
+        maximum: usize,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<u8>> {
+        self.run(cancellation, move |stop| {
+            platform::read_body(&binding, &path, maximum, &stop)
+        })
+        .await
+    }
     async fn read_path(
         &self,
         request: rsi_files_protocol::PathRead,

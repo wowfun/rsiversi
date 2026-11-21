@@ -13,6 +13,7 @@ import type { HighlightToken } from "../../code-highlight.js";
 import { highlights } from "../runtime/highlight-queue.js";
 import { CopyButton } from "./copy-button.tsx";
 import { MarkdownImage } from "./markdown-image.tsx";
+import { TranscriptFileImage } from "./transcript-file-image.tsx";
 import {
   IconNowrapFillRegular,
   IconWrapFillRegular,
@@ -36,6 +37,7 @@ type Element =
   | { kind: "list"; start: number | null }
   | { kind: "link"; href: string }
   | { kind: "image"; src: string }
+  | { kind: "file_image"; path: string }
   | {
       kind: "table_cell";
       header: boolean;
@@ -220,6 +222,8 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
         );
       case "image":
         return <MarkdownImage key={`${key}:${element.src}`} src={element.src} alt={textOf(node.children)} linked={inLink}/>;
+      case "file_image":
+        return streaming ? textOf(node.children) : <TranscriptFileImage key={`${key}:${element.path}`} path={element.path} alt={textOf(node.children)} linked={inLink}/>;
       case "link":
         return (
           <a

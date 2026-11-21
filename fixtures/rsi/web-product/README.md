@@ -1093,3 +1093,11 @@ The service fixture's `localWeb` option starts the installed `rsi web`
 listener. Its origin and one-use launch URL follow the current listener across
 a restart. It supports tests that distinguish
 the Host owner's browser credential from an ordinary paired device.
+
+With a paired release in `RSI_WEB_BINARY` and `RSI_WEB_ASSETS`, run
+`RSI_REPORT_DIR=/absolute/new/report node transcript-images.mjs` from this
+directory. Two authenticated devices open the same transcript before and after
+a Host restart and replacement of an outside-workspace image. Windows and
+Linux Chromium and Firefox use deterministic replies by default. For a real
+DeepSeek reply, run from the repository root with `RSI_LIVE_DEEPSEEK=1` and
+the fixture's path, using the development key file under that root.

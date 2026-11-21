@@ -22,6 +22,8 @@ pub enum FilesOperation {
     List,
     /// Release a token early.
     Release,
+    /// Read a displayable image on the Session's execution host.
+    Image,
 }
 impl FilesOperation {
     /// Registered authentication, cancellation and wire-budget policy.
@@ -32,6 +34,7 @@ impl FilesOperation {
             Self::Read => "read",
             Self::List => "list",
             Self::Release => "release",
+            Self::Image => "image",
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
@@ -41,7 +44,11 @@ impl FilesOperation {
             effect: OperationEffect::Read,
             encoding: RequestEncoding::Json,
             maximum_request_bytes: MAXIMUM_REQUEST_BYTES,
-            maximum_response_bytes: MAXIMUM_RESPONSE_BYTES,
+            maximum_response_bytes: if self == Self::Image {
+                rsi_files_protocol::MAXIMUM_FILE_BODY_BYTES + 1024
+            } else {
+                MAXIMUM_RESPONSE_BYTES
+            },
         }
     }
 }

@@ -120,6 +120,10 @@ Worker frames never overwrite editable text or ordered image references. Dynamic
 nodes or the Worker's restricted Markdown event stream, using only its closed
 element set. Absolute HTTP(S) Markdown images load automatically near the viewport.
 Both the inline image and full-size preview send no referrer. Raw HTML stays text.
+Settled replies can also display local image paths on the conversation's
+execution host. A paired device uses its Session read grant for both workspace
+and outside-workspace images. The document validates local image bytes before
+decoding and releases the preview Blob URL with the displayed image.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.

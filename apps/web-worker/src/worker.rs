@@ -519,6 +519,19 @@ pub async fn file_input(source: String) -> Result<String, JsValue> {
     application()?.file_input(&source).await.map_err(failure)
 }
 
+/// Returns the admitted MIME type and transferable bytes for one transcript image.
+#[wasm_bindgen]
+pub async fn transcript_image(source: String) -> Result<js_sys::Array, JsValue> {
+    let (mime, bytes) = application()?
+        .transcript_image(&source)
+        .await
+        .map_err(failure)?;
+    Ok(js_sys::Array::of2(
+        &JsValue::from_str(&mime),
+        &js_sys::Uint8Array::from(bytes.as_bytes()),
+    ))
+}
+
 /// Restores saved input only to an exact Session, or explicitly creates a Fresh replacement.
 #[wasm_bindgen]
 pub async fn restore_session(source: String) -> Result<String, JsValue> {

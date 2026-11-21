@@ -15,6 +15,8 @@ pub use path_read::{PathPage, PathRead, ReadPage, ReadPath};
 pub const PREFERRED_FILE_PAGE_BYTES: usize = 16 * 1024;
 /// Hard exact file page size.
 pub const MAXIMUM_FILE_PAGE_BYTES: usize = 64 * 1024;
+/// Largest finite whole-file read; separate from model-facing page limits.
+pub const MAXIMUM_FILE_BODY_BYTES: usize = 50 * 1024 * 1024;
 /// Preferred directory page length.
 pub const PREFERRED_DIRECTORY_PAGE_ENTRIES: usize = 128;
 /// Hard directory page length.
@@ -105,8 +107,7 @@ impl FilesBinding {
     ) -> Result<Self> {
         if [subject, revision].iter().any(|value| {
             value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
-        }) || !workspace.is_absolute()
-            || !rsi_workspace_path::is_normalized_absolute_path(&workspace)
+        }) || !rsi_workspace_path::is_normalized_absolute_path(&workspace)
         {
             return Err(FilesError::Invalid);
         }
@@ -282,6 +283,17 @@ pub struct DirectoryPage {
 /// Shared reader. Entrypoints must establish current authority before every call.
 #[async_trait]
 pub trait Files: fmt::Debug + Send + Sync + 'static {
+    /// Read one version of a regular file, resolving the path on the selected host.
+    /// The binding's cwd is a base for relative paths; the caller authorizes host paths.
+    async fn read_body(
+        &self,
+        binding: FilesBinding,
+        path: ReadPath,
+        maximum: usize,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<u8>> {
+        path_read::read_body(self, binding, path, maximum, cancellation).await
+    }
     /// Resolve and read one page on this execution host; caller owns read authority.
     async fn read_path(
         &self,
@@ -351,6 +363,9 @@ mod tests {
     }
     #[test]
     fn caller_identity_is_not_value_equality_and_binding_is_bounded() {
+        for cwd in ["/target/work", "D:/target/work"] {
+            assert!(FilesBinding::new(FilesCaller::default(), "s", "h", cwd.into()).is_ok());
+        }
         let caller = FilesCaller::default();
         assert_eq!(caller, caller.clone());
         assert_ne!(caller, FilesCaller::default());

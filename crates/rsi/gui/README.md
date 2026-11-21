@@ -299,6 +299,9 @@ An absolute HTTP(S) Markdown image carries its URL and alt text to the renderer.
 The browser loads it with no referrer and offers a full-size preview. An
 unavailable image falls back to its alt text or destination. Tool/file/source
 contents keep their plain-text presentations.
+Local Markdown image destinations become file-path events. After settlement
+the renderer reads through the attached Session Files service, including local
+absolute paths and parent paths. A read does not change the file picker's selection.
 The document constructs only the closed element set with text nodes, and links
 open with no opener or referrer.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses

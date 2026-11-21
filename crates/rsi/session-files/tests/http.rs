@@ -161,10 +161,10 @@ struct Reader {
 impl Files for Reader {
     async fn read_path(
         &self,
-        _request: rsi_files_protocol::PathRead,
-        _cancellation: tokio_util::sync::CancellationToken,
+        request: rsi_files_protocol::PathRead,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> rsi_files_protocol::Result<rsi_files_protocol::PathPage> {
-        panic!("finite path read is outside this fixture")
+        self.native.read_path(request, cancellation).await
     }
 
     fn release_caller(&self, caller: &FilesCaller) {
@@ -373,6 +373,7 @@ impl Harness {
                     "read" => rsi_session_files::FilesOperation::Read,
                     "list" => rsi_session_files::FilesOperation::List,
                     "release" => rsi_session_files::FilesOperation::Release,
+                    "image" => rsi_session_files::FilesOperation::Image,
                     _ => panic!("unknown fixture operation"),
                 }
                 .spec()
@@ -403,6 +404,68 @@ impl Harness {
     }
 }
 
+#[tokio::test]
+async fn session_read_grants_preview_images_in_and_outside_the_workspace() {
+    let _serial = SERIAL.lock().await;
+    let harness = Harness::start().await;
+    let other = tempfile::tempdir().unwrap();
+    let contents = br#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"/>"#;
+    let path = other.path().join("image.svg");
+    std::fs::write(&path, contents).unwrap();
+    std::fs::write(harness._temporary.path().join("image.svg"), contents).unwrap();
+    let absolute = ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let request = serde_json::json!({"target":harness.target(),"input":&absolute});
+    assert_eq!(harness.raw("image", request, false).await.status(), 401);
+    for p in [absolute.clone(), ReadPath::new(b"image.svg").unwrap()] {
+        let (mime, body) = harness.client.image(harness.target(), p).await.unwrap();
+        assert_eq!(mime, "image/svg+xml");
+        assert_eq!(body.as_bytes(), contents);
+    }
+    let mut bmp = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(256, 128)
+        .write_to(&mut bmp, image::ImageFormat::Bmp)
+        .unwrap();
+    let bytes = bmp.into_inner();
+    assert!(bytes.len() > rsi_files_protocol::MAXIMUM_FILE_PAGE_BYTES);
+    let path = other.path().join("large.bmp");
+    std::fs::write(&path, &bytes).unwrap();
+    let (mime, body) = harness
+        .client
+        .image(
+            harness.target(),
+            ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mime, "image/bmp");
+    assert_eq!(body.as_bytes(), bytes);
+    assert!(
+        harness
+            .client
+            .image(harness.target(), ReadPath::new(b"file").unwrap())
+            .await
+            .is_err()
+    );
+    let mut wrong = harness.target();
+    wrong.header_key = "0".repeat(64);
+    assert!(harness.client.image(wrong, absolute).await.is_err());
+    harness.reader.gate.store(true, Ordering::SeqCst);
+    let client = harness.client.clone();
+    let target = harness.target();
+    let large = ReadPath::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let read = tokio::spawn(async move { client.image(target, large).await });
+    harness.reader.entered.acquire().await.unwrap().forget();
+    harness.reads.retiring.cancel();
+    assert!(matches!(
+        read.await.unwrap(),
+        Err(SessionFilesError::Files(FilesError::Cancelled))
+    ));
+    let cancellation = harness.reader.cancellation.lock().unwrap().clone().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled())
+        .await
+        .unwrap();
+    harness.close().await;
+}
 #[tokio::test]
 async fn real_http_requires_authentication_before_session_binding_and_reads_selected_workspace() {
     let _serial = SERIAL.lock().await;
