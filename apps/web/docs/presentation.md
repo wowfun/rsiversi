@@ -760,16 +760,16 @@ using xterm's minimum contrast ratio of 4.5.
 Application extension restoration sends the ownerless application command;
 Session extension restoration carries its current pane and generation. The shell
 measures the viewport once and passes its dimensions to the resource slot. All
-retained Session docks use that same snapshot for fullscreen and float bounds. Narrow
-resource-overlay visibility is transient and never writes the saved desktop
-visibility, including when opening a resource tab. Collapsing docked panes on a
-narrow viewport preserves the focused floating pane and the root dock selection.
+retained Session docks use that same snapshot for fullscreen and float bounds.
+The [Session dock persistence contract](persistence.md) governs column visibility
+at every width. Combining docked panes on a narrow viewport preserves the focused
+floating pane and the root dock selection.
 Keyboard resizing preserves the dock engine's minimum float size, including
 End-to-fill when a restored float lies near the viewport edge.
 
-The starting page has no resource column or resource-toggle action. A saved open
-column is suppressed until a conversation is selected, without overwriting that
-desktop preference. A selected external conversation can show its resource
+The starting page has no resource column or resource-toggle action. Selecting a
+native conversation shows its Session dock according to that window's layout.
+A selected external conversation can show its resource
 summary; no Session dock or terminal is allocated for the starting page.
 
 The first-use composer selects the Service-provided default workspace, or an
