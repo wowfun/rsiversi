@@ -3,7 +3,7 @@ use super::Block;
 use rsi_agent_session_protocol::{
     EffectId, ModelEventPurpose, SessionFact, SessionFactBody as Fact, TurnId, TurnOutcome,
 };
-use rsi_ai_protocol::{ContentStart, FinishReason, LanguageEvent, TokenUsage};
+use rsi_ai_protocol::{ContentStart, FinishReason, LanguageEvent, ModelRef, TokenUsage};
 use rsi_conversation::RetryState;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -31,6 +31,8 @@ pub(crate) struct Turn {
     pub timestamps: BTreeMap<String, u64>,
     pub elapsed_ms: Option<u64>,
     pub usage: Option<TokenUsage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub usage_routes: Vec<ModelRef>,
     pub partial: bool,
     pub status: String,
     pub running: bool,
@@ -406,6 +408,7 @@ impl State {
                 .flatten()
                 .and_then(|(start, end)| end.checked_sub(start)),
             usage: None,
+            usage_routes: vec![],
             partial,
             running: self.terminal.is_none(),
             foldable: !partial && (self.terminal.is_none() || (successful && !interrupted_model)),
@@ -422,6 +425,7 @@ impl State {
             .map(|(seq, _)| seq.to_string());
         let mut reservations = BTreeMap::new();
         let mut measure_usage = !partial && self.terminal.is_some();
+        let mut routes_known = true;
         for block in blocks {
             let Some(link) = self.links.get(&block.key) else {
                 continue;
@@ -436,6 +440,15 @@ impl State {
                         None => Some(reading),
                     });
                 measure_usage = turn.usage.is_some();
+                if routes_known && measure_usage {
+                    if let Some(route) = request.model_route() {
+                        if !turn.usage_routes.contains(route) {
+                            turn.usage_routes.push(route.clone());
+                        }
+                    } else {
+                        routes_known = false;
+                    }
+                }
             }
             if let Some(time) = link.timestamp_ms {
                 turn.timestamps.insert(block.key.clone(), time);
@@ -494,6 +507,9 @@ impl State {
             {
                 turn.process.push(block.key.clone());
             }
+        }
+        if !routes_known || turn.usage.is_none() {
+            turn.usage_routes = vec![];
         }
         turn
     }
@@ -1469,5 +1485,67 @@ mod tests {
             apply(&mut t, terminal(TurnOutcome::Completed));
             assert_eq!(turn(&t).usage, expected);
         }
+    }
+
+    #[test]
+    fn turn_usage_lists_unique_prepared_routes_in_step_order_after_backfill() {
+        let mut t = Transcript::default();
+        apply(&mut t, accepted());
+        let reading = TokenUsage::new(3, 1, None, None, None).unwrap();
+        let mut inputs = Vec::new();
+        for (i, (effect, deployment)) in [("a", "work"), ("b", "work"), ("c", "backup")]
+            .iter()
+            .enumerate()
+        {
+            let seq = 2 + 2 * i as u64;
+            inputs.push(
+                SessionFact::new(
+                    seq,
+                    seq,
+                    Fact::ModelIntent {
+                        turn_id: TurnId::new("turn").unwrap(),
+                        effect_id: EffectId::new(*effect).unwrap(),
+                        snapshot: rsi_ai_protocol::PreparedCallSnapshot {
+                            call_id: effect.to_string(),
+                            deployment_id: deployment.to_string(),
+                            provider_family: "test".into(),
+                            capability: rsi_ai_protocol::AiCapability::Language,
+                            model: "model".into(),
+                            protocol: "chat".into(),
+                            transport: "http".into(),
+                            endpoint_fingerprint: "local".into(),
+                            config_generation: 1,
+                            credential_source: None,
+                            retry_policy: Default::default(),
+                            request_sha256: "0".repeat(64),
+                            language_settings: None,
+                        },
+                        purpose: rsi_agent_session_protocol::ModelPurpose::Conversation,
+                        price_quote: None,
+                        evidence: rsi_agent_session_protocol::RequestEvidence::Unavailable {
+                            reason: rsi_agent_session_protocol::EvidenceUnavailable::NotCaptured,
+                        },
+                    },
+                )
+                .unwrap(),
+            );
+            t.fact(
+                &SessionFact::new(seq + 1, seq + 1, response_with_usage(effect, reading)).unwrap(),
+            );
+        }
+        apply(&mut t, terminal(TurnOutcome::Completed));
+        for intent in inputs.iter().rev() {
+            assert!(turn(&t).usage_routes.is_empty());
+            t.fact(intent);
+        }
+        assert_eq!(turn(&t).usage.unwrap().input_tokens(), 9);
+        assert_eq!(
+            turn(&t)
+                .usage_routes
+                .iter()
+                .map(ModelRef::deployment)
+                .collect::<Vec<_>>(),
+            ["work", "backup"]
+        );
     }
 }

@@ -727,6 +727,8 @@ Message clocks use durable Fact timestamps; transient blocks have no fabricated 
 Completed Turn headings show recorded elapsed time when both boundaries are known.
 Assistant action rows expose copy, source inspection and **Turn usage** for a
 complete Turn whose conversational requests all reported token counts.
+The panel identifies each contributing deployment and model when the complete
+set of routes is available.
 On hover-capable devices the latest user message and the latest closing assistant
 response keep their action rows visible. Earlier rows reveal actions on hover or
 keyboard focus without shifting the transcript. Touch devices retain visible actions.

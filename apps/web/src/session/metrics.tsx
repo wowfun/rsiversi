@@ -2,6 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import {IconDatabaseOutlineRegular, IconGaugeOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 import {tokenCount, tokenTotal, usageReadings, durationReading} from '../../message-metrics.js';
 import type {SessionSurfaceOwner} from './state.ts';
+import type {Model} from '../bridge.ts';
 import {StatPopover} from './stat-popover.tsx';
 import css from './metrics.module.css';
 
@@ -37,10 +38,11 @@ export interface MetricsRead {
 }
 const exactTokens = (value: number) => `${value.toLocaleString()} tok`;
 
-function TokenDetails({usage}: {usage: TokenUsage}) {
+function TokenDetails({usage, routes}: {usage: TokenUsage; routes?: Model[]}) {
   const cache = usage.input_tokens > 0 && usage.cache_read_tokens != null
     ? Math.round(100 * usage.cache_read_tokens / usage.input_tokens) : undefined;
   return <dl className={css.details}>
+    {routes?.length ? <><dt>Provider / model</dt><dd className={css.route}>{routes.map(route=>`${route.deployment}/${route.model}`).join(', ')}</dd></> : null}
     {cache != null && <><dt>Cache hit</dt><dd>{cache}%</dd></>}
     <dt>{usage.cache_read_tokens == null ? 'Input' : 'Uncached input'}</dt>
     <dd>{exactTokens(usage.input_tokens - (usage.cache_read_tokens ?? 0))}</dd>
@@ -50,13 +52,13 @@ function TokenDetails({usage}: {usage: TokenUsage}) {
     {!!usage.reasoning_tokens && <><dt title="Included in output">Reasoning</dt><dd>{exactTokens(usage.reasoning_tokens)}</dd></>}
   </dl>;
 }
-export function TurnUsage({usage}: {usage: TokenUsage}) {
+export function TurnUsage({usage, routes}: {usage: TokenUsage; routes?: Model[]}) {
   const total = tokenTotal(usage);
   if (total == null) return null;
   return <span className="message-usage">
     <StatPopover name="Turn usage" icon={<IconDatabaseOutlineRegular/>}
       label={`Usage ${tokenCount(total)} tok`} headline={exactTokens(total)}>
-      <TokenDetails usage={usage}/>
+      <TokenDetails usage={usage} routes={routes}/>
     </StatPopover>
   </span>;
 }

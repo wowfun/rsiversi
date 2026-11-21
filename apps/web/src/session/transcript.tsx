@@ -469,7 +469,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
             {pane && generation && terminal.feedback_message && <MessageFeedback key={terminal.feedback_message}
               pane={pane} generation={generation} message={terminal.feedback_message}/>}
             <ForkTurn turn={terminal.id} owner={owner}/>
-            {terminal.usage && <TurnUsage usage={terminal.usage}/>}
+            {terminal.usage && <TurnUsage usage={terminal.usage} routes={terminal.usage_routes}/>}
             {clock && <time className="message-clock" dateTime={clock.iso} title={clock.title}>{clock.label}</time>}
           </div>
         </div>);

@@ -1,6 +1,6 @@
 //! Partial request metadata for history windows, independent of lifetime totals.
 use rsi_agent_session_protocol::{LanguageAttemptStage, ScheduledModelRetry, SessionFact, TurnId};
-use rsi_ai_protocol::{LanguageEvent, TokenUsage};
+use rsi_ai_protocol::{LanguageEvent, ModelRef, TokenUsage};
 use std::fmt::Write as _;
 
 /// A failed request's durable reservation, with its owning Turn and failure kind.
@@ -45,7 +45,7 @@ impl RetryState {
 #[derive(Clone, Debug, Default)]
 pub struct RequestPresentation {
     intent_seq: Option<u64>,
-    model: Option<String>,
+    model: Option<ModelRef>,
     effort: Option<String>,
     started: Option<u64>,
     terminal: Option<(u64, bool)>,
@@ -65,7 +65,10 @@ impl RequestPresentation {
             LanguageAttemptStage::Prepared(snapshot, purpose, _) => {
                 self.intent_seq = Some(fact.seq());
                 self.retry_limit = Some(snapshot.retry_policy.max_retries());
-                self.model = Some(snapshot.model.clone());
+                self.model = Some(
+                    ModelRef::new(&snapshot.deployment_id, &snapshot.model)
+                        .expect("validated request intent"),
+                );
                 self.effort = snapshot
                     .language_settings
                     .as_ref()
@@ -113,7 +116,8 @@ impl RequestPresentation {
     pub fn title_with_retry(&self, state: RetryState) -> String {
         let mut title = self
             .model
-            .clone()
+            .as_ref()
+            .map(|route| route.model().to_owned())
             .unwrap_or_else(|| "Request · model not loaded".into());
         if self.compaction {
             title.push_str(" · compaction");
@@ -165,7 +169,9 @@ impl RequestPresentation {
     }
     /// Retained heap bytes, in addition to the inline structure.
     pub fn owned_bytes(&self) -> usize {
-        self.model.as_ref().map_or(0, String::capacity)
+        self.model
+            .as_ref()
+            .map_or(0, |route| route.deployment().len() + route.model().len())
             + self.effort.as_ref().map_or(0, String::capacity)
             + self.scheduled_retry.as_deref().map_or(0, |value| {
                 std::mem::size_of_val(value)
@@ -189,6 +195,10 @@ impl RequestPresentation {
     /// Inclusive counts from the settled provider stream.
     pub fn reported_usage(&self) -> Option<TokenUsage> {
         self.usage
+    }
+    /// Frozen provider deployment and model for this exact request.
+    pub fn model_route(&self) -> Option<&ModelRef> {
+        self.model.as_ref()
     }
     /// Exact intent source when that earlier history has been loaded.
     pub fn intent_seq(&self) -> Option<u64> {

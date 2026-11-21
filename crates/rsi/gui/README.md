@@ -799,6 +799,8 @@ The Turn index carries durable block timestamps and boundary elapsed time. For a
 complete, closed Turn it sums provider-reported usage once per conversational
 request, including retries. A missing reading or an unrepresentable total
 withholds the disclosure. Compaction requests have separate accounting.
+When every contributing request has its prepared deployment and model, Turn
+usage lists the distinct routes in their first-use order.
 A generation-bound `metrics` command reads the existing
 Session metrics API, preserves its watermark/completeness, and publishes only to
 the still-current attachment. It does not infer whole-Session totals from loaded

@@ -65,7 +65,7 @@ try {
       {key:'u',role:'user',title:'User',text:'say hi',sources:0},
       {key:'r',role:'reasoning',title:'Thinking',text:'A short reasoning step.',sources:0},
       {key:'a',role:'assistant',title:'Assistant',text:'Hi! Ready when you are — just let me know what you would like to work on.',sources:0}, {key:'terminal',role:'status',title:'Completed',text:'',sources:1}
-    ],turns:{entries:{turn:{id:'turn',status:'Completed',running:false,foldable:true,partial:false,blocks:['u','r','a','terminal'],terminal:'terminal',process:['r'],candidate:[],answer:['a'],closing_prose:[2],elapsed_ms:2000,timestamps:{u:Date.now()-2000,a:Date.now()},usage:{input_tokens:10000,output_tokens:1300,cache_read_tokens:8700,cache_write_tokens:null,reasoning_tokens:null}}}}};
+    ],turns:{entries:{turn:{id:'turn',status:'Completed',running:false,foldable:true,partial:false,blocks:['u','r','a','terminal'],terminal:'terminal',process:['r'],candidate:[],answer:['a'],closing_prose:[2],elapsed_ms:2000,timestamps:{u:Date.now()-2000,a:Date.now()},usage:{input_tokens:10000,output_tokens:1300,cache_read_tokens:8700,cache_write_tokens:null,reasoning_tokens:null},usage_routes:[{deployment:'fixture',model:'long-model-identifier-for-the-narrow-window'}]}}}};
     await fixture.frame();
    });
    const composer=page.locator('.pane:not([hidden]) > .composer');
@@ -102,7 +102,17 @@ try {
    const turnUsage=page.getByRole('dialog',{name:'Turn usage',exact:true});
    await turnUsage.waitFor();
    assert.match(await turnUsage.innerText(),/11,300 tok/);
+   await turnUsage.getByText('fixture/long-model-identifier-for-the-narrow-window',{exact:true}).waitFor();
    await page.screenshot({path:join(report,name+'-Turn-usage.png')});
+   await page.setViewportSize({width:320,height:844});
+   await page.waitForFunction(()=>{
+     const panel=document.querySelector('[role=dialog][aria-label="Turn usage"]');
+     if(!panel)return false;
+     const box=panel.getBoundingClientRect();
+     return box.x>=12 && box.right<=innerWidth-12 && panel.scrollWidth<=panel.clientWidth;
+   });
+   await page.screenshot({path:join(report,name+'-Turn-usage-narrow.png')});
+   await page.setViewportSize({width:1710,height:940});
    await page.locator('.message-usage button').click();
    await page.getByTestId('session-metrics').getByText('11.3K tok · Cache hit 87%',{exact:true}).waitFor();
    const stats=page.getByTestId('session-metrics');

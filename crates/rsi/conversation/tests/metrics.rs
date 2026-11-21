@@ -215,12 +215,15 @@ fn request_metadata_backfill_preserves_actual_default_effort_failed_usage_and_el
     );
     let mut state = rsi_conversation::RequestPresentation::default();
     state.observe(&failure);
+    assert!(state.model_route().is_none());
     assert!(state.title().contains("model not loaded"));
     assert!(state.title().contains("10 in / 4 out"));
     for fact in [&started, &intent, &intent] {
         state.observe(fact);
     }
     assert_eq!(state.title(), "model · max · 10 in / 4 out · 1.2s · failed");
+    let route = state.model_route().unwrap();
+    assert_eq!((route.deployment(), route.model()), ("fixture", "model"));
     assert_eq!(state.intent_seq(), Some(1));
     assert!(state.owned_bytes() < 1024);
 }

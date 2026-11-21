@@ -1,4 +1,5 @@
 // Document types for the Rust GUI presentation; no runtime or validation owner.
+import type {Model} from './bridge.ts';
 import type {ComposerProjection} from './session/composer-state.ts';
 import type {MarkdownEvent} from './session/markdown.tsx';
 import type {TokenUsage, MetricsRead} from './session/metrics.tsx';
@@ -48,6 +49,7 @@ export interface TranscriptTurn {
   timestamps?: Record<string, number>;
   elapsed_ms?: number | null;
   usage?: TokenUsage | null;
+  usage_routes?: Model[];
 }
 export interface ModelRetry {
   block: number;
