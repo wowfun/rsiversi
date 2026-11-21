@@ -90,6 +90,9 @@ durable identity, not a transport replay or a generic outcome ledger. Explicit
 controller retry of a retained unresolved request begins with a status query;
 query failure sends nothing, NotFound permits the same reconciliation sequence,
 and an accepted receipt starts observation even when no replay was necessary.
+Checking the status of a saved message also starts the same observers when the
+returned receipt confirms its Session and message identity. An unavailable
+status leaves the fresh draft ready for another check.
 
 Session extension commands use the same controller's four non-queued work slots.
 Discovery returns the pinned catalog and exact predecessor; preparing an invocation

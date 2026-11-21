@@ -109,6 +109,7 @@ struct Backend {
     children: Mutex<std::collections::BTreeMap<SessionId, Arc<Backend>>>,
     tree: Mutex<Vec<rsi_agent_store_protocol::StoreAgentDescendantStatus>>,
     observations: std::sync::atomic::AtomicUsize,
+    transcript_observations: std::sync::atomic::AtomicUsize,
     media: Arc<images::Reader>,
     settings: Arc<settings::Fixture>,
     block_source: std::sync::atomic::AtomicBool,
@@ -625,6 +626,8 @@ impl SessionHandle for Backend {
         &self,
         _: ObservationCursor,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionObservationStream> {
+        self.transcript_observations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.observations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::pin(futures_util::stream::pending()))
@@ -915,12 +918,12 @@ impl PluginFactory for Providers {
 
 #[tokio::test]
 async fn unknown_submission_retains_its_identity_across_user_retries() {
-    for resolution in [1, 2] {
-        verify_retry(resolution).await;
+    for (resolution, query_in_place) in [(1, false), (2, false), (2, true)] {
+        verify_retry(resolution, query_in_place).await;
     }
 }
 #[allow(clippy::too_many_lines)] // One lifecycle from preparation through unknown outcome and exact retry.
-async fn verify_retry(resolution: usize) {
+async fn verify_retry(resolution: usize, query_in_place: bool) {
     let rt = Runtime::with_execution(
         RuntimeLimits::default(),
         Execution::native(tokio::runtime::Handle::current()),
@@ -980,6 +983,25 @@ async fn verify_retry(resolution: usize) {
         "status outage must not replay a possibly accepted request"
     );
     let original = backend.requests.lock().unwrap()[0].clone();
+    if query_in_place {
+        use std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(backend.transcript_observations.load(SeqCst), 0);
+        backend.resolution.store(resolution, SeqCst);
+        assert_eq!(
+            dispatch(&app, generation, &prepared, "query").await["status"],
+            "complete"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while backend.transcript_observations.load(SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a confirmed first message must start observation in the current pane");
+        assert_eq!(backend.requests.lock().unwrap().len(), 1);
+        assert!(rt.shutdown().await.is_clean());
+        return;
+    }
     let session = view["surfaces"]["main"]["session"].clone();
     // Replacing the surface must preserve both the original request and its admission.
     app.command(&serde_json::json!({"action":"open","pane":"main","session":session}).to_string())
@@ -1013,7 +1035,7 @@ async fn verify_retry(resolution: usize) {
         );
     }
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    assert!(view["surfaces"]["main"].get("draft").is_none());
+    assert_eq!(view["surfaces"]["main"]["draft"], false);
     let next = prepare(&app, generation, "edited next draft", vec![], false).await;
     assert_eq!(
         dispatch(&app, generation, &next, "dispatch").await["status"],
@@ -1114,7 +1136,7 @@ async fn failed_navigation_at_submission_capacity_keeps_the_current_pane_usable(
     )
     .await;
     let view: serde_json::Value = serde_json::from_slice(app.view().unwrap().as_bytes()).unwrap();
-    assert!(view["surfaces"]["main"].get("draft").is_none());
+    assert_eq!(view["surfaces"]["main"]["draft"], true);
     assert_eq!(
         view["surfaces"]["main"]["generation"],
         current["surfaces"]["main"]["generation"]

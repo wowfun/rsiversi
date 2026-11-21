@@ -674,9 +674,13 @@ impl GuiApplication {
                     if !attached
                         .durable
                         .swap(true, std::sync::atomic::Ordering::AcqRel)
-                        && let Some(navigation) = &self.navigation
                     {
-                        navigation.invalidate();
+                        if mode == Mode::Query {
+                            attached.controller.observe_durable_session();
+                        }
+                        if let Some(navigation) = &self.navigation {
+                            navigation.invalidate();
+                        }
                     }
                 }
                 result.map(|receipt| serde_json::json!(receipt))

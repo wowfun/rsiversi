@@ -142,12 +142,18 @@ impl SessionController {
                 result = reconcile => result,
             };
             if result.is_ok() {
-                controller.start_observing(ObservationCursor::default());
+                controller.observe_durable_session();
             }
             result
         }));
         drop(admission);
         Box::pin(async move { task.await.unwrap_or(Err(unknown)) })
+    }
+
+    /// Starts the surface's observers after its first confirmed durable receipt.
+    /// An already observing or retired controller keeps its existing state.
+    pub fn observe_durable_session(self: &Arc<Self>) {
+        self.start_observing(ObservationCursor::default());
     }
 
     fn start_observing(self: &Arc<Self>, cursor: ObservationCursor) {

@@ -426,7 +426,8 @@ Preparation reads the current Header and validates full text/image input without
 mutation. Dispatch revalidates the exact Session/Header and opaque typed request,
 including absent sandbox, model and effort overrides for both next-turn and steer
 delivery, then uses the shared controller.
-Query-only reconciliation never sends input;
+Query-only reconciliation uses the Session controller to resume observation
+when a receipt confirms the saved message. It never sends input;
 explicit message retry uses the controller's authoritative NotFound rule. Commands
 are executed once and later only queried. Generic failures after dispatch remain
 unknown, while pre-dispatch validation or admission rejection is explicit.
