@@ -158,10 +158,12 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await band.waitFor();
       const landing=await band.evaluate(node=>{
         const body=node.parentElement, row=body.querySelector('mark').getBoundingClientRect(), area=body.getBoundingClientRect(), mark=node.getBoundingClientRect();
-        return {offset:body.scrollTop,rowOffset:row.top-area.top,bandOffset:mark.top-row.top,width:mark.width,scrollWidth:body.scrollWidth,duration:getComputedStyle(node).animationDuration};
+        const sourceStyle=getComputedStyle(body.querySelector('pre'));
+        return {offset:body.scrollTop,rowOffset:row.top-area.top,bandOffset:mark.top-row.top,width:mark.width,scrollWidth:body.scrollWidth,duration:getComputedStyle(node).animationDuration,fontSize:sourceStyle.fontSize,lineHeight:sourceStyle.lineHeight};
       });
       assert(landing.offset>0 && Math.abs(landing.rowOffset)<=1 && Math.abs(landing.bandOffset)<=1,JSON.stringify(landing));
       assert.equal(landing.width,landing.scrollWidth);assert.equal(landing.duration,'2s');
+      assert.equal(landing.fontSize,'11px');assert.equal(landing.lineHeight,'19px');
       await page.screenshot({path:join(dir,stage+'-document.png')});
       await band.waitFor({state:'detached',timeout:5000});
       const viewport=page.viewportSize();

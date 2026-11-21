@@ -15,7 +15,7 @@
     "TrajectoryTimeline keeps the upstream gesture, accessibility and time projections. Its record, layout and English translation contracts include only the fields used by the timeline.",
     "The Schedule catalog uses the upstream recommendation artwork, English recommendation copy and tile styling. The task click opens the local starting draft.",
     "TextSearchIndex retains the upstream multilingual matching and ranking. The task manager builds it on the first search and releases it when cleared. Its closure omits localization helpers and cross-index preparation caches.",
-    "typography.css keeps the five font shorthands used by the imported presentation components.",
+    "typography.css keeps the font shorthands used by the Web components and the code font size adjustment.",
     "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included.",
     "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls."
   ],
@@ -542,7 +542,7 @@
       "path": "typography.css",
       "source": "packages/client/ui-theme/src/styles/gradient-shadow-text.css",
       "source_sha256": "b6e1e8387edbfa60ec03bb29aad7c01245c0adbd22229d5a6f2916caa7e7b427",
-      "adapted_sha256": "15a967b4a7f5869f2e54110e0808b20aa602f54c6608d85e861ebdfee7ae37cc",
+      "adapted_sha256": "0e098225eca3954aade2f34fc00121ad87c17f90b0ca224b66dbe9c0caee6496",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {

@@ -1,4 +1,6 @@
 body {
+  --dsh-code-font-delta: calc(var(--dsh-code-font-size, 11px) - 11px);
+  --dsw-font-markdown-code-block: var(--dsh-code-font-size, 11px) / calc(19px + var(--dsh-code-font-delta)) var(--ds-font-family-code);
   --dsw-font-l-20: 500 20px/28px var(--dsw-font-family);
   --dsw-font-s-14: 14px/22px var(--dsw-font-family);
   --dsw-font-xs-13: 13px/20px var(--dsw-font-family);

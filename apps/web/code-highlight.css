@@ -51,7 +51,7 @@
   border-radius: 0;
   white-space: pre;
   overflow: auto;
-  font: 11px/19px var(--ds-font-family-code);
+  font: var(--dsw-font-markdown-code-block);
 }
 .markdown .code-block pre.transcript-code.wrap {
   white-space: pre-wrap;

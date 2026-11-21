@@ -18,7 +18,7 @@ code .linkIcon { margin-inline-start: 0; }
 .fileHeader span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fileHeader button { display: grid; place-items: center; width: 28px; height: 28px; }
 .fileScroll { position: relative; flex: 1; min-height: 0; overflow: auto; }
-.documentSource { margin: 0; padding: 8px 18px; font: var(--dsw-font-markdown-code-block, 13px/1.6 monospace); tab-size: 4; }
+.documentSource { margin: 0; padding: 8px 18px; font: var(--dsw-font-markdown-code-block); tab-size: 4; }
 .documentSource mark { display: inline-block; color: inherit; background: transparent; }
 .documentSource mark:empty::after { content: '\200b'; }
 .lineMark {
