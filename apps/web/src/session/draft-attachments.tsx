@@ -1,5 +1,6 @@
 import { run } from "../bridge.ts";
-import {useEffect, useRef} from "react";
+import {useEffect, useMemo, useRef} from "react";
+import {AttachmentRail} from "../../vendor/dsh/attachment/AttachmentRail.tsx";
 import {IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular, IconCloseFillRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import type { ComposerOwner, ComposerView } from "./composer-state.ts";
 type Props = { owner: ComposerOwner; state?: ComposerView };
@@ -65,11 +66,21 @@ function DraftThumbnail({owner, media, generation}: {
 }
 
 export function DraftImages({ owner, state }: Props) {
+  const images = state?.images;
+  const keys = useMemo(() => {
+    if (!images?.length) return [];
+    const seen = new Map<string, number>();
+    return images.map(media => {
+      const occurrence = seen.get(media.id) ?? 0;
+      seen.set(media.id, occurrence + 1);
+      return media.id + ':' + occurrence;
+    });
+  }, [images]);
   return (
     <>
-      {!!(state?.images.length || state?.importingImages) && <div className="draft-images" role="group" aria-label="Pending attachments">
-        {state?.images.map((media, index) => (
-          <div key={media.id + ':' + index} className="draft-image">
+      {!!state?.images.length && <AttachmentRail key={state.generation} count={state.images.length}>
+        {state.images.map((media, index) => (
+          <div key={keys[index]} className="draft-image" role="group" aria-label={`Image ${index + 1} of ${state.images.length}`}>
             <button
               type="button"
               className="draft-thumbnail"
@@ -105,12 +116,12 @@ export function DraftImages({ owner, state }: Props) {
             </button>
           </div>
         ))}
-        {state?.importingImages && <div role="status" aria-live="polite">
+      </AttachmentRail>}
+      {state?.importingImages && <div role="status" aria-live="polite">
           {state.importingImages.files.slice(state.importingImages.next).map((file,index) =>
             <div key={index} className="draft-image-import">{file.name || "Image"} · Uploading…</div>
           )}
         </div>}
-      </div>}
       {!!state?.pending?.images && <p className="hint frozen-images">
         Previous submission retains {state.pending.images} image(s) in its original order. Draft changes apply to the next submission.
       </p>}

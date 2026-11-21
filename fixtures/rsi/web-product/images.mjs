@@ -42,6 +42,50 @@ export async function verifyMarkdownImages(page, markdown, service) {
   assert(service.provider.imageRequests.every(request=>request.referer===null));
 }
 
+export async function verifyAttachmentRail(page, pane, report) {
+  const viewport = page.viewportSize();
+  const rail = pane.getByRole('group', {name:'Pending attachments', exact:true});
+  const picker = pane.locator('input[type=file]');
+  const left = pane.getByRole('button', {name:'Scroll attachments left'});
+  const right = pane.getByRole('button', {name:'Scroll attachments right'});
+  try {
+    await page.setViewportSize({width:390,height:844});
+    for (let index = 0; index < 8; index++) {
+      // The last two entries share a content identity and must keep separate controls.
+      const width = 32 + Math.min(index, 6);
+      await picker.setInputFiles({name:'item-' + index + '.png', mimeType:'image/png',
+        buffer:png(width, 24, [32, 90, 160, 255])});
+      const card = rail.getByRole('group', {name:'Image ' + (index + 1) + ' of ' + (index + 1), exact:true});
+      const thumbnail = card.locator('img');
+      await thumbnail.waitFor();
+      assert.equal(await thumbnail.evaluate(async el => { await el.decode(); return el.naturalWidth; }), width);
+    }
+    await left.waitFor();
+    assert.equal(await right.count(), 0);
+    assert(await rail.evaluate(el => el.scrollLeft > 0 && el.lastElementChild.getBoundingClientRect().right <= el.getBoundingClientRect().right + 1));
+    await page.screenshot({path:join(report, 'attachment-rail-narrow.png')});
+    await left.click();
+    await left.waitFor({state:'detached'});
+    await right.waitFor();
+    await rail.hover();
+    await page.mouse.wheel(0, 48);
+    await left.waitFor();
+    assert(await rail.evaluate(el => el.scrollLeft > 1 && el.scrollLeft < el.scrollWidth - el.clientWidth - 1));
+    await page.setViewportSize(viewport);
+    await right.waitFor({state:'detached'});
+    await left.waitFor({state:'detached'});
+    assert(await rail.evaluate(el => el.scrollWidth === el.clientWidth));
+    const remove = rail.getByRole('button', {name:'Remove image', exact:true});
+    for (let index = 8; index > 0; index--) {
+      await rail.getByRole('group', {name:'Image ' + index + ' of ' + index, exact:true}).waitFor();
+      await remove.last().click();
+    }
+    await rail.waitFor({state:'detached'});
+  } finally {
+    await page.setViewportSize(viewport);
+  }
+}
+
 export async function verifyImages(page, pane, service, report, name) {
   // setInputFiles bypasses the disabled attachment control; await the bound draft first.
   const input=await pane.locator('input[type="file"]').elementHandle();

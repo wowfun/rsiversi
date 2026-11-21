@@ -7,6 +7,7 @@ import {connectWorkbench,readBrowserCaller,registerFixtureWorkspace} from './bro
 import {startService} from './service.mjs';
 import {readDeepseekKey,deepseekProfile} from './live-limits.mjs';
 import {png} from './png.mjs';
+import {verifyAttachmentRail} from './images.mjs';
 
 const report=resolve(process.env.RSI_REPORT_DIR);
 const live=process.env.RSI_LIVE_DEEPSEEK==='1';
@@ -124,6 +125,8 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
         await chip.getByRole('button',{name:'Remove image',exact:true}).click();
         await chip.waitFor({state:'detached'});assert.equal(result.drag.imageReads,0);
       }finally{author.off('request',watch);}
+      await verifyAttachmentRail(page,page.locator('.pane.selected'),dir);
+      result.attachmentRail={cards:8,duplicateContent:true,mouseWheel:true,paging:true,resize:true};
     }
     const id=await session();assert(id);
     await author.close();

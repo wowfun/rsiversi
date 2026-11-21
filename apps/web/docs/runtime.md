@@ -133,6 +133,10 @@ Restored drafts load a thumbnail from the canonical Media reference. Original
 file previews and canonical Media previews share the connection's bounded URL
 cache. The draft persists only its ordered references. Each thumbnail opens
 the canonical preview and offers removal and, for multiple images, reordering.
+When the attachments exceed the composer width, edge buttons page through
+them and the vertical wheel pans the rail. Adding an image reveals its end.
+Returning to a saved draft starts at its first attachment. Resizing the
+composer updates the available paging actions.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.

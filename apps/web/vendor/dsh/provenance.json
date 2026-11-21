@@ -16,7 +16,8 @@
     "The Schedule catalog uses the upstream recommendation artwork, English recommendation copy and tile styling. The task click opens the local starting draft.",
     "TextSearchIndex retains the upstream multilingual matching and ranking. The task manager builds it on the first search and releases it when cleared. Its closure omits localization helpers and cross-index preparation caches.",
     "typography.css keeps the five font shorthands used by the imported presentation components.",
-    "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included."
+    "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included.",
+    "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls."
   ],
   "files": [
     {
@@ -605,6 +606,20 @@
       "source": "packages/client/ui-primitives/src/Toast.module.css",
       "source_sha256": "85e7e50f4d18d30751cbb64fd6d85554561a0982080d8ab57afebb848e8fe4e3",
       "adapted_sha256": "85e7e50f4d18d30751cbb64fd6d85554561a0982080d8ab57afebb848e8fe4e3",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/AttachmentRail.tsx",
+      "source": "packages/client/ui-attachment/src/AttachmentRail.tsx",
+      "source_sha256": "45b33aa0203c38fe79fbb75f25c728705a4181e281b06bf048578c766f249905",
+      "adapted_sha256": "25704a1ac2fb986c9dee24061ea1517a47b5712297e7e06cb54aece0bdf8a5bf",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/AttachmentRail.module.css",
+      "source": "packages/client/ui-attachment/src/AttachmentRail.module.css",
+      "source_sha256": "036094c7bcf3bff0008c6487e01cc8a65948392edee16b552013b2f5ceda3ee3",
+      "adapted_sha256": "59262d42e121ad3d5d55ff50eb9fd2f9570a9d5e70270da56ed1c43d7261d0fa",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]
