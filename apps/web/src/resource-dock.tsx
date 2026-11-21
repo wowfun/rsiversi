@@ -1,6 +1,7 @@
 import type {NativeSurface} from './presentation-types.ts';
 import css from "./resources.module.css"
 import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react'
+import {IconFullscreenOutlineRegular,IconPanelLeftOutlineRegular} from '../vendor/dsh/dockkit-primitives/icons/index.tsx'
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
 import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
@@ -216,12 +217,20 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
   }
   void revision
   const fullscreen=doc.state.mode==='fullscreen'||narrow
+  const chrome=<>
+    <Button size="sm" aria-label="Undo layout" disabled={!doc.history.cursor} onClick={()=>apply('undo')}>↶</Button>
+    <Button size="sm" aria-label="Redo layout" disabled={doc.history.cursor===doc.history.entries.length} onClick={()=>apply('redo')}>↷</Button>
+    <button type="button" className={css.dockAction} aria-label={fullscreen?'Exit resource fullscreen':'Resource fullscreen'} onClick={()=>apply('toggle-fullscreen',{automatic:narrow})}>
+      {fullscreen?<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="M9 2.5V6a1 1 0 0 0 1 1h3.5M7 13.5V10a1 1 0 0 0-1-1H2.5"/></svg>:<IconFullscreenOutlineRegular size={15}/>}
+    </button>
+    <button type="button" className={css.dockAction} aria-label="Hide resources" onClick={()=>dock.expand(false)}><IconPanelLeftOutlineRegular size={15} className={css.collapseGlyph}/></button>
+  </>
   return <section className={`${css.scope} resource-dock${fullscreen?' resource-fullscreen':''}`} hidden={!visible} aria-label="Resource workbench" data-session={surface.session} onKeyDown={event=>{
       if(!(event.ctrlKey||event.metaKey)||event.altKey||event.nativeEvent.isComposing||(event.target as HTMLElement).closest('input,textarea,[contenteditable=true]'))return
       if(event.key.toLowerCase()==='z'){event.preventDefault();apply(event.shiftKey?'redo':'undo')}
     }}>
     {notice&&<p className="resource-notice" role="alert">{notice}</p>}
     {visible&&!Object.keys(doc.state.tabs).length&&guide}
-    <DockLayout state={displayed} active={visible} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={<><Button size="sm" aria-label="Undo layout" disabled={!doc.history.cursor} onClick={()=>apply('undo')}>↶</Button><Button size="sm" aria-label="Redo layout" disabled={doc.history.cursor===doc.history.entries.length} onClick={()=>apply('redo')}>↷</Button><Button size="sm" aria-label={doc.state.mode==='fullscreen'?'Exit resource fullscreen':'Resource fullscreen'} onClick={()=>apply('mode',{mode:doc.state.mode==='fullscreen'?'push':'fullscreen'})}>⛶</Button><Button size="sm" aria-label="Hide resources" onClick={()=>dock.expand(false)}>×</Button></>}/>
+    <DockLayout state={displayed} active={visible} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={chrome}/>
   </section>
 }

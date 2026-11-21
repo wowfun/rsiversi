@@ -159,7 +159,11 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
     case 'resize-float':ops=[{type:'resizeFloat',paneId:p,rect:{...checkedFloatRect(intent.rect)}}];break
     case 'resize':ops=plan.planResizeSplit(intent.split as SplitId,intent.sizes as number[],.2);break
     case 'expanded':if(typeof intent.expanded!=='boolean')return fail();ops=plan.planSetExpanded(s,intent.expanded);break
-    case 'mode':if(intent.mode!=='push'&&intent.mode!=='fullscreen')fail();ops=plan.planSetMode(s,intent.mode as 'push'|'fullscreen');break
+    case 'toggle-fullscreen':
+      ops=intent.automatic===true
+        ? [...plan.planSetExpanded(s,false),...plan.planSetMode(s,'push')]
+        : plan.planSetMode(s,s.mode==='push'?'fullscreen':'push')
+      break
     case 'undo':result=stepBack(value.history,s);break
     case 'redo':result=stepForward(value.history,s);break
     default:fail()

@@ -14,6 +14,17 @@ test('revealing a resource from a collapsed column is one undoable edit',()=>{
  assert.deepEqual(closed.state.tabs,shown.state.tabs);
  assert.equal(act(closed,'expanded',{expanded:false}),closed);
 });
+test('exiting automatic fullscreen closes the dock and resets manual fullscreen in the same edit',()=>{
+ const opened=open(emptyDock());
+ const manual=act(opened,'toggle-fullscreen');
+ assert.equal(manual.state.mode,'fullscreen');
+ assert.deepEqual(act(manual,'toggle-fullscreen').state,opened.state);
+ for(const before of [opened,manual]){
+   const closed=act(before,'toggle-fullscreen',{automatic:true});
+   assert.deepEqual(closed.state,{...opened.state,expanded:false});
+   assert.deepEqual(act(closed,'undo').state,before.state);
+ }
+});
 test('opening, copying or moving a guide respects its destination pane',()=>{
   const guide={coordinate:{action:'resources'},title:'Resources',duplicate:true};
   const start=act(open(emptyDock()),'open',guide);

@@ -645,6 +645,9 @@ selection. The adapter admits two horizontal panes, a 20 to 80 percent split,
 pane merges the empty pane as part of the same undoable intent. Explicitly
 splitting may leave an empty destination until the next move. At narrow widths,
 a single displayed strip combines docked tabs without changing the saved tree.
+Below 768px, an open resource column fills the viewport. Its Exit fullscreen
+control closes the column and returns its saved mode to push. At wider widths,
+the same control returns the column to its normal width and keeps it open.
 Float rectangles are clamped to the current viewport for display; resizing the
 window never persists these temporary bounds.
 Inner split separators support axis arrow keys, Shift for larger steps, and

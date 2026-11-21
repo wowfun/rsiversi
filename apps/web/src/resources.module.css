@@ -224,6 +224,23 @@
 :global(.resource-dock):where(.scope, .scope *) {
   font-family: var(--dsw-font-family);
 }
+.dockAction {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 6px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+}
+@media (hover: hover) {
+  .dockAction:hover { background: var(--dsw-alias-interactive-bg-hover); }
+}
+.collapseGlyph { transform: scaleX(-1); }
 :global(.approval-review):where(.scope, .scope *) {
   min-width: 0;
   overflow-wrap: anywhere;

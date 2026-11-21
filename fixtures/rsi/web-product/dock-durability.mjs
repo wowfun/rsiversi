@@ -95,6 +95,14 @@ try{
  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
  await resources(page);
  checks.push('Closing at 390 px stays closed after widening and reload, preserving the other window and float geometry');
+ await page.getByRole('button',{name:'Resource fullscreen',exact:true}).click();
+ await page.setViewportSize({width:390,height:844});
+ await page.getByRole('button',{name:'Exit resource fullscreen',exact:true}).click();
+ await page.setViewportSize({width:1440,height:900});
+ assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+ assert.deepEqual((await record(page)).value.state,{...desktop.value.state,expanded:false,mode:'push'});
+ await resources(page);
+ checks.push('Exiting fullscreen at 390 px closes the column and resets manual fullscreen while retaining the layout');
  await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
  await page.locator(`[data-session-id="${session}"] [data-testid=conversation-open]`).click();
  await page.getByRole('button',{name:'Dock resource',exact:true}).waitFor();

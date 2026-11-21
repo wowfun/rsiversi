@@ -339,7 +339,7 @@ try{
   const key=dockStorageKey('fixture','history');
   let doc=emptyDock();
   for(let i=0;i<16;i++)doc=dockIntent(doc,{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'example'},title:'Resource '+i,duplicate:true});
-  for(let i=0;i<64;i++)doc=dockIntent(doc,{kind:'dock',operation:'mode',mode:i%2?'push':'fullscreen'});
+  for(let i=0;i<64;i++)doc=dockIntent(doc,{kind:'dock',operation:'toggle-fullscreen'});
   writeDock(key,doc);
   const restored=readDock(key);
   const closed=dockIntent(doc,{kind:'dock',operation:'close',tab:Object.keys(doc.state.tabs)[0]});
