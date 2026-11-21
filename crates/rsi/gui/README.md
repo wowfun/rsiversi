@@ -303,6 +303,10 @@ contents keep their plain-text presentations.
 Local Markdown image destinations become file-path events. After settlement
 the renderer reads through the attached Session Files service, including local
 absolute paths and parent paths. A read does not change the file picker's selection.
+A standalone image paragraph can use an unquoted local image path containing
+spaces when it begins with `./`, `../`, a POSIX root, or a Windows drive root.
+An escaped example, a code span, or a larger paragraph containing this
+space-separated form retains its ordinary Markdown interpretation.
 Links to these same image paths carry a distinct file-link event so the
 document can open the file from its label after settlement.
 The document constructs only the closed element set with text nodes, and HTTP(S) links

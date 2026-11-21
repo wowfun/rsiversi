@@ -1,5 +1,6 @@
 use pulldown_cmark::{
     Alignment as ParsedAlignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
+    TextMergeWithOffset,
 };
 use serde::Serialize;
 
@@ -101,11 +102,36 @@ fn file_image(value: &str) -> Option<String> {
 
 fn image_link(value: &str) -> Option<String> {
     let path = file_image(value)?;
-    let (_, extension) = path.rsplit_once('.')?;
-    ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"]
-        .iter()
-        .any(|suffix| extension.eq_ignore_ascii_case(suffix))
-        .then_some(path)
+    has_image_extension(&path).then_some(path)
+}
+
+fn has_image_extension(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, extension)| {
+        ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"]
+            .iter()
+            .any(|suffix| extension.eq_ignore_ascii_case(suffix))
+    })
+}
+
+// DSH recovers an image only when the paragraph's complete literal text
+// matches its source. Link destinations in ordinary Markdown stay with the parser.
+fn spaced_image(source: &str) -> Option<(&str, String)> {
+    let (alt, path) = source
+        .strip_prefix("![")?
+        .strip_suffix(')')?
+        .split_once("](")?;
+    if alt.contains([']', '\n', '\r'])
+        || !path.contains(' ')
+        || !has_image_extension(path)
+        || path.contains(['\n', '\r', '<', '>', '(', ')', '[', ']', '"', '\''])
+        || !(path.starts_with('/')
+            || path.starts_with("./")
+            || path.starts_with("../")
+            || matches!(path.as_bytes(), [letter, b':', b'/' | b'\\', ..] if letter.is_ascii_alphabetic()))
+    {
+        return None;
+    }
+    Some((alt, file_image(path)?))
 }
 
 fn leaf(event: Event<'_>) -> Option<Node> {
@@ -141,11 +167,13 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
     let mut columns = Vec::new();
     let mut column = 0;
     let mut header = false;
-    for event in Parser::new_ext(
+    let parser = Parser::new_ext(
         source,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_MATH,
-    ) {
-        if nodes.len() == MAXIMUM_EVENTS {
+    );
+    let mut events = TextMergeWithOffset::new(parser.into_offset_iter()).peekable();
+    while let Some((event, range)) = events.next() {
+        if nodes.len() >= MAXIMUM_EVENTS {
             return None;
         }
         let node = match event {
@@ -223,6 +251,42 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                     columns.clear();
                 }
                 depth = depth.checked_sub(1)?;
+                Node::End
+            }
+            Event::Text(ref text)
+                if text.starts_with("![")
+                    && matches!(
+                        nodes.last(),
+                        Some(Node::Start {
+                            element: Element::Paragraph | Element::Item
+                        })
+                    )
+                    && !source[..range.start].ends_with('\\')
+                    && &source[range] == text.as_ref()
+                    && events.peek().is_some_and(|(next, _)| {
+                        matches!(
+                            next,
+                            Event::End(TagEnd::Paragraph | TagEnd::Item)
+                                | Event::Start(
+                                    Tag::List(_)
+                                        | Tag::BlockQuote(_)
+                                        | Tag::CodeBlock(_)
+                                        | Tag::Heading { .. }
+                                        | Tag::Table(_)
+                                        | Tag::HtmlBlock
+                                )
+                                | Event::Rule
+                        )
+                    })
+                    && let Some((alt, path)) = spaced_image(text) =>
+            {
+                if depth >= MAXIMUM_DEPTH || nodes.len() + 3 > MAXIMUM_EVENTS {
+                    return None;
+                }
+                nodes.push(Node::Start {
+                    element: Element::FileImage { path },
+                });
+                nodes.push(Node::Text { text: alt.into() });
                 Node::End
             }
             event => leaf(event)?,
@@ -427,6 +491,57 @@ mod tests {
             "//server/image.png",
         ] {
             assert!(image_link(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn standalone_spaced_image_paths_preserve_escaped_code_and_prose_examples() {
+        for (source, expected) in [
+            (
+                "![Space path](./test workspace/测试图.png)",
+                "./test workspace/测试图.png",
+            ),
+            (
+                "![](../shared diagrams/world.svg)",
+                "../shared diagrams/world.svg",
+            ),
+            (
+                "> ![Space path](/test workspace/测试图.png)\n",
+                "/test workspace/测试图.png",
+            ),
+            (
+                r"- ![Space path](C:\test workspace\测试图.png)",
+                r"C:\test workspace\测试图.png",
+            ),
+            ("- ![Space path](./a b.png)\n  - child", "./a b.png"),
+        ] {
+            let nodes = parse(source).unwrap();
+            assert!(nodes.iter().any(|n| matches!(n, Node::Start{element:Element::FileImage{path}} if path == expected)), "{source}");
+        }
+        for source in [
+            r"\![literal](./a b.png)",
+            "`![literal](./a b.png)`",
+            "more ![literal](./a b.png)",
+            "![literal](./a b.png) more",
+            "![literal](a b.png)",
+            "![literal](https://example.org/a b.png)",
+            "![literal](//network/share/a b.png)",
+            "![literal](./a b.txt)",
+            "![literal](./a b.png#fragment)",
+            "![literal](./a b.png \"title\")",
+            "![*caption*](./a b.png)",
+            "![literal](./a &amp; b.png)",
+            "![literal](./a b.png)\nmore",
+        ] {
+            assert!(
+                !parse(source).unwrap().iter().any(|n| matches!(
+                    n,
+                    Node::Start {
+                        element: Element::FileImage { .. }
+                    }
+                )),
+                "{source}"
+            );
         }
     }
     #[test]

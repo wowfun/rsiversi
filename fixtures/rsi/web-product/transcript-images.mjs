@@ -19,6 +19,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     async configure({config,workspace}){
       await writeFile(join(workspace,'图 #1%.png'),png(84,52,[64,128,72,255]));
       await writeFile(join(dirname(workspace),'outside.png'),png(210,90,[175,88,46,255]));
+      await writeFile(join(dirname(workspace),'外部 草图.png'),png(210,90,[85,102,160,255]));
       await writeFile(join(dirname(workspace),'linked.png'),png(210,90,[52,132,165,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
       await writeFile(join(workspace,'ordinary.png'),'An ordinary text document');
@@ -55,6 +56,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     const markdown=[
       '![Workspace diagram](./%E5%9B%BE%20%231%25.png)',
       '![Parent image](../outside.png)',
+      '![Spaced image](../外部 草图.png)',
       '![Absolute image](<'+abs+'>)',
       '![Vector drawing](drawing.svg)',
       '![Missing](missing.png)',
@@ -70,7 +72,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     async function inspect(stage,width){
       const article=page.locator('.pane.selected .message.assistant .markdown').last();
       const sizes={};
-      for(const [label,w,h] of [['Workspace diagram',84,52],['Parent image',width,90],['Absolute image',width,90],['Vector drawing',96,48]]){
+      for(const [label,w,h] of [['Workspace diagram',84,52],['Parent image',width,90],['Spaced image',width,90],['Absolute image',width,90],['Vector drawing',96,48]]){
         const trigger=article.getByRole('button',{name:'View full image: '+label,exact:true});
         // The placeholder can be below the fold before any image request starts.
         const placeholder=article.getByText(label,{exact:true});
@@ -178,6 +180,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     result.readerConfigurationAccess=devices.includes(second.id);
     assert.equal(result.readerConfigurationAccess,false);
     await writeFile(join(dirname(service.workspace),'outside.png'),png(248,90,[61,106,170,255]));
+    await writeFile(join(dirname(service.workspace),'外部 草图.png'),png(248,90,[85,102,160,255]));
     await writeFile(join(dirname(service.workspace),'linked.png'),png(248,90,[52,132,165,255]));
     await connect(second,390);
     await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();
