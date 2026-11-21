@@ -788,8 +788,13 @@ after the first message. Menus mount their contents while open. Browsing the
 model, access or Add menu leaves the starting draft unattached. Choosing the
 current access mode dismisses the menu. A session-specific action opens one
 draft Session and transfers the saved starting text without submitting it.
-The Add list spans the composer, keeps focus and the selection in its editor,
-and exposes its active option for keyboard navigation. File references and
+The empty conversation offers a draft download in the Add list. Once history
+is visible, Session tools offers the conversation download and its cancellation.
+Both controls use the same export as `/export`. Export uses the attached Session
+generation, including in a protected investigation without a draft editor.
+The Add list spans the composer,
+keeps focus and the selection in its editor, and exposes its active option for
+keyboard navigation. File references and
 available Session commands share the list. Arrow keys cycle through enabled
 options. Enter or Tab selects, and Shift+Tab or Escape dismisses. An unattached draft offers an
 explicit Commands option to bind the Session and read its catalog. The image

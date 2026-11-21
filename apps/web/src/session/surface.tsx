@@ -1,4 +1,5 @@
 import {DocumentSessionScope, DocumentContributions, DocumentReviews} from "../document-plugins.tsx";
+import {closeDisclosure} from '../../disclosure.js';
 import {WorkspaceChoice} from './workspace-choice.tsx';
 import {PresetChoice, PresetLabel} from './preset-choice.tsx';
 import { ExternalSurface } from "./external.tsx";
@@ -23,7 +24,7 @@ import {
   PendingInteractions,
   SessionCommands,
 } from "./projections.tsx";
-import { useSelected, useView } from "../bridge.ts";
+import { run, useSelected, useView } from "../bridge.ts";
 import { sessionSurfaces, type SessionSurfaceOwner } from "./state.ts";
 import {ConversationAnnouncements, generationRejectionText} from './announcements.js';
 
@@ -138,6 +139,11 @@ function NativeSurface({
             </summary>
             <div className="pane-tools">
               <p className="pane-session mono">{coordinates}</p>
+              {!empty && !data?.protected && <button type="button" className="quiet" disabled={owner.switching}
+                onClick={event => {
+                  closeDisclosure(event.currentTarget, true);
+                  void run(() => owner.exportSession(''));
+                }}>{owner.composerView?.exporting ? 'Cancel export' : 'Download conversation'}</button>}
               {control(
                 "history",
                 "Earlier history",
@@ -225,6 +231,7 @@ function NativeSurface({
       <Composer
         owner={owner}
         data={data}
+        empty={empty}
         submitKey={owner.staged?.submitKey ?? "enter"}
         register={ref}
         hintId={hintId}

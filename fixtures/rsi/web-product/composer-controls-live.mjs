@@ -51,6 +51,13 @@ default="off"
  const values=[];function visit(value,path=''){if(value&&typeof value==='object')for(const [key,item]of Object.entries(value)){const next=path+'.'+key;if(['sandbox','reasoning_effort'].includes(key))values.push({path:next,value:item});visit(item,next);}}visit(facts);
  await writeFile(join(report,'policy-evidence.json'),JSON.stringify(values,null,2));
  assert(facts.some(fact=>['turn_accepted','message_turn_accepted'].includes(fact.type)&&fact.sandbox==='read-only'));
+ await page.getByLabel('Session tools',{exact:true}).click();
+ const markdownReady=page.waitForEvent('download');
+ await page.getByRole('button',{name:'Download conversation',exact:true}).click();
+ const markdown=await markdownReady;
+ assert.equal(await markdown.failure(),null);
+ assert.match(markdown.suggestedFilename(),/\.md$/);
+ assert.match(await readFile(await markdown.path(),'utf8'),/RSI_COMPOSER_OK/);
  // A Session model command is a domain default, not a Turn-level override.
  // Inspect the actual provider request rather than expecting it on TurnAccepted.
  const downloadReady=page.waitForEvent('download');

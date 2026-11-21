@@ -3,7 +3,7 @@ export async function exportSession(pane, context, args) {
     pane.exportAbort.abort();
     return;
   }
-  if (!pane.generation || !pane.editor)
+  if (!pane.generation)
     throw new Error("Open a native conversation first");
   const owner = context.connection;
   if (!owner) throw new Error("Not connected");

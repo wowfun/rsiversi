@@ -7,13 +7,14 @@ import css from './composer-menu.module.css';
 interface Props {
   owner: ComposerOwner;
   data?: ComposerProjection | null;
+  empty: boolean;
   id: string;
   choice: number | null;
   choose(value: number | null): void;
 }
 const label = 'Add files or run commands';
 
-export function ComposerAdd({owner, data, id, choice, choose}: Props) {
+export function ComposerAdd({owner, data, empty, id, choice, choose}: Props) {
   const open = choice !== null;
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
@@ -99,8 +100,9 @@ export function ComposerAdd({owner, data, id, choice, choose}: Props) {
     ...(state?.mediaLimits ? [{label:'Images', section:'Add', disabled:state.imageDisabled, pick:() => owner.imageInput.click()}] : []),
     {label:'Conversation', section:'Add', disabled:unavailable(state?.referenceDisabled), pick:() => bound(() => owner.showReferencePicker())},
     {label:'Search history', section:'Add', disabled:unavailable(state?.referenceDisabled), pick:() => bound(() => owner.showHistoryPicker())},
-    {label:state?.exporting ? 'Cancel export' : 'Export', section:'Add', disabled:unavailable(false), pick:() => bound(() => owner.exportSession(''))},
   ];
+  if (empty) rows.push({label:state?.exporting ? 'Cancel export' : 'Export', section:'Add',
+    disabled:unavailable(false), pick:() => bound(() => owner.exportSession(''))});
   if (data?.commands) {
     for (const command of data.commands.commands) {
       if (command.composer_input) rows.push({label:`/${command.name}`, section:'Commands', description:command.description,

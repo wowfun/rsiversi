@@ -21,12 +21,14 @@ type Register = (name: string) => (node: HTMLElement | null) => void;
 export function Composer({
   owner,
   data,
+  empty,
   submitKey,
   register,
   hintId,
 }: {
   owner: ComposerOwner;
   data?: ComposerProjection | null;
+  empty: boolean;
   submitKey: string;
   register: Register;
   hintId: string;
@@ -137,7 +139,7 @@ export function Composer({
             </p>
       <div ref={row} className="composer-bar">
         <div className={css.tools}>
-          <ComposerAdd owner={owner} data={data} id={addListId} choice={addChoice} choose={setAddChoice}/>
+          <ComposerAdd owner={owner} data={data} empty={empty} id={addListId} choice={addChoice} choose={setAddChoice}/>
           <ComposerAccess owner={owner}/>
         </div>
         <div className={css.submission}>

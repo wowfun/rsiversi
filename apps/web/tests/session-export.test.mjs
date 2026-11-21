@@ -2,6 +2,24 @@ import {afterEach, beforeEach, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {desktopBridgeDescriptor} from '../wire-descriptors.mjs';
 import {downloadSession} from '../session-export.js';
+import {exportSession} from '../src/runtime/session-submissions.js';
+
+test('a protected pane downloads using its attached generation without a draft editor', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', {value: new EventTarget(), configurable: true});
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'window', previous); else delete globalThis.window; });
+  const pane = {index: 'main', generation: '7', renderComposer() {}};
+  const connection = {}, call = () => {};
+  let started = 0;
+  await exportSession(pane, {connection, boundCall(owner) { assert.equal(owner, connection); return call; },
+    async downloadSession(transport, index, generation, args, signal) {
+      assert.equal(transport, call);
+      assert.deepEqual([index, generation, args, signal.aborted], ['main', '7', '', false]);
+      started++;
+    }}, '');
+  assert.equal(started, 1);
+  assert.equal(pane.exportAbort, undefined);
+});
 
 const deferred = () => { let resolve; const promise = new Promise(r=>resolve=r); return {promise,resolve}; };
 let nativeCalls, original;
