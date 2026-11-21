@@ -240,8 +240,9 @@ or cookie removal. Disconnect retains saved drafts and hides their namespace;
 reconnection exposes only the authenticated endpoint and device namespace.
 When reconnecting a browser tab, selecting the conversation already being
 restored shares that open. A different selection takes effect after the pending
-restore settles. Once the restored pane is visible, an explicit reopen starts
-a new reading visit.
+restore settles. Selecting the published conversation already visible in the
+pane retains its attachment, draft, and reading position. Visiting another
+conversation and returning opens a fresh attachment.
 If draft storage cannot open or fails its integrity check, connection displays
 an explicit storage-unavailable notice before a composer is opened. The connected
 service remains accessible; sending requires successful draft persistence. This

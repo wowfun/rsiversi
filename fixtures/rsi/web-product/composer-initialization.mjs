@@ -104,10 +104,14 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
     finishRestore();
     await Promise.all([same,other]);
     await fixture.input.open({action:'open',session:'other'});
-    return {session,during,actions,selected:fixture.view.surfaces.main.session};
+    const reselected=[...actions];
+    await fixture.input.open({action:'open',session});
+    await fixture.input.open({action:'open',session:'other'});
+    return {session,during,reselected,actions,selected:fixture.view.surfaces.main.session};
   });
   assert.deepEqual(reconnect.during,['restore '+reconnect.session]);
-  assert.deepEqual(reconnect.actions,[...reconnect.during,'open other','open other']);
+  assert.deepEqual(reconnect.reselected,[...reconnect.during,'open other']);
+  assert.deepEqual(reconnect.actions,[...reconnect.reselected,'open '+reconnect.session,'open other']);
   assert.equal(reconnect.selected,'other');
   results.push({browser:name,initialLabel,reloadedLabel,before,after,shortBottom,shortGeometry,scrollReturn:true,contentShrink:true,reconnect,errors});
  }catch(error){

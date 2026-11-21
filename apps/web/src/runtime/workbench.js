@@ -17,7 +17,7 @@ import { downloadSession } from "../../session-export.js";
 import { DocumentConnection } from "../../document-connection.js";
 import {installDisclosures} from '../../disclosure.js';
 import { StartingDraft } from "../../starting-draft.js";
-import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice, pageKind } from "../bridge.ts";
+import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice } from "../bridge.ts";
 import { createDocumentTransport } from "../native.ts";
 import { isDesktop, desktopCall } from "../../desktop-bridge.js";
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
@@ -250,10 +250,10 @@ async function openInSelected(fields, startingText) {
   const pane = panes.get(selected);
   if (!pane) throw new Error("Open a conversation surface first");
   const surface = view?.surfaces[selected];
-  if (fields.action === "open" && pageKind() && surface?.kind === "native" && !surface.draft &&
-      surface.session === fields.session && surface.generation === pane.generation && !pane.switching && !owner.closing) return;
+  const restoring = pane.index === "main" ? owner?.restoring : undefined;
+  if (!restoring && fields.action === "open" && surface?.kind === "native" && !surface.draft &&
+      surface.session === fields.session && surface.generation === pane.generation && !pane.switching && owner && !owner.closing) return;
   if (pane.switching || pane.submitting || pane.uploading) throw new Error("Wait for this conversation’s current operation");
-  const restoring = pane.index === "main" ? owner.restoring : undefined;
   if (restoring && fields.action === "open" && fields.session === restoring.session)
     return restoring.opened;
   pane.switching = true;
