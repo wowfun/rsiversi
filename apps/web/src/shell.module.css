@@ -173,6 +173,8 @@
   display: none;
 }
 :global(.connection-controls-host):where(.scope, .scope *) {
+  display: flex;
+  align-items: center;
   margin-left: auto;
   min-width: 0;
 }

@@ -1,6 +1,8 @@
 # Presentation design
 
-The Chat header's Session panel shows the attached working folder and its parent.
+The Session panel button sits in the selected conversation's title toolbar,
+beside the workbench controls. Its panel opens below the Chat tabs and shows
+the attached working folder and its parent.
 The folder exposes its full path to pointer and keyboard users. Its actions
 button, context click and keyboard context menu offer Copy folder path, which
 copies the exact attached path and reports the clipboard result. Show in folder

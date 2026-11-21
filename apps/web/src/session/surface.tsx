@@ -58,12 +58,14 @@ function NativeSurface({
   selected,
   mode,
   column,
+  titleActions,
   catalogOpen,
 }: {
   owner: SessionSurfaceOwner;
   selected: boolean;
   mode: string;
   column: HTMLElement | null;
+  titleActions: HTMLElement | null;
   catalogOpen?: boolean;
 }) {
   useSyncExternalStore(owner.subscribe, owner.getSnapshot);
@@ -134,7 +136,7 @@ function NativeSurface({
             {(['conversation','activity'] as const).map(value=><button key={value} type="button" role="tab" id={`${tabId}-${value}`} aria-controls={`${tabId}-panel`} aria-selected={tab===value} tabIndex={tab===value?0:-1} onClick={()=>setTab(value)} onKeyDown={event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?'conversation':event.key==='End'?'activity':tab==='conversation'?'activity':'conversation';setTab(next);document.getElementById(`${tabId}-${next}`)?.focus();}}}>{value==='conversation'?'Chat':'Trajectory'}</button>)}
           </nav>
           {!empty && data?.agent_preset && <PresetLabel id={data.agent_preset}/>}
-          {selected && !empty && data && <SessionPanel key={`panel:${data.session}`} path={data.workspace.coordinates.path} local={data.workspace.coordinates.location.kind === 'local'} chat={tab === 'conversation'}/>}
+          {selected && !empty && data && <SessionPanel key={`panel:${data.session}`} titleActions={titleActions} path={data.workspace.coordinates.path} local={data.workspace.coordinates.location.kind === 'local'} chat={tab === 'conversation'}/>}
           {selected && !empty && data && <ScheduledTasks key={data.generation} pane={owner.index} surface={data}/>}
           <details className="session-menu">
             <summary aria-label="Session tools">
@@ -253,10 +255,12 @@ function NativeSurface({
 export function SessionSurfaces({
   mode,
   column,
+  titleActions,
   catalogOpen,
 }: {
   mode: string;
   column: HTMLElement | null;
+  titleActions: HTMLElement | null;
   catalogOpen?: boolean;
 }) {
   const owners = useSyncExternalStore(
@@ -280,6 +284,7 @@ export function SessionSurfaces({
             selected={owner.index === selected}
             mode={mode}
             column={column}
+            titleActions={titleActions}
             catalogOpen={catalogOpen}
           />
         ),

@@ -9,6 +9,7 @@ import { openTerminals } from "./resource-dock.tsx";
 export function Conversation() {
   const catalogOpen = useSyncExternalStore(scheduleCatalog.subscribe, catalogVisible);
   const [column, setColumn] = useState<HTMLElement | null>(null);
+  const [titleActions, setTitleActions] = useState<HTMLDivElement | null>(null);
   const surfaceKeys = useView((view) =>
     Object.keys(view?.surfaces ?? {}).join(","),
   );
@@ -136,13 +137,12 @@ export function Conversation() {
             </Button>
           </div>
         </details>
-        <div
-          id="connection-controls-host"
-          className="connection-controls-host"
-        />
+        <div id="connection-controls-host" className="connection-controls-host">
+          <div ref={setTitleActions} />
+        </div>
       </div>
       <div id="panes" className="panes">
-        <SessionSurfaces mode={mode} column={column} catalogOpen={catalogOpen} />
+        <SessionSurfaces mode={mode} column={column} titleActions={titleActions} catalogOpen={catalogOpen} />
       </div>
     </section>
   );

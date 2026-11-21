@@ -1,4 +1,5 @@
 import {memo, useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent} from 'react';
+import {createPortal} from 'react-dom';
 import {writeClipboard} from '../../mounts.js';
 import {Menu} from '../../vendor/dsh/dockkit-primitives/Menu.tsx';
 import {Tooltip} from '../../vendor/dsh/dockkit-primitives/Tooltip.tsx';
@@ -63,7 +64,7 @@ function WorkingFolder({path, local}: {path:string; local:boolean}) {
   </div>;
 }
 
-export const SessionPanel = memo(function SessionPanel({path, local, chat}: {path:string; local:boolean; chat:boolean}) {
+export const SessionPanel = memo(function SessionPanel({titleActions, path, local, chat}: {titleActions:HTMLElement | null; path:string; local:boolean; chat:boolean}) {
   const [fits, setFits] = useState(false), [pinned, setPinned] = useState(dockVisible);
   const [overlay, setOverlay] = useState(false);
   const probe = useRef<HTMLSpanElement>(null), trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLElement>(null);
@@ -109,10 +110,10 @@ export const SessionPanel = memo(function SessionPanel({path, local, chat}: {pat
     try { if (pinned) localStorage.setItem(hiddenDock, '1'); else localStorage.removeItem(hiddenDock); } catch { /* The active pane retains the choice. */ }
   }
   return <div className={css.root}>
-    <Tooltip portal label={chat ? 'Session panel' : 'Session panel is available in Chat'} side="bottom" delayMs={500}>
+    {titleActions && createPortal(<Tooltip portal label={chat ? 'Session panel' : 'Session panel is available in Chat'} side="bottom" delayMs={500}>
       <button ref={trigger} type="button" className={css.trigger} disabled={!chat} aria-label="Session panel"
         aria-expanded={shown} aria-controls={shown ? id : undefined} onClick={toggle}><IconFlatListOutlineRegular size={16} aria-hidden/></button>
-    </Tooltip>
+    </Tooltip>, titleActions)}
     {chat && <span ref={probe} className={css.probe} aria-hidden/>}
     {shown && <aside ref={panel} id={id} className={css.panel} data-presentation={fits ? 'docked' : 'overlay'} aria-label="Session panel">
       <h2>Environment</h2><WorkingFolder path={path} local={local}/>

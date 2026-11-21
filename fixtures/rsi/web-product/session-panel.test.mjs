@@ -26,9 +26,12 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
     });
     document.body.style.margin='0';
     document.body.style.setProperty('--dsw-menu-backdrop-filter','blur(14px)');
+    const titleActions=document.createElement('header');
+    titleActions.className='session-toolbar';
+    document.body.prepend(titleActions);
     const root=createRoot(document.querySelector('#root'));
     window.show=(path='/home/work/project',chat=true,local=true)=>root.render(<><IconSprite/>
-      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} path={path} local={local} chat={chat}/></div></header>
+      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} titleActions={titleActions} path={path} local={local} chat={chat}/></div></header>
       <button style={{marginTop:'160px'}}>Outside</button></>);
     window.show();
   `});
@@ -38,10 +41,11 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
       const browser=await engine.launch();t.after(()=>browser.close());
       const page=await browser.newPage({viewport:{width:1575,height:880}});
       await page.goto(fixture.url);
-      const trigger=page.getByRole('button',{name:'Session panel',exact:true});
+      const trigger=page.locator('.session-toolbar').getByRole('button',{name:'Session panel',exact:true});
       const panel=page.getByRole('complementary',{name:'Session panel',exact:true});
       await trigger.waitFor();assert.equal(await trigger.getAttribute('aria-expanded'),'false');
       await trigger.press('Enter');await panel.waitFor();
+      assert(await panel.evaluate(node=>!!node.closest('.pane-header')));
       assert.equal(await panel.getAttribute('data-presentation'),'overlay');
       const folder=panel.getByLabel('Working folder: /home/work/project',{exact:true});
       await folder.focus();await page.getByRole('tooltip',{name:/Working folder.*project/s}).waitFor();
