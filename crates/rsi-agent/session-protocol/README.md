@@ -329,6 +329,10 @@ still require replacements. The digest covers the complete input batch even when
 the domain set is empty. Removing the last input cannot produce an empty commit,
 including through deserialization.
 
+Durable command inputs carry the same delivery intent as mailbox messages. A
+follow-up targets the next Turn even when the current Turn is running. Draft
+command inputs are held for the first Step of the first Turn.
+
 Command invocations bind a ContributionId, DomainRequestId, typed draft or
 durable control revision, and at most 64 KiB of structurally validated JSON
 arguments. A durable command control retains that complete invocation alongside

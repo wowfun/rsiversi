@@ -22,7 +22,7 @@ pub const MAXIMUM_COMMAND_INPUT_BYTES: usize = 256 * 1024;
 pub struct CommandMessage {
     /// Immutable command source, identity and typed content.
     pub message: crate::AgentMessage,
-    /// Held next-Step or current-Turn-or-waking steering intent.
+    /// Mailbox delivery intent. Draft publications hold all inputs for their first Step.
     pub delivery: crate::MessageDelivery,
 }
 impl CommandMessage {
@@ -89,14 +89,6 @@ impl CommandMessage {
                 "command message changed source".into(),
             ));
         };
-        if !matches!(
-            self.delivery,
-            crate::MessageDelivery::NextStep | crate::MessageDelivery::Steer
-        ) {
-            return Err(SessionError::Invalid(
-                "invalid command input delivery".into(),
-            ));
-        }
         Ok(source)
     }
 }

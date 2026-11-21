@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, CommandArguments, CommandMessage,
     CommandMessageSource, CommandRevision, DomainStateView, MAXIMUM_COMMAND_INPUT_BYTES,
-    MAXIMUM_COMMAND_INPUTS, MessageAttribution, MessageOptions, SessionCommandDescriptor,
-    SessionCommandInvocation, SessionHeader,
+    MAXIMUM_COMMAND_INPUTS, MessageAttribution, MessageDelivery, MessageOptions,
+    SessionCommandDescriptor, SessionCommandInvocation, SessionHeader,
 };
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -58,19 +58,11 @@ impl From<Vec<ValidatedDomainProposal>> for SessionCommandOutput {
     }
 }
 
-/// Scheduling intent of content returned by an admitted command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommandInputDelivery {
-    /// Hold for the next Step without waking an idle Session.
-    Inject,
-    /// Join the current Turn when active, otherwise wake a new Turn.
-    Steer,
-}
 /// Proposed content; only the Session owner assigns its durable identity and source.
 #[derive(Clone, Debug)]
 pub struct CommandInput {
     /// Delivery intent, independent of the current scheduling state.
-    pub delivery: CommandInputDelivery,
+    pub delivery: MessageDelivery,
     /// Ordered model-visible blocks; external callers verify referenced objects.
     pub content: Vec<AgentMessageContent>,
     /// Optional original presentation identity and source.
@@ -79,8 +71,7 @@ pub struct CommandInput {
 /// Validated immutable input retained through draft or durable publication.
 #[derive(Clone, Debug)]
 pub struct PreparedCommandInput {
-    delivery: CommandInputDelivery,
-    held: CommandMessage,
+    output: CommandMessage,
     encoded_len: usize,
 }
 impl PreparedCommandInput {
@@ -124,16 +115,17 @@ impl PreparedCommandInput {
                 message
                     .validate()
                     .map_err(|error| crate::ContributionError::Invalid(error.to_string()))?;
-                let held = CommandMessage {
+                let mut output = CommandMessage {
                     message,
-                    delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                    delivery: MessageDelivery::NextStep,
                 };
-                let encoded_len = held
+                // A draft always writes next_step, including when the durable intent is shorter.
+                let encoded_len = output
                     .encoded_len()
                     .map_err(|error| crate::ContributionError::Invalid(error.to_string()))?;
+                output.delivery = input.delivery;
                 Ok(Self {
-                    delivery: input.delivery,
-                    held,
+                    output,
                     encoded_len,
                 })
             })
@@ -159,22 +151,11 @@ impl PreparedCommandInput {
     }
     /// Returns the exact validated message with owner-assigned provenance.
     pub const fn message(&self) -> &AgentMessage {
-        &self.held.message
+        &self.output.message
     }
     /// Returns immutable scheduling intent.
-    pub const fn delivery(&self) -> CommandInputDelivery {
-        self.delivery
-    }
-    /// Scheduling intent as recorded in the owning publication.
-    pub const fn publication_delivery(
-        &self,
-        draft: bool,
-    ) -> rsi_agent_session_protocol::MessageDelivery {
-        if !draft && matches!(self.delivery, CommandInputDelivery::Steer) {
-            rsi_agent_session_protocol::MessageDelivery::Steer
-        } else {
-            rsi_agent_session_protocol::MessageDelivery::NextStep
-        }
+    pub const fn delivery(&self) -> MessageDelivery {
+        self.output.delivery
     }
     /// Freezes durable intent; drafts hold all inputs for the first accepted Step.
     pub fn publication(&self, draft: bool) -> rsi_agent_session_protocol::CommandMessage {
@@ -183,8 +164,10 @@ impl PreparedCommandInput {
 
     /// Moves the callback's original content into its final publication.
     pub fn into_publication(mut self, draft: bool) -> CommandMessage {
-        self.held.delivery = self.publication_delivery(draft);
-        self.held
+        if draft {
+            self.output.delivery = MessageDelivery::NextStep;
+        }
+        self.output
     }
 }
 

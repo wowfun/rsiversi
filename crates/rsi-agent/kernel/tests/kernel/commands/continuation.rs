@@ -1224,7 +1224,7 @@ async fn independent_domains_share_a_session_but_not_a_second_owner_or_generatio
 
 #[tokio::test]
 async fn held_command_context_enters_an_automatic_turn_without_waking_or_authorizing_it() {
-    use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery};
+    use rsi_agent_composition_protocol::CommandInput;
     for sqlite in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let store: Arc<dyn SessionStore> = if sqlite {
@@ -1234,7 +1234,7 @@ async fn held_command_context_enters_an_automatic_turn_without_waking_or_authori
         };
         let fixture = Fixture::start(store, false).await;
         *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
-            delivery: CommandInputDelivery::Inject,
+            delivery: MessageDelivery::NextStep,
             content: vec![AgentMessageContent::Text {
                 text: "Held task change".into(),
             }],
@@ -1296,73 +1296,79 @@ async fn held_command_context_enters_an_automatic_turn_without_waking_or_authori
 
 #[tokio::test]
 async fn waking_input_supersedes_a_continuation_beyond_the_first_payload_page() {
-    use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery};
-    for (sqlite, human) in [(false, true), (false, false), (true, true), (true, false)] {
-        let directory = tempfile::tempdir().unwrap();
-        let inner: Arc<dyn SessionStore> = if sqlite {
-            Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
-        } else {
-            Arc::new(MemoryStore::new())
-        };
-        let store = Arc::new(FactReadRaceStore::new(inner));
-        let fixture = Fixture::start(store.clone(), false).await;
-        let session = &fixture.session_id;
-        let command = async |delivery, name: &str| {
-            *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
-                delivery,
-                content: vec![AgentMessageContent::Text { text: name.into() }],
-                attribution: None,
-            }];
-            SessionCommands::execute(
-                &fixture.kernel,
-                fixture.kernel.prepare_resume(session).await.unwrap(),
-                fixture.invocation(name, true).await,
-            )
-            .await
-            .unwrap()
-        };
-        let held = command(CommandInputDelivery::Inject, "held").await;
-        let lease = arm(&fixture).await;
-        reserve(&fixture, &lease).await;
-        store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
-        store.mailbox.reads.lock().unwrap().clear();
-        if human {
-            fixture
+    use rsi_agent_composition_protocol::CommandInput;
+    for sqlite in [false, true] {
+        for command_delivery in [
+            None,
+            Some(MessageDelivery::Steer),
+            Some(MessageDelivery::NextTurn),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let inner: Arc<dyn SessionStore> = if sqlite {
+                Arc::new(rsi_agent_store_sqlite::SqliteStore::open(directory.path()).unwrap())
+            } else {
+                Arc::new(MemoryStore::new())
+            };
+            let store = Arc::new(FactReadRaceStore::new(inner));
+            let fixture = Fixture::start(store.clone(), false).await;
+            let session = &fixture.session_id;
+            let command = async |delivery, name: &str| {
+                *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
+                    delivery,
+                    content: vec![AgentMessageContent::Text { text: name.into() }],
+                    attribution: None,
+                }];
+                SessionCommands::execute(
+                    &fixture.kernel,
+                    fixture.kernel.prepare_resume(session).await.unwrap(),
+                    fixture.invocation(name, true).await,
+                )
+                .await
+                .unwrap()
+            };
+            let held = command(MessageDelivery::NextStep, "held").await;
+            let lease = arm(&fixture).await;
+            reserve(&fixture, &lease).await;
+            store.mailbox.prefix_limit.store(1, Ordering::Relaxed);
+            store.mailbox.reads.lock().unwrap().clear();
+            if let Some(delivery) = command_delivery {
+                command(delivery, "wake").await;
+            } else {
+                fixture
+                    .kernel
+                    .submit_message(SubmitMessage {
+                        session: super::super::resume(&fixture.kernel, session.clone()).await,
+                        message: mailbox_message("wake"),
+                        delivery: MessageDelivery::NextTurn,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let automatic = fixture
                 .kernel
-                .submit_message(SubmitMessage {
-                    session: super::super::resume(&fixture.kernel, session.clone()).await,
-                    message: mailbox_message("wake"),
-                    delivery: MessageDelivery::NextTurn,
-                })
+                .message_status(session, &input().message_id)
                 .await
                 .unwrap();
-        } else {
-            command(CommandInputDelivery::Steer, "wake").await;
+            assert!(matches!(
+                automatic.state,
+                MessageState::Discarded {
+                    reason: MessageDiscardReason::Superseded,
+                    ..
+                }
+            ));
+            let retained = fixture
+                .kernel
+                .message_status(
+                    session,
+                    &held.commit().command_inputs()[0].message.message_id,
+                )
+                .await
+                .unwrap();
+            assert_eq!(retained.state, MessageState::Pending);
+            assert!(store.mailbox.reads.lock().unwrap().is_empty());
+            drop(lease);
+            fixture.stop().await;
         }
-        let automatic = fixture
-            .kernel
-            .message_status(session, &input().message_id)
-            .await
-            .unwrap();
-        assert!(matches!(
-            automatic.state,
-            MessageState::Discarded {
-                reason: MessageDiscardReason::Superseded,
-                ..
-            }
-        ));
-        let retained = fixture
-            .kernel
-            .message_status(
-                session,
-                &held.commit().command_inputs()[0].message.message_id,
-            )
-            .await
-            .unwrap();
-        assert_eq!(retained.state, MessageState::Pending);
-        assert!(store.mailbox.reads.lock().unwrap().is_empty());
-        drop(lease);
-        fixture.stop().await;
     }
 }
 

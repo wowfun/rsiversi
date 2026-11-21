@@ -4,12 +4,13 @@
 
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    CommandInput, CommandInputDelivery, ContributionError, ContributionKind,
-    ContributionRegistrarContract, ContributionRegistration, ContributionResult, SessionCommand,
-    SessionCommandContext, SessionCommandOutput, SessionCommandRegistration,
+    CommandInput, ContributionError, ContributionKind, ContributionRegistrarContract,
+    ContributionRegistration, ContributionResult, SessionCommand, SessionCommandContext,
+    SessionCommandOutput, SessionCommandRegistration,
 };
 use rsi_agent_session_protocol::{
-    AgentMessageContent, CommandArguments, ContributionId, SessionCommandDescriptor,
+    AgentMessageContent, CommandArguments, ContributionId, MessageDelivery,
+    SessionCommandDescriptor,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use std::sync::Arc;
@@ -81,7 +82,7 @@ impl SessionCommand for ContextInput {
         }
         Ok(SessionCommandOutput {
             inputs: vec![CommandInput {
-                delivery: CommandInputDelivery::Inject,
+                delivery: MessageDelivery::NextStep,
                 content: arguments.content,
                 attribution: arguments.attribution,
             }],

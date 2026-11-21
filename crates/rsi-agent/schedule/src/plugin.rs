@@ -5,14 +5,14 @@ use crate::{
 };
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    CommandInput, CommandInputDelivery, ContinuationCommand, ContributionError, ContributionKind,
+    CommandInput, ContinuationCommand, ContributionError, ContributionKind,
     ContributionRegistrarContract, ContributionRegistration, ContributionResult, DomainDefinition,
     DomainForkPolicy, DomainHandle, DomainRegistrarContract, SessionCommand, SessionCommandContext,
     SessionCommandRegistration, SessionProjection, SessionProjectionContext,
 };
 use rsi_agent_session_protocol::{
     CommandArguments, ContributionId, DomainIdentity, DomainRequestId, DomainStateView, EffectId,
-    MessageId, ProjectionValue, SessionCommandDescriptor,
+    MessageDelivery, MessageId, ProjectionValue, SessionCommandDescriptor,
 };
 use rsi_agent_turn_protocol::{
     AgentCallerAuthority, DomainMutation, TurnExecution, TurnExecutionContract,
@@ -123,7 +123,7 @@ impl SessionCommand for Command {
                         json!(title)
                     );
                     inputs.push(CommandInput {
-                        delivery: CommandInputDelivery::Inject,
+                        delivery: MessageDelivery::NextStep,
                         content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                             text,
                         }],

@@ -1,9 +1,9 @@
 use super::*;
-use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery, DraftCommandPreparation};
+use rsi_agent_composition_protocol::{CommandInput, DraftCommandPreparation};
 use rsi_agent_session_protocol::{AgentControlRecord, InputMessageSource, MessageDelivery};
 use rsi_agent_store_protocol::MailboxRead;
 
-fn text_input(delivery: CommandInputDelivery, text: &str) -> CommandInput {
+fn text_input(delivery: MessageDelivery, text: &str) -> CommandInput {
     CommandInput {
         delivery,
         content: vec![AgentMessageContent::Text { text: text.into() }],
@@ -56,8 +56,9 @@ async fn inbox_pause_command_injection_preserves_pause_and_receipt_retry_cannot_
         };
         pause().await;
         for (delivery, request, paused) in [
-            (CommandInputDelivery::Inject, "held-command", true),
-            (CommandInputDelivery::Steer, "waking-command", false),
+            (MessageDelivery::NextStep, "held-command", true),
+            (MessageDelivery::Steer, "waking-command", false),
+            (MessageDelivery::NextTurn, "follow-up-command", false),
         ] {
             *fixture.callback.inputs.lock().unwrap() = vec![text_input(delivery, request)];
             let invocation = fixture.invocation(request, true).await;
@@ -137,7 +138,7 @@ async fn inject_only(
     rsi_agent_turn_protocol::DomainMutationReceipt,
 ) {
     *fixture.callback.inputs.lock().unwrap() = vec![CommandInput {
-        delivery: CommandInputDelivery::Inject,
+        delivery: MessageDelivery::NextStep,
         content: vec![
             AgentMessageContent::Text {
                 text: "Held across cold recovery".into(),
@@ -278,7 +279,7 @@ async fn input_only_draft_and_durable_receipts_recover_without_domain_state() {
                 .await
                 .unwrap();
         *fixture.callback.inputs.lock().unwrap() = vec![text_input(
-            CommandInputDelivery::Inject,
+            MessageDelivery::NextStep,
             "Side conversation boundary",
         )];
         let invocation = SessionCommandInvocation {
@@ -352,8 +353,8 @@ async fn input_only_draft_and_durable_receipts_recover_without_domain_state() {
 
 fn inputs(fixture: &Fixture) {
     *fixture.callback.inputs.lock().unwrap() = vec![
-        text_input(CommandInputDelivery::Inject, "Mode changed"),
-        text_input(CommandInputDelivery::Steer, "Prepare a plan"),
+        text_input(MessageDelivery::NextStep, "Mode changed"),
+        text_input(MessageDelivery::Steer, "Prepare a plan"),
     ];
 }
 
@@ -373,9 +374,9 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         let store = Arc::new(FactReadRaceStore::new(store));
         let fixture = Fixture::start(store.clone(), false).await;
         *fixture.callback.inputs.lock().unwrap() = vec![
-            text_input(CommandInputDelivery::Steer, "Prepare a plan"),
-            text_input(CommandInputDelivery::Inject, "Mode changed"),
-            text_input(CommandInputDelivery::Steer, "Continue that plan"),
+            text_input(MessageDelivery::Steer, "Prepare a plan"),
+            text_input(MessageDelivery::NextStep, "Mode changed"),
+            text_input(MessageDelivery::Steer, "Continue that plan"),
         ];
         for (ordinal, input) in fixture
             .callback
@@ -526,6 +527,32 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
                 tail
             );
         }
+        *fixture.callback.inputs.lock().unwrap() =
+            vec![text_input(MessageDelivery::NextTurn, "After this turn")];
+        let followup = fixture
+            .kernel
+            .execute(
+                fixture
+                    .kernel
+                    .prepare_resume(&fixture.session_id)
+                    .await
+                    .unwrap(),
+                fixture.invocation("active-follow-up", true).await,
+            )
+            .await
+            .unwrap();
+        let queued = store
+            .read_agent_message(
+                &fixture.session_id,
+                &followup.commit().command_inputs()[0].message.message_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.delivery, MessageDelivery::NextTurn);
+        assert_eq!(queued.target, MessageTarget::NextTurn);
+        assert!(queued.bound_turn_id.is_none());
+        assert!(queued.wake_required);
         assert_eq!(
             fixture
                 .kernel
@@ -575,6 +602,36 @@ async fn command_inputs_publish_atomically_keep_provenance_and_retry_once() {
         fixture
             .kernel
             .finish_turn(&claim, &TurnOutcome::Completed)
+            .await
+            .unwrap();
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture
+                .kernel
+                .claim("command-input-executor", CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_ne!(next.turn_id(), claim.turn_id());
+        assert!(
+            fixture
+                .kernel
+                .read_facts(&next, 0, 16)
+                .await
+                .unwrap()
+                .facts
+                .iter()
+                .any(
+                    |fact| matches!(fact.body(), SessionFactBody::InputMessageClaimed {
+                source: InputMessageSource::Command { message_id, .. }, ..
+            } if message_id == &queued.message.message_id)
+                )
+        );
+        fixture
+            .kernel
+            .finish_turn(&next, &TurnOutcome::Completed)
             .await
             .unwrap();
         drop(executor);
@@ -702,7 +759,7 @@ async fn draft_inputs_remain_local_until_first_submit_and_enter_first_step() {
 #[tokio::test]
 async fn invalid_command_input_rolls_back_domain_and_observer() {
     let fixture = Fixture::start(Arc::new(MemoryStore::new()), false).await;
-    *fixture.callback.inputs.lock().unwrap() = vec![text_input(CommandInputDelivery::Steer, "")];
+    *fixture.callback.inputs.lock().unwrap() = vec![text_input(MessageDelivery::Steer, "")];
     let invocation = fixture.invocation("invalid-command-input", true).await;
     let before = fixture
         .store

@@ -75,7 +75,7 @@ impl SessionCommand for Toggle {
             output
                 .inputs
                 .push(rsi_agent_composition_protocol::CommandInput {
-                    delivery: rsi_agent_composition_protocol::CommandInputDelivery::Inject,
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
                     content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                         text: "held context".into(),
                     }],

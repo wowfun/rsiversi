@@ -37,11 +37,10 @@ pub use tool_outputs::ToolOutputCatalog;
 mod command;
 mod contribution;
 pub use command::{
-    AppliedDraftCommand, CommandInput, CommandInputDelivery, CommandOutcome,
-    CommandOutcomeEvidence, CommandOutcomeOwner, ContinuationCommand, DraftCommandError,
-    DraftCommandMutation, DraftCommandPreparation, DraftCommandResult,
-    MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedCommandInput, PreparedDraftCommand, SessionCommand,
-    SessionCommandContext, SessionCommandOutput, SessionCommandRegistration,
+    AppliedDraftCommand, CommandInput, CommandOutcome, CommandOutcomeEvidence, CommandOutcomeOwner,
+    ContinuationCommand, DraftCommandError, DraftCommandMutation, DraftCommandPreparation,
+    DraftCommandResult, MAXIMUM_DRAFT_COMMAND_RECEIPTS, PreparedCommandInput, PreparedDraftCommand,
+    SessionCommand, SessionCommandContext, SessionCommandOutput, SessionCommandRegistration,
 };
 mod domain;
 mod projection;

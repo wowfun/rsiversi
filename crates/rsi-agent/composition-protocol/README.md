@@ -338,9 +338,10 @@ Commands may return bounded typed message inputs, domain replacements, or both. 
 must produce at least one input or replacement; it need not register a domain
 just to publish input. Input-only commands retain the same canonical receipt,
 revision check and retry identity. An empty domain catalog also admits draft
-inputs; first submission publishes their input-only baseline. `Inject`
-holds input for the next Step without waking an idle Session; `Steer` joins the
-current Turn when one is active, otherwise wakes a new Turn.
+inputs and first submission publishes their input-only baseline. Commands use
+the mailbox delivery modes. `NextStep` holds input for the next Step.
+`Steer` joins the active Turn or wakes an idle Session. `NextTurn` queues a
+follow-up that wakes the Session and runs after any current Turn.
 All pending inputs from one command invocation enter that waking Turn together
 in their original output order, including earlier injected content. The owner assigns
 message identities from the exact invocation and ordinal, with explicit command

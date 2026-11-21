@@ -5,12 +5,12 @@ use super::{
     invalid, json, prepare,
 };
 use rsi_agent_composition_protocol::{
-    CommandInput, CommandInputDelivery, CommandOutcome, CommandOutcomeEvidence,
-    DraftPublicationReceipt, PreparedCommandInput, SessionCommand, SessionCommandContext,
-    SessionCommandOutput,
+    CommandInput, CommandOutcome, CommandOutcomeEvidence, DraftPublicationReceipt,
+    PreparedCommandInput, SessionCommand, SessionCommandContext, SessionCommandOutput,
 };
 use rsi_agent_session_protocol::{
-    CommandArguments, ContributionId, DomainMutationSource, SessionCommandInvocation,
+    CommandArguments, ContributionId, DomainMutationSource, MessageDelivery,
+    SessionCommandInvocation,
 };
 
 #[derive(Debug, Default)]
@@ -144,7 +144,7 @@ impl PublicationObserver for PendingCommand {
         let expected = self
             .inputs
             .iter()
-            .map(|input| (input.message(), input.publication_delivery(false)));
+            .map(|input| (input.message(), input.delivery()));
         if receipt.session_id != &self.session
             || !receipt.facts.is_empty()
             || !matches!(commit.source(), DomainMutationSource::Command { invocation } if invocation == &self.invocation)
@@ -232,8 +232,8 @@ impl From<Input> for CommandInput {
     fn from(input: Input) -> Self {
         Self {
             delivery: match input.delivery {
-                Delivery::Inject => CommandInputDelivery::Inject,
-                Delivery::Steer => CommandInputDelivery::Steer,
+                Delivery::Inject => MessageDelivery::NextStep,
+                Delivery::Steer => MessageDelivery::Steer,
             },
             content: vec![rsi_agent_session_protocol::AgentMessageContent::Text {
                 text: input.text,

@@ -1,4 +1,4 @@
-use rsi_agent_composition_protocol::{CommandInput, CommandInputDelivery, PreparedCommandInput};
+use rsi_agent_composition_protocol::{CommandInput, PreparedCommandInput};
 use rsi_agent_session_protocol::{
     AgentMessageContent, CommandArguments, CommandRevision, ContributionId, DomainRequestId,
     MessageDelivery, SessionCommandInvocation,
@@ -15,7 +15,7 @@ fn publication_moves_callback_content_and_counts_the_exact_escaped_wire_bytes() 
     let text = "quote \" and newline\n".repeat(500);
     let original = text.as_ptr();
     let inputs = vec![CommandInput {
-        delivery: CommandInputDelivery::Steer,
+        delivery: MessageDelivery::Steer,
         content: vec![AgentMessageContent::Text { text }],
         attribution: None,
     }];

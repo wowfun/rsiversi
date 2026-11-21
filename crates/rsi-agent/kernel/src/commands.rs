@@ -10,7 +10,7 @@ use rsi_agent_composition_protocol::{Publication, PublicationReceipt};
 use rsi_agent_session_protocol::SessionCommandsView;
 use rsi_agent_session_protocol::{
     CommandRevision, DomainMutationSource, DomainRequestId, DomainStateCommit, DomainStateUpdate,
-    DomainStateView, SessionCommandInvocation,
+    DomainStateView, MessageDelivery, SessionCommandInvocation,
 };
 use rsi_agent_turn_protocol::{DomainMutationReceipt, SessionCommands};
 
@@ -539,10 +539,11 @@ impl AgentKernel {
                     })
                 })
             };
-            let wakes = active.is_none()
-                && candidate.inputs.iter().any(|input| {
-                    input.delivery == rsi_agent_session_protocol::MessageDelivery::Steer
-                });
+            let wakes = candidate.inputs.iter().any(|input| match input.delivery {
+                MessageDelivery::NextTurn => true,
+                MessageDelivery::Steer => active.is_none(),
+                MessageDelivery::NextStep => false,
+            });
             let superseded = if wakes {
                 mailbox.pending_continuation_ids
             } else {
@@ -558,18 +559,15 @@ impl AgentKernel {
                 return Err(TurnError::Capacity);
             }
             for input in &candidate.inputs {
-                let bound_turn_id = (input.delivery
-                    == rsi_agent_session_protocol::MessageDelivery::Steer)
+                let bound_turn_id = (input.delivery == MessageDelivery::Steer)
                     .then(|| active.clone())
                     .flatten();
-                let target = if input.delivery
-                    == rsi_agent_session_protocol::MessageDelivery::NextStep
-                    || bound_turn_id.is_some()
-                {
-                    MessageTarget::NextStep
-                } else {
-                    MessageTarget::NextTurn
-                };
+                let target =
+                    if input.delivery == MessageDelivery::NextStep || bound_turn_id.is_some() {
+                        MessageTarget::NextStep
+                    } else {
+                        MessageTarget::NextTurn
+                    };
                 command_execution.push(self.inner.execution_messages.reserve(
                     &session_id,
                     &input.message.message_id,
@@ -593,9 +591,10 @@ impl AgentKernel {
                 );
             }
             if mailbox.inbox_paused
-                && candidate.inputs.iter().any(|input| {
-                    input.delivery != rsi_agent_session_protocol::MessageDelivery::NextStep
-                })
+                && candidate
+                    .inputs
+                    .iter()
+                    .any(|input| input.delivery != MessageDelivery::NextStep)
             {
                 inbox::append_resume(&mut controls, self.inner.clock.now_ms().max(1))?;
             }
@@ -648,7 +647,7 @@ impl AgentKernel {
                             }],
                             options: MessageOptions::default(),
                         },
-                        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                        delivery: MessageDelivery::NextTurn,
                         bound_turn_id: None,
                         root_session_id: agent_root_and_path(header).0,
                         target: MessageTarget::NextTurn,
