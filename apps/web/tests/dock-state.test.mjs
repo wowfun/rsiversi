@@ -5,6 +5,7 @@ import {IDBFactory} from 'fake-indexeddb';
 import {emptyDock,dockIntent,savedDock,restoreDock,validateDock,dockPaneIds,floatingTab,narrowDock,displayDock} from '../src/dock-state.ts';
 import {applyIntent,boundedRecords,DeviceStore} from '../device-store.js';
 import {storedNamespace} from '../storage-namespace.js';
+import {defaultLayout} from '../presentation-layout.js';
 const act=(doc,operation,fields={})=>dockIntent(doc,{kind:'dock',operation,...fields});
 const open=doc=>act(doc,'open',{coordinate:{action:'surface',bundle:'files',name:'browser'},title:'Files',duplicate:true});
 test('opening, copying or moving a guide respects its destination pane',async()=>{
@@ -79,6 +80,27 @@ test('redundant tab and pane focus preserve redo and the latest committed revisi
     assert.equal(latest.value.history.entries.length,0);
   }finally{store.close();peer.close()}
 });
+test('editing an existing layout is scoped and adding a key still evicts the least recently used layout',async t=>{
+ const factory=new IDBFactory();
+ t.mock.method(globalThis.indexedDB,'open',factory.open.bind(factory));
+ const current=await DeviceStore.open('session-0'),incoming=await DeviceStore.open('incoming');
+ try{
+   await new Promise((resolve,reject)=>{
+     const tx=current.database.transaction('layouts','readwrite'),layouts=tx.objectStore('layouts');
+     for(let i=0;i<64;i++)layouts.put({key:'session-'+i,used:i,revision:'1',value:defaultLayout});
+     tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);
+   });
+   const intent={kind:'patch',patch:{conversationWidth:800}};
+   await current.apply('layouts',intent);
+   await incoming.apply('layouts',intent);
+   const keys=current.database.transaction('layouts').objectStore('layouts').getAllKeys();
+   const savedKeys=await new Promise((resolve,reject)=>{keys.onsuccess=()=>resolve(keys.result);keys.onerror=()=>reject(keys.error)});
+   assert.equal(savedKeys.length,64);
+   assert(savedKeys.includes('session-0')&&savedKeys.includes('incoming'));
+   assert(!savedKeys.includes('session-1'));
+ }finally{current.close();incoming.close()}
+});
+
 test('schema 4 Dock addresses retain the exact namespace, scope, revision and LRU across upgrade',async t=>{
  const factory=new IDBFactory();
  t.mock.method(globalThis.indexedDB,'open',factory.open.bind(factory));

@@ -286,9 +286,19 @@ export class DeviceStore {
           beforeCommit?.(results.map(result=>result.value));
         }catch(error){failure=error;tx.abort();}
       };
-      selected.forEach(({bucket},index)=>{
-        const read=tx.objectStore(bucket).getAll(undefined,budgets[bucket].count+1);
-        read.onsuccess=()=>{snapshots[index]=read.result;if(--remaining===0)apply()};
+      selected.forEach(({bucket,key},index)=>{
+        const store=tx.objectStore(bucket);
+        const loaded=records=>{
+          snapshots[index]=records;
+          if(--remaining===0)apply();
+        };
+        const read=store.get(bucket==='layouts'?layoutAddress(key):key);
+        read.onsuccess=()=>{
+          if(read.result!==undefined){loaded([read.result]);return;}
+          // Only a new identity can require LRU eviction.
+          const admission=store.getAll(undefined,budgets[bucket].count+1);
+          admission.onsuccess=()=>loaded(admission.result);
+        };
       });
       tx.oncomplete=()=>{
         selected.forEach(({bucket,key},index)=>{

@@ -217,10 +217,12 @@ origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
 128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
 Record wrappers count toward each budget. A semantic intent reads the latest
 revision and applies in the same read-write transaction. Writes preserve
-unrelated records without rewriting them. Bucket accounting validates every
-record's envelope and byte size. The selected record's content is validated
-on read or mutation. Internally generated Dock transitions check the resulting
-state and storage budget. LRU ordering is computed only when a write needs eviction.
+unrelated records without rewriting them. Updating an existing key reads just
+that record and validates its envelope, content and replacement size. Adding a
+key checks the bucket's envelopes, sizes and cardinality before eviction. Each
+bucket's total limit equals its record limit multiplied by its maximum count.
+Internally generated Dock transitions check the resulting state and storage
+budget. LRU ordering is computed only when a write needs eviction.
 Session Dock primary keys store the endpoint and device identity as their 16 bytes,
 an empty principal for local access, and the exact scope. A Web-generated Session
 scope stores the 16 bytes after its fixed `dock:web-` prefix. All other scopes
@@ -229,7 +231,7 @@ existing authenticated or local Dock in the same transaction, retaining its
 payload, revision and LRU position. Quota accounting uses the logical key.
 An unchanged Dock intent or a patch that requests already-selected shell or
 navigation settings preserves the record revision and LRU position. Incoming
-records still undergo the normal content and bucket checks.
+records still undergo the selected record's content and size checks.
 Malformed selected content fails closed. Layout patches preserve
 unrelated fields; expansion toggles preserve unrelated groups. Order moves use
 complete membership and exact coordinate/pin/archive partitions; previous, next,
@@ -245,8 +247,8 @@ The editing Dock applies the layout returned by its transaction. Other Dock
 windows reread their own records when the commit notification arrives.
 An invalid layout falls back locally without opening or changing drafts. Explicit
 Reset layout replaces only the selected principal's workbench record in a write
-transaction, without validating its old value or revision; unrelated records still
-cross the bucket's envelope and byte limits. Reset does not alter Dock, navigation
+transaction, without validating its old value or revision. Creating a missing
+workbench record follows the same admission as any new key. Reset does not alter Dock, navigation
 preferences, orders or composer drafts. A failed load retains this repair action.
 The schema-2 upgrade removes workbench layouts and preserves independently scoped
 Dock records, preferences and orders. Earlier layout stores are discarded; no

@@ -44,6 +44,25 @@ try{
     return {dock:JSON.stringify(await read('layouts',retainedDock.key))===JSON.stringify(retainedDock),preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
   });
   assert.equal(preserved.dock,true);assert.equal(preserved.preferences.value.view,'flat');assert.deepEqual(preserved.order.value.ids,['saved-order']);
+  const scopeReads=await one.evaluate(async()=>{
+    const open={kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'};
+    for(let index=0;index<16;index++)await store.apply('layouts',open,'dock:scoped-'+index);
+    const scope='dock:scoped-0',saved=await store.read('layouts',scope);
+    const tab=Object.keys(saved.value.state.tabs)[0];
+    const prototype=IDBObjectStore.prototype,all=prototype.getAll,get=prototype.get;
+    const reads={key:0,bucketRows:0};
+    try{
+      prototype.get=function(...args){reads.key++;return get.apply(this,args)};
+      prototype.getAll=function(...args){
+        const request=all.apply(this,args);
+        request.addEventListener('success',()=>{reads.bucketRows+=request.result.length});
+        return request;
+      };
+      await store.apply('layouts',{kind:'dock',operation:'close',tab},scope);
+    }finally{prototype.get=get;prototype.getAll=all}
+    return reads;
+  });
+  assert.deepEqual(scopeReads,{key:1,bucketRows:0},'closing an existing tab reads only its Session layout');
   await Promise.all([
     one.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{conversationWidth:710}})),
     two.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{detail:'detailed'}})),
@@ -174,6 +193,6 @@ try{
    },version);
    assert.deepEqual(upgraded.actual,upgraded.expected);assert(upgraded.dockKeyMatches);await priorContext.close();
   }
-  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:blocked.version,widthUpgradePreservesOtherFields:true,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgradePreservesDockPreferencesOrders:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
+  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',scopeReads,schema:blocked.version,widthUpgradePreservesOtherFields:true,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgradePreservesDockPreferencesOrders:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
   await mkdir(report,{recursive:true});await writeFile(join(report,'result.json'),JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence));
 }finally{await browser?.close();await server.close();}
