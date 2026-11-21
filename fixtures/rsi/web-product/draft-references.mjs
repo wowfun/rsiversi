@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {join} from 'node:path';
+import {serveDraftModules} from './draft-origin.mjs';
 
 export async function verifyDraftReferences(browser, root) {
-  const files = new Map(await Promise.all(['drafts.js','draft-databases.js'].map(async name => [name,await readFile(join(root,'apps/web',name),'utf8')])));
   const context = await browser.newContext();
-  await context.route('http://localhost:37918/**', route => route.fulfill({contentType:'text/javascript',body:files.get(new URL(route.request().url()).pathname.slice(1)) ?? ''}));
+  await serveDraftModules(context,root,37918);
   const page = await context.newPage();
   try {
     await page.goto('http://localhost:37918/');
@@ -32,7 +30,7 @@ export async function verifyDraftReferences(browser, root) {
       const frozen = record.pending.opaque === original && record.pending.captures.length === 1;
       record = await store.settle(record,{status:'unknown'});
       const retry = record.pending.opaque === original && record.pending.phase === 'unknown';
-      record = await store.settle(record,{status:'complete',receipt:'{"fact_seq":"18446744073709551615"}'});
+      record = await store.settle(record,{status:'complete'});
       const laterDraft = record.text === 'Next draft' && record.references.length === 0 && !record.pending;
       let bounded = 0;
       for (const invalid of [()=>validateEditor('x'.repeat(1024*1024),[],[reference]),()=>validateEditor('',[],Array(5).fill(reference)),()=>validateEditor('',[],[{...reference,metadata:{...reference.metadata,through_seq:9007199254740993}}])]) {try {invalid()}catch {bounded++}}

@@ -380,8 +380,8 @@ Each conversation exposes its discovered Session commands and saved command
 receipt. Registered slash names execute through the shared controller; unknown
 names remain Human input for workspace skills. The document retains an unresolved opaque invocation across Worker replacement;
 Rust owns command preparation, exact receipt matching and execution admission.
-Submission settlements carry complete receipts as opaque JSON strings so the
-document can persist exact u64 values without parsing their contents.
+The Host retains confirmed submission receipts. Rust checks their identities and
+sequence numbers and sends the document the settlement status and any notice.
 
 The private renderer factory takes null configuration. Pane identity and
 generation belong to the application attachment and its input fences; renderer

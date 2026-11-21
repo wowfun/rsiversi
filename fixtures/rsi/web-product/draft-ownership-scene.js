@@ -15,7 +15,7 @@ export async function verifySettlementCapacity() {
     record=await store.edit(record,'submit at capacity',[],references);
     record=await store.startDispatch(record,{kind:'message',id:'capacity',opaque:'frozen',text_bytes:18,images:0,captures:references.map(captureOf)});
     if(settle) {
-      record=await store.settle(record,{status:'complete',receipt:'accepted'});
+      record=await store.settle(record,{status:'complete'});
     } else {
       record=await store.edit(record,'new draft',[],[]);
       record=await store.settle(record,{status:'not_admitted'});
@@ -57,7 +57,7 @@ export async function verifyReferenceOwnership() {
   await editor.update(record=>store.settle(record,{status:'unknown'}));
   await pane.drainReferenceReleases(editor,'test');
   check(calls.length === 0, 'unknown request released');
-  await editor.update(record=>store.settle(record,{status:'complete',receipt:'exact receipt'}));
+  await editor.update(record=>store.settle(record,{status:'complete'}));
   offline = true;
   await pane.drainReferenceReleases(editor,'test').catch(()=>{});
   check(editor.record.releases.length === 1, 'offline outbox lost');

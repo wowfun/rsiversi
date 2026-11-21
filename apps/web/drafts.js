@@ -123,7 +123,7 @@ function validateCreation(creation, session) {
     && Object.keys(selection).join() === "last" && integer(selection.last) && selection.last > 0));
 }
 function validateRecord(record) {
-  require(record?.version === 10 && Array.isArray(record.key) && record.key.length === 4 &&
+  require(record?.version === 11 && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
@@ -140,9 +140,8 @@ function validateRecord(record) {
     "Reference cleanup is pending. Reconnect and retry cleanup before adding more references.");
   require([...record.releases, ...record.pending?.captures ?? []].every(capture => capture.target.session_id === record.key[3] && capture.target.header_sha256 === record.header));
   require(record.releases.every(capture => !owned.has(captureKey(capture))), "A retired capture cannot be restored; capture it again");
-  if (record.receipt !== null) require(typeof record.receipt === "string" && bytes(record.receipt) <= 4096);
   if (record.creation !== null) validateCreation(record.creation, record.key[3]);
-  require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,receipt,references,releases,text,version");
+  require(Object.keys(record).sort().join() === "creation,editRevision,everDispatched,header,images,incarnation,key,pending,pendingRevision,references,releases,text,version");
   return [1, editorBytes, record.pending?.text_bytes ?? 0, opaqueBytes];
 }
 const referenceBytes = references => references?.length ? bytes(JSON.stringify(references)) : 0;
@@ -185,29 +184,32 @@ function putDraft(store, record, address) {
   store.put(content, address);
 }
 function openDatabase() {
-  return openDraftDatabase(draftDatabaseNames.composer, 10, (db, tx, oldVersion, fail) => {
+  return openDraftDatabase(draftDatabaseNames.composer, 11, (db, tx, oldVersion, fail) => {
     if (oldVersion === 0) {
       db.createObjectStore("drafts");
       db.createObjectStore("usage");
-    } else if ([7,8,9].includes(oldVersion)) {
+    } else if ([7,8,9,10].includes(oldVersion)) {
       const previous = tx.objectStore('drafts');
-      previous.name = 'previousDrafts';
-      const records = db.createObjectStore('drafts');
+      const rekey = oldVersion < 10;
+      if (rekey) previous.name = 'previousDrafts';
+      const records = rekey ? db.createObjectStore('drafts') : previous;
       const request = previous.openCursor();
       request.onsuccess = () => {
         try {
           const cursor = request.result;
-          if (!cursor) { db.deleteObjectStore(previous.name); return; }
-          const record = cursor.value;
-          require(record.version === oldVersion && Array.isArray(record.key) && equal(cursor.primaryKey,record.key));
+          if (!cursor) { if (rekey) db.deleteObjectStore(previous.name); return; }
+          const record = rekey ? cursor.value : withKey(cursor.value,cursorKey(cursor.primaryKey));
+          require(record.version === oldVersion);
+          if (rekey) require(Array.isArray(record.key) && equal(cursor.primaryKey,record.key));
           if (oldVersion < 9) {
             require(equal(record.scope,record.key.slice(0,3)));
             delete record.scope;
           }
-          record.version = 10;
+          delete record.receipt;
+          record.version = 11;
           validateRecord(record);
           const [endpoint,principal,pane,session] = record.key;
-          putDraft(records,record,[...storedNamespace(endpoint,principal),pane,session]);
+          putDraft(records,record,rekey ? [...storedNamespace(endpoint,principal),pane,session] : cursor.primaryKey);
           cursor.continue();
         } catch (error) { fail(error); }
       };
@@ -357,9 +359,9 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     const blank = {
-      version: 10, key, incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 11, key, incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], releases: [], header,
-      creation: creation ?? null, everDispatched: !creation, pending: null, receipt: null,
+      creation: creation ?? null, everDispatched: !creation, pending: null,
     };
     validateRecord(blank);
     this.ephemeral.add(blank);
@@ -424,8 +426,6 @@ export class DraftStore {
       samePending(expected, saved);
       require(saved.pending && ["complete", "rejected", "not_admitted", "unknown"].includes(settlement.status));
       if (settlement.status === "complete") {
-        require(typeof settlement.receipt === "string", "The completed receipt must remain an opaque Rust string");
-        saved.receipt = settlement.receipt;
         if (saved.pending.consume && saved.editRevision === saved.pending.editRevision) {
           const {start,end} = saved.pending.consume;
           saved.text = saved.text.slice(0,start) + saved.text.slice(end);

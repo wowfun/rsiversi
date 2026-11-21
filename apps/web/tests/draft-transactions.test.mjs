@@ -72,9 +72,12 @@ test('rechecking the same result reads concurrent edits and rejects a changed fr
     await assert.rejects(left.settle(changed,{status}),error=>error.code==='conflict');
   }
   const old = await left.get('main','session');
-  const settled = await right.settle(old,{status:'complete',receipt:'original receipt'});
-  await assert.rejects(left.settle(old,{status:'not_admitted'}),error=>error.code==='conflict' && error.saved.receipt===settled.receipt);
-  assert.equal((await left.get('main','session')).pending,null);
+  const settled = await right.settle(old,{status:'complete'});
+  await assert.rejects(left.settle(old,{status:'not_admitted'}),error=>error.code==='conflict' && error.saved.pendingRevision===settled.pendingRevision);
+  const saved = await left.get('main','session');
+  assert.equal(saved.pending,null);
+  assert.equal(saved.text,'typed while not_admitted');
+  assert(!Object.hasOwn(saved,'receipt'));
 });
 
 test('changing a draft preset rebinds the latest text, media and fork while fencing the old editor', async () => {
@@ -106,7 +109,7 @@ test('more than 128 completed conversations reclaim empty dispatched records ato
     let saved=await store.ensure('main',`sent-${String(i).padStart(3,'0')}`,header);
     saved=await store.edit(saved,'hello',[]);
     saved=await store.startDispatch(saved,{kind:'message',id:`request-${i}`,opaque:'opaque',text_bytes:5,images:0,captures:[]});
-    saved=await store.settle(saved,{status:'complete',receipt:'acknowledged'});
+    saved=await store.settle(saved,{status:'complete'});
     if(!i) first=saved;
   }
   assert.equal((await store.list('main')).length,128);

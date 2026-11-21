@@ -14,7 +14,7 @@ async function seed(name,version,write) {
 test('known draft upgrades preserve frozen requests and allow reducing legacy starting quota debt',async()=>{
   const namespace=['a'.repeat(32),'local'];
   const previous=new DraftStore(undefined,...namespace).blank('main','session','b'.repeat(64));
-  previous.version=7;previous.text='saved text';previous.editRevision=4;
+  previous.version=7;previous.text='saved text';previous.editRevision=4;previous.receipt='old confirmed receipt';
   previous.scope=previous.key.slice(0,3);
   previous.pending={kind:'command',id:'same-request',opaque:'exact request',text_bytes:10,images:0,captures:[],phase:'unknown',editRevision:3,preserve_editor:true};
   await seed('rsi.composer',7,db=>{
@@ -22,8 +22,8 @@ test('known draft upgrades preserve frozen requests and allow reducing legacy st
     db.createObjectStore('usage').put([1,10,10,13],'aggregate');
   });
   const store=await DraftStore.open(namespace[0],{kind:'local'}),upgraded=await store.get('main','session');
-  const {scope,...retained}=previous;
-  assert.deepEqual(upgraded,{...retained,version:10});await store.verify();
+  const {scope,receipt,...retained}=previous;
+  assert.deepEqual(upgraded,{...retained,version:11});await store.verify();
   await seed('rsi.composer-starts',1,db=>{
     const drafts=db.createObjectStore('drafts');
     for(let index=0;index<129;index++)drafts.put({revision:1,text:index===0?'retained':'',workspace:'workspace'},JSON.stringify([...namespace,`pane${index}`]));

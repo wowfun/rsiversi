@@ -298,18 +298,18 @@ async fn mismatched_command_receipts_never_become_authoritative() {
 }
 
 #[tokio::test]
-async fn completed_receipts_cross_the_document_boundary_as_exact_json_strings() {
+async fn completed_submissions_leave_exact_receipts_at_the_host() {
     let (runtime, backend, app, generation) = fixture().await;
     backend.resolution.store(2, Ordering::SeqCst);
     backend.receipt_sequence.store(u64::MAX, Ordering::SeqCst);
     let prepared = prepare(&app, &generation, "exact receipt", vec![], false).await;
     let result = dispatch(&app, &generation, &prepared, "dispatch").await;
-    assert_eq!(result["status"], "complete");
-    let receipt: serde_json::Value =
-        serde_json::from_str(result["receipt"].as_str().expect("opaque receipt")).unwrap();
-    assert_eq!(receipt["accepted_control_seq"].as_u64(), Some(u64::MAX));
-    assert_eq!(receipt["observed_fact_seq"].as_u64(), Some(u64::MAX - 1));
-    assert_eq!(receipt["message_id"], prepared["id"]);
+    assert_eq!(result, json!({"status": "complete"}));
+    let id = serde_json::from_value(prepared["id"].clone()).unwrap();
+    let receipt = backend.message_status(&id).await.unwrap();
+    assert_eq!(receipt.message_id, id);
+    assert_eq!(receipt.accepted_control_seq, u64::MAX);
+    assert_eq!(receipt.observed_fact_seq, u64::MAX - 1);
     assert!(runtime.shutdown().await.is_clean());
 }
 

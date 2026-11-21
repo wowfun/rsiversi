@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import {serveDraftModules} from './draft-origin.mjs';
 
 // Real IndexedDB transactions in two documents; no Session/provider claims.
 export async function verifyDrafts(browser, root) {
   const context = await browser.newContext();
-  const files = new Map(await Promise.all(['drafts.js','draft-databases.js'].map(async name => [name,await readFile(join(root,'apps/web',name),'utf8')])));
-  await context.route("http://localhost:37919/**", route => route.fulfill({ contentType: "text/javascript", body: files.get(new URL(route.request().url()).pathname.slice(1)) ?? "" }));
+  await serveDraftModules(context,root,37919);
   const page = await context.newPage(), other = await context.newPage();
   try {
     for (const tab of [page, other]) {
@@ -46,15 +44,15 @@ export async function verifyDrafts(browser, root) {
       if (committed.pending.phase !== "dispatching") throw new Error("begin resolved before commit");
       const editor = new DraftEditor(store, dispatched);
       editor.edit("typed during execution"); await editor.flush();
-      const receipt = '{"request_id":"original-id","accepted_control_seq":18446744073709551615,"observed_fact_seq":18446744073709551614}';
-      await editor.update(() => store.settle(dispatched, JSON.parse(JSON.stringify({ status: "complete", receipt }))));
+      await editor.update(() => store.settle(dispatched, { status: "complete" }));
       window.record = editor.record;
-      return { text: editor.text, pending: editor.record.pending, opaque: dispatched.pending.opaque, receipt: editor.record.receipt };
+      return { text: editor.text, pending: editor.record.pending, opaque: dispatched.pending.opaque,
+        hasReceipt: Object.hasOwn(await store.get("main","first"),"receipt") };
     });
     assert.equal(settled.text, "typed during execution");
     assert.equal(settled.pending, null);
     assert.equal(settled.opaque, '{"revision":18446744073709551615,"arguments":{"z":1,"a":2}}');
-    assert.equal(settled.receipt, '{"request_id":"original-id","accepted_control_seq":18446744073709551615,"observed_fact_seq":18446744073709551614}');
+    assert.equal(settled.hasReceipt, false);
     const queued = await page.evaluate(async () => {
       const original = await store.get("main", "first");
       const opaque = '{"session":"first","header":"frozen-header","request":{"kind":"queue","input":{"operation_id":"queue-original","slot_id":"slot","expected_message_id":"old","mutation":{"action":"replace","new_message_id":"successor","content":[{"type":"text","text":"complete queued text"}]}}}}';
@@ -64,7 +62,7 @@ export async function verifyDrafts(browser, root) {
       const restored = await reopened.get("main","first");
       if(restored.pending.opaque !== opaque || restored.pending.id !== "queue-original") throw new Error("unknown queue envelope changed on reopen");
       let cancelled=false;try {await reopened.cancelPrepared(restored);}catch {cancelled=true;}
-      const finished = await reopened.settle(restored, {status:"complete",receipt:'{"operation_id":"queue-original"}'});
+      const finished = await reopened.settle(restored, {status:"complete"});
       return {cancelled,kind:unknown.pending.kind,phase:restored.pending.phase,text:finished.text,images:finished.images,pending:finished.pending};
     });
     assert.deepEqual(queued,{cancelled:true,kind:"queue",phase:"unknown",text:"typed during execution",images:[],pending:null});
@@ -72,8 +70,8 @@ export async function verifyDrafts(browser, root) {
       const original=await store.get("main","first");
       const prepared=await store.startDispatch(original,{kind:"queue",id:"conflict",opaque:'{"operation":"conflict"}',text_bytes:0,images:0,captures: []});
       const finished=await store.settle(prepared,{status:"rejected",error:"identity conflict"});
-      return {text:finished.text,pending:finished.pending,receipt:finished.receipt};
-    }),{text:"typed during execution",pending:null,receipt:'{"operation_id":"queue-original"}'});
+      return {text:finished.text,pending:finished.pending,hasReceipt:Object.hasOwn(finished,"receipt")};
+    }),{text:"typed during execution",pending:null,hasReceipt:false});
     const boundaries = await page.evaluate(async () => {
       let record = await store.ensure("compare", "aba", "c".repeat(64));
       record = await store.edit(record, "", []);
@@ -141,12 +139,11 @@ export async function verifyDrafts(browser, root) {
       const noReplay = await rejects(() => store.moveFresh(pending, next)) && await rejects(() => store.cancelPrepared(pending));
       const transaction = store.db.transaction.bind(store.db);
       store.db.transaction = (...args) => { const tx = transaction(...args); if (args[1] === "readwrite") queueMicrotask(() => tx.abort()); return tx; };
-      const receiptFailure = await rejects(() => store.settle(pending, {status:"complete",receipt:'{"request_id":"same-command"}'}));
+      const settlementFailure = await rejects(() => store.settle(pending, {status:"complete"}));
       store.db.transaction = transaction;
       const stillPending = (await store.get("main","fresh-new")).pending;
-      const receiptBlocked = receiptFailure && stillPending.phase === "dispatching" && stillPending.id === "same-command" && await rejects(() => store.startDispatch(pending,{kind:"message",id:"new-id",opaque:"{}",text_bytes:0,images: 0, captures: []}));
-      const invalidReceipt = await rejects(() => store.settle(pending, {status:"complete",receipt:{}})) &&
-        await rejects(() => store.settle(pending, {status:"complete",receipt:"x".repeat(4097)})) &&
+      const settlementBlocked = settlementFailure && stillPending.phase === "dispatching" && stillPending.id === "same-command" && stillPending.opaque === pending.pending.opaque && await rejects(() => store.startDispatch(pending,{kind:"message",id:"new-id",opaque:"{}",text_bytes:0,images: 0, captures: []}));
+      const invalidSettlement = await rejects(() => store.settle(pending, {status:"invalid"})) &&
         (await store.get("main","fresh-new")).pendingRevision === pending.pendingRevision;
       const notAdmitted = await store.settle(pending, {status:"not_admitted"});
       const cancelled = await store.cancelPrepared(notAdmitted);
@@ -198,9 +195,9 @@ export async function verifyDrafts(browser, root) {
       invalid.pending=false;
       await new Promise((resolve,reject) => {const tx=store.db.transaction("drafts","readwrite");tx.objectStore("drafts").put(invalid,[...store.storedNamespace,key[2],key[3]]);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
       const invalidPending = await rejects(() => DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)}));
-      return {freshMove,noReplay,receiptBlocked,invalidReceipt,conservativeMarker,transferLocked,transferSaved,resolvingBlocksTransfer,recordBound,frozenBound,corruptRejected,unchanged,invalidPending};
+      return {freshMove,noReplay,settlementBlocked,invalidSettlement,conservativeMarker,transferLocked,transferSaved,resolvingBlocksTransfer,recordBound,frozenBound,corruptRejected,unchanged,invalidPending};
     });
     assert(Object.values(more).every(value => value === true), JSON.stringify(more));
-    return { two_documents: true, single_dispatch: true, opaque_u64: true, opaque_receipt_u64: true, edited_suffix: true, aba: true, cross_namespace_bounds: true, transaction_abort: true, reload: true, ...more };
+    return { two_documents: true, single_dispatch: true, opaque_u64: true, host_only_receipt: true, edited_suffix: true, aba: true, cross_namespace_bounds: true, transaction_abort: true, reload: true, ...more };
   } finally { await context.close(); }
 }

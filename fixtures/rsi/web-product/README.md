@@ -24,8 +24,9 @@ It also runs real IndexedDB refusal/reset checks in Chromium and Firefox.
 of deletion, readable recovery titles and command announcements in the real
 document. A separate React Profiler scene mounts the production Conversation
 component to verify nonempty tab/option labels and no container commit on an
-unrelated view publication. Real IndexedDB also verifies schema-7 pending identity
-preservation and refusal of the older writer's reopen after upgrade. Set
+unrelated view publication. Real IndexedDB also verifies that the schema-10
+upgrade retains an unresolved request, drops the last completed receipt and
+refuses a subsequent reopen by the older writer. Set
 `RSI_REPORT_DIR` for its screenshots and results.
 CI runs these recovery fixtures and `command-visibility.mjs` directly, including
 their migration, reset and older-writer helpers. Their paths resolve from the
@@ -439,7 +440,7 @@ read-slot/byte admission retained through the final returned byte clone or slice
 
 Persistent composer checks use real IndexedDB transactions in two documents,
 including revision conflicts, record reincarnation, origin quotas, opaque u64
-requests and receipts, terminal queue-conflict retirement without draft loss,
+requests, Host-only confirmed receipts, terminal queue-conflict retirement without draft loss,
 transaction aborts and malformed durable metadata.
 Document composer tests gate saves before repeated Send/reconcile input and
 automatic recovery, checking single admission and the absence of false conflicts.

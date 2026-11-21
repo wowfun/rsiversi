@@ -28,15 +28,15 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 10 namespaces composer records by endpoint, real principal
+IndexedDB schema 11 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. The first
 three components of that primary key select a pane's saved drafts in key order.
 The primary key alone serves listing and single-record lookup. Its endpoint and
 device IDs use their 16 bytes; a zero-length principal selects local access.
 The value stores the draft content once and takes its scope from the key.
-Upgrading schema 7, 8 or 9
-preserves editor text, captures, pending identities and opaque receipts in one
-transaction, and fences older writers. Other schemas are refused without rewriting
+Upgrading schemas 7 through 10 preserves editor text, captures, pending identities
+and their exact request bodies in one transaction. It drops completed receipt
+copies and fences older writers. Other schemas are refused without rewriting
 their records, ledgers or version. Refusal explains that the saved drafts remain on this device;
 validation failures during asynchronous upgrade reads retain their specific reason
 and abort the whole upgrade, including earlier cursor updates. Explicit discard
@@ -169,14 +169,15 @@ the message is confirmed. The failure text stays with the current editor.
 A detached no-argument command preserves the editor. A slash-triggered command
 can carry a bounded consume span; successful settlement removes that span only
 when its captured edit revision still matches, including after reload.
-Failed receipt persistence leaves pending input blocked, never allocating a new ID.
+If saving the settlement fails, the pending input retains its original request ID
+and body for reconciliation with the Host.
 Rechecking an already unknown or definitively unadmitted result reads the saved
 incarnation, pending revision and frozen request. An unchanged outcome keeps the
 same revision and performs no write. The check returns the latest editor text
 and detects another tab's settlement. Frozen request bodies compare as exact
 strings, including sequence numbers outside JavaScript's safe integer range.
-Completed receipts also arrive as opaque Rust JSON strings and are stored verbatim;
-the document never decodes their sequence numbers through JavaScript numbers.
+The Host retains completed receipts. Rust checks the typed outcome and returns a
+completion status and any user-facing notice. A confirmed draft keeps no receipt copy.
 The stored `everDispatched` marker is conservative: it records that a dispatch
 transition has ever begun, including attempts later proved not admitted. It is
 not proof that a request reached the service. Once set, cancelling a prepared

@@ -117,7 +117,6 @@ impl Mode {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Settlement {
     Complete {
-        receipt: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         notice: Option<String>,
     },
@@ -555,7 +554,6 @@ impl GuiApplication {
                         )),
                         _ => None,
                     },
-                    receipt: serde_json::to_string(&receipt).expect("bounded queue receipt"),
                 }
             }
             Ok(None) => Settlement::Unknown {
@@ -593,10 +591,7 @@ impl GuiApplication {
                     .transcript
                     .command_feedback(&id, outcome);
                 attached.renderer.changed();
-                Settlement::Complete {
-                    receipt: serde_json::json!(outcome).to_string(),
-                    notice: None,
-                }
+                Settlement::Complete { notice: None }
             }
             Ok(None) => Settlement::Unknown {
                 error: "No paid compaction is recorded for this request.".into(),
@@ -683,7 +678,7 @@ impl GuiApplication {
                         }
                     }
                 }
-                result.map(|receipt| serde_json::json!(receipt))
+                result.map(|_| ())
             }
             Request::Compact { id } => return Self::settle_compaction(attached, id, mode).await,
             Request::Command { invocation } => {
@@ -692,21 +687,17 @@ impl GuiApplication {
                 } else {
                     attached.controller.reconcile_command(invocation).await
                 };
-                if let Ok(receipt) = &result {
+                result.map(|receipt| {
                     *attached
                         .submission
                         .receipt
                         .lock()
-                        .expect("Web command receipt poisoned") = Some(receipt.clone());
-                }
-                result.map(|receipt| serde_json::json!(receipt))
+                        .expect("Web command receipt poisoned") = Some(receipt);
+                })
             }
         };
         match result {
-            Ok(receipt) => Settlement::Complete {
-                receipt: receipt.to_string(),
-                notice: None,
-            },
+            Ok(()) => Settlement::Complete { notice: None },
             Err(reason) if mode == Mode::Dispatch && not_admitted(&reason) => {
                 Settlement::rejected(mode, reason)
             }

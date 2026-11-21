@@ -62,7 +62,7 @@ test('command controls retain editor content through unknown-result recovery and
   saved = await store.settle(saved, {status:'unknown'});
   assert.equal(saved.pending.opaque, 'frozen');
   assert.equal(saved.pending.preserve_editor, true);
-  saved = await store.settle(saved, {status:'complete',receipt:'confirmed'});
+  saved = await store.settle(saved, {status:'complete'});
   assert.equal(saved.text, 'Unsubmitted work');
   assert.equal(saved.pending, null);
   assert.throws(() => store.startDispatch(saved,{kind:'message'},true), /Only a command/);
@@ -143,7 +143,7 @@ test('command trigger consumption survives recovery and never deletes newer text
     saved=await store.settle(saved,{status:'unknown'});
     assert.equal(saved.text,'before /help after');
     if(changed)saved=await store.edit(saved,'new text',[]);
-    saved=await store.settle(saved,{status:'complete',receipt:'confirmed'});
+    saved=await store.settle(saved,{status:'complete'});
     assert.equal(saved.text,changed?'new text':'before  after');
   }
 });
