@@ -42,6 +42,7 @@ const usedSymbols = [
   'dsw-icon-copy-outline-regular',
   'dsw-icon-database-outline-regular',
   'dsw-icon-gauge-outline-regular',
+  'dsw-icon-globe-outline-medium',
   'dsw-icon-data-outline-medium',
   'dsw-icon-data-outline-regular',
   'dsw-icon-dark-outline-medium',

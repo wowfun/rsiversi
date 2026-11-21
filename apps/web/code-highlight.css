@@ -64,7 +64,6 @@
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  margin-block: 16px;
 }
 .markdown .katex-display {
   max-width: 100%;

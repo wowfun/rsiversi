@@ -55,10 +55,15 @@ window.mountImageDrop=()=>{
     upload:async files=>{for(const file of files)window.dropped.push({name:file.name,type:file.type,text:await file.text()});}},active=>window.dropOverlay.push(active));
 };
 const root=createRoot(article);
-window.renderTableTranscript=()=>{
+window.renderTableTranscript=(type=false)=>{
   article.removeAttribute('style');article.className=session.scope+' '+chat.scope;
-  const block={key:'table-reply',role:'assistant',title:'Assistant',text:'',markdown:[
-    start('paragraph'),text('Column start'),end,...table,start('quote'),...table,end]};
+  const markdown=type?[
+    ...[1,2,3,4,5,6].flatMap(level=>[start('heading',{level}),text('Section '+level),end]),
+    start('list',{start:null}),start('item'),text('First'),end,start('item'),text('Next'),end,end,
+    start('paragraph'),start('strong'),text('中文'),end,{kind:'code',text:'inlineValue'},end,
+    ...table,...table,
+  ]:[start('paragraph'),text('Column start'),end,...table,start('quote'),...table,end];
+  const block={key:'table-reply',role:'assistant',title:'Assistant',text:'',markdown};
   flushSync(()=>root.render(React.createElement('div',{className:chat.transcriptArea},
     React.createElement(Transcript,{owner:{index:'main',setReadingSummary(){}},transcript:{blocks:[block],turns:{entries:{}}},
       generation:'1',mode:'standard',cards:false,register(){}}))));
@@ -69,10 +74,11 @@ window.renderLocal=(streaming,generation,content='image')=>{const view={session:
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
-window.renderCodeLinks=()=>flushSync(()=>root.render(React.createElement(Markdown,{events:[
+window.renderCodeLinks=()=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
+  React.createElement(IconSprite),React.createElement(Markdown,{events:[
   start('paragraph'),{kind:'code_link',text:'HTTPS://example.test:443/api?q=1&b=2'},end,
   start('paragraph'),start('link',{href:'https://outer.test/'}),{kind:'code_link',text:'http://inner.test/path'},end,end,
-  start('paragraph'),{kind:'code',text:'curl https://example.test'},end]})));
+  start('paragraph'),{kind:'code',text:'curl https://example.test'},end]}))));
 window.ready=true;
 `;
 const server=await sourceFixture({name:'markdown-scene',source:script});const results=[];
@@ -280,14 +286,35 @@ try{
           assert.equal(await height(),resting,'showing a scrollbar keeps the table height');
         }
       }
+      await page.evaluate(()=>window.renderTableTranscript(true));
+      const typography=[];
+      for(const size of [14,17]){
+        const sample=await page.locator('.transcript .markdown').evaluate((root,size)=>{
+          root.style.setProperty('--content-size',size+'px');
+          const style=selector=>getComputedStyle(root.querySelector(selector));
+          const tables=root.querySelectorAll('.markdown-table');
+          return {headings:[1,2,3,4,5,6].map(n=>[parseFloat(style('h'+n).fontSize),parseFloat(style('h'+n).lineHeight)]),
+            headingMargins:[style('h4').marginBottom,style('h6').marginBottom],
+            list:[style('ul').paddingLeft,style('li+li').marginTop],weight:style('strong').fontWeight,
+            code:[parseFloat(style('code').fontSize),style('code').paddingLeft],
+            tableGap:tables[1].getBoundingClientRect().top-tables[0].getBoundingClientRect().bottom};
+        },size);
+        assert.deepEqual(sample.headings,[[size+7,size+16],[size+5,size+14],[size+4,size+12],...[4,5,6].map(()=>[size,size+10])]);
+        assert.deepEqual(sample.headingMargins,['16px','8px']);
+        assert.deepEqual(sample.list,['18px','6px']);assert.equal(sample.weight,'600');
+        assert.deepEqual(sample.code,[size*.875,'5px']);assert.equal(sample.tableGap,0);
+        typography.push(sample);
+      }
       await page.evaluate(()=>window.renderCodeLinks());
       const codeUrl=page.getByRole('link',{name:'HTTPS://example.test:443/api?q=1&b=2',exact:true});
       const codeLink=await codeUrl.evaluate(el=>[el.parentElement.tagName,el.getAttribute('href'),el.target,el.rel]);
       assert.deepEqual(codeLink,['CODE','HTTPS://example.test:443/api?q=1&b=2','_blank','noopener noreferrer']);
+      const globe=codeUrl.locator('svg[aria-hidden=true] use');
+      assert(await globe.evaluate(shape=>shape.getBBox().width>0 && shape.getBBox().height>0));
       assert.equal(await page.locator('article a').count(),2);
       assert.equal(await page.locator('a[href="https://outer.test/"] > code').innerText(),'http://inner.test/path');
       assert.deepEqual(errors,[]);
-      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,codeLink,linkedImage:true,
+      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,tableLayout,typography,codeLink,linkedImage:true,
         imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
         localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});

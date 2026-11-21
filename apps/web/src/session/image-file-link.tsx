@@ -9,7 +9,7 @@ export function ImageFileLink({path, imagesOnly, children}: {path:string; images
   const session = useOptionalDocumentSession();
   if (!session) return <>{children}</>;
   const {pane, view: {generation}} = session;
-  const anchor = <button type="button" className={css.fileLink} title={imagesOnly ? path : undefined}
+  const anchor = <button type="button" className={css.link} title={imagesOnly ? path : undefined}
     onClick={() => window.dispatchEvent(new CustomEvent('rsi:file-image', {detail: {pane, generation, path}}))}>
     {!imagesOnly && <PhotoGlyph className={css.linkIcon}/>}
     {children}

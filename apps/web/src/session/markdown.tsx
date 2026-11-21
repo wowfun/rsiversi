@@ -15,7 +15,9 @@ import { CopyButton } from "./copy-button.tsx";
 import { MarkdownImage } from "./markdown-image.tsx";
 import { TranscriptFileImage } from "./transcript-file-image.tsx";
 import { ImageFileLink } from "./image-file-link.tsx";
+import linkStyles from "./markdown-image.module.css";
 import {
+  IconGlobeOutlineMedium,
   IconNowrapFillRegular,
   IconWrapFillRegular,
 } from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
@@ -57,6 +59,10 @@ type Tree =
       element: Element | { kind: "code" | "break" | "rule" } | {kind:"math"; display:boolean};
       children: Tree[];
     };
+function onlyImages(children: Tree[]) {
+  return children.length > 0 && children.every(child => typeof child !== "string" &&
+    (child.element.kind === "image" || child.element.kind === "file_image"));
+}
 const tags = {
   paragraph: "p",
   quote: "blockquote",
@@ -229,18 +235,19 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
       case "file_image":
         return streaming ? textOf(node.children) : <TranscriptFileImage key={`${key}:${element.path}`} path={element.path} alt={textOf(node.children)} linked={inLink}/>;
       case "file_image_link": {
-        const imagesOnly = node.children.length > 0 && node.children.every(child => typeof child !== "string" && (child.element.kind === "image" || child.element.kind === "file_image"));
-        return streaming ? children() : <ImageFileLink key={`${key}:${element.path}`} path={element.path} imagesOnly={imagesOnly}>{children()}</ImageFileLink>;
+        return streaming ? children() : <ImageFileLink key={`${key}:${element.path}`} path={element.path} imagesOnly={onlyImages(node.children)}>{children()}</ImageFileLink>;
       }
       case "link":
         if (inLink) return children();
         return (
           <a
             key={key}
+            className={linkStyles.link}
             href={element.href}
             target="_blank"
             rel="noopener noreferrer"
           >
+            {!onlyImages(node.children) && <IconGlobeOutlineMedium className={linkStyles.linkIcon}/>}
             {children()}
           </a>
         );

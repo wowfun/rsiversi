@@ -136,6 +136,11 @@ offers an explicit reload to read changed bytes from the execution host.
 Opening a hover card or resource tab schedules the image read immediately.
 Inline local images wait until they approach the viewport. After the bytes
 arrive, the browser can decode the local preview immediately.
+
+Conversation Markdown follows the selected content size. Headings distinguish
+section levels, lists indent from the reading column, and consecutive tables
+share an edge. Text links carry a leading glyph and a keyboard focus indicator.
+
 Dragging a local transcript thumbnail into a composer copies the original file
 into that composer's normal image import. The gesture uses the bytes already
 read for this occurrence and leaves the editor text and preview dialog alone.
