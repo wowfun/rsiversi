@@ -14,6 +14,7 @@ rsi-execution = { path = "../../rsi-execution/core" }
 getrandom.workspace = true
 rsi-jobs = { path = "../../rsi-jobs/core" }
 async-trait.workspace = true
+base64.workspace = true
 futures-util.workspace = true
 rsi-agent-session-protocol = { path = "../session-protocol" }
 rsi-agent-composition-protocol = { path = "../composition-protocol" }

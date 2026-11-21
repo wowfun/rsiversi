@@ -1615,12 +1615,17 @@ impl DurabilityWait {
 }
 
 fn message_turn_id(session: &SessionId, control_seq: u64) -> TurnId {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest as _, Sha256};
     let mut hash = Sha256::new();
     hash.update(b"rsi.message-turn.v1\0");
     hash.update(session.as_str().as_bytes());
     hash.update(control_seq.to_le_bytes());
-    TurnId::new(format!("message-{:x}", hash.finalize())).expect("bounded digest identity")
+    const PREFIX: &str = "message-";
+    let mut id = String::with_capacity(PREFIX.len() + 43);
+    id.push_str(PREFIX);
+    URL_SAFE_NO_PAD.encode_string(hash.finalize(), &mut id);
+    TurnId::new(id).expect("bounded digest identity")
 }
 
 #[cfg(test)]
@@ -1630,8 +1635,8 @@ mod message_identity_tests {
         let parent = rsi_agent_session_protocol::SessionId::new("parent").unwrap();
         let child = rsi_agent_session_protocol::SessionId::new("child").unwrap();
         assert_eq!(
-            super::message_turn_id(&parent, 3),
-            super::message_turn_id(&parent, 3)
+            super::message_turn_id(&parent, 3).as_str(),
+            "message-80juPMrTKDScYI7GnIprkzEplALjYDoFOQSuNsdYRgA"
         );
         assert_ne!(
             super::message_turn_id(&parent, 3),

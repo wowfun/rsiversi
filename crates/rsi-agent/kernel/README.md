@@ -715,7 +715,9 @@ checking whether a new claim may start. A resident active Turn prevents a new
 claim, but cannot hide an already committed exact receipt.
 
 Scheduler-created message Turn identities bind both the recipient Session and
-accepted control sequence. A per-Session sequence alone cannot name a Turn in
+accepted control sequence. New identities encode the full SHA-256 digest as
+unpadded URL-safe Base64 after `message-`. Stored Turn IDs are opaque.
+A per-Session sequence alone cannot name a Turn in
 forked model context, which retains parent and child history together. Activation
 and Step coordinates remain scoped by their durable Session records.
 
