@@ -194,7 +194,10 @@ impl Operation {
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: 4096,
-            maximum_response_bytes: MAXIMUM_PAGE_BYTES,
+            maximum_response_bytes: match self {
+                Self::Mark => 512,
+                Self::Read | Self::Follow => MAXIMUM_PAGE_BYTES,
+            },
         }
     }
 }

@@ -1,5 +1,40 @@
-use rsi_navigation_api::attention::{Page, Position};
+use rsi_navigation_api::attention::{Operation, Page, Position};
 use serde_json::json;
+
+#[test]
+fn mark_admits_maximal_positions_with_half_a_kibibyte_of_response_capacity() {
+    for (kind, id, epoch, sequence) in [
+        (
+            "native",
+            "s".repeat(256),
+            "0".to_string(),
+            u64::MAX.to_string(),
+        ),
+        (
+            "external",
+            "e".repeat(128),
+            i64::MAX.to_string(),
+            i64::MAX.to_string(),
+        ),
+    ] {
+        let position: Position = serde_json::from_value(json!({
+            "conversation": {"kind": kind, "id": id}, "epoch": epoch, "sequence": sequence
+        }))
+        .unwrap();
+        position.validate().unwrap();
+        let budget = rsi_api_protocol::ByteBudget::new(512).unwrap();
+        let encoded = budget
+            .reserve(Operation::Mark.spec().maximum_response_bytes)
+            .unwrap()
+            .encode(&position)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Position>(encoded.as_bytes()).unwrap(),
+            position
+        );
+    }
+}
+
 #[test]
 fn attention_wire_preserves_coordinates_and_rejects_backend_and_request_ambiguity() {
     let position = json!({"conversation":{"kind":"external","id":"same"},"epoch":"1","sequence":"9007199254740993"});

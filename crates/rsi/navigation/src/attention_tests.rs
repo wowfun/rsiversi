@@ -351,6 +351,49 @@ async fn cold_reminders_are_filtered_at_the_callers_session_boundary() {
 }
 
 #[tokio::test]
+async fn an_empty_reading_cut_only_retains_an_explicit_reminder() {
+    let owner = fixture();
+    let mut changes = owner.records.changes.subscribe();
+    let mut mark = Mark {
+        host_epoch: owner.epoch.clone(),
+        position: Position {
+            conversation: ConversationIdentity::External(ConversationId::new("external").unwrap()),
+            epoch: "2".into(),
+            sequence: "0".into(),
+        },
+        action: ReadAction::Read,
+    };
+    for action in [ReadAction::Read, ReadAction::Acknowledge] {
+        mark.action = action;
+        owner.mark(CallOrigin::Local, mark.clone()).await.unwrap();
+        assert!(owner.records.rows.lock().unwrap().is_empty());
+        assert!(!changes.has_changed().unwrap());
+    }
+    mark.action = ReadAction::Unread;
+    owner.mark(CallOrigin::Local, mark.clone()).await.unwrap();
+    changes.borrow_and_update();
+    assert!(owner.records.rows.lock().unwrap()[&mark.position.conversation].manual);
+    mark.action = ReadAction::Read;
+    owner.mark(CallOrigin::Local, mark.clone()).await.unwrap();
+    assert!(changes.has_changed().unwrap());
+    assert!(owner.records.rows.lock().unwrap().is_empty());
+    let remaining = owner.read(&CallOrigin::Local).await.unwrap();
+    assert!(remaining.entries[0].reading.unseen);
+    assert!(!remaining.entries[0].reading.manual);
+    // A positive cut remains shared even when it marks every completion read.
+    mark.position.sequence = "2".into();
+    owner.mark(CallOrigin::Local, mark).await.unwrap();
+    assert!(
+        owner
+            .read(&CallOrigin::Local)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn external_marks_are_shared_and_keep_their_epoch_fence() {
     let owner = fixture();
     let row = owner

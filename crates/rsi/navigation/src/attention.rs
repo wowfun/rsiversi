@@ -315,28 +315,28 @@ impl Attention {
         };
         super::finish_scope(&origin, &[])?;
         let mut records = self.records.rows.lock().expect("reading records");
-        let native = matches!(position.conversation, ConversationIdentity::Native(_));
+        let previous = records.get(&position.conversation).copied();
         if through > current
-            || native
-                && through
-                    > records
-                        .get(&position.conversation)
-                        .map_or(0, |r| r.completed)
+            || matches!(position.conversation, ConversationIdentity::Native(_))
+                && through > previous.map_or(0, |r| r.completed)
         {
             return Err(ApiError::Invalid(
                 "attention position is in the future".into(),
             ));
         }
-        let record = records.entry(position.conversation.clone()).or_default();
-        let before = *record;
-        if record.epoch != epoch {
-            *record = Record {
-                epoch,
-                ..Record::default()
-            };
-        }
+        let mut record = previous.filter(|r| r.epoch == epoch).unwrap_or(Record {
+            epoch,
+            ..Record::default()
+        });
         record.mark(request.action, through);
-        if *record != before {
+        let retained =
+            (record.completed != 0 || record.read != 0 || record.manual).then_some(record);
+        if previous != retained {
+            if let Some(retained) = retained {
+                records.insert(position.conversation.clone(), retained);
+            } else {
+                records.remove(&position.conversation);
+            }
             self.records.changes.send_replace(());
         }
         position.sequence = through.max(record.read).to_string();

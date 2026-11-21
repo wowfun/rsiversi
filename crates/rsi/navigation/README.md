@@ -32,6 +32,8 @@ Opening historical Sessions after restart starts with their history read.
 Reading changes write no storage. Acknowledging a rendered cut preserves an
 explicit unread flag. Marking it read clears that flag and advances only
 through the observed cut. Both use the caller's current Session visibility.
+Reading a zero cut or clearing its last manual flag retains no per-conversation
+entry unless the Host has a completion or a read position to remember.
 
 Pending targets precede running, unknown and unread idle activity. Two
 nonqueued request slots bound concurrent attention operations. A finite read

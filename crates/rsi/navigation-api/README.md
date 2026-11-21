@@ -20,8 +20,9 @@ to every caller with access. Acknowledgment preserves a manual reminder.
 Future positions and positions from a replaced source or Host are rejected.
 A subscription starts with the caller-visible attention page. Each later frame
 replaces that page. Reading mutations, native admissions and new native completions wake connected
-clients. Equivalent visible pages produce no frame. A 256 KiB response cap can truncate rows. Polling never opens a Session or
-starts a peer.
+clients. Equivalent visible pages produce no frame. A 256 KiB page cap can
+truncate rows. A mark returns one position and reserves 512 bytes of response
+capacity. Polling never opens a Session or starts a peer.
 
 The authenticated navigation API reads durable Session truth and edits only
 Host-owned title/archive metadata. It never stops or deletes a Session. Titles
