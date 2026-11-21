@@ -54,16 +54,32 @@ export function savedDock({counter,state}:DockSnapshot):DockSnapshot {
   return {kind:'session-dock',version:2,counter,state}
 }
 export function validateDock(value:unknown):DockSnapshot {
-  if(!plain(value)||!keys(value,value.version===1?'kind,version,counter,state,history':'kind,version,counter,state'))fail()
+  if(!plain(value)||!keys(value,'kind,version,counter,state'))fail()
   const doc=value as DockSnapshot
-  if(doc.kind!=='session-dock'||![1,2].includes(doc.version)||!Number.isSafeInteger(doc.counter)||doc.counter<1||doc.counter>1e14)fail()
+  if(doc.kind!=='session-dock'||doc.version!==2||!Number.isSafeInteger(doc.counter)||doc.counter<1||doc.counter>1e14)fail()
   validateState(doc.state,doc.counter)
   return savedDock(doc)
 }
-export function restoreDock(value:unknown,live?:DockDocument):DockDocument {
+export function restoreDock(value:unknown):DockDocument {
   const saved=validateDock(value)
-  if(live&&saved.counter===live.counter&&JSON.stringify(saved.state)===JSON.stringify(live.state))return live
   return {...saved,history:EMPTY_HISTORY}
+}
+export function dockStorageKey(identity:string,session:string) {
+  return 'rsi.dock.v1.'+JSON.stringify([identity,session])
+}
+const maximumSnapshotLength=32*1024
+export function readDock(key:string|undefined):DockDocument {
+  if(key)try {
+    const raw=localStorage.getItem(key)
+    if(raw && raw.length<=maximumSnapshotLength)return restoreDock(JSON.parse(raw))
+  }catch { /* A missing or unusable snapshot starts a fresh window. */ }
+  return emptyDock()
+}
+export function writeDock(key:string|undefined,doc:DockDocument) {
+  if(key)try {
+    const raw=JSON.stringify(savedDock(doc))
+    if(raw.length<=maximumSnapshotLength)localStorage.setItem(key,raw)
+  }catch { /* The live window retains its layout when storage is unavailable. */ }
 }
 function validateState(state:LayoutState,counter:number) {
   if(!keys(state,'nodes,tabs,rootId,floats,activePaneId,expanded,mode')||!plain(state.nodes)||!plain(state.tabs)||Object.keys(state.nodes).length>7||Object.keys(state.tabs).length>16||!Array.isArray(state.floats)||state.floats.length>4||new Set(state.floats).size!==state.floats.length||typeof state.expanded!=='boolean'||!['push','fullscreen'].includes(state.mode))fail()
@@ -152,7 +168,7 @@ export function floatingTab(state:LayoutState,tab:TabId) {return findTabPane(sta
 export function paneFor(state:LayoutState,tab:TabId){return findTabPane(state,tab)?.id}
 export {dockPaneIds,getPane}
 
-// A display projection only: focus still targets the tab in the committed tree.
+// Display-only geometry keeps the desktop layout intact on narrow screens.
 export function narrowDock(state:LayoutState):LayoutState {
   const ids=dockPaneIds(state),root=getPane(state,ids[0]!)
   if(ids.length===1)return state
@@ -165,9 +181,7 @@ export function narrowDock(state:LayoutState):LayoutState {
   return {...state,nodes,rootId:root.id,activePaneId:active.host==='float'?active.id:root.id}
 }
 
-export function displayDock(state:LayoutState,width:number,height:number,narrow:boolean,selected?:TabId):LayoutState {
-  if(selected&&state.tabs[selected]&&getPane(state,state.activePaneId).activeTabId!==selected)
-    state=applyOp(state,{type:'focusTab',tabId:selected}).state
+export function displayDock(state:LayoutState,width:number,height:number,narrow:boolean):LayoutState {
   const shown=narrow?narrowDock(state):state
   if(!shown.floats.length)return shown
   const nodes={...shown.nodes}

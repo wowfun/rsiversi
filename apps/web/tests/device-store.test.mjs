@@ -96,7 +96,7 @@ test('bucket accounting does not replay another Sessions history or rewrite its 
   const next=planPresentationWrite('layouts',[unrelated],'current',defaultLayout,2);
   assert.equal(next.evicted,undefined);
   assert.equal(next.replacement.key,'current');
-  assert.throws(()=>applyIntent('layouts',unrelated.value,{kind:'dock',operation:'undo'}),/Invalid resource layout/);
+  assert.throws(()=>applyIntent('layouts',unrelated.value,{kind:'dock',operation:'undo'}),/Invalid saved layout/);
   assert.throws(()=>planPresentationWrite('layouts',[{...unrelated,value:'x'.repeat(32768)}],'current',defaultLayout,2),/too large/);
   assert.throws(()=>planPresentationWrite('layouts',[{...unrelated,revision:'invalid'}],'current',defaultLayout,2),/record/);
 });

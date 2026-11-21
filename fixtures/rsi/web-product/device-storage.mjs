@@ -41,14 +41,14 @@ try{
   const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,6);
   const preserved=await one.evaluate(async()=>{
     const read=(bucket,key)=>new Promise((resolve,reject)=>{const tx=store.database.transaction(bucket,'readonly'),q=tx.objectStore(bucket).get(key);tx.oncomplete=()=>resolve(q.result);tx.onabort=()=>reject(tx.error)});
-    return {dock:JSON.stringify(await read('layouts',retainedDock.key))===JSON.stringify(retainedDock),preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
+    return {obsoleteDockRemoved:await read('layouts',retainedDock.key)===undefined,preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
   });
-  assert.equal(preserved.dock,true);assert.equal(preserved.preferences.value.view,'flat');assert.deepEqual(preserved.order.value.ids,['saved-order']);
+  assert.equal(preserved.obsoleteDockRemoved,true);assert.equal(preserved.preferences.value.view,'flat');assert.deepEqual(preserved.order.value.ids,['saved-order']);
   const scopeReads=await one.evaluate(async()=>{
-    const open={kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'};
-    for(let index=0;index<16;index++)await store.apply('layouts',open,'dock:scoped-'+index);
-    const scope='dock:scoped-0',saved=await store.read('layouts',scope);
-    const tab=Object.keys(saved.value.state.tabs)[0];
+    const {dockStorageKey,emptyDock,dockIntent,writeDock}=await import('/src/dock-state.ts');
+    const key=dockStorageKey('fixture-principal','scoped');
+    const doc=dockIntent(emptyDock(),{kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'});
+    writeDock(key,doc);
     const prototype=IDBObjectStore.prototype,all=prototype.getAll,get=prototype.get;
     const reads={key:0,bucketRows:0};
     try{
@@ -58,11 +58,11 @@ try{
         request.addEventListener('success',()=>{reads.bucketRows+=request.result.length});
         return request;
       };
-      await store.apply('layouts',{kind:'dock',operation:'close',tab},scope);
+      writeDock(key,dockIntent(doc,{kind:'dock',operation:'close',tab:Object.keys(doc.state.tabs)[0]}));
     }finally{prototype.get=get;prototype.getAll=all}
     return reads;
   });
-  assert.deepEqual(scopeReads,{key:1,bucketRows:0},'closing an existing tab reads only its Session layout');
+  assert.deepEqual(scopeReads,{key:0,bucketRows:0},'closing a tab needs no IndexedDB reads');
   await Promise.all([
     one.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{conversationWidth:710}})),
     two.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{detail:'detailed'}})),
@@ -75,12 +75,6 @@ try{
     two.evaluate(()=>store.apply('layouts',{kind:'workspace',id:'two',expanded:true})),
   ]);
   const expanded=await one.evaluate(()=>store.read('layouts'));assert.equal(expanded.value.workspaces.length,2);
-  const reservedRollback=await one.evaluate(async()=>{
-    const before=await store.read('layouts');let observed,error;
-    try{await store.apply('layouts',{kind:'patch',patch:{conversationWidth:720}},'',values=>{observed=values[0].conversationWidth;throw Error('cleanup capacity full')})}catch(failure){error=failure.message}
-    return {before,after:await store.read('layouts'),observed,error};
-  });
-  assert.equal(reservedRollback.observed,720);assert.match(reservedRollback.error,/cleanup capacity full/);assert.deepEqual(reservedRollback.after,reservedRollback.before);
   const order=await one.evaluate(async()=>{
     const members=Array.from({length:65},(_,i)=>({id:`s-${i}`,partition:'local/project/unpinned'}));
     await store.apply('orders',{kind:'reconcile',members},'sessions');
@@ -148,7 +142,7 @@ try{
     return {value,corrupt,draft,reset,saved,scopeRejected,preferences:await store.read('preferences'),dock:await store.read('layouts','dock:retained')};
   });
   assert.deepEqual(isolation.value.value.ids,[]);assert.match(isolation.corrupt,/record/);assert.equal(isolation.draft,'unchanged draft');assert.equal(isolation.preferences.value.view,'workspace');
-  assert.equal(isolation.reset.value.conversationWidth,null);assert.equal(isolation.saved.value.conversationWidth,1200);assert.equal(isolation.scopeRejected,true);assert.equal(isolation.dock.revision,'11');
+  assert.equal(isolation.reset.value.conversationWidth,null);assert.equal(isolation.saved.value.conversationWidth,1200);assert.equal(isolation.scopeRejected,true);assert.equal(isolation.dock.revision,'0');
   await one.evaluate(()=>new Promise((resolve,reject)=>{const opening=indexedDB.open('rsi.presentation',store.database.version+1);opening.onsuccess=()=>{opening.result.close();resolve()};opening.onerror=()=>reject(opening.error)}));
   assert.deepEqual(await one.evaluate(()=>({closed:store.closed,changed:versionChanged})),{closed:true,changed:1});
   assert.deepEqual(await two.evaluate(()=>({closed:store.closed,changed:versionChanged})),{closed:true,changed:1});
@@ -160,7 +154,7 @@ try{
     old.close();
     const retry=await DeviceStore.open('retry'),version=retry.database.version;retry.close();return {error,version};
   });
-  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,7);await blockedContext.close();
+  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,8);await blockedContext.close();
   for(const version of [3,6]){
    const priorContext=await browser.newContext(),prior=await priorContext.newPage();await prior.goto(origin);
    const upgraded=await prior.evaluate(async version=>{
@@ -188,11 +182,11 @@ try{
         req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
       });
       const shell={key:'previous',used:9,revision:'8',value:layout};
-      return {actual:all,expected:version===3?[dock,shell]:[shell,dock],dockKeyMatches:all.some(item=>indexedDB.cmp(item.key,dockKey)===0)};
+      return {actual:all,expected:[shell],dockKeyMatches:all.some(item=>indexedDB.cmp(item.key,dockKey)===0)};
     }finally{store.close()}
    },version);
-   assert.deepEqual(upgraded.actual,upgraded.expected);assert(upgraded.dockKeyMatches);await priorContext.close();
+   assert.deepEqual(upgraded.actual,upgraded.expected);assert.equal(upgraded.dockKeyMatches,false);await priorContext.close();
   }
-  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',scopeReads,schema:blocked.version,widthUpgradePreservesOtherFields:true,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgradePreservesDockPreferencesOrders:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
+  const evidence={browser:browser.version(),module:'current apps/web/device-store.js',scopeReads,schema:blocked.version,widthUpgradePreservesOtherFields:true,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgrade:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
   await mkdir(report,{recursive:true});await writeFile(join(report,'result.json'),JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence));
 }finally{await browser?.close();await server.close();}

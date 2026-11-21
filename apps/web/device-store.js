@@ -1,6 +1,4 @@
-import {emptyDock,validateDock,restoreDock,savedDock,dockIntent} from './src/dock-state.ts';
 import {defaultLayout,validateLayout,parseLayout,workspacePreference} from './presentation-layout.js';
-import {storedNamespace,readNamespace,idBytes,idHex} from './storage-namespace.js';
 
 export const budgets = Object.freeze({
   preferences:{record:4096,count:64},
@@ -14,38 +12,7 @@ const keys = (value, names) => plain(value) && Object.keys(value).sort().join() 
 const identity = value => typeof value === 'string' && value.length > 0 && bytes(value) <= 2048 && !/[\x00-\x1f\x7f]/.test(value);
 const revision = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
 const ids = values => Array.isArray(values) && values.length <= 1024 && values.every(id=>typeof id==='string' && new TextEncoder().encode(id).length<=256 && /^[A-Za-z0-9._:-]+$/.test(id)) && new Set(values).size===values.length;
-const webDockScope=/^dock:web-([0-9a-f]{32})$/;
-function storedScope(scope) {
-  const web=webDockScope.exec(scope);
-  return web?idBytes(web[1]):scope;
-}
-function layoutAddress(key) {
-  // Shell layouts and other opaque namespaces keep their original string keys.
-  if(typeof key!=='string'||key.length>2048)throw new Error('Invalid presentation scope');
-  if(!key.startsWith('["['))return key;
-  let parts;
-  try{parts=JSON.parse(key);}catch{return key;}
-  if(!Array.isArray(parts)||parts.length!==2||typeof parts[0]!=='string'||typeof parts[1]!=='string'||!parts[1].startsWith('dock:')||JSON.stringify(parts)!==key)return key;
-  const owner=/^\["([0-9a-f]{32})","(local|device:[0-9a-f]{32})"\]$/.exec(parts[0]);
-  return owner?[...storedNamespace(owner[1],owner[2]),storedScope(parts[1])]:key;
-}
-function unpackLayout(record) {
-  if(typeof record.key==='string'){
-    if(layoutAddress(record.key)!==record.key)throw new Error('Invalid presentation scope');
-    return record;
-  }
-  const key=record.key;
-  if(!Array.isArray(key)||key.length!==3)throw new Error('Invalid presentation scope');
-  let scope=key[2];
-  if(scope instanceof ArrayBuffer&&scope.byteLength===16)scope='dock:web-'+idHex(scope);
-  else if(typeof scope!=='string'||!scope.startsWith('dock:')||scope.length>1024||webDockScope.test(scope))throw new Error('Invalid presentation scope');
-  const owner=readNamespace(key[0],key[1]);
-  if(!owner)throw new Error('Invalid presentation namespace');
-  record.key=JSON.stringify([JSON.stringify(owner),scope]);
-  return record;
-}
-function defaults(bucket,scope='') {
-  if(bucket==='layouts' && scope.startsWith('dock:'))return emptyDock();
+function defaults(bucket) {
   if(bucket==='layouts')return structuredClone(defaultLayout);
   if(bucket==='preferences')return {...defaultPreferences};
   if(bucket==='orders')return {ids:[]};
@@ -53,7 +20,6 @@ function defaults(bucket,scope='') {
 }
 function validate(bucket,value) {
   if(bucket==='layouts') {
-    if(value?.kind==='session-dock')return validateDock(value);
     if(!plain(value) || JSON.stringify(validateLayout(value))!==JSON.stringify(value))throw new Error('Invalid saved layout');
   } else if(bucket==='preferences') {
     if(!keys(value,'view,sessionOrder,workspaceOrder') || !['workspace','workspace_tree','flat'].includes(value.view) || !['updated','manual'].includes(value.sessionOrder) || !['updated','manual'].includes(value.workspaceOrder))throw new Error('Invalid navigation preferences');
@@ -94,7 +60,6 @@ function orderIntent(value,intent) {
 }
 export function applyIntent(bucket,value,intent) {
   if(!plain(intent))throw new Error('Invalid presentation intent');
-  if(bucket==='layouts' && value?.kind==='session-dock')return savedDock(dockIntent(restoreDock(value),intent));
   validate(bucket,value);
   let result;
   if(bucket==='orders')result=orderIntent(value,intent);
@@ -153,7 +118,7 @@ export class DeviceStore {
   static async open(key,{onVersionChange=()=>{}}={}) {
     if(!identity(key))throw new Error('Invalid presentation identity');
     return new Promise((resolve,reject)=>{
-      const opening=indexedDB.open('rsi.presentation',7);
+      const opening=indexedDB.open('rsi.presentation',8);
       opening.onupgradeneeded=event=>{
         const db=opening.result,tx=opening.transaction;
         if(event.oldVersion<2 && db.objectStoreNames.contains('layouts'))db.deleteObjectStore('layouts');
@@ -166,30 +131,19 @@ export class DeviceStore {
               if(read.result.length>budgets.layouts.count)throw new Error('Too many saved layouts');
               for(const record of read.result){
                 const key=record.key;
-                if(event.oldVersion===2){
-                  let scoped;try{scoped=JSON.parse(key)}catch{/* Unscoped workbench key. */}
-                  const dock=Array.isArray(scoped)&&scoped.length===2&&identity(scoped[0])&&typeof scoped[1]==='string'&&scoped[1].startsWith('dock:');
-                  if(!dock){store.delete(key);continue;}
+                if(event.oldVersion===2 || Array.isArray(key) || record.value?.kind==='session-dock'){
+                  store.delete(key);
+                  continue;
                 }
-                let address;
-                if(event.oldVersion===5&&Array.isArray(key)){
-                  if(key.length!==3||typeof key[2]!=='string')throw new Error('Invalid presentation scope');
-                  const scope=storedScope(key[2]);
-                  address=scope===key[2]?key:[key[0],key[1],scope];
-                }else address=event.oldVersion>=6?key:layoutAddress(key);
                 const oldWidth=event.oldVersion===3&&record.value?.version===4&&Object.hasOwn(record.value,'resourcesWidth');
                 if(oldWidth){delete record.value.resourcesWidth;record.value.version=5;}
-                const oldNavigation=record.value?.version===5 && record.value.kind!=='session-dock';
+                const oldNavigation=record.value?.version===5;
                 if(oldNavigation){
                   delete record.value.navigation;
                   delete record.value.navigationWidth;
                   record.value.version=6;
                 }
-                if(address!==key){
-                  record.key=address;
-                  store.add(record);
-                  store.delete(key);
-                }else if(oldNavigation)store.put(record);
+                if(oldNavigation||oldWidth)store.put(record);
               }
             }catch{tx.abort();}
           };
@@ -206,18 +160,16 @@ export class DeviceStore {
     });
   }
   scopedKey(scope) {if(typeof scope!=='string' || bytes(scope)>1024)throw new Error('Invalid presentation scope');const key=scope?JSON.stringify([this.key,scope]):this.key;if(!identity(key))throw new Error('Presentation scope key is too large');return key;}
-  async read(bucket,scope='',liveDock) {
+  async read(bucket,scope='') {
     if(this.closed || !budgets[bucket])throw new Error('Presentation storage unavailable');
     const key=this.scopedKey(scope);
     return new Promise((resolve,reject)=>{
-      const tx=this.database.transaction(bucket,'readonly'),read=tx.objectStore(bucket).get(bucket==='layouts'?layoutAddress(key):key);let result,failure;
+      const tx=this.database.transaction(bucket,'readonly'),read=tx.objectStore(bucket).get(key);let result,failure;
       read.onsuccess=()=>{
         try{
           const record=read.result;
-          if(record&&bucket==='layouts')unpackLayout(record);
           if(record && (!keys(record,'key,value,revision,used') || record.key!==key || !revision(record.revision) || !Number.isSafeInteger(record.used) || record.used<0 || bytes(record)>budgets[bucket].record))throw new Error('Invalid presentation record');
-          const dock=bucket==='layouts'&&scope.startsWith('dock:');
-          const value=record?(dock?restoreDock(record.value,liveDock):validate(bucket,record.value)):defaults(bucket,scope);
+          const value=record?validate(bucket,record.value):defaults(bucket);
           result={value,revision:record?.revision??'0'};
         }catch(error){failure=error;tx.abort();}
       };
@@ -225,8 +177,8 @@ export class DeviceStore {
       tx.onabort=tx.onerror=()=>reject(failure??tx.error??new Error('Presentation read failed'));
     });
   }
-  async apply(bucket,intent,scope='',beforeCommit,liveDock) {
-    return (await this.#applyAll([{bucket,intent,scope}],undefined,beforeCommit,liveDock))[0];
+  async apply(bucket,intent,scope='') {
+    return (await this.#applyAll([{bucket,intent,scope}]))[0];
   }
   async applyAll(changes) {
     return this.#applyAll(changes);
@@ -240,7 +192,7 @@ export class DeviceStore {
       {bucket:'preferences',scope:'',intent:{kind:'patch',patch:{}}},
     ],preference);
   }
-  async #applyAll(changes,manualPreference,beforeCommit,liveDock) {
+  async #applyAll(changes,manualPreference) {
     if(this.closed || !Array.isArray(changes) || changes.length<1 || changes.length>3 || changes.some(change=>!keys(change,'bucket,intent,scope') || !budgets[change.bucket]) || new Set(changes.map(change=>change.bucket)).size!==changes.length)throw new Error('Invalid presentation transaction');
     const selected=changes.map(change=>({...change,key:this.scopedKey(change.scope)}));
     return new Promise((resolve,reject)=>{
@@ -248,16 +200,14 @@ export class DeviceStore {
       const results=new Array(selected.length),snapshots=new Array(selected.length),changed=new Set();let failure,remaining=selected.length;
       const apply=()=>{
         try{
-          selected.forEach(({bucket},index)=>{if(bucket==='layouts')snapshots[index].forEach(unpackLayout);});
           const current=index=>{
-            const {bucket,key,scope}=selected[index],record=snapshots[index].find(row=>row.key===key);
-            if(!record)return defaults(bucket,scope);
-            return bucket==='layouts'&&scope.startsWith('dock:')?restoreDock(record.value,liveDock):record.value;
+            const {bucket,key}=selected[index];
+            const record=snapshots[index].find(row=>row.key===key);
+            return record?record.value:defaults(bucket);
           };
           const preferences=manualPreference?validate('preferences',current(1)):null;
           selected.forEach(({bucket,intent,key,scope},index)=>{
             let records=snapshots[index];
-            const dock=bucket==='layouts'&&scope.startsWith('dock:');
             const value=current(index);
             const reset=bucket==='layouts'&&keys(intent,'kind')&&intent.kind==='reset';
             if(reset){if(scope!=='')throw new Error('Reset layout only applies to the workbench');records=records.filter(record=>record.key!==key);}
@@ -265,20 +215,15 @@ export class DeviceStore {
             let applied;
             if(reset)applied=defaults(bucket);
             else if(observe)applied=validate(bucket,value);
-            else if(dock)applied=dockIntent(value,intent);
             else applied=applyIntent(bucket,value,intent);
-            const stored=dock?savedDock(applied):applied;
-            const next=planPresentationWrite(bucket,records,key,stored,Date.now(),!reset&&applied===value);
-            results[index]=dock?{...next.replacement,value:applied}:next.replacement;
+            const next=planPresentationWrite(bucket,records,key,applied,Date.now(),!reset&&applied===value);
+            results[index]=next.replacement;
             if(!next.changed)return;
             changed.add(index);
             const store=tx.objectStore(bucket);
-            if(next.evicted!==undefined)store.delete(bucket==='layouts'?layoutAddress(next.evicted):next.evicted);
-            store.put(bucket==='layouts'?{...next.replacement,key:layoutAddress(key)}:next.replacement);
+            if(next.evicted!==undefined)store.delete(next.evicted);
+            store.put(next.replacement);
           });
-          // A synchronous owner can reserve effects for the actual latest
-          // committed layout. Throwing aborts every queued write in this tx.
-          beforeCommit?.(results.map(result=>result.value));
         }catch(error){failure=error;tx.abort();}
       };
       selected.forEach(({bucket,key},index)=>{
@@ -287,7 +232,7 @@ export class DeviceStore {
           snapshots[index]=records;
           if(--remaining===0)apply();
         };
-        const read=store.get(bucket==='layouts'?layoutAddress(key):key);
+        const read=store.get(key);
         read.onsuccess=()=>{
           if(read.result!==undefined){loaded([read.result]);return;}
           // Only a new identity can require LRU eviction.
@@ -299,14 +244,14 @@ export class DeviceStore {
         selected.forEach(({bucket,key},index)=>{
           if(!changed.has(index))return;
           try{this.channel?.postMessage({bucket,key,revision:results[index].revision});}catch{/* Commit remains authoritative if notification delivery fails. */}
-          this.notify(bucket,key,true);
+          this.notify(bucket,key);
         });
         resolve(results.map(result=>({value:result.value,revision:result.revision})));
       };
       tx.onabort=tx.onerror=()=>reject(failure??tx.error??new Error('Presentation intent was not saved'));
     });
   }
-  notify(bucket,key,ownCommit=false){for(const listener of this.listeners)if(listener.bucket===bucket && listener.key===key && (!ownCommit||listener.includeOwn))queueMicrotask(listener.callback);}
-  subscribe(bucket,scope,callback,{includeOwn=true}={}){const listener={bucket,key:this.scopedKey(scope),callback,includeOwn};this.listeners.add(listener);return()=>this.listeners.delete(listener);}
+  notify(bucket,key){for(const listener of this.listeners)if(listener.bucket===bucket && listener.key===key)queueMicrotask(listener.callback);}
+  subscribe(bucket,scope,callback){const listener={bucket,key:this.scopedKey(scope),callback};this.listeners.add(listener);return()=>this.listeners.delete(listener);}
   close(){if(this.closed)return;this.closed=true;this.listeners.clear();this.channel?.close();this.database.close();}
 }

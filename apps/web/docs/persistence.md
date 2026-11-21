@@ -211,7 +211,7 @@ Changing History's query or source filters clears the displayed matches and thei
 pagination actions. Changing a source filter also drops discovery continuation;
 pagination cannot silently reuse a previous query or workspace.
 
-Device presentation uses IndexedDB `rsi.presentation` schema 7, separately scoped
+Device presentation uses IndexedDB `rsi.presentation` schema 8, separately scoped
 by endpoint and authenticated principal. Three object stores have independent
 origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
 128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
@@ -221,17 +221,10 @@ unrelated records without rewriting them. Updating an existing key reads just
 that record and validates its envelope, content and replacement size. Adding a
 key checks the bucket's envelopes, sizes and cardinality before eviction. Each
 bucket's total limit equals its record limit multiplied by its maximum count.
-Internally generated Dock transitions check the resulting state and storage
-budget. At capacity, a new key evicts the least recently used record. Equal
+At capacity, a new key evicts the least recently used record. Equal
 timestamps are resolved by the lowest logical key.
-Session Dock primary keys store the endpoint and device identity as their 16 bytes,
-an empty principal for local access, and the exact scope. A Web-generated Session
-scope stores the 16 bytes after its fixed `dock:web-` prefix. All other scopes
-retain their original strings. Upgrading rekeys each
-existing authenticated or local Dock in the same transaction, retaining its
-payload, revision and LRU position. Quota accounting uses the logical key.
-An unchanged Dock intent or a patch that requests already-selected shell or
-navigation settings preserves the record revision and LRU position. Incoming
+A patch that requests already-selected shell or navigation settings preserves
+the record revision and LRU position. Incoming
 records still undergo the selected record's content and size checks.
 Malformed selected content fails closed. Layout patches preserve
 unrelated fields; expansion toggles preserve unrelated groups. Order moves use
@@ -244,17 +237,14 @@ than silently discarding positions; Updated mode explicitly resets the order.
 Reading never writes or evicts. BroadcastChannel messages
 only invalidate reads, and focus always rereads storage. Only committed values
 are reported as saved; aborts retain the prior durable revision and show a notice.
-The editing Dock applies the layout returned by its transaction. Other Dock
-windows reread their own records when the commit notification arrives.
 An invalid layout falls back locally without opening or changing drafts. Explicit
 Reset layout replaces only the selected principal's workbench record in a write
 transaction, without validating its old value or revision. Creating a missing
 workbench record follows the same admission as any new key. Reset does not alter Dock, navigation
 preferences, orders or composer drafts. A failed load retains this repair action.
-The schema-2 upgrade removes workbench layouts and preserves independently scoped
-Dock records, preferences and orders. Earlier layout stores are discarded; no
-compatibility conversion is retained. Version-change events close database owners
-and show a reload notice. A blocked open exposes Retry after other windows close.
+Obsolete Session dock snapshots are retired from the presentation database.
+Version-change events close database owners and show a reload notice. A
+blocked open exposes Retry after other windows close.
 Neither
 presentation records nor channel messages contain credentials, history or input.
 
@@ -301,34 +291,28 @@ transaction. It preserves the mode and changes saved membership only while that
 scope is still manual. A stale restored view cannot undo Updated mode or refill
 the order it cleared, including when another window made that choice.
 
-Session dock records share the layouts bucket, separately keyed by Session and
-endpoint/principal. Semantic intents apply to the latest record in one transaction.
-The record stores the current layout and its ID counter. Each open Session dock
-keeps up to 64 undo entries in memory. Reloading restores the layout with a
-fresh undo history. A write from another window that changes the saved state
-also starts a fresh history before the next local edit. An unchanged reread
-preserves the live history. Focusing the already active pane or its selected
-tab leaves the revision and undo/redo history intact, including when a
-concurrent window selected it first. Selecting an open resource tab displays its
-content immediately. The transaction still selects it in the latest saved layout.
-If the save fails, the dock shows the committed selection unless the user has
-since selected another tab. Keyboard focus in a replaced tab strip returns to
-the attempted chip when it still exists. Older records supply their current layout and ID
-counter only. The adapter enforces two horizontal panes, 20 to 80% split, 16
-tabs and four floats. Runtime view IDs, references and terminal attachments
-never enter this record. Close/undo/reload resolve current
-resource coordinates; terminal restore only attaches read-only. A failed save
-leaves the committed layout intact and reports its failure. A subsequent
-successful saved layout action clears the notice that was visible when it
-started. A different message and pending resource cleanup remain visible.
+Each window owns its Session resource dock. Opening, closing and focusing
+tabs immediately changes that window's layout. A separate localStorage
+entry for each endpoint, authenticated principal and Session holds the latest
+saved layout and ID counter. Other open windows continue using their own
+layout. A fresh mount restores the last saved snapshot with an empty undo
+history. A blocked or full storage area leaves the live layout usable.
+A no-op leaves both local history and storage untouched.
+
+Only the layout and coordinates enter the snapshot. Each window retains up to
+64 undo entries in memory. The adapter allows two horizontal panes, 20 to 80%
+split, 16 tabs and four floats. A snapshot is limited to 32,768 UTF-16 code units and checked on restore
+before any resource opens. Runtime view IDs, references and terminal
+attachments stay with the current connection. Undo and reload resolve the
+saved coordinates again. Terminal restoration attaches read-only.
 Document resource opens carry a connection-local UUID and return an exact
 view/open-revision receipt or an unavailable result. Frames echo the UUID;
 neither reply ordering nor equal coordinates identify a pending tab. Duplicate
 document tabs own distinct resources. A closed pending tab releases a late
 receipt instead of adopting it into another tab.
-Before saving a close, the connection reserves its cleanup responsibility. A
-failed save preserves the old layout; a successful save publishes immediately,
-independently of remote cleanup. Cleanup retains the original connection and
+Before closing a resource the connection reserves its cleanup responsibility.
+The window can publish the change immediately after admission. Cleanup
+retains the original connection and
 resource incarnation, with one request in flight per identity and explicit retry
 after failure when an exact cleanup identity is available. An uncertain opening
 without an identity cannot be replayed: it shows a reconnect requirement, not a

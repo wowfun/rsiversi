@@ -24,13 +24,13 @@ import {Notices} from './src/notices.tsx';
 import {DeviceStore,applyIntent} from './device-store.js';
 import {PresentationStore} from './presentation-store.js';
 import {useDeviceNavigation} from './src/navigation-device.ts';
-import {emptyDock,dockIntent,savedDock} from './src/dock-state.ts';
+import {emptyDock,dockIntent,savedDock,readDock,writeDock,dockStorageKey} from './src/dock-state.ts';
 import {presentationIdentity,LayoutContext,usePresentation,useViewport,useResourceVisibility,ResizeHandle} from './src/presentation.tsx';
 import {defaultLayout} from './presentation-layout.js';
 import {ConversationWidthControls} from './src/conversation-width.tsx';
 import {source,installActions,settingsPanel,settingsMounted,registeredSettings} from './src/bridge.ts';
 import {resources,resourceHosts,publishResources,clearResources} from './src/resource-hosts.ts';
-window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,savedDock,resources,resourceHosts,publishResources,clearResources};
+window.modules={defaultLayout,DeviceStore,emptyDock,dockIntent,savedDock,readDock,writeDock,dockStorageKey,resources,resourceHosts,publishResources,clearResources};
 window.mountConversationWidth=()=>{
  const node=document.createElement('div');node.style.cssText="position:fixed;inset:0;z-index:9999";document.body.append(node);const root=createRoot(node);window.widthIntents=[];
  function Scene(){const [layout,setLayout]=React.useState({...defaultLayout,conversationWidth:1200}),[container,setContainer]=React.useState(null);
@@ -228,12 +228,14 @@ window.mountVisibility=()=>{
  root.render(<Visibility/>);window.unmountVisibility=()=>{root.unmount();node.remove()};
 };
 window.lifecycle=async(stage)=>{
- const events={reads:0,subscribed:0,closed:0,focus:0,applies:0,detaches:0,viewportSubscriptions:0};let release,entered;
+ const events={reads:0,focus:0,detaches:0,viewportSubscriptions:0};let release,entered;
  const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve);
  const pause=async name=>{if(stage===name){entered();await gate}};
  const saved=dockIntent(emptyDock(),{kind:'dock',operation:'open',coordinate:stage==='terminal'?{action:'resources'}:{action:'ui_block',key:'example'},title:'Example'});
- const original=DeviceStore.open;
- DeviceStore.open=async()=>{await pause('open');return {read:async()=>{events.reads++;await pause('read');return {value:saved}},apply:async()=>{events.applies++;return {value:saved}},subscribe:()=>{events.subscribed++;return()=>events.subscribed--},close:()=>events.closed++}};
+ const storageKey=dockStorageKey('lifecycle:'+stage,'test');
+ writeDock(storageKey,saved);
+ const read=Storage.prototype.getItem;
+ Storage.prototype.getItem=function(key){if(key===storageKey)events.reads++;return read.call(this,key)};
  const add=window.addEventListener,remove=window.removeEventListener;
  const listeners=new Set();window.addEventListener=function(type,fn,...args){if(type==='focus')listeners.add(fn);if(type==='resize')events.viewportSubscriptions++;return add.call(this,type,fn,...args)};
  window.removeEventListener=function(type,fn,...args){if(type==='focus')listeners.delete(fn);return remove.call(this,type,fn,...args)};
@@ -245,11 +247,11 @@ window.lifecycle=async(stage)=>{
  if(stage==='terminal'){for(let attempt=0;attempt<100&&!node.querySelector('.resource-guide');attempt++)await new Promise(resolve=>setTimeout(resolve,10));[...node.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')==='New terminal').click()}
  await Promise.race([started,new Promise((_,reject)=>setTimeout(()=>reject(Error("lifecycle did not reach "+stage)),10000))]);root.unmount();release();await new Promise(resolve=>setTimeout(resolve,30));
  window.dispatchEvent(new Event('focus'));await new Promise(resolve=>setTimeout(resolve,30));
- events.focus=listeners.size;DeviceStore.open=original;window.addEventListener=add;window.removeEventListener=remove;node.remove();return events;
+ events.focus=listeners.size;Storage.prototype.getItem=read;window.addEventListener=add;window.removeEventListener=remove;node.remove();return events;
 };
 window.mountExtension=async(action,seed)=>{
- const identity='extension:'+action,scope='dock:extension-session';
- if(seed){const store=await DeviceStore.open(identity);await store.apply('layouts',{kind:'dock',operation:'open',coordinate:{action,bundle:'fixture',name:'card'},title:'Fixture card'},scope);store.close()}
+ const identity='extension:'+action;
+ if(seed)writeDock(dockStorageKey(identity,'extension-session'),dockIntent(emptyDock(),{kind:'dock',operation:'open',coordinate:{action,bundle:'fixture',name:'card'},title:'Fixture card'}));
  const reference={name:'card',revision:'fixture'};
  window.extensionCommands=[];
  const resourceOwner=new ResourceOwner(async(method,text)=>{const request=JSON.parse(text);if(method==='resource_open'){window.extensionCommands.push(request.command);return JSON.stringify({status:'opened',request:request.opening_request,view:String(window.extensionCommands.length),open_revision:String(window.extensionCommands.length)})}return JSON.stringify({value:[]})});
@@ -314,10 +316,10 @@ try{
   await page.evaluate(()=>window.unmountExtension());
   checks.push({action,restore:2,duplicate:true,exactCommand:expected});
  }
- for(const stage of ['open','read','reopen','terminal']){
+ for(const stage of ['reopen','terminal']){
   const result=await page.evaluate(stage=>window.lifecycle(stage),stage);
   assert.equal(result.viewportSubscriptions,0,`Session dock registered ${result.viewportSubscriptions} window resize listener(s) during ${stage}`);
-  assert.equal(result.subscribed,0);assert.equal(result.focus,0);assert.equal(result.closed,1);assert.equal(result.reads,stage==='open'?0:1);assert.equal(result.applies,0);assert.equal(result.detaches,stage==='terminal'?1:0);checks.push({stage,...result});
+  assert.equal(result.focus,0);assert.equal(result.reads,1);assert.equal(result.detaches,stage==='terminal'?1:0);checks.push({stage,...result});
  }
  const hosts=await page.evaluate(()=>{
   const {resourceHosts,resources,publishResources,clearResources}=modules;let changes=0;
@@ -328,85 +330,25 @@ try{
   host.key='second';publishResources();host.model={kind:'ui',data:{error:'Fixture detail'},command:async()=>{}};publishResources();
   host.title='New title';publishResources();host.entry={...host.entry,floating:true};publishResources();clearResources();stop();return {stable,contentChanges,changes};
  });assert.deepEqual(hosts,{stable:true,contentChanges:1,changes:6});checks.push(hosts);
- const storage=await page.evaluate(async()=>{
-  const {DeviceStore,emptyDock}=modules,a=await DeviceStore.open('review'),b=await DeviceStore.open('review');
-  await Promise.all([a.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'resources'},title:'Resources'},'dock:session'),b.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'one'},title:'One'},'dock:session')]);
-  const before=await a.read('layouts','dock:session');
-  let puts=0,deletes=0,clears=0;const put=IDBObjectStore.prototype.put,del=IDBObjectStore.prototype.delete,clear=IDBObjectStore.prototype.clear;
-  IDBObjectStore.prototype.put=function(...args){puts++;return put.apply(this,args)};IDBObjectStore.prototype.delete=function(...args){deletes++;return del.apply(this,args)};IDBObjectStore.prototype.clear=function(...args){clears++;return clear.apply(this,args)};
-  await a.apply('layouts',{kind:'dock',operation:'mode',mode:'fullscreen'},'dock:session');
-  IDBObjectStore.prototype.put=put;IDBObjectStore.prototype.delete=del;IDBObjectStore.prototype.clear=clear;
-  const after=await b.read('layouts','dock:session');a.close();b.close();return {tabs:Object.keys(before.value.state.tabs).length,before:before.revision,after:after.revision,puts,deletes,clears,mode:after.value.state.mode};
- });assert.deepEqual(storage,{tabs:2,before:'2',after:'3',puts:1,deletes:0,clears:0,mode:'fullscreen'});checks.push(storage);
- const noops=await page.evaluate(async()=>{
-  const {DeviceStore,emptyDock,dockIntent}=modules,a=await DeviceStore.open('noops'),b=await DeviceStore.open('noops'),scope='dock:capped';
-  const act=(doc,operation,extra={})=>dockIntent(doc,{kind:'dock',operation,...extra});
+ const history=await page.evaluate(()=>{
+  const {emptyDock,dockIntent,savedDock,readDock,writeDock,dockStorageKey}=modules;
+  const key=dockStorageKey('fixture','history');
   let doc=emptyDock();
-  for(let i=0;i<6;i++)doc=act(doc,'open',{coordinate:{action:'ui_block',key:'example'},title:`Resource ${i}`,duplicate:true});
-  doc=act(doc,'split',{pane:doc.state.activePaneId});
-  for(const tab of Object.keys(doc.state.tabs).slice(0,4))doc=act(doc,'float',{tab});
-  await new Promise((resolve,reject)=>{const tx=a.database.transaction('layouts','readwrite');tx.objectStore('layouts').put({key:a.scopedKey(scope),value:modules.savedDock(doc),revision:'7',used:1});tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error)});
-  const before=await b.read('layouts',scope),tab=Object.keys(doc.state.tabs).at(-1);
-  let puts=0,deletes=0,broadcasts=0,notifications=0;
-  const put=IDBObjectStore.prototype.put,del=IDBObjectStore.prototype.delete,post=BroadcastChannel.prototype.postMessage;
-  const stops=[a.subscribe('layouts',scope,()=>notifications++),b.subscribe('layouts',scope,()=>notifications++)];
-  IDBObjectStore.prototype.put=function(...args){puts++;return put.apply(this,args)};
-  IDBObjectStore.prototype.delete=function(...args){deletes++;return del.apply(this,args)};
-  BroadcastChannel.prototype.postMessage=function(...args){broadcasts++;return post.apply(this,args)};
-  let empty;
-  try{
-   empty=await a.apply('layouts',{kind:'dock',operation:'undo'},'dock:absent');
-   await a.apply('layouts',{kind:'dock',operation:'redo'},'dock:absent');
-   await a.apply('layouts',{kind:'dock',operation:'split',pane:doc.state.activePaneId},scope);
-   await a.apply('layouts',{kind:'dock',operation:'float',tab},scope);
-   await a.apply('layouts',{kind:'dock',operation:'drop',tab,pane:doc.state.activePaneId,zone:'outside'},scope);
-   const active=doc.state.nodes[doc.state.activePaneId];
-   await a.apply('layouts',{kind:'dock',operation:'focus',tab:active.activeTabId},scope);
-   await a.apply('layouts',{kind:'dock',operation:'focus-pane',pane:active.id},scope);
-  }finally{IDBObjectStore.prototype.put=put;IDBObjectStore.prototype.delete=del;BroadcastChannel.prototype.postMessage=post}
-  const after=await b.read('layouts',scope);await new Promise(resolve=>setTimeout(resolve,20));
-  stops.forEach(stop=>stop());a.close();b.close();
-  return {puts,deletes,broadcasts,notifications,emptyRevision:empty.revision,revision:after.revision,unchanged:JSON.stringify(before)===JSON.stringify(after)};
- });assert.deepEqual(noops,{puts:0,deletes:0,broadcasts:0,notifications:0,emptyRevision:'0',revision:'7',unchanged:true});checks.push(noops);
- await writeFile(join(report,'dock-noops.json'),JSON.stringify(noops,null,2));
- const history=await page.evaluate(async()=>{
-  const {DeviceStore,emptyDock,dockIntent}=modules,a=await DeviceStore.open('history'),b=await DeviceStore.open('history'),scope='dock:session';
-  let doc=emptyDock();
-  for(let i=0;i<16;i++)doc=dockIntent(doc,{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'example'},title:`Resource ${i}`,duplicate:true});
+  for(let i=0;i<16;i++)doc=dockIntent(doc,{kind:'dock',operation:'open',coordinate:{action:'ui_block',key:'example'},title:'Resource '+i,duplicate:true});
   for(let i=0;i<64;i++)doc=dockIntent(doc,{kind:'dock',operation:'mode',mode:i%2?'push':'fullscreen'});
-  const write=record=>new Promise((resolve,reject)=>{const tx=b.database.transaction('layouts','readwrite');tx.objectStore('layouts').put(record);tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error)});
-  await write({key:a.scopedKey(scope),value:modules.savedDock(doc),revision:'1',used:1});
-  const intent={kind:'dock',operation:'mode',mode:'fullscreen'},clone=globalThis.structuredClone;
-  let copies=0,expected,once,actual;
-  globalThis.structuredClone=(...args)=>{copies++;return clone(...args)};
-  try{expected=dockIntent(doc,intent);once=copies;copies=0;actual=(await a.apply('layouts',intent,scope,undefined,doc)).value}
-  finally{globalThis.structuredClone=clone}
-  const equal=JSON.stringify(actual)===JSON.stringify(expected),saved=await b.read('layouts',scope);
-  const timing=[];
-  for(let i=0;i<30;i++){const start=performance.now();await a.apply('layouts',{...intent,mode:i%2?'push':'fullscreen'},scope);if(i>=5)timing.push(performance.now()-start)}
-  timing.sort((x,y)=>x-y);
-  if(saved.value.history.entries.length!==0)throw Error('Another window inherited undo entries');
-  const bad=clone(modules.savedDock(saved.value));bad.state.nodes[bad.state.activePaneId].activeTabId='tab999';
-  await write({key:b.scopedKey(scope),value:bad,revision:'99',used:2});
-  let rejected=false;try{await a.apply('layouts',intent,scope)}catch(error){rejected=String(error).includes('Invalid resource layout')}
-  const retained=await new Promise((resolve,reject)=>{const tx=b.database.transaction('layouts','readonly'),read=tx.objectStore('layouts').get(b.scopedKey(scope));tx.oncomplete=()=>resolve(read.result.revision);tx.onerror=()=>reject(tx.error)});
-  a.close();b.close();return {tabs:Object.keys(doc.state.tabs).length,history:doc.history.entries.length,once,copies,equal,rejected,retained,p50ms:timing[12],p95ms:timing[23]};
- });checks.push(history);
- await writeFile(join(report,'history.json'),JSON.stringify(history,null,2));
- assert.equal(history.tabs,16);assert.equal(history.history,64);assert.equal(history.copies,history.once);assert.equal(history.equal,true);assert.equal(history.rejected,true);assert.equal(history.retained,'99');
-
- const oversized=await page.evaluate(async()=>{
-  const owner=await modules.DeviceStore.open('oversized'),scope='dock:large';
-  let saved=await owner.read('layouts',scope),accepted=0,rejected=false;
-  for(let i=0;i<16;i++){
-   try{saved=await owner.apply('layouts',{kind:'dock',operation:'open',coordinate:{action:'inspect_source',source:{payload:'x'.repeat(12000),id:i}},title:'Large source',duplicate:true},scope);accepted++}
-   catch(error){if(!String(error).includes('too large'))throw error;rejected=true;break}
-  }
-  const after=await owner.read('layouts',scope),preserved=saved.revision===after.revision&&JSON.stringify(modules.savedDock(saved.value))===JSON.stringify(modules.savedDock(after.value));
-  const tab=Object.keys(after.value.state.tabs)[0];
-  const closed=await owner.apply('layouts',{kind:'dock',operation:'close',tab},scope);
-  owner.close();return {accepted,rejected,preserved,closedTabs:Object.keys(closed.value.state.tabs).length};
- });assert.equal(oversized.rejected,true);assert.equal(oversized.preserved,true);assert.equal(oversized.closedTabs,oversized.accepted-1);checks.push({oversized});
+  writeDock(key,doc);
+  const restored=readDock(key);
+  const closed=dockIntent(doc,{kind:'dock',operation:'close',tab:Object.keys(doc.state.tabs)[0]});
+  writeDock(key,closed);
+  const original=JSON.stringify(savedDock(restored));
+  const bad=JSON.parse(original);bad.state.nodes[bad.state.activePaneId].activeTabId='tab999';
+  localStorage.setItem(key,JSON.stringify(bad));
+  return {originalTabs:Object.keys(restored.state.tabs).length,restoredUndo:restored.history.entries.length,
+    liveUndo:doc.history.entries.length,currentTabs:Object.keys(closed.state.tabs).length,
+    corruptTabs:Object.keys(readDock(key).state.tabs).length};
+ });
+ assert.deepEqual(history,{originalTabs:16,restoredUndo:0,liveUndo:64,currentTabs:15,corruptTabs:0});
+ checks.push(history);await writeFile(join(report,'history.json'),JSON.stringify(history,null,2));
  for(const legacy of ['valid','invalid','over-count']){
   const migration=await browser.newPage();
   await migration.goto(`http://127.0.0.1:${server.httpServer.address().port}/review.html`);await migration.waitForFunction(()=>window.modules);
