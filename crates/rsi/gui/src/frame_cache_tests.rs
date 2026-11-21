@@ -234,6 +234,51 @@ fn repeated_control_preserves_its_history_anchor_after_later_facts() {
 }
 
 #[test]
+fn markdown_frames_reuse_compact_block_bytes_in_snapshots_and_patches() {
+    let mut transcript = Transcript::default();
+    let rich = "中文 **note** with `code` and [a link](https://example.org/).\n\n".repeat(8);
+    for index in 0..128 {
+        span(&mut transcript, u64::from(index) + 1, index, &rich);
+    }
+    // Warm the source Markdown cache before measuring either frame representation.
+    let expected = serde_json::to_vec(&transcript).unwrap();
+    let (trees, expanded) = allocations::measure(|| {
+        transcript
+            .blocks
+            .iter()
+            .map(|block| serde_json::to_value(block).unwrap())
+            .collect::<Vec<_>>()
+    });
+    let metadata = json!({"transcript": null});
+    let (first, compact) = allocations::measure(|| {
+        CachedPane::capture(metadata.clone(), Some(&transcript), None).unwrap()
+    });
+    assert_eq!(
+        serde_json::to_vec(first.transcript.as_ref().unwrap()).unwrap(),
+        expected
+    );
+    let old = expanded.requested - expanded.released;
+    let new = compact.requested - compact.released;
+    eprintln!(
+        "128 rich blocks: wire={} expanded_blocks={old} captured_pane={new}",
+        expected.len()
+    );
+    assert!(
+        new < old,
+        "the complete pane should retain fewer bytes than the expanded block trees"
+    );
+    span(&mut transcript, 129, 127, " tail");
+    let second = CachedPane::capture(metadata, Some(&transcript), Some(&first)).unwrap();
+    assert_eq!(second.projected_blocks, 1);
+    let patch = serde_json::to_value(pane_patch(crate::SurfaceId::MAIN, &first, &second)).unwrap();
+    assert_eq!(
+        patch["transcript"]["upsert"],
+        json!([transcript.blocks.back().unwrap()])
+    );
+    assert_eq!(trees.len(), transcript.blocks.len());
+}
+
+#[test]
 fn cached_wire_matches_markdown_after_backfill_reordering_and_eviction() {
     let mut transcript = Transcript::default();
     for index in 0..128 {

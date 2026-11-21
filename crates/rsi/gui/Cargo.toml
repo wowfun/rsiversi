@@ -63,7 +63,7 @@ rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros"] }
 tokio-util.workspace = true

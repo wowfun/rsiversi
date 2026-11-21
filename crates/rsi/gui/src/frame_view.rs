@@ -6,7 +6,10 @@ use serde::{
     Serialize,
     ser::{SerializeMap, SerializeSeq},
 };
-use serde_json::Value;
+use serde_json::{
+    Value,
+    value::{RawValue, to_raw_value},
+};
 use std::{collections::BTreeMap, sync::Arc};
 const NULL_BYTES: usize = b"null".len();
 
@@ -47,21 +50,39 @@ pub(super) struct CachedValue {
     pub value: Arc<Value>,
     bytes: usize,
 }
-impl CachedValue {
-    pub fn key(&self) -> &str {
-        self.value["key"].as_str().expect("closed block identity")
-    }
-}
 impl PartialEq for CachedValue {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.value, &other.value) || self.value == other.value
     }
 }
 
+#[derive(Debug)]
+pub(super) struct CachedBlock {
+    pub key: Box<str>,
+    revision: Arc<()>,
+    pub raw: Box<RawValue>,
+}
+impl CachedBlock {
+    fn capture(key: &str, revision: Arc<()>, value: &impl Serialize) -> Result<Arc<Self>> {
+        let raw = to_raw_value(value).map_err(|_| ApiError::Capacity)?;
+        Ok(Arc::new(Self {
+            key: key.into(),
+            revision,
+            raw,
+        }))
+    }
+}
+impl PartialEq for CachedBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw.get() == other.raw.get()
+    }
+}
+impl Eq for CachedBlock {}
+
 #[derive(Debug, PartialEq)]
 pub(super) struct CachedTranscript {
     pub metadata: Value,
-    pub blocks: Vec<CachedValue>,
+    pub blocks: Vec<Arc<CachedBlock>>,
     pub turns: CachedValue,
     bytes: usize,
 }
@@ -114,7 +135,7 @@ impl CachedPane {
                     .and_then(|pane| pane.transcript.as_ref())
                     .into_iter()
                     .flat_map(|transcript| &transcript.blocks)
-                    .map(|block| (block.key(), block))
+                    .map(|block| (block.key.as_ref(), block))
                     .collect();
                 let blocks = transcript
                     .blocks
@@ -129,12 +150,7 @@ impl CachedPane {
                         {
                             projected += 1;
                         }
-                        let value = serde_json::to_value(block).map_err(|_| ApiError::Capacity)?;
-                        Ok(CachedValue {
-                            revision: block.revision.clone(),
-                            bytes: encoded_size(&value)?,
-                            value: Arc::new(value),
-                        })
+                        CachedBlock::capture(&block.key, block.revision.clone(), block)
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let turns = if let Some(old) = old_turns
@@ -183,11 +199,14 @@ impl CachedPane {
     }
     fn transcript(
         metadata: Value,
-        blocks: Vec<CachedValue>,
+        blocks: Vec<Arc<CachedBlock>>,
         turns: CachedValue,
     ) -> Result<CachedTranscript> {
         let bytes = encoded_size(&metadata)? + turns.bytes - NULL_BYTES
-            + blocks.iter().map(|block| block.bytes).sum::<usize>()
+            + blocks
+                .iter()
+                .map(|block| block.raw.get().len())
+                .sum::<usize>()
             + blocks.len().saturating_sub(1);
         if bytes > MAX_BYTES {
             return Err(ApiError::Capacity);
@@ -211,11 +230,11 @@ impl CachedPane {
                     .expect("fixture blocks")
                     .iter()
                     .map(|block| {
-                        Ok(CachedValue {
-                            revision: Arc::new(()),
-                            bytes: encoded_size(block)?,
-                            value: Arc::new(block.clone()),
-                        })
+                        CachedBlock::capture(
+                            block["key"].as_str().expect("fixture block key"),
+                            Arc::new(()),
+                            block,
+                        )
                     })
                     .collect::<Result<Vec<_>>>()?;
                 value["blocks"] = Value::Array(Vec::new());
@@ -291,7 +310,7 @@ impl Serialize for CachedTranscript {
         map.end()
     }
 }
-struct Blocks<'a>(&'a [CachedValue]);
+struct Blocks<'a>(&'a [Arc<CachedBlock>]);
 impl Serialize for Blocks<'_> {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -299,7 +318,7 @@ impl Serialize for Blocks<'_> {
     ) -> std::result::Result<S::Ok, S::Error> {
         let mut blocks = serializer.serialize_seq(Some(self.0.len()))?;
         for block in self.0 {
-            blocks.serialize_element(block.value.as_ref())?;
+            blocks.serialize_element(block.raw.as_ref())?;
         }
         blocks.end()
     }

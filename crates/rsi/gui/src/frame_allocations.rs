@@ -6,15 +6,17 @@ use std::{
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Stats {
     pub requested: usize,
+    pub released: usize,
     pub calls: usize,
 }
 thread_local! { static TRACKED: Cell<Option<Stats>> = const { Cell::new(None) }; }
 struct Probe;
-fn record(bytes: usize) {
+fn record(requested: usize, released: usize) {
     let _ = TRACKED.try_with(|tracked| {
         if let Some(mut stats) = tracked.get() {
-            stats.requested += bytes;
-            stats.calls += 1;
+            stats.requested += requested;
+            stats.released += released;
+            stats.calls += usize::from(requested != 0);
             tracked.set(Some(stats));
         }
     });
@@ -24,21 +26,22 @@ fn record(bytes: usize) {
 #[allow(unsafe_code)] // Only the unit-test binary observes allocation requests.
 unsafe impl GlobalAlloc for Probe {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
+        record(layout.size(), 0);
         // SAFETY: The caller's valid layout is forwarded unchanged.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(layout.size());
+        record(layout.size(), 0);
         // SAFETY: The caller's valid layout is forwarded unchanged.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        record(0, layout.size());
         // SAFETY: The caller's live allocation and original layout are unchanged.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        record(size);
+        record(size, layout.size());
         // SAFETY: The caller supplies a live allocation and valid new size.
         unsafe { System.realloc(ptr, layout, size) }
     }

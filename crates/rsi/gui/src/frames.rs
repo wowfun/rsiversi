@@ -287,7 +287,7 @@ struct TranscriptPatch<'a> {
     fields: BTreeMap<&'a str, &'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     turns: Option<TurnPatch<'a>>,
-    upsert: Vec<&'a Value>,
+    upsert: Vec<&'a serde_json::value::RawValue>,
     remove: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     order: Option<Vec<&'a str>>,
@@ -338,24 +338,16 @@ fn pane_patch<'a>(
             let old_blocks: BTreeMap<_, _> = old
                 .blocks
                 .iter()
-                .map(|block| (block.key(), block))
+                .map(|block| (block.key.as_ref(), block))
                 .collect();
-            let new_keys: Vec<_> = new
-                .blocks
-                .iter()
-                .map(frame_view::CachedValue::key)
-                .collect();
-            let old_keys: Vec<_> = old
-                .blocks
-                .iter()
-                .map(frame_view::CachedValue::key)
-                .collect();
+            let new_keys: Vec<_> = new.blocks.iter().map(|block| block.key.as_ref()).collect();
+            let old_keys: Vec<_> = old.blocks.iter().map(|block| block.key.as_ref()).collect();
             let membership: BTreeSet<_> = new_keys.iter().copied().collect();
             let upsert = new
                 .blocks
                 .iter()
-                .filter(|block| old_blocks.get(block.key()).copied() != Some(*block))
-                .map(|block| block.value.as_ref())
+                .filter(|block| old_blocks.get(block.key.as_ref()).copied() != Some(*block))
+                .map(|block| block.raw.as_ref())
                 .collect();
             let remove = old_keys
                 .iter()

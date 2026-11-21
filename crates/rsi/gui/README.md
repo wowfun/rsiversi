@@ -272,8 +272,9 @@ Markdown capacity is limited to eight times each block's source bytes plus 16 Ki
 within the existing 128-block / 1 MiB source budget (at most 8.5 MiB of cached
 events). The fixed allowance accommodates ordinary short tables and code blocks.
 
-The incremental frame baseline caches each block's immutable JSON and encoded
-length by its own revision identity. Every visible block mutation replaces that
+The incremental frame baseline stores each block as its compact JSON bytes,
+with its key and revision identity. Snapshots and patches reuse those bytes
+directly. Every visible block mutation replaces that
 identity; duplicate retained Facts do not. Repeated controls preserve the history
 anchor of unchanged previews and status blocks. Pane and UI revisions refresh metadata
 without invalidating unchanged blocks. Frame construction borrows cached values,
