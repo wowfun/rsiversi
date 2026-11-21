@@ -1,0 +1,13 @@
+.alt { color: var(--dsw-alias-label-tertiary); font-style: italic; }
+.image { display: block; width: auto; height: auto; max-width: 100%; border-radius: var(--dsw-radius-md); object-fit: contain; }
+.thumbnail { display: inline-block; max-width: 100%; padding: 0; border: 0; background: transparent; vertical-align: middle; cursor: zoom-in; }
+.thumbnail .image { max-width: min(100%,640px); max-height: 360px; }
+.lightbox[open] {
+  position: fixed; inset: var(--dsh-frame-chrome-top,0px) 0 0; display: grid; place-items: center;
+  width: 100%; height: calc(100% - var(--dsh-frame-chrome-top,0px)); max-width: none; max-height: none;
+  box-sizing: border-box; margin: 0; padding: 40px; border: 0; background: transparent;
+}
+.lightbox::backdrop { background: transparent; }
+.mask { position: absolute; inset: 0; background: var(--dsw-alias-bg-mask-1); backdrop-filter: var(--dsw-mask-blur); }
+.original { position: relative; min-height: 0; min-width: 0; max-width: min(100%,1600px); max-height: 100%; object-fit: contain; border-radius: var(--dsw-radius-lg); box-shadow: var(--dsw-elevation-prominent); }
+.close { position: absolute; top: 20px; right: 20px; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary); }

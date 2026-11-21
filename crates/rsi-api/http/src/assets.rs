@@ -53,11 +53,15 @@ pub enum DocumentPolicy {
     Application {
         /// Root asset paths or single-segment directory prefixes ending in `/`; never URL or CSP text.
         frame_paths: Vec<String>,
+        /// Allow remote HTTP(S) image sources in this application document.
+        remote_images: bool,
     },
     /// Explicit trusted extension document; permits inline styles, never inline scripts.
     TrustedExtensionApplication {
         /// The same bounded frame allowlist as Application.
         frame_paths: Vec<String>,
+        /// Allow remote HTTP(S) image sources in this application document.
+        remote_images: bool,
     },
     /// Opaque script-enabled document with local data resources only.
     SandboxLocal,
@@ -68,6 +72,7 @@ impl Default for DocumentPolicy {
     fn default() -> Self {
         Self::Application {
             frame_paths: Vec::new(),
+            remote_images: false,
         }
     }
 }
@@ -97,8 +102,14 @@ impl DocumentPolicy {
             return Err(ApiError::Invalid("invalid document origin".into()));
         }
         match self {
-            Self::Application { frame_paths }
-            | Self::TrustedExtensionApplication { frame_paths } => {
+            Self::Application {
+                frame_paths,
+                remote_images,
+            }
+            | Self::TrustedExtensionApplication {
+                frame_paths,
+                remote_images,
+            } => {
                 if frame_paths.len() > 32
                     || frame_paths.iter().any(|path| {
                         let name = path
@@ -129,13 +140,14 @@ impl DocumentPolicy {
                 let socket = origin
                     .strip_prefix("http://")
                     .map_or_else(String::new, |authority| format!(" ws://{authority}"));
+                let images = if *remote_images { " http: https:" } else { "" };
                 let styles = if matches!(self, Self::TrustedExtensionApplication { .. }) {
                     "style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'"
                 } else {
                     "style-src 'self'"
                 };
                 Ok(format!(
-                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; {styles}; connect-src 'self'{socket}; worker-src 'self'; img-src 'self' blob:; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
+                    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; {styles}; connect-src 'self'{socket}; worker-src 'self'; img-src 'self' blob:{images}; font-src 'self'; frame-src {frames}; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
                 ))
             }
             Self::SandboxLocal | Self::SandboxHttps => {
@@ -219,6 +231,7 @@ mod tests {
     fn trusted_extension_styles_do_not_relax_scripts_or_the_default_policy() {
         let policy = DocumentPolicy::TrustedExtensionApplication {
             frame_paths: vec![],
+            remote_images: false,
         }
         .content_security_policy("http://127.0.0.1:8787")
         .unwrap();
@@ -237,7 +250,8 @@ mod tests {
     fn document_origins_and_frame_paths_cannot_inject_directives() {
         assert!(
             DocumentPolicy::Application {
-                frame_paths: vec![]
+                frame_paths: vec![],
+                remote_images: false,
             }
             .content_security_policy("http://127.0.0.1:8787")
             .unwrap()
@@ -246,6 +260,7 @@ mod tests {
         for origin in ["https://localhost:8443", "rsi://localhost"] {
             let policy = DocumentPolicy::Application {
                 frame_paths: vec!["/preview-local.html".into(), "/downloads/".into()],
+                remote_images: false,
             };
             assert!(
                 policy
@@ -290,7 +305,8 @@ mod tests {
         ] {
             assert!(
                 DocumentPolicy::Application {
-                    frame_paths: vec![path.into()]
+                    frame_paths: vec![path.into()],
+                    remote_images: false,
                 }
                 .content_security_policy("https://localhost")
                 .is_err()

@@ -239,9 +239,15 @@ fn application_policy(inline: bool) -> rsi_api_http::DocumentPolicy {
         "/download-worker.js".into(),
     ];
     if inline {
-        rsi_api_http::DocumentPolicy::TrustedExtensionApplication { frame_paths }
+        rsi_api_http::DocumentPolicy::TrustedExtensionApplication {
+            frame_paths,
+            remote_images: true,
+        }
     } else {
-        rsi_api_http::DocumentPolicy::Application { frame_paths }
+        rsi_api_http::DocumentPolicy::Application {
+            frame_paths,
+            remote_images: true,
+        }
     }
 }
 fn discover_renderer_files(

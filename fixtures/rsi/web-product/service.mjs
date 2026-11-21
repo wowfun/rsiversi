@@ -1,4 +1,5 @@
 import {readFactEvidence} from './fact-evidence.mjs';
+import {png} from './png.mjs';
 import { cleanupAll } from './cleanup.mjs';
 import { liveProxyEnvironment } from './live-limits.mjs';
 import assert from "node:assert/strict";
@@ -42,9 +43,16 @@ function sse(delta, finish = "stop") {
 async function startProvider(onRequest) {
   const requests = [];
   const sockets = new Set();
+  const imageRequests = [];
   const held = new Map();
   const server = http.createServer(async (request, response) => {
     try {
+      if (request.method === "GET" && ["/diagram.png","/missing.png"].includes(request.url)) {
+        imageRequests.push({path:request.url,referer:request.headers.referer ?? null});
+        if (request.url === "/missing.png") response.writeHead(404).end();
+        else response.writeHead(200,{"content-type":"image/png","cache-control":"no-store"}).end(png(240,100,[52,132,165,255]));
+        return;
+      }
       if (request.method !== "POST" || request.url !== "/v1/chat/completions") { response.writeHead(404).end(); return; }
       const chunks = []; let length = 0;
       for await (const chunk of request) { length += chunk.length; if (length > 4 * 1024 * 1024) { response.writeHead(413).end(); return; } chunks.push(chunk); }
@@ -84,7 +92,8 @@ async function startProvider(onRequest) {
         response.end(sse({content:"Stream complete."})); return;
       }
       if (prompt.includes("Markdown example")) {
-        response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n![Remote alt text](https://example.com/never-fetch.png)\n\n[Unsafe link](javascript:alert%281%29)" })); return;
+        const origin = `http://127.0.0.1:${server.address().port}`;
+        response.end(sse({ content: "## Review notes\n\nThe **Unicode 界** result has `literal <code>` and [documentation](https://example.com/docs).\n\n- Preserve source\n- Keep output bounded\n\n```sh\nprintf 'hello'\n```\n\n<script>window.markdownExecuted = true</script>\n\n" + `![Remote alt text](${origin}/diagram.png)\n\n![Missing preview](${origin}/missing.png)` + "\n\n[Unsafe link](javascript:alert%281%29)" })); return;
       }
       if (messages.some(message => message.role === "system" && text(message.content).includes("MARKDOWN-REVIEWER-V"))) {
         response.end(sse({content:"Custom reviewer completed its isolated task."})); return;
@@ -131,7 +140,7 @@ async function startProvider(onRequest) {
   server.requestTimeout = 10_000;
   server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
-  return { origin: `http://127.0.0.1:${server.address().port}`, requests,
+  return { origin: `http://127.0.0.1:${server.address().port}`, requests, imageRequests,
     release(marker) {
       const matches = [...held.values()].filter(value => value.prompt.includes(marker));
       assert(matches.length > 0, `no held provider response for ${marker}`);

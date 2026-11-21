@@ -20,6 +20,28 @@ export async function transferImage(target, type, width, height) {
   }, {bytes, type});
 }
 
+export async function verifyMarkdownImages(page, markdown, service) {
+  const thumbnail=markdown.getByRole("button",{name:"View full image: Remote alt text"});
+  await thumbnail.scrollIntoViewIfNeeded();
+  const inspect = async image => {
+    const element=await image.elementHandle();
+    try {
+      await page.waitForFunction(node=>node.naturalWidth>0,element);
+      return await element.evaluate(node=>[node.naturalWidth,node.naturalHeight,node.referrerPolicy]);
+    } finally { await element.dispose(); }
+  };
+  assert.deepEqual(await inspect(thumbnail.getByRole("img")),[240,100,"no-referrer"]);
+  await markdown.getByText("Image preview unavailable · Missing preview",{exact:true}).waitFor();
+  await thumbnail.click();
+  const lightbox=page.getByRole("dialog",{name:"Image preview",exact:true});
+  assert.deepEqual(await inspect(lightbox.getByRole("img")),[240,100,"no-referrer"]);
+  await lightbox.getByRole("button",{name:"Close image preview"}).press("Escape");
+  await lightbox.waitFor({state:"hidden"});
+  assert(await thumbnail.evaluate(el=>el===document.activeElement));
+  assert(service.provider.imageRequests.some(request=>request.path==="/diagram.png"));
+  assert(service.provider.imageRequests.every(request=>request.referer===null));
+}
+
 export async function verifyImages(page, pane, service, report, name) {
   // setInputFiles bypasses the disabled attachment control; await the bound draft first.
   const input=await pane.locator('input[type="file"]').elementHandle();

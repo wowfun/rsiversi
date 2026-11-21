@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {sourceFixture} from './source-fixture.mjs';
 import {chromium,firefox} from 'playwright';
+import {png} from './png.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 const report=resolve(process.env.RSI_REPORT_DIR);
@@ -26,9 +27,11 @@ const formulas=[start('paragraph'),text('勾股定理 '),formula('x^2'),end,
 const table=[start('table'),start('table_head'),...['城市','结果','日期','颜色','数量','类别','单位','项目'].flatMap(label=>[start('table_cell',{header:true}),text(label),end]),end,
   start('table_row'),...['上海','ABCDEFGHIJ'.repeat(13),'周一','橙','19','花','朵','果园'].flatMap(value=>[start('table_cell'),text(value),end]),end,end];
 const tables=[...table,start('quote'),...table,end];
+const linkedImage=[start('paragraph'),start('link',{href:'https://media.example.test/original'}),
+  start('image',{src:'https://media.example.test/diagram.png'}),text('Diagram'),end,end,end];
 const root=createRoot(article);
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
-  React.createElement(IconSprite),React.createElement(Markdown,{events:math==='tables'?tables:math?formulas:nodes,streaming}))));
+  React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
 window.ready=true;
 `;
@@ -114,8 +117,20 @@ try{
       const wideTable=await wrapper.evaluate(el=>{el.scrollLeft=70;return {width:el.clientWidth,content:el.scrollWidth,offset:el.scrollLeft,viewport:innerWidth,documentWidth:document.documentElement.scrollWidth};});
       assert(wideTable.offset>0);assert.equal(wideTable.viewport,wideTable.documentWidth);
       await page.screenshot({path:join(report,name+'-wide-table.png')});
+      let imageHeaders;
+      await page.route('https://media.example.test/diagram.png',async route=>{
+        imageHeaders=await route.request().allHeaders();
+        await route.fulfill({contentType:'image/png',body:png(24,16,[32,120,145,255])});
+      });
+      await page.evaluate(()=>window.render(false,'image'));
+      const imageLink=page.getByRole('link',{name:'Diagram',exact:true});
+      await imageLink.scrollIntoViewIfNeeded();
+      await page.waitForFunction(()=>document.querySelector('article a img')?.naturalWidth===24);
+      assert.equal(await imageLink.getAttribute('href'),'https://media.example.test/original');
+      assert.equal(await imageLink.locator('button').count(),0);
+      assert.equal(imageHeaders.referer,undefined);
       assert.deepEqual(errors,[]);
-      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,errors});
+      results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,errors});
     }finally{await browser.close()}
   }
   await writeFile(join(report,'result.json'),JSON.stringify(results,null,2));

@@ -410,9 +410,11 @@ captures stdout beyond 16 KiB and raw NUL/non-UTF8 bytes in both streams, then
 checks separate text/hex cards and pagination. The source/result inspectors still
 preserve the failed process status and literal arguments.
 
-Markdown scenarios exercise actual Worker parsing and closed DOM construction:
-Unicode emphasis, lists, code, an HTTP(S) link, literal HTML and an image alt label
-without image elements. Separate document tests simulate composing and key-code
+Markdown scenarios exercise actual Worker parsing and closed DOM construction
+with Unicode emphasis, lists, code, an HTTP(S) link and literal HTML. An isolated
+image origin checks the request headers, loaded preview and fallback text.
+The full-size preview closes with Escape and returns focus to its thumbnail.
+Separate document tests simulate composing and key-code
 229 Enter events and verify that keyboard submission stays suppressed; they do
 not establish native IME platform behavior.
 

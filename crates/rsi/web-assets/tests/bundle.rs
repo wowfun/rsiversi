@@ -61,6 +61,7 @@ async fn selected_extension_styles_and_fonts_survive_renderer_staging() {
         .content_security_policy("http://127.0.0.1:4319")
         .unwrap();
     assert!(csp.contains("style-src-attr 'unsafe-inline'"));
+    assert!(csp.contains("img-src 'self' blob: http: https:;"));
     assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval';"));
     for (file, mime) in [
         ("font.woff", "font/woff"),

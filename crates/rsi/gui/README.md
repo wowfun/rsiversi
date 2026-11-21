@@ -294,11 +294,13 @@ alignment, code and absolute HTTP(S) links are supported. Fenced code retains
 only its first language token: at most 32 ASCII letters, digits, `_`, `+`, `-`,
 `.` or `#`, normalized to lowercase. Other info strings do not enter the wire.
 Tables and language labels share the existing event, depth, source, encoded and
-retained-memory limits; over-budget tables remain plain text. Raw HTML is text;
-Markdown images show their alt text without
-fetching a URL. Tool/file/source contents keep their plain-text presentations.
+retained-memory limits; over-budget tables remain plain text. Raw HTML is text.
+An absolute HTTP(S) Markdown image carries its URL and alt text to the renderer.
+The browser loads it with no referrer and offers a full-size preview. An
+unavailable image falls back to its alt text or destination. Tool/file/source
+contents keep their plain-text presentations.
 The document constructs only the closed element set with text nodes, and links
-open with no opener or referrer. Markdown does not grant script or media access.
+open with no opener or referrer.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses
 transcript source with a JavaScript Markdown parser. Code presentation may add
 bounded syntax tokens, language, wrap and copy controls without interpreting HTML.

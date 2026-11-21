@@ -1,0 +1,23 @@
+import {useState} from 'react';
+import {createPortal} from 'react-dom';
+import {Modal} from '../presentation.tsx';
+import {IconCloseOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import css from './markdown-image.module.css';
+
+export function MarkdownImage({src,alt,linked}: {src:string;alt:string;linked:boolean}) {
+  const [failed,setFailed]=useState(false);
+  const [open,setOpen]=useState(false);
+  if (failed) return <span className={css.alt}>Image preview unavailable · {alt || src}</span>;
+  const image=<img className={css.image} alt={alt} loading="lazy" decoding="async"
+    referrerPolicy="no-referrer" src={src} onError={()=>setFailed(true)}/>;
+  if (linked) return image;
+  return <>
+    <button type="button" className={css.thumbnail} aria-label={alt ? 'View full image: '+alt : 'View full image'}
+      onClick={()=>setOpen(true)}>{image}</button>
+    {open && createPortal(<Modal className={css.lightbox} label="Image preview" close={()=>setOpen(false)} initialFocus="button">
+      <div className={css.mask} aria-hidden="true" onMouseDown={()=>setOpen(false)}/>
+      <img className={css.original} alt={alt} referrerPolicy="no-referrer" src={src}/>
+      <button type="button" className={css.close} aria-label="Close image preview" onClick={()=>setOpen(false)}><IconCloseOutlineRegular size={16}/></button>
+    </Modal>,document.body)}
+  </>;
+}

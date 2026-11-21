@@ -28,7 +28,7 @@ import { verifyDom } from "./dom.mjs";
 import { verifyAccessibility } from "./accessibility.mjs";
 import { verifyFiles } from "./files.mjs";
 import { verifyCompletionPointer, verifyFilePicker, verifyReferenceDraft, verifyInputDialogRetirement } from "./input-resources.mjs";
-import { verifyImages } from "./images.mjs";
+import { verifyImages, verifyMarkdownImages } from "./images.mjs";
 import { verifyAcknowledgementDeadline } from "./frames.mjs";
 import { verifyTree } from "./tree.mjs";
 import { verifyMountAdmission } from "./mount-admission.mjs";
@@ -184,7 +184,8 @@ try {
       assert.match(await markdown.locator("pre").innerText(), /printf 'hello'/);
       assert.equal(await markdown.locator("a").count(), 1);
       assert.equal(await markdown.locator("a").getAttribute("rel"), "noopener noreferrer");
-      assert.equal(await markdown.locator("img,script,iframe").count(), 0);
+      assert.equal(await markdown.locator("script,iframe").count(), 0);
+      await verifyMarkdownImages(page,markdown,service);
       assert.equal(await page.evaluate(() => window.markdownExecuted), undefined);
       assert.match(await markdown.innerText(), /<script>window.markdownExecuted = true<\/script>/);
       await page.screenshot({ path: join(report, `${name}-markdown.png`) });
@@ -465,7 +466,7 @@ try {
       results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
       results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       results.at(-1).cases.push("completed stdout/stderr byte pages and exact hex");
-      results.at(-1).cases.push("restricted Markdown with literal HTML, inert images and safe links");
+      results.at(-1).cases.push("restricted Markdown with literal HTML, referrer-free remote images, fullscreen preview and safe links");
       results.at(-1).cases.push("Settings-backed Enter preference applies immediately and survives reconnect");
       results.at(-1).cases.push("binary image import, ordered provider input and shared draft/durable preview");
       results.at(-1).cases.push("actual subagent tree, breadcrumbs and read-only child history");

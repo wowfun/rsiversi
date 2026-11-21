@@ -70,6 +70,9 @@ Application script, frame and resource restrictions. Selecting it grants no
 isolation between extensions and the application. The default Application policy
 continues to forbid inline styles; a bootstrap policy change remains an
 application-restart boundary owned by the asset publisher.
+Application documents may explicitly allow HTTP(S) image sources. The
+default image policy allows same-origin and Blob resources. Image loading is
+independent of script, frame, style and connection permissions.
 `AssetType` owns MIME selection shared by HTTP and native document transports.
 SVG application assets use `image/svg+xml`; their bytes follow the same immutable
 delivery, budget and document policy as the other admitted application assets.

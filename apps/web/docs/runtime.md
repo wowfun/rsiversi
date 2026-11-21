@@ -118,7 +118,8 @@ returns. The pending list lives only for that import.
 
 Worker frames never overwrite editable text or ordered image references. Dynamic content enters text
 nodes or the Worker's restricted Markdown event stream, using only its closed
-element set. HTML and remote Markdown images remain inert text.
+element set. Absolute HTTP(S) Markdown images load automatically near the viewport.
+Both the inline image and full-size preview send no referrer. Raw HTML stays text.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.

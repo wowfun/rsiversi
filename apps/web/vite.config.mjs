@@ -38,7 +38,7 @@ export function documentConfiguration({command}, {supervised = false} = {}) {
     optimizeDeps:{exclude:['@xterm/xterm']},
     resolve:{alias:{'@rsi/dsh-slots':local('./vendor/dsh/slots/index.ts'),'@rsi/dsh-store-contract':local('./vendor/dsh/store-contract.ts')}},
     server:{host:'127.0.0.1',strictPort:true,fs:{strict:true,allow:[local('./')],deny:['**/.git/**','**/.env*','**/target/**','**/Cargo.toml','**/Cargo.lock','**/*.rs']},
-      headers:{'Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' blob: data:; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"},
+      headers:{'Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' blob: data: http: https:; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"},
       proxy:upstream ? proxyConfiguration(websocket => ({target:upstream,changeOrigin:false,rewriteWsOrigin:false,ws:websocket})) : undefined},
     build:{target:'es2022',emptyOutDir:false,assetsDir:'',rollupOptions:{external:['/mounts.js','/drafts.js','/math.js',draftDatabaseModule,storageNamespaceModule],output:{paths:{[draftDatabaseModule]:'/draft-databases.js',[storageNamespaceModule]:'/storage-namespace.js'},inlineDynamicImports:true,entryFileNames:'app.js',assetFileNames:'styles[extname]'}}},
   };

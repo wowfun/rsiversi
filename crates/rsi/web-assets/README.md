@@ -32,6 +32,7 @@ The native `check_bundle` example accepts one absolute bundle directory and admi
 the default bundle through this provider in an isolated Host, reports retained
 bytes, then shuts it down. Build callers use it instead of copying admission policy.
 
+The application document admits HTTP(S) image sources for transcript Markdown.
 The application frame policy permits the two preview documents and the `/downloads/`
 Service Worker navigation prefix. Firefox also checks the synthetic navigation
 against the exact `/download-worker.js` source, which is explicitly permitted. Download responses are owned by the client worker,

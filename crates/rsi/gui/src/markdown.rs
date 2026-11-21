@@ -36,6 +36,7 @@ pub(crate) enum Element {
     Strong,
     Strike,
     Link { href: String },
+    Image { src: String },
     Span,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -141,7 +142,10 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                         column += 1;
                         Element::TableCell { alignment, header }
                     }
-                    Tag::HtmlBlock | Tag::Image { .. } => Element::Span,
+                    Tag::HtmlBlock => Element::Span,
+                    Tag::Image { dest_url, .. } => {
+                        link(&dest_url).map_or(Element::Span, |src| Element::Image { src })
+                    }
                     Tag::List(start) => Element::List {
                         start: start.map(u32::try_from).transpose().ok()?,
                     },
@@ -193,7 +197,7 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
                     text.capacity()
                 }
                 Node::Start {
-                    element: Element::Link { href },
+                    element: Element::Link { href } | Element::Image { src: href },
                 } => href.capacity(),
                 Node::Start {
                     element:
@@ -324,7 +328,9 @@ mod tests {
         assert!(json.contains("literal <x>"));
         assert!(json.contains("<script>bad()</script>"));
         assert!(!json.contains("javascript:"));
-        assert!(!json.contains("image.png"));
+        assert!(nodes.iter().any(|node| matches!(node, Node::Start {
+            element: Element::Image { src }
+        } if src == "https://example.com/image.png")));
         assert!(json.contains("https://example.com/a"));
         for invalid in [
             "javascript:alert(1)",

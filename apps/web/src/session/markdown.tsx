@@ -12,6 +12,7 @@ import {
 import type { HighlightToken } from "../../code-highlight.js";
 import { highlights } from "../runtime/highlight-queue.js";
 import { CopyButton } from "./copy-button.tsx";
+import { MarkdownImage } from "./markdown-image.tsx";
 import {
   IconNowrapFillRegular,
   IconWrapFillRegular,
@@ -34,6 +35,7 @@ type Element =
   | { kind: "heading"; level: number }
   | { kind: "list"; start: number | null }
   | { kind: "link"; href: string }
+  | { kind: "image"; src: string }
   | {
       kind: "table_cell";
       header: boolean;
@@ -185,11 +187,11 @@ function Formula({source,display,streaming}: {source:string;display:boolean;stre
   return <span ref={host}/>;
 }
 
-function render(nodes: Tree[], streaming: boolean, inQuote = false): ReactNode[] {
+function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = false): ReactNode[] {
   return nodes.map((node, key) => {
     if (typeof node === "string") return node;
     const element = node.element;
-    const children = () => render(node.children, streaming, inQuote || element.kind === "quote");
+    const children = () => render(node.children, streaming, inQuote || element.kind === "quote", inLink || element.kind === "link");
     switch (element.kind) {
       case "pre":
         if (element.language === "math" && !streaming)
@@ -216,6 +218,8 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false): ReactNode[]
             {children()}
           </ol>
         );
+      case "image":
+        return <MarkdownImage key={`${key}:${element.src}`} src={element.src} alt={textOf(node.children)} linked={inLink}/>;
       case "link":
         return (
           <a
