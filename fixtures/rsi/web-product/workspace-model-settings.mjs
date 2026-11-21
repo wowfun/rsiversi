@@ -13,6 +13,7 @@ fixture.view.catalog.workspaces[0].created_at_ms=1793094120000;
 fixture.view.setup={...fixture.view.setup,allowed:true,credentials_available:true,providers_writable:true,settings_writable:true,agent:{default_model:null},providers:{desired_revision:'1',applied_revision:'1',applying:false,diagnostic:null,deployments:[{provider:'deepseek',config:{deployment:'deepseek',endpoint:'https://api.deepseek.com',credential:{owner:'rsi.ai.provider.deepseek',slot:'default'},protocol:'responses',language_models:{'deepseek-flash':{context_window_tokens:128000,default_output_reserve_tokens:4096,max_output_reserve_tokens:16384}},default_output_tokens:{'deepseek-flash':8192}}}]}};
 fixture.setReply('command',async text=>{
  const value=JSON.parse(text),command=value.command,setup=fixture.view.setup;
+ if(!['rename_workspace','delete_workspace','setup'].includes(value.action))return '{}';
  if(value.action==='rename_workspace'){
   if(fixture.renameFailure)throw new Error('Rename unavailable');
   fixture.view.catalog.workspaces[0].name=value.name;
@@ -29,6 +30,7 @@ fixture.setReply('command',async text=>{
    setup.providers={...setup.providers,deployments:command.deployments,desired_revision:String(Number(setup.providers.desired_revision)+1),applied_revision:String(Number(setup.providers.desired_revision)+1)};
    setup.ticket+='n';
   }
+  if(command.kind==='credential_set' && fixture.keyFailure)throw new Error('Key store unavailable');
   if(command.kind==='default_model')setup.agent.default_model=command.model;
   if(command.kind==='discover_models')setup.discovery={request:command.input.request,models:[{id:'candidate',name:'Candidate',context_window_tokens:1000000,max_output_tokens:256000}]};
  }
@@ -105,8 +107,30 @@ try{for(const [name,engine] of Object.entries({chromium,firefox})){
   assert.equal((await page.evaluate(()=>fixture.calls.filter(call=>call.method==='command').map(call=>JSON.parse(call.payload)).filter(value=>value.command?.kind==='credential_set'))).length,0);
   await page.getByRole('button',{name:'Add model provider',exact:true}).click();const add=page.getByRole('form',{name:'Add model provider'});
   await add.getByRole('button',{name:'Custom model API',exact:true}).click();await add.getByRole('textbox',{name:'Provider ID',exact:true}).first().fill('gateway');await add.getByRole('textbox',{name:'Base URL'}).fill('http://127.0.0.1:9999/v1');await add.getByRole('textbox',{name:'API key'}).fill('fixture-only-key');await add.getByText('Customized settings',{exact:true}).click();await add.getByRole('button',{name:'Fetch available models'}).click();await add.getByRole('button',{name:'Candidate Add'}).click();
-  await page.evaluate(()=>{fixture.providerFailure=true;});await add.getByRole('button',{name:'Create provider'}).click();await add.getByRole('alert').waitFor();assert.equal(await add.getByRole('textbox',{name:'API key'}).inputValue(),'');assert.match(await add.innerText(),/API key saved/);
-  await page.evaluate(()=>{fixture.providerFailure=false;});await add.getByRole('button',{name:'Create provider'}).click();await add.waitFor({state:'detached'});
+  const keyInput=add.getByLabel('API key',{exact:true});
+  const keyWrites=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='command' && JSON.parse(call.payload).command?.kind==='credential_set').length);
+  await page.evaluate(()=>{fixture.providerFailure=true;});
+  await add.getByRole('button',{name:'Create provider'}).click();
+  await add.getByRole('alert').filter({hasText:'Provider rejected'}).waitFor();
+  assert.equal(await keyWrites(),0);
+  assert.equal(await keyInput.inputValue(),'fixture-only-key');
+  await page.evaluate(()=>{fixture.providerFailure=false;fixture.keyFailure=true;});
+  await add.getByRole('button',{name:'Create provider'}).click();
+  await add.getByRole('alert').filter({hasText:'Key store unavailable'}).waitFor();
+  const acceptedWrites=await writes();
+  assert.equal(await keyWrites(),1);
+  assert.equal(await keyInput.inputValue(),'');
+  assert(await keyInput.isEditable());
+  assert(await add.getByLabel('Provider ID',{exact:true}).first().isDisabled());
+  await add.getByRole('button',{name:'Finish setup'}).click();
+  await add.getByRole('alert').filter({hasText:'Enter the API key again'}).waitFor();
+  assert.equal(await keyWrites(),1);
+  await keyInput.fill('replacement-fixture-key');
+  await page.evaluate(()=>{fixture.keyFailure=false;});
+  await add.getByRole('button',{name:'Finish setup'}).click();
+  await add.waitFor({state:'detached'});
+  assert.equal(await keyWrites(),2);
+  assert.equal(await writes(),acceptedWrites);
   await page.getByRole('button',{name:'Add model provider',exact:true}).click();
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:join(report,name+'-narrow.png')});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.emulateMedia({colorScheme:'light'});await page.screenshot({path:join(report,name+'-light.png')});

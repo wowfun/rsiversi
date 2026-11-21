@@ -349,7 +349,9 @@ scope for commands and setup observations; editor teardown, Settings dismissal,
 and connection retirement cancel its waiters and prevent further dispatch.
 Dispatched requests still settle with their original connection. A successful
 provider replacement waits for its exact successor revision to finish applying.
-Finish setup refreshes that revision without repeating the replacement; a newer
+Only then does the editor save an entered API key for that provider. A failed
+credential write leaves the applied profile visible and lets the user enter the
+key again. Finish setup refreshes the saved revision before continuing. A newer
 revision requires reopening the editor.
 Authentication attaches only draft storage and its storage notice to the owner.
 An unexpected authentication or storage-setup rejection fails that owner, rejects

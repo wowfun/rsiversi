@@ -21,6 +21,7 @@ export function ProviderEditor({original,revision,deployments,binding,actions,cl
   const [rows,setRows]=useState(()=>draftRows(original)),[error,setError]=useState(''),[note,setNote]=useState(''),[removing,setRemoving]=useState(false);
   const [candidates,setCandidates]=useState<{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]>();
   const [advanced,setAdvanced]=useState(false),[applied,setApplied]=useState<string>();
+  const [needsKey,setNeedsKey]=useState(false);
   const [checking,setChecking]=useState(false);
   const statusRead=useRef<{timer?:ReturnType<typeof setTimeout>;pending?:Promise<unknown>;checked?:string}>({});
   const {busy,act}=actions,locked=busy||!setup?.allowed;
@@ -47,25 +48,37 @@ export function ProviderEditor({original,revision,deployments,binding,actions,cl
     act(async()=>{setError('');try{await statusRead.current.pending;await work();}catch(reason){if(alive.current&&scope.current?.active)setError(reason instanceof Error?reason.message:String(reason));}});
   };
   const save=()=>perform(async()=>{
-    const models=modelDefinitions(rows);
-    if(!Object.keys(models).length&&(provider!=='openai'||language))throw new Error('Add at least one model ID.');
-    if(!/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/.test(deployment))throw new Error('Provider ID must start with a letter and contain only letters, numbers, dots, underscores or hyphens.');
-    const url=new URL(endpoint);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error('Enter an HTTP or HTTPS API base URL without credentials, query or fragment.');
-    const config:Record<string,unknown>={...providerModelConfig(provider,models,original?.config),deployment,endpoint,credential:{owner:providerOwners[provider],slot}};
-    if(provider==='deepseek')config.protocol=protocol;
-    if(provider==='openai'){config.language=language;config.image=imageOutput;}
-    if(provider==='openai-compatible'){config.path=path;config.allow_image_input=images;}
-    const next=replaceProvider(deployments,{provider,config},original?String(original.config.deployment):undefined);
+    const owner=scope.current!;
+    const missingKey='Provider saved. Enter the API key again to finish setup.';
+    if(needsKey&&!secret.current?.value)throw new Error(missingKey);
     const target=applied??String(BigInt(revision)+1n);
     if(!applied){
-      if(scope.current!.snapshot()?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
-      const key=secret.current?.value??'';
-      if(key){if(secret.current)secret.current.value='';await command({kind:'credential_set',provider,slot,secret:key});if(alive.current)setNote('API key saved.');}
-      await command({kind:'providers_replace',expected_revision:revision,deployments:next});
-      if(alive.current&&scope.current?.active)setApplied(target);
-    }else await command({kind:'refresh'});
-    const current=await scope.current!.waitSetup(value=>providerApplied(value,target));
-    if(!current.agent?.default_model&&current.settings_writable&&rows[0])await command({kind:'default_model',ticket:current.ticket,model:{deployment,model:rows[0].name.trim()}});
+      if(owner.snapshot()?.providers?.desired_revision!==revision)throw new Error('Provider configuration changed. Cancel and reopen this editor before applying.');
+      const models=modelDefinitions(rows);
+      if(!Object.keys(models).length&&(provider!=='openai'||language))throw new Error('Add at least one model ID.');
+      if(!/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/.test(deployment))throw new Error('Provider ID must start with a letter and contain only letters, numbers, dots, underscores or hyphens.');
+      const url=new URL(endpoint);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error('Enter an HTTP or HTTPS API base URL without credentials, query or fragment.');
+      const config:Record<string,unknown>={...providerModelConfig(provider,models,original?.config),deployment,endpoint,credential:{owner:providerOwners[provider],slot}};
+      if(provider==='deepseek')config.protocol=protocol;
+      if(provider==='openai'){config.language=language;config.image=imageOutput;}
+      if(provider==='openai-compatible'){config.path=path;config.allow_image_input=images;}
+      const next=replaceProvider(deployments,{provider,config},original?String(original.config.deployment):undefined);
+      await owner.command({kind:'providers_replace',expected_revision:revision,deployments:next});
+      if(owner.active)setApplied(target);
+    }else await owner.command({kind:'refresh'});
+    let current=await owner.waitSetup(value=>providerApplied(value,target));
+    const field=secret.current;
+    if(field?.value){
+      const key=field.value;field.value='';
+      try{await owner.command({kind:'credential_set',provider,slot,secret:key});}
+      catch(reason){
+        if(owner.active)setNeedsKey(true);
+        throw new Error(missingKey+' '+(reason instanceof Error?reason.message:String(reason)));
+      }
+      if(owner.active){setNeedsKey(false);setNote('API key saved.');}
+      current=await owner.waitSetup(value=>providerApplied(value,target));
+    }
+    if(!current.agent?.default_model&&current.settings_writable&&rows[0])await owner.command({kind:'default_model',ticket:current.ticket,model:{deployment,model:rows[0].name.trim()}});
     if(alive.current)close();
   });
   const fetchModels=()=>perform(async()=>{
@@ -82,23 +95,27 @@ export function ProviderEditor({original,revision,deployments,binding,actions,cl
     setRows(previous=>previous.some(row=>row.name===candidate.id)?previous:[...previous,row]);
   };
   return <form className={css.editor} onSubmit={event=>{event.preventDefault();save();}} aria-label={original?'Edit model provider':'Add model provider'} aria-busy={busy}>
-    <fieldset disabled={locked||!!applied}>
-      {!original&&<><div className={css.segments} role="group" aria-label="Provider type"><button type="button" aria-pressed={provider!=='openai-compatible'} onClick={()=>choose('deepseek')}>Built-in provider</button><button type="button" aria-pressed={provider==='openai-compatible'} onClick={()=>choose('openai-compatible')}>Custom model API</button></div>
-      {provider!=='openai-compatible'?<label>Provider<select aria-label="Provider" value={provider} onChange={event=>choose(event.target.value as Provider['provider'])}><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option></select></label>:<><label>Provider ID<input aria-label="Provider ID" value={deployment} onChange={event=>{setDeployment(event.target.value);setSlot(event.target.value||'default');}} maxLength={128} placeholder="my-gateway"/></label><label>Base URL<input aria-label="Base URL" value={endpoint} onChange={event=>setEndpoint(event.target.value)} placeholder="https://gateway.example/v1" maxLength={2048}/></label></> }</>}
-      {original&&<div className={css.editorTitle}><strong>{providerLabels[provider]}</strong><span>{deployment}</span></div>}
+    <fieldset disabled={locked}>
+      <fieldset disabled={!!applied}>
+        {!original&&<><div className={css.segments} role="group" aria-label="Provider type"><button type="button" aria-pressed={provider!=='openai-compatible'} onClick={()=>choose('deepseek')}>Built-in provider</button><button type="button" aria-pressed={provider==='openai-compatible'} onClick={()=>choose('openai-compatible')}>Custom model API</button></div>
+        {provider!=='openai-compatible'?<label>Provider<select aria-label="Provider" value={provider} onChange={event=>choose(event.target.value as Provider['provider'])}><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option></select></label>:<><label>Provider ID<input aria-label="Provider ID" value={deployment} onChange={event=>{setDeployment(event.target.value);setSlot(event.target.value||'default');}} maxLength={128} placeholder="my-gateway"/></label><label>Base URL<input aria-label="Base URL" value={endpoint} onChange={event=>setEndpoint(event.target.value)} placeholder="https://gateway.example/v1" maxLength={2048}/></label></> }</>}
+        {original&&<div className={css.editorTitle}><strong>{providerLabels[provider]}</strong><span>{deployment}</span></div>}
+      </fieldset>
       <label>API key<input ref={secret} aria-label="API key" type="password" autoComplete="off" spellCheck={false} disabled={!setup?.credentials_available||credential?.editable===false} placeholder={credential?.availability.kind==='configured'?'Leave blank to use saved credentials':'Enter your API key'} /></label>
       {credential?.editable===false&&<p className={css.hint}>This key is managed by the Service environment.</p>}
-      <details open={advanced} onToggle={event=>setAdvanced(event.currentTarget.open)}><summary>Customized settings</summary><div className={css.advanced}>
-        {(original||provider!=='openai-compatible')&&<label>Base URL<input aria-label="Base URL" value={endpoint} onChange={event=>setEndpoint(event.target.value)} maxLength={2048}/></label>}
-        <label>API protocol<select aria-label="API protocol" value={provider==='deepseek'?protocol:provider==='openai'?'responses':'chat-completions'} onChange={event=>setProtocol(event.target.value)} disabled={provider!=='deepseek'}>{provider!=='openai-compatible'&&<option value="responses">OpenAI Responses</option>}{provider!=='openai'&&<option value="chat-completions">OpenAI Chat Completions</option>}</select></label>
-        {provider==='openai-compatible'&&<><label>Request path<input aria-label="Request path" value={path} onChange={event=>setPath(event.target.value)}/></label><label className={css.check}><input type="checkbox" checked={images} onChange={event=>setImages(event.target.checked)}/>Image input</label></>}
-        {provider==='openai'&&<div className={css.checks}><label className={css.check}><input type="checkbox" checked={language} onChange={event=>setLanguage(event.target.checked)}/>Language models</label><label className={css.check}><input type="checkbox" checked={imageOutput} onChange={event=>setImageOutput(event.target.checked)}/>Image generation</label></div>}
-        <div className={css.modelsHeading}><strong>Models</strong><Button size="sm" variant="outline" disabled={!endpoint||!setup?.credentials_available} onClick={fetchModels}>Fetch available models</Button></div>
-        {candidates&&<div className={css.candidates} aria-label="Available models">{!candidates.length?<p>No models returned.</p>:candidates.map(candidate=><button type="button" key={candidate.id} disabled={rows.some(row=>row.name===candidate.id)} onClick={()=>addCandidate(candidate)}>{candidate.name??candidate.id}<span>{rows.some(row=>row.name===candidate.id)?'Added':'Add'}</span></button>)}</div>}
-        <ModelDefinitions rows={rows} setRows={setRows}/>
-        <details className={css.connection}><summary>Connection identifiers</summary><label>Provider ID<input aria-label="Provider ID" value={deployment} disabled={!!original} onChange={event=>setDeployment(event.target.value)} maxLength={128}/></label><label>Credential slot<input aria-label="Credential slot" value={slot} onChange={event=>setSlot(event.target.value)} maxLength={128}/></label></details>
-        {original&&<Button className={css.danger} size="sm" onClick={()=>setRemoving(true)}>Remove provider</Button>}
-      </div></details>
+      <fieldset disabled={!!applied}>
+        <details open={advanced} onToggle={event=>setAdvanced(event.currentTarget.open)}><summary>Customized settings</summary><div className={css.advanced}>
+          {(original||provider!=='openai-compatible')&&<label>Base URL<input aria-label="Base URL" value={endpoint} onChange={event=>setEndpoint(event.target.value)} maxLength={2048}/></label>}
+          <label>API protocol<select aria-label="API protocol" value={provider==='deepseek'?protocol:provider==='openai'?'responses':'chat-completions'} onChange={event=>setProtocol(event.target.value)} disabled={provider!=='deepseek'}>{provider!=='openai-compatible'&&<option value="responses">OpenAI Responses</option>}{provider!=='openai'&&<option value="chat-completions">OpenAI Chat Completions</option>}</select></label>
+          {provider==='openai-compatible'&&<><label>Request path<input aria-label="Request path" value={path} onChange={event=>setPath(event.target.value)}/></label><label className={css.check}><input type="checkbox" checked={images} onChange={event=>setImages(event.target.checked)}/>Image input</label></>}
+          {provider==='openai'&&<div className={css.checks}><label className={css.check}><input type="checkbox" checked={language} onChange={event=>setLanguage(event.target.checked)}/>Language models</label><label className={css.check}><input type="checkbox" checked={imageOutput} onChange={event=>setImageOutput(event.target.checked)}/>Image generation</label></div>}
+          <div className={css.modelsHeading}><strong>Models</strong><Button size="sm" variant="outline" disabled={!endpoint||!setup?.credentials_available} onClick={fetchModels}>Fetch available models</Button></div>
+          {candidates&&<div className={css.candidates} aria-label="Available models">{!candidates.length?<p>No models returned.</p>:candidates.map(candidate=><button type="button" key={candidate.id} disabled={rows.some(row=>row.name===candidate.id)} onClick={()=>addCandidate(candidate)}>{candidate.name??candidate.id}<span>{rows.some(row=>row.name===candidate.id)?'Added':'Add'}</span></button>)}</div>}
+          <ModelDefinitions rows={rows} setRows={setRows}/>
+          <details className={css.connection}><summary>Connection identifiers</summary><label>Provider ID<input aria-label="Provider ID" value={deployment} disabled={!!original} onChange={event=>setDeployment(event.target.value)} maxLength={128}/></label><label>Credential slot<input aria-label="Credential slot" value={slot} onChange={event=>setSlot(event.target.value)} maxLength={128}/></label></details>
+          {original&&<Button className={css.danger} size="sm" onClick={()=>setRemoving(true)}>Remove provider</Button>}
+        </div></details>
+      </fieldset>
     </fieldset>
     {note&&<p className={css.hint} role="status">{note}</p>}{error&&<p className={css.error} role="alert">{error}</p>}
     <footer><Button variant="outline" disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" type="submit" disabled={locked}>{busy?'Applying…':applied?'Finish setup':original?'Apply':'Create provider'}</Button></footer>
