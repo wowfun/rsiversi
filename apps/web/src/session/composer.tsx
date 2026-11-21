@@ -92,6 +92,7 @@ export function Composer({
       />
       <DocumentContributions seat="composer"/>
       <DraftReferences owner={owner} state={state} />
+      <DraftImages owner={owner} state={state} />
       <div className="composer-command">
         <span role="status" aria-live="polite" aria-atomic="true">{state?.command && <><strong>/{state.command.name}</strong> {state.command.hint}</>}</span>
         {state?.command && <button type="button" className="quiet" disabled={state.disabled} aria-label="Leave command input" onClick={()=>void run(async()=>owner.clearCommand())}>×</button>}
@@ -130,7 +131,6 @@ export function Composer({
         hidden
         aria-label={`${label} image files`}
       />
-      <DraftImages owner={owner} state={state} />
       <DraftStatus owner={owner} state={state} />
             <p id={hintId} className="composer-hint sr-only">
               {submitKey === "enter"

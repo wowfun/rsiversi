@@ -148,6 +148,7 @@ enum WorkspaceRegistration {
 
 #[derive(Debug)]
 struct Attachment {
+    stop: tokio_util::sync::CancellationToken,
     metrics: Mutex<Option<rsi_session_protocol::MetricsRead>>,
     metrics_work: tokio::sync::Mutex<()>,
     export: export::State,
@@ -239,12 +240,9 @@ impl Attachment {
     }
 
     async fn close(&self) -> Result<()> {
+        self.stop.cancel();
         self.export.close().await;
         let mut failure = self.detach_terminals().await.err();
-        self.file_read
-            .lock()
-            .expect("File picker cancellation poisoned")
-            .cancel();
         let resource_failure = self
             .resource
             .lock()
@@ -1202,6 +1200,7 @@ impl GuiApplication {
             terminal_followers: Mutex::new(BTreeMap::new()),
             terminal_closed: std::sync::atomic::AtomicBool::new(false),
             files: surface.lookup_local::<rsi_session_files_ui::FilesBrowserContract>(),
+            stop: tokio_util::sync::CancellationToken::new(),
             file_read: Mutex::new(tokio_util::sync::CancellationToken::new()),
             inline: Mutex::new(BTreeMap::new()),
             inline_work: tokio::sync::Mutex::new(0),

@@ -350,8 +350,9 @@ is retained with the pane's existing bounded submission records. The document
 checks device-local saved input before offering a previous blank. Read uncertainty disables reuse; it never makes
 Session creation invalid or reuses a historical/durable Session.
 
-Preview reads require a current exact-source detail ticket, obtained by inspecting
-a draft reference or a displayed source. Media owns canonical PNG validation and byte identity; arbitrary
+Detail previews read through the current exact-source ticket. A restored draft
+thumbnail can read its canonical Media reference with the attached pane generation.
+Replacing the attachment retires its thumbnail reads. Media owns canonical PNG validation and byte identity; arbitrary
 URLs and filenames are never read capabilities. Binary input and output travel
 separately from JSON views. Source bytes are bounded before copying into WASM;
 canonical response receive leases remain owned until the document transfer is
@@ -361,12 +362,12 @@ immutable bytes through their final clone or slice. The document shares eight
 objects / 32 MiB between cached URLs and active read reservations, with at most
 eight waiting request descriptions. Only unreferenced LRU entries may be evicted;
 capacity retained by displayed images produces an explicit retryable refusal.
-Pending reads share only an exact connection, image and detail ticket; completed
+Pending reads share only an exact connection, image and selection; completed
 objects may be reused by another ticket on that connection. Display disposal
 unpins its cache entry and drops queued interest. Blob conversion has a separate
 32 MiB temporary allowance; transfer buffers are released after conversion.
 Disconnect revokes all URLs and fences pending results.
-Only a requested preview is decoded for display. Closing/replacing that display
+The composer displays thumbnails for its draft images. Closing/replacing a display
 fences late responses; application retirement cancels and drains image work.
 These are presentation retention limits, not total browser decoder or RSS limits.
 

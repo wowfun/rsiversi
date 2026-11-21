@@ -6,7 +6,7 @@
  * snapshot:{revision:string,model:unknown,busy:boolean,error:string|null},
  * host:{invoke(action:string,input:unknown):Promise<unknown>,source(name:string,offset:number,maximum:number):Promise<unknown>}}} RendererSlot */
 /** @typedef {{connection:object,boundCall(owner:object):Call,
- * acquireImage(owner:object,media:DetailFrame['source_media'],ticket:string,call:Call):import('../details/model.ts').ImageInterest,
+ * acquireImage(owner:object,media:DetailFrame['source_media'],ticket:string):import('../details/model.ts').ImageInterest,
  * rendererSlots:RendererSlot[]}} Context */
 import {interactionKey} from './interaction.js';
 /** @param {Context} context */
@@ -40,7 +40,7 @@ export function createResourceDetails(context) {
         ...detail,
         owner: connection,
         acquire: () =>
-          context.acquireImage(connection, detail.media, detail.ticket, call),
+          context.acquireImage(connection, detail.media, detail.ticket),
       }});
       return;
     }
@@ -130,7 +130,6 @@ export function createResourceDetails(context) {
               connection,
               next.source_media,
               detail.ticket,
-              call,
             ),
         }},
       );

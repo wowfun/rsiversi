@@ -649,6 +649,7 @@ export function createPaneClass(context) {
             },
           })),
         images: this.images,
+        generation: this.generation,
         importingImages: this.uploading?.editor === editor ? this.uploading : undefined,
         references: (editor?.references ?? []).map((reference) => {
           const interval = context.referenceInterval(reference.metadata);
@@ -732,6 +733,11 @@ export function createPaneClass(context) {
     }
     previewImage(index) {
       return this.action("inspect_image", { media: this.editor.images[index] });
+    }
+    acquireDraftImage(media, generation) {
+      if (this.generation !== generation || this.bindingError || !this.editor)
+        throw new Error("This draft is unavailable");
+      return context.previews(context.connection).acquire(media, {kind:"draft", pane:this.index, generation, media});
     }
     showFilePicker() {
       return showFilePicker(this, context);

@@ -268,7 +268,7 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
         .import_image(rsi_gui::SurfaceId::MAIN, &generation, png(2))
         .await
         .unwrap();
-    let direct = json!({"kind":"draft","pane":"main","generation":generation,"media":media});
+    let direct = json!({"kind":"draft","pane":"main","generation":"retired","media":media});
     let reads = backend.media.reads.load(Ordering::SeqCst);
     assert!(app.read_image(&direct.to_string()).await.is_err());
     assert_eq!(backend.media.reads.load(Ordering::SeqCst), reads);
@@ -373,6 +373,29 @@ async fn two_preview_reads_enter_before_release_and_upload_keeps_its_own_slot() 
     backend.media.release.notify_one();
     assert_eq!(second.await.unwrap().bytes, png(3));
     assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn draft_thumbnail_reads_without_opening_a_detail_and_retires_with_its_pane() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let pane = view(&app)["surfaces"]["main"].clone();
+    let generation = pane["generation"].as_str().unwrap();
+    let media = app
+        .import_image(rsi_gui::SurfaceId::MAIN, generation, png(2))
+        .await
+        .unwrap();
+    let selection =
+        json!({"kind":"draft","pane":"main","generation":generation,"media":media}).to_string();
+    assert_eq!(app.read_image(&selection).await.unwrap().bytes, png(2));
+    assert!(sources::panel(&app)["image_detail"].is_null());
+    backend.media.block_read.store(true, Ordering::SeqCst);
+    let reading = app.read_image(&selection);
+    until(|| backend.media.active.load(Ordering::SeqCst) == 1).await;
+    cmd(&app, json!({"action":"close_surface","pane":"main"})).await;
+    assert!(reading.await.is_err());
+    assert_eq!(backend.media.active.load(Ordering::SeqCst), 0);
+    assert!(app.read_image(&selection).await.is_err());
     assert!(runtime.shutdown().await.is_clean());
 }
 

@@ -1,4 +1,4 @@
-// One connection owns canonical URLs, exact-ticket reads and bounded waiting interest.
+// One connection owns preview URLs and bounded interest in canonical Media reads.
 export class ImagePreviews {
   #call;
   #limits;
@@ -25,7 +25,17 @@ export class ImagePreviews {
       keys: [...this.#cache.keys()] };
   }
 
-  acquire(media, ticket) {
+  rememberDraft(media, file) {
+    const key = 'draft:' + JSON.stringify(media);
+    if (this.#closed || this.#cache.has(key) || !this.#room(file.size)) return;
+    let url;
+    try { url = this.#urls.createObjectURL(file); }
+    catch { return; } // A canonical thumbnail remains available.
+    this.#cache.set(key, {url, bytes: file.size, refs: 0});
+    this.#cached += file.size;
+  }
+
+  acquire(media, selection) {
     let resolve, reject;
     const result = new Promise((yes, no) => { resolve = yes; reject = no; });
     const subscription = { resolve, reject, live: true, entry: undefined, flight: undefined };
@@ -48,10 +58,12 @@ export class ImagePreviews {
       reject(new Error('Image exceeds the preview budget')); return handle;
     }
     this.#subscriptions.add(subscription);
-    const key = JSON.stringify(media);
+    const canonical = JSON.stringify(media);
+    const draftKey = 'draft:' + canonical;
+    const key = selection.kind === 'draft' && this.#cache.has(draftKey) ? draftKey : canonical;
     const cached = this.#cache.get(key);
     if (cached) { this.#deliver(subscription, key, cached); return handle; }
-    const identity = JSON.stringify([key, ticket]);
+    const identity = JSON.stringify([key, selection]);
     let flight = this.#flights.get(identity);
     if (!flight) {
       if (this.#queue.length >= this.#limits.preview_objects) {
@@ -59,7 +71,7 @@ export class ImagePreviews {
         reject(new Error('Image preview queue is full; retry after another preview finishes'));
         return handle;
       }
-      flight = { identity, key, media, ticket, subscribers: new Set(), started: false };
+      flight = { identity, key, media, selection, subscribers: new Set(), started: false };
       this.#flights.set(identity, flight);
       this.#queue.push(flight);
     }
@@ -136,7 +148,7 @@ export class ImagePreviews {
   async #read(flight) {
     let bytes;
     try {
-      bytes = await this.#call('read_image', JSON.stringify({ kind: 'source', ticket: flight.ticket }));
+      bytes = await this.#call('read_image', JSON.stringify(flight.selection));
       if (this.#closed || !flight.subscribers.size) return;
       if (!(bytes instanceof Uint8Array) || bytes.byteLength !== flight.media.bytes
         || bytes.buffer.byteLength !== bytes.byteLength) throw new Error('Image exceeds the preview budget');

@@ -127,6 +127,12 @@ decoding and releases the preview Blob URL with the displayed image.
 Dragging a local transcript thumbnail into a composer copies the original file
 into that composer's normal image import. The gesture uses the bytes already
 read for this occurrence and leaves the editor text and preview dialog alone.
+The composer's attachment rail shows images above the text. Fresh raster
+thumbnails can reuse the browser file after its headers and import were accepted.
+Restored drafts load a thumbnail from the canonical Media reference. Original
+file previews and canonical Media previews share the connection's bounded URL
+cache. The draft persists only its ordered references. Each thumbnail opens
+the canonical preview and offers removal and, for multiple images, reordering.
 Passive inline-card visibility updates pause during replacement. An in-flight
 update rejected for the retiring attachment does not become a user action error;
 the replacement frame supplies a fresh visibility observation.

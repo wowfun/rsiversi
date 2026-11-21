@@ -5,6 +5,7 @@ import type {
 } from "./projection-types.ts";
 import type { MediaLimits } from "../presentation-types.ts";
 interface Media {
+  id: string;
   width: number;
   height: number;
   bytes: number;
@@ -17,6 +18,7 @@ interface Pending {
   images?: number;
 }
 export interface ComposerView {
+  generation?: string;
   bindingInput?: boolean;
   completionsAvailable?: boolean;
   access?: string;
@@ -73,6 +75,7 @@ export interface ComposerOwner extends ProjectionActions {
   reconcile(mode: string): Promise<unknown>;
   moveImage(index: number, to: number | null): void;
   previewImage(index: number): Promise<unknown>;
+  acquireDraftImage(media: Media, generation: string): import("../details/model.ts").ImageInterest;
   removeReference(id: string): Promise<unknown>;
   previewReference(id: string): void;
 }

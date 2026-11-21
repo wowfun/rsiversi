@@ -36,7 +36,14 @@ impl AsRef<[u8]> for PreviewBody {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Preview {
-    Source { ticket: String },
+    Source {
+        ticket: String,
+    },
+    Draft {
+        pane: crate::SurfaceId,
+        generation: String,
+        media: MediaRef,
+    },
 }
 
 impl GuiApplication {
@@ -100,7 +107,7 @@ impl GuiApplication {
         Ok(())
     }
 
-    /// Reads an image through its current exact-source detail ticket.
+    /// Reads an image for a current source detail or the attached draft.
     /// Byte leases stay with the returned immutable object until its consumer releases them.
     ///
     /// # Panics
@@ -114,6 +121,17 @@ impl GuiApplication {
                 serde_json::from_str(source).map_err(|_| "Invalid image selection")?;
             let media = self.media.clone().ok_or("Image preview is unavailable")?;
             let (reference, stop) = match selection {
+                Preview::Draft {
+                    pane,
+                    generation,
+                    media,
+                } => {
+                    let attached = self.pane(pane)?.attachment(&generation)?;
+                    if attached.protected {
+                        return Err("This pane has no editable draft".into());
+                    }
+                    (media, attached.stop.clone())
+                }
                 Preview::Source { ticket } => {
                     let registry = self.details.lock().expect("Web details poisoned");
                     let details = registry.ticket(&ticket)?;

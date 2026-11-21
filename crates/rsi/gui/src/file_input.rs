@@ -42,7 +42,11 @@ impl GuiApplication {
                 session_id: attached.id.clone(),
                 header_key: attached.header.clone(),
             };
-            let image = files.image(target, path).await.map_err(error)?;
+            let image = tokio::select! {
+                biased;
+                () = attached.stop.cancelled() => return Err("This pane changed".into()),
+                result = files.image(target, path) => result.map_err(error)?,
+            };
             pane.attachment(&generation)?;
             Ok(image)
         })
@@ -67,7 +71,7 @@ impl GuiApplication {
                     .lock()
                     .expect("File picker cancellation poisoned");
                 current.cancel();
-                *current = tokio_util::sync::CancellationToken::new();
+                *current = attached.stop.child_token();
                 current.clone()
             };
             let Some(request) = input.request else {

@@ -60,10 +60,10 @@ let selected = "main";
 let lastNotice;
 let imagePreviews, imageConnection;
 function clearImages(){imagePreviews?.dispose();imagePreviews=imageConnection=undefined}
-function acquireImage(owner,media,ticket,call){
+function previews(owner){
  if(owner!==connection||owner?.closing)throw Error('The image connection is closed');
- if(!imagePreviews||imageConnection!==owner){clearImages();imageConnection=owner;imagePreviews=new ImagePreviews(call,view.media_limits)}
- return imagePreviews.acquire(media,ticket);
+ if(!imagePreviews||imageConnection!==owner){clearImages();imageConnection=owner;imagePreviews=new ImagePreviews(boundCall(owner),view.media_limits)}
+ return imagePreviews;
 }
 let endpoint;
 try { endpoint = localStorage.getItem("rsi.endpoint"); } catch { /* Storage is optional. */ }
@@ -214,7 +214,7 @@ const disconnectDocument=closer.disconnectDocument;
 listen(window, "rsi-native-close", event => { if (!nativeDocument || !Number.isSafeInteger(event.detail)) return; closer.attempt = event.detail; perform(disconnectDocument); });
 if(nativeDocument)setClipboardWriter(text=>nativeCall({kind:"clipboard",text}));
 
-const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, location, notify, perform, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
+const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, location, notify, perform, previews, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
 const panes = new Map();
 listen(window, "rsi:detail-mode",()=>{for(const pane of panes.values())if(pane.lastTranscript)pane.renderTranscript(pane.lastTranscript,false);});
 const ExternalPane = externalPaneClass({command,perform});
@@ -300,7 +300,7 @@ installActions({ captureSetupBinding:settings.captureSetupBinding, disconnect:as
 
 const projectResources=createResourceProjector({get connection(){return connection},get resourceHosts(){return resourceHosts},get element(){return element},get $(){return $},get renderDetail(){return renderResourceDetail},get publishResources(){return publishResources}});
 function renderResources(next){return projectResources(next)}
-const renderResourceDetail=createResourceDetails({get connection(){return connection},boundCall,acquireImage,get rendererSlots(){return rendererSlots}});
+const renderResourceDetail=createResourceDetails({get connection(){return connection},boundCall,acquireImage:(owner,media,ticket)=>previews(owner).acquire(media,{kind:'source',ticket}),get rendererSlots(){return rendererSlots}});
 
 return {
   start() {

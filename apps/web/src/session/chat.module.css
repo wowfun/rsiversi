@@ -356,9 +356,6 @@
   color: var(--muted);
   padding-top: 4px;
 }
-:global(.draft-images:empty):where(.scope, .scope *) {
-  display: none;
-}
 :global(.delivery-menu):where(.scope, .scope *) {
   position: relative;
 }

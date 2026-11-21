@@ -87,20 +87,42 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     }
     await inspect('author',210);
     if(process.env.RSI_CHECK_IMAGE_DRAG==='1'){
-      const reads=[];
-      const watch=request=>{if(new URL(request.url()).pathname.endsWith('/files/image/2/read'))reads.push(request.method());};
+      const reads=[],mediaReads=[];
+      const watch=request=>{
+        const path=new URL(request.url()).pathname;
+        if(path.endsWith('/files/image/2/read'))reads.push(request.method());
+        if(path.endsWith('/media/read/1/read'))mediaReads.push(request.method());
+      };
       author.on('request',watch);
       try{
         const editor=page.getByRole('textbox',{name:'Main message'});
         const thumbnail=page.locator('.message.assistant').getByRole('button',{name:'View full image: Workspace diagram'}).getByRole('img');
         await thumbnail.dragTo(editor);
         const chip=page.locator('.pane.selected .draft-image');
-        await chip.waitFor();assert.match(await chip.innerText(),/84 × 52/);
+        const preview=chip.getByRole('button',{name:'Preview image',exact:true});
+        const image=preview.locator('img');
+        await image.waitFor();assert.deepEqual(await image.evaluate(el=>[el.naturalWidth,el.naturalHeight]),[84,52]);
+        const box=await image.boundingBox();
+        assert(box && box.width>=60 && box.width<=64 && box.width===box.height);
+        const editorBox=await editor.boundingBox();
+        assert(editorBox && box.y+box.height<=editorBox.y);
         assert.equal(await editor.inputValue(),'');assert.equal(await page.getByRole('dialog',{name:'Image preview'}).count(),0);
         await page.screenshot({path:join(dir,'dragged-attachment.png')});
-        result.drag={draftAttachment:await chip.locator('span').first().innerText(),imageReads:reads.length};
+        result.drag={draftAttachment:await preview.getAttribute('title'),thumbnail:box,imageReads:reads.length,mediaReads:mediaReads.length};
+        assert.equal(mediaReads.length,0);
+        const sessionId=await session();
+        await page.reload();
+        await page.getByLabel('Allow local HTTP for development',{exact:true}).check();
+        await page.locator('#reconnect').click();
+        await page.locator('#workbench').waitFor({state:'visible'});
+        if(await session()!==sessionId)await page.locator('[data-testid="conversation-row"][data-session-id="'+sessionId+'"]').getByTestId('conversation-open').click();
+        await image.waitFor();
+        assert.deepEqual(await image.evaluate(el=>[el.naturalWidth,el.naturalHeight]),[84,52]);
+        assert.equal(mediaReads.length,1);
+        await page.screenshot({path:join(dir,'restored-attachment.png')});
+        result.drag.restoredMediaReads=mediaReads.length;
         await chip.getByRole('button',{name:'Remove image',exact:true}).click();
-        await chip.waitFor({state:'detached'});assert.deepEqual(reads,[]);
+        await chip.waitFor({state:'detached'});assert.equal(result.drag.imageReads,0);
       }finally{author.off('request',watch);}
     }
     const id=await session();assert(id);

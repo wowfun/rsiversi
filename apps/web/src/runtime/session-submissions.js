@@ -1,3 +1,5 @@
+import {boundedImage} from '../../image-bounds.js';
+
 export async function exportSession(pane, context, args) {
   if (pane.exportAbort) {
     pane.exportAbort.abort();
@@ -229,6 +231,11 @@ export async function upload(pane, context, files) {
         pane.generation !== generation
       )
         throw new Error("Pane changed; remaining images were not imported");
+      // Only reuse raster bytes that the document can safely hand to its decoder.
+      // Other imports use Media's canonical thumbnail, including animated originals.
+      const source = new Uint8Array(bytes);
+      let previewable = false;
+      try { previewable = boundedImage(source, file.type).bytes === source; } catch { /* Canonical fallback. */ }
       const media = JSON.parse(
         await context.call(
           "import_image",
@@ -236,6 +243,9 @@ export async function upload(pane, context, files) {
           [bytes],
         ),
       );
+      if (previewable && context.connection === current && !current.closing && pane.editor === editor) {
+        context.previews(current).rememberDraft(media, file);
+      }
       batch.next++;
       editor.edit(editor.text, [...editor.images, media]);
       await editor.flush();
