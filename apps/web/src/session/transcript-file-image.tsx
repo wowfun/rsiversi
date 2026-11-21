@@ -7,7 +7,7 @@ import {MarkdownImage} from './markdown-image.tsx';
 import css from './markdown-image.module.css';
 
 type Props = {path: string; alt: string; linked: boolean};
-interface Preview { url: string; original: File }
+interface Preview { url: string; original: File; unavailable(): void }
 
 const waiting = new Set<() => Promise<void>>();
 let active = 0;
@@ -31,6 +31,17 @@ function FileImage({pane, generation, path, alt, linked}: Props & {pane: string;
   useEffect(() => {
     let mounted = true;
     let loaded: Preview | undefined;
+    function release() {
+      if (loaded) {
+        URL.revokeObjectURL(loaded.url);
+        releaseTranscriptImage(loaded.original);
+        loaded = undefined;
+      }
+    }
+    function unavailable() {
+      release();
+      if (mounted) setPreview(null);
+    }
     async function load() {
       try {
         const [mime, bytes] = await input.transcriptImage(pane, generation, path);
@@ -40,10 +51,10 @@ function FileImage({pane, generation, path, alt, linked}: Props & {pane: string;
         const original = new File([bytes], name, {type: mime});
         // SVG previews normalize dimensions. A drag still carries the original file.
         const display = image.bytes === bytes ? original : new Blob([image.bytes], {type: mime});
-        loaded = {url: URL.createObjectURL(display), original};
+        loaded = {url: URL.createObjectURL(display), original, unavailable};
         setPreview(loaded);
       } catch {
-        if (mounted) setPreview(null);
+        unavailable();
       }
     }
     const observer = new IntersectionObserver(entries => {
@@ -58,14 +69,12 @@ function FileImage({pane, generation, path, alt, linked}: Props & {pane: string;
       mounted = false;
       observer.disconnect();
       waiting.delete(load);
-      if (loaded) {
-        URL.revokeObjectURL(loaded.url);
-        releaseTranscriptImage(loaded.original);
-      }
+      release();
     };
   }, [pane, generation, path]);
 
-  if (preview) return <MarkdownImage src={preview.url} original={preview.original} alt={alt} linked={linked}/>;
+  if (preview) return <MarkdownImage src={preview.url} original={preview.original} alt={alt} linked={linked}
+    onDecodeError={preview.unavailable}/>;
   const label = alt || path;
   return <span ref={placeholder} className={css.alt}>{preview === null ? 'Image preview unavailable · ' + label : label}</span>;
 }

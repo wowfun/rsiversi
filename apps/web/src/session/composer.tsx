@@ -117,7 +117,7 @@ export function Composer({
             : undefined
         }
         placeholder={
-          data
+          state?.images.length ? undefined : data
             ? state?.completionsAvailable ? "Send a message · / commands · @ agents" : "Send a message"
             : "Describe what you want to build"
         }

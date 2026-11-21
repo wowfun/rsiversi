@@ -124,11 +124,15 @@ Settled replies can also display local image paths on the conversation's
 execution host. A paired device uses its Session read grant for both workspace
 and outside-workspace images. The document validates local image bytes before
 decoding and releases the preview Blob URL with the displayed image.
+If the browser cannot decode a local image, the transcript immediately releases
+its original file and preview URL and shows the author's alt text or file path.
 Dragging a local transcript thumbnail into a composer copies the original file
 into that composer's normal image import. The gesture uses the bytes already
 read for this occurrence and leaves the editor text and preview dialog alone.
 The composer's attachment rail shows images above the text. Fresh raster
 thumbnails can reuse the browser file after its headers and import were accepted.
+An attached image hides the empty-input placeholder. Removing the last image
+restores the hint in an empty editor.
 Restored drafts load a thumbnail from the canonical Media reference. Original
 file previews and canonical Media previews share the connection's bounded URL
 cache. The draft persists only its ordered references. Each thumbnail opens

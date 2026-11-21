@@ -6,7 +6,7 @@ import {chromium,firefox} from 'playwright';
 import {connectWorkbench,readBrowserCaller,registerFixtureWorkspace} from './browser-fixture.mjs';
 import {startService} from './service.mjs';
 import {readDeepseekKey,deepseekProfile} from './live-limits.mjs';
-import {png} from './png.mjs';
+import {png,unreadablePng} from './png.mjs';
 import {verifyAttachmentRail} from './images.mjs';
 
 const report=resolve(process.env.RSI_REPORT_DIR);
@@ -21,6 +21,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await writeFile(join(dirname(workspace),'outside.png'),png(210,90,[175,88,46,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
       await writeFile(join(workspace,'ordinary.png'),'An ordinary text document');
+      await writeFile(join(dirname(workspace),'unreadable.png'),unreadablePng());
       const large=await open(join(workspace,'large.png'),'w');
       try{await large.truncate(50*1024*1024+1);}finally{await large.close();}
       if(live){
@@ -29,13 +30,18 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       }
     }});
   let browser,page;
-  const result={live,errors:[],observations:[]};
+  const result={live,errors:[],observations:[],unreadableResponses:[]};
   try{
     browser=await engine.launch();
     async function connect(registration,width){
       const ctx=await browser.newContext({viewport:{width,height:960},locale:'en-US',colorScheme:'dark'});
       page=await ctx.newPage();page.setDefaultTimeout(30000);
       page.on('pageerror',e=>result.errors.push(e.message));
+      page.on('response',response=>{
+        if(new URL(response.url()).pathname.endsWith('/files/image/2/read') &&
+          response.request().postDataJSON()?.input===Buffer.from('../unreadable.png').toString('hex'))
+          result.unreadableResponses.push(response.status());
+      });
       await connectWorkbench(page,service,registration);
       assert.deepEqual(await readBrowserCaller(page,registration.id),{status:200,device:registration.id});
       return ctx;
@@ -53,8 +59,9 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       '![Missing](missing.png)',
       '![Wrong format](ordinary.png)',
       '![Too big](large.png)',
+      '![](../unreadable.png)',
     ].join('\n\n');
-    await page.getByRole('textbox',{name:'Main message'}).fill((live?'Reproduce the following Markdown verbatim. Output only the seven images, with the exact destinations and labels. No tools.':'Show these seven images.')+'\n\n'+markdown);
+    await page.getByRole('textbox',{name:'Main message'}).fill((live?'Reproduce the following Markdown verbatim. Output only the eight images, with the exact destinations and labels, including the final empty label. No tools.':'Show these eight images.')+'\n\n'+markdown);
     await page.getByTestId('composer-send').click();
     const session=()=>page.locator('.pane.selected').getAttribute('data-session-id');
     async function inspect(stage,width){
@@ -76,6 +83,9 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
         if(!await error.count())await article.getByText(label,{exact:true}).scrollIntoViewIfNeeded().catch(()=>{});
         await error.waitFor();
       }
+      const unreadable=article.getByText('Image preview unavailable · ../unreadable.png',{exact:true});
+      if(!await unreadable.count())await article.getByText('../unreadable.png',{exact:true}).scrollIntoViewIfNeeded().catch(()=>{});
+      await unreadable.waitFor();
       const trigger=article.getByRole('button',{name:'View full image: Absolute image'});
       await trigger.click();
       const dialog=page.getByRole('dialog',{name:'Image preview'});
@@ -84,7 +94,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await dialog.getByRole('button',{name:'Close image preview'}).press('Escape');
       assert(await trigger.evaluate(el=>el===document.activeElement));
       await page.screenshot({path:join(dir,stage+'.png')});
-      result.observations.push({stage,sizes});
+      result.observations.push({stage,sizes,unreadable:await unreadable.innerText()});
     }
     await inspect('author',210);
     if(process.env.RSI_CHECK_IMAGE_DRAG==='1'){
@@ -150,6 +160,8 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     result.modelIntents=facts.filter(x=>x.type==='model_intent').length;
     result.mockCalls=service.provider.requests.length;
     result.browser=browser.version();assert.equal(result.modelIntents,1);assert.equal(result.mockCalls,live?0:1);
+    assert(result.unreadableResponses.length>=2 && result.unreadableResponses.every(status=>status===200 || status===422),
+      'both devices received a result for the unreadable image');
     assert.deepEqual(result.errors,[]);result.ok=true;
   }catch(e){result.failure=e.message;await page?.screenshot({path:join(dir,'failure.png')}).catch(()=>{});throw e;}
   finally{try{await browser?.close();}finally{await service.close();await writeFile(join(dir,'result.json'),JSON.stringify(result,null,2));}}

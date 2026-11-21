@@ -14,3 +14,9 @@ export function png(width, height, color) {
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) rows.set(color, y * (width * 4 + 1) + 1 + x * 4);
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
+
+// Keep the PNG header and end marker of an image whose pixel data is missing.
+export function unreadablePng() {
+  const bytes=png(24,16,[32,120,145,255]);
+  return Buffer.concat([bytes.subarray(0,33),bytes.subarray(-12)]);
+}

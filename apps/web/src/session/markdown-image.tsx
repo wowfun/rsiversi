@@ -5,7 +5,9 @@ import {IconCloseOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons
 import css from './markdown-image.module.css';
 import {startTranscriptImageDrag} from './image-intake.ts';
 
-export function MarkdownImage({src,alt,linked,original}: {src:string;alt:string;linked:boolean;original?:File}) {
+export function MarkdownImage({src,alt,linked,original,onDecodeError}: {
+  src:string; alt:string; linked:boolean; original?:File; onDecodeError?:()=>void
+}) {
   const [failed,setFailed]=useState(false);
   const [open,setOpen]=useState(false);
   const dragged = useRef(false);
@@ -22,7 +24,7 @@ export function MarkdownImage({src,alt,linked,original}: {src:string;alt:string;
         if (dragged.current && event.detail) { event.preventDefault(); event.stopPropagation(); }
       },
     })}
-    referrerPolicy="no-referrer" src={src} onError={()=>setFailed(true)}/>;
+    referrerPolicy="no-referrer" src={src} onError={onDecodeError ?? (()=>setFailed(true))}/>;
   if (linked) return image;
   return <>
     <button type="button" className={css.thumbnail} aria-label={alt ? 'View full image: '+alt : 'View full image'}

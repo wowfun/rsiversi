@@ -46,6 +46,9 @@ export async function verifyAttachmentRail(page, pane, report) {
   const viewport = page.viewportSize();
   const rail = pane.getByRole('group', {name:'Pending attachments', exact:true});
   const picker = pane.locator('input[type=file]');
+  const editor = pane.getByRole('textbox', {name:'Main message', exact:true});
+  const hint = await editor.getAttribute('placeholder');
+  assert(hint);
   const left = pane.getByRole('button', {name:'Scroll attachments left'});
   const right = pane.getByRole('button', {name:'Scroll attachments right'});
   try {
@@ -61,6 +64,7 @@ export async function verifyAttachmentRail(page, pane, report) {
       assert.equal(await thumbnail.evaluate(async el => { await el.decode(); return el.naturalWidth; }), width);
     }
     await left.waitFor();
+    assert.equal(await editor.getAttribute('placeholder'), null);
     assert.equal(await right.count(), 0);
     assert(await rail.evaluate(el => el.scrollLeft > 0 && el.lastElementChild.getBoundingClientRect().right <= el.getBoundingClientRect().right + 1));
     await page.screenshot({path:join(report, 'attachment-rail-narrow.png')});
@@ -81,6 +85,7 @@ export async function verifyAttachmentRail(page, pane, report) {
       await remove.last().click();
     }
     await rail.waitFor({state:'detached'});
+    assert.equal(await editor.getAttribute('placeholder'), hint);
   } finally {
     await page.setViewportSize(viewport);
   }

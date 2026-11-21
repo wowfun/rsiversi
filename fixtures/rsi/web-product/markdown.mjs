@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {sourceFixture} from './source-fixture.mjs';
 import {chromium,firefox} from 'playwright';
-import {png} from './png.mjs';
+import {png,unreadablePng} from './png.mjs';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 const report=resolve(process.env.RSI_REPORT_DIR);
@@ -32,11 +32,13 @@ const tables=[...table,start('quote'),...table,end];
 const linkedImage=[start('paragraph'),start('link',{href:'https://media.example.test/original'}),
   start('image',{src:'https://media.example.test/diagram.png'}),text('Diagram'),end,end,end];
 const localImage=[start('paragraph'),start('file_image',{path:'../diagram.svg'}),text('Local diagram'),end,end];
+const brokenImage=[start('paragraph'),start('file_image',{path:'../unreadable.png'}),end,end];
 window.reads=[];window.revoked=[];
 const revoke=URL.revokeObjectURL.bind(URL);
 URL.revokeObjectURL=url=>{window.revoked.push(url);revoke(url)};
 installActions({call:async(method,raw)=>{
   window.reads.push([method,JSON.parse(raw)]);
+  if(JSON.parse(raw).path==='../unreadable.png')return ['image/png',Uint8Array.from(window.broken)];
   return ['image/svg+xml',new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="teal"/></svg>')];
 }});
 window.mountImageDrop=()=>{
@@ -50,9 +52,9 @@ window.mountImageDrop=()=>{
     upload:async files=>{for(const file of files)window.dropped.push({name:file.name,type:file.type,text:await file.text()});}},active=>window.dropOverlay.push(active));
 };
 const root=createRoot(article);
-window.renderLocal=(streaming,generation)=>{const view={session:'document',generation};
+window.renderLocal=(streaming,generation,broken=false)=>{const view={session:'document',generation};
   flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
-    React.createElement(Markdown,{events:localImage,streaming}))))};
+    React.createElement(Markdown,{events:broken?brokenImage:localImage,streaming}))))};
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
@@ -182,6 +184,15 @@ try{
       await page.evaluate(()=>window.render());
       assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_image',{pane:'main',generation,path:'../diagram.svg'}]));
       assert.equal(await page.evaluate(()=>new Set(window.revoked).size),2);
+      await page.evaluate(bytes=>{window.broken=bytes;window.renderLocal(false,'3',true);},Array.from(unreadablePng()));
+      const failure=page.getByText(/^Image preview unavailable · /);
+      await failure.waitFor();
+      const fallback=await failure.innerText();
+      const releasedAfterFailure=await page.evaluate(()=>new Set(window.revoked).size);
+      await page.screenshot({path:join(report,name+'-decode-failure.png')});
+      await writeFile(join(report,name+'-decode-failure.json'),JSON.stringify({fallback,releasedAfterFailure}));
+      assert.equal(fallback,'Image preview unavailable · ../unreadable.png');
+      assert.equal(releasedAfterFailure,3,'failed local image is released while its message stays open');
       assert.deepEqual(errors,[]);
       results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,
         localImage:{readCount:await page.evaluate(()=>window.reads.length),originalName:dropped.name,originalType:dropped.type,
