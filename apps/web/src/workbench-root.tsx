@@ -12,13 +12,13 @@ import { Shell } from "./shell.tsx";
 import { Conversation } from "./conversation.tsx";
 import { ResourceDocks } from "./resource-dock.tsx";
 import type { Viewport } from "./presentation.tsx";
-import { Navigation } from "./navigation.tsx";
+import { Navigation, type NavigationSearch } from "./navigation.tsx";
 import { slots, host, renderer } from "./slots.tsx";
 
 declare module "@rsi/dsh-slots" {
   interface SlotMap {
     root: { kind: "single"; scope: "root" };
-    "rsi.navigation": { kind: "single"; scope: "root" };
+    "rsi.navigation": { kind: "single"; scope: "root"; owner: NavigationSearch };
     "rsi.main": { kind: "single"; scope: "root"; owner: Record<string, never> };
     "rsi.resources": { kind: "single"; scope: "session-maybe"; owner: { viewport: Viewport } };
   }

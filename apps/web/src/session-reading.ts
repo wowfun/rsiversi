@@ -1,6 +1,7 @@
 import {useLayoutEffect, useRef} from "react";
 import {input, run, useView, type AttentionEntry, type Navigation} from "./bridge.ts";
 import type {NativeSurface} from "./presentation-types.ts";
+import {hasOpenOverlay} from "./presentation.tsx";
 
 export function markReading(host_epoch: string, session: string, row: AttentionEntry | undefined, action: "read" | "unread" | "acknowledge") {
   const position = row?.position ?? {conversation: {kind: "native", id: session}, epoch: "0", sequence: "0"};
@@ -71,8 +72,7 @@ export function SessionReading({surface, visible}: {surface: NativeSurface; visi
         || event.altKey || event.ctrlKey === event.metaKey) return;
       const {page, row, nav, visible} = latest.current;
       if (!page || !nav || !visible || archived(nav, session)) return;
-      const overlays = document.querySelectorAll('dialog[open],[aria-modal="true"],[role="menu"]');
-      if (Array.from(overlays).some(element => !element.closest("details:not([open]),[hidden],[inert]") && element.getClientRects().length > 0)) return;
+      if (hasOpenOverlay()) return;
       event.preventDefault();
       void run(() => markReading(page.host_epoch, session, row, isUnread(row) ? "read" : "unread"));
     };

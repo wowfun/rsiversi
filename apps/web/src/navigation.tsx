@@ -4,6 +4,7 @@ import {NavigationOptions, type ConversationFilter} from "./navigation-options.t
 import { AttentionNavigation } from "./navigation-attention.tsx";
 import { ExternalNavigation } from "./navigation-external.tsx";
 import {Toast} from "../vendor/dsh/dockkit-primitives/Toast.tsx";
+import {Tooltip} from "../vendor/dsh/dockkit-primitives/Tooltip.tsx";
 import {writeClipboard} from "../mounts.js";
 import {
   IconSearchOutlineRegular,
@@ -29,7 +30,23 @@ function searchInput(value: string) {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 500).replace(/[\uD800-\uDBFF]$/, "");
 }
 
-export function Navigation() {
+export interface NavigationSearch {
+  searchOpen: boolean;
+  setSearchOpen(open: boolean): void;
+  searchInputRef: React.RefObject<HTMLInputElement>;
+}
+
+const mac = /Mac/.test(navigator.platform);
+const searchKeys = mac ? ["⌥","⌘","K"] : ["Ctrl","+","Alt","+","K"];
+export function NavigationSearchButton({rail=false, open}: {rail?:boolean; open:()=>void}) {
+  return <Tooltip label="Search conversations" shortcutKeys={searchKeys} side={rail ? "right" : "bottom"} delayMs={rail ? 0 : 500} portal>
+    <Button size={rail ? "md" : "sm"} aria-label="Search conversations" aria-keyshortcuts={mac ? "Alt+Meta+K" : "Control+Alt+K"} onClick={open}>
+      <IconSearchOutlineRegular size={rail ? 18 : 16}/>
+    </Button>
+  </Tooltip>;
+}
+
+export function Navigation({searchOpen, setSearchOpen, searchInputRef}: NavigationSearch) {
   const [now, setNow] = useState(Date.now);
   useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()), 60_000);return ()=>clearInterval(timer);}, []);
   const nav = useView((value) => value?.navigation),
@@ -102,7 +119,6 @@ export function Navigation() {
       );
     }
   }, [restoreKey, nav?.ticket, nav?.filter.query]);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState("");
   const query = searchText.trim();
   const searchRoot = useRef<HTMLFormElement>(null);
@@ -242,12 +258,12 @@ export function Navigation() {
       <div className={`section-heading ${css.heading}`}>
         {searchOpen ? <form ref={searchRoot} className="navigation-search" onSubmit={event=>{event.preventDefault();submitSearch.current?.()}}>
           <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={14}/></Button>
-          <input autoFocus aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>setSearchText(searchInput(event.target.value))} onKeyDown={event=>{if(event.key==='Escape'){event.stopPropagation();closeSearch()}}}/>
+          <input ref={searchInputRef} autoFocus data-navigation-initial-focus="" aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>setSearchText(searchInput(event.target.value))} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch()}}}/>
           <Button size="sm" aria-label="Close search" onClick={closeSearch}><IconCloseOutlineRegular size={16}/></Button>
         </form> : <>
           <h2 data-testid="workspace-heading">Workspaces</h2>
           <div className="navigation-actions">
-            <Button size="sm" aria-label="Search conversations" onClick={()=>setSearchOpen(true)}><IconSearchOutlineRegular size={16}/></Button>
+            <NavigationSearchButton open={()=>setSearchOpen(true)}/>
             <NavigationOptions device={device} filter={mode} onFilter={async value=>{if(value!=='attention')await search({...filter,archived:value==='all'?null:value==='archived'});setMode(value)}} refresh={async()=>{await input.command({action:'refresh'});await search()}}/>
             <Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}><IconProjectAddOutlineRegular size={16}/></Button>
           </div>

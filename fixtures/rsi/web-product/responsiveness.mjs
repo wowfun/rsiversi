@@ -66,6 +66,9 @@ try {
      await button.click();await drawer.waitFor();
      assert(await search.evaluate((node,old)=>node===old,original));
      assert.equal(await search.inputValue(),'retained navigation');
+     assert(await search.evaluate(node=>node===document.activeElement));
+     await search.press('Escape');await search.waitFor({state:'hidden'});
+     assert(await drawer.isVisible());
      await original.dispose();
     }else{
      assert.equal(await page.locator('.workbench > .sidebar').count(),1);
@@ -117,10 +120,36 @@ try {
    await expand.press('Enter');await page.evaluate(()=>fixture.tick());
    assert(await desktop.isVisible());
    await desktop.click();await page.evaluate(()=>fixture.tick());
-   await expand.click();await page.evaluate(()=>fixture.tick());
+   const search=page.getByRole('textbox',{name:'Search conversations',exact:true});
+   const railSearch=rail.getByRole('button',{name:'Search conversations',exact:true});
+   const verifySearchFocus=async()=>{
+    await search.waitFor();
+    await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Search conversations' && document.activeElement.tagName==='INPUT');
+    assert.equal(await page.getByRole('dialog',{name:'Command palette',exact:true}).count(),0);
+   };
+   await railSearch.hover();
+   const searchTip=page.getByRole('tooltip',{name:/^Search conversations/});
+   await searchTip.waitFor();assert.deepEqual(await searchTip.locator('kbd').allTextContents(),['Ctrl','+','Alt','+','K']);
+   await railSearch.click();await verifySearchFocus();
    assert(await desktop.isVisible());
+   await search.fill('retained rail query');
+   const composer=page.getByLabel('Main message',{exact:true});
+   await composer.focus();await page.keyboard.press('Control+Alt+k');await verifySearchFocus();
+   assert.equal(await search.inputValue(),'retained rail query');
+   await page.screenshot({path:join(report,name+'-rail-search.png')});
+   await search.press('Escape');await search.waitFor({state:'hidden'});
    await page.setViewportSize({width:900,height:900});await page.evaluate(()=>fixture.tick());
-   await expand.click();await desktop.waitFor();await desktop.click();
+   await railSearch.click();await verifySearchFocus();await desktop.waitFor();
+   await composer.click();await search.waitFor({state:'hidden'});await desktop.click();
+   await page.setViewportSize({width:390,height:900});await page.evaluate(()=>fixture.tick());
+   await composer.focus();await page.keyboard.press('Control+Alt+k');await verifySearchFocus();
+   const narrowDrawer=page.getByRole('dialog',{name:'Workspace navigation',exact:true});
+   assert(await narrowDrawer.isVisible());
+   await page.screenshot({path:join(report,name+'-drawer-search.png')});
+   await page.keyboard.press('Escape');await search.waitFor({state:'hidden'});
+   assert(await narrowDrawer.isVisible());
+   await page.keyboard.press('Escape');await narrowDrawer.waitFor({state:'hidden'});
+   checks.railSearch={desktopClick:true,refocusedQuery:true,tabletOutsideDismiss:true,mobileKeyboard:true,escapeClosesInOrder:true};
    await page.setViewportSize({width:1440,height:900});await page.evaluate(()=>fixture.tick());
    const commands=page.getByRole('button',{name:'Commands',exact:true});
    for(const close of ['escape','button']) {
@@ -135,6 +164,9 @@ try {
    await message.focus();await page.keyboard.press('Control+k');
    await page.getByRole('dialog',{name:'Command palette',exact:true}).waitFor();
    const keyboardEntered=await page.getByLabel('Search commands',{exact:true}).evaluate(node=>node===document.activeElement);
+   await page.keyboard.press('Control+Alt+k');
+   assert(await page.getByLabel('Search commands',{exact:true}).evaluate(node=>node===document.activeElement));
+   assert.equal(await search.count(),0);
    await page.keyboard.press('Escape');await page.evaluate(()=>fixture.tick());
    checks.focus.push({modal:'palette-keyboard',entered:keyboardEntered,restored:await message.evaluate(node=>node===document.activeElement)});
    await commands.focus();await page.evaluate(()=>window.chooseDirectory());

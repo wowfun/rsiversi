@@ -19,6 +19,7 @@ import {
   lazy,
   Suspense,
   useState,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -34,8 +35,10 @@ import {
   Modal,
   CommandPalette,
   LayoutContext,
+  hasOpenOverlay,
 } from "./presentation.tsx";
 import { Button } from "./button.tsx";
+import {NavigationSearchButton} from "./navigation.tsx";
 import { Brand } from "./brand.tsx";
 import { Tooltip } from "../vendor/dsh/dockkit-primitives/Tooltip.tsx";
 import {
@@ -107,6 +110,15 @@ export function Shell({
       ? expansion === "column" ? "expanded" : "rail"
       : layout.navigation;
   const [palette, setPalette] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const showSessionSearch = useCallback(() => {
+    setSearchOpen(true);
+    if (narrow) compactNavigation.set("drawer");
+    else if (compact) compactNavigation.set("column");
+    else if (navigationMode !== "expanded") update({navigation:"expanded"});
+    searchInputRef.current?.focus({preventScroll:true});
+  }, [narrow, compact, navigationMode, update]);
   useLayoutEffect(() => { compactNavigation.set(undefined); }, [narrow, compact]);
   useLayoutEffect(() => {
     if (!layout.resourcesClosed && compact) compactNavigation.set(undefined);
@@ -148,40 +160,42 @@ export function Shell({
   }, [connected, chrome]);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (
-        (event.ctrlKey || event.metaKey) &&
-        event.key.toLowerCase() === "k" &&
-        !event.isComposing &&
-        connected
-      ) {
-        event.preventDefault();
-        setPalette((value) => !value);
-      }
+      if (!connected || event.defaultPrevented || event.repeat || event.isComposing || event.key === "Dead"
+        || event.getModifierState("AltGraph") || event.code !== "KeyK" || event.shiftKey || event.ctrlKey === event.metaKey) return;
+      if (event.altKey && (event.metaKey !== /Mac/.test(navigator.platform) ||
+        (event.target instanceof Element && event.target.closest(".xterm")) ||
+        hasOpenOverlay(document.querySelector("dialog.navigation-drawer[open]")))) return;
+      event.preventDefault();
+      if (event.altKey) showSessionSearch();
+      else setPalette(value => !value);
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [connected]);
+  }, [connected, showSessionSearch]);
   useEffect(() => {
     if (!connected) {
       closeScheduleCatalog();
       setPalette(false);
+      setSearchOpen(false);
       compactNavigation.set(undefined);
       input.dismissSettings();
     }
   }, [connected]);
-  const navigation = () =>
-    compact
+  const navigation = () => {
+    if (!narrow && navigationMode === "expanded") setSearchOpen(false);
+    return compact
       ? compactNavigation.set(expansion ? undefined : narrow ? "drawer" : "column")
       : update({
           navigation: layout.navigation === "expanded" ? "rail" : "expanded",
         });
+  };
   const resources = () => update({ resourcesClosed: !layout.resourcesClosed });
   const appearance = () => setSettings("appearance");
   const sidebar = (
     <>
       <div className="sidebar-brand">
         <Brand />
-        <Button size="sm" aria-label="Collapse navigation" onClick={navigation}>
+        <Button size="sm" aria-label="Collapse navigation" data-navigation-initial-focus={searchOpen ? undefined : ""} onClick={navigation}>
           <IconPanelLeftOutlineRegular />
         </Button>
       </div>
@@ -199,7 +213,7 @@ export function Shell({
         <Button aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/>Automation tasks</Button>
         {hasAutomation && <Button onClick={()=>{dismissNavigationDrawer();setAutomation(true)}}><IconClockOutlineRegular/>Deployment checks</Button>}
       </nav>
-      {renderSlot("rsi.navigation", {})}
+      {renderSlot("rsi.navigation", {searchOpen, setSearchOpen, searchInputRef})}
       <div className={`sidebar-footer ${css.footer}`}>
         <details className={`application-options ${css.footerOptions}`}>
           <summary aria-label="More">
@@ -402,6 +416,7 @@ export function Shell({
             </Button>
             <Button aria-label="Open plugins" onClick={()=>setSettings('plugins')}><IconPluginPinwheelOutlineMedium/></Button>
             <Button aria-label="Automation tasks" aria-pressed={showTasks} onClick={openTasks}><IconClockOutlineRegular/></Button>
+            <NavigationSearchButton rail open={showSessionSearch}/>
             <Button
               aria-label="Settings"
               onClick={() => setSettings("appearance")}
@@ -429,7 +444,7 @@ export function Shell({
           className="navigation-drawer"
           label="Workspace navigation"
           open={drawer}
-          initialFocus='[aria-label="Collapse navigation"]'
+          initialFocus="[data-navigation-initial-focus]"
           fallbackFocus='[aria-label="Expand navigation"], [aria-label="Toggle navigation"], .workbench > .sidebar [aria-label="Collapse navigation"]'
           lightDismiss
           close={dismissNavigationDrawer}

@@ -376,7 +376,8 @@ Their handles track one primary-button drag, preview at most once per paint and
 apply the width at release. A stationary press or cancelled drag keeps the
 previous preference. Keyboard increments start at the rendered width.
 Below 768px navigation overlays the conversation. Opening the drawer focuses its
-collapse control. Escape and a press on the backdrop return focus to the opener.
+collapse control. Opening it for session search focuses the search field instead.
+Escape and a press on the backdrop return focus to the opener.
 Selecting a conversation or a destination closes the drawer. Reopening it preserves
 its search and workspace controls. From 768px through 1023px, the 56px rail
 expands in place and the conversation remains interactive. Crossing either
@@ -554,7 +555,9 @@ Navigation exposes New session and a Workspaces heading with search, view option
 and add-directory controls. The options popover uses grouped, checked rows for
 workspace/workspace-tree/single-list grouping, manual/recent ordering, and hide
 archived/all/archived-only filtering. All includes active and archived conversations.
-Session search focuses its input on open. It ranks visible titles and workspace
+Session search focuses its input on open. The rail search button and
+Ctrl/Command+Alt+K open navigation and focus that same field. Pressing the
+shortcut again returns focus to the existing query. It ranks visible titles and workspace
 labels by their text match, also accepting session ID and path substrings.
 Equally ranked rows show the most recently active conversation first. The
 selected archive filter applies throughout. A complete, current first

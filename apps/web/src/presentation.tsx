@@ -9,6 +9,12 @@ export interface Layout {version:5;navigationWidth:number;conversationWidth:numb
 export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)
+export function hasOpenOverlay(except?: Element | null) {
+  for (const element of document.querySelectorAll('dialog[open],[aria-modal="true"],[role="menu"]')) {
+    if (element !== except && !element.closest('details:not([open]),dialog:not([open]),[hidden],[inert]') && element.getClientRects().length) return true
+  }
+  return false
+}
 const useIdentity = bindSnapshotSelector(presentationIdentity)
 type Theme = NonNullable<View['appearance']>['theme']
 const themePreview = observable<{identity: string | undefined; theme: Theme} | undefined>(undefined)
