@@ -225,7 +225,11 @@ Confirmed creation refreshes the parent before showing the new child column.
 Needs attention renders the shared Rust workbench's bounded activity projection.
 It displays unknown ownership and truncation explicitly; request buttons send exact
 targets back to Rust. The document does not infer execution from recent history,
-persist running flags or maintain its own observation poller.
+persist running flags or maintain its own observation poller. The Session menu
+and Ctrl/Command+Shift+U toggle the shared unread reminder on an unarchived
+Session. A visible, focused transcript acknowledges the displayed completion.
+An explicit reminder survives repainting the same Session. Opening it again
+clears the reminder after display.
 
 External conversation panes render the Rust controller's distinct identity,
 observations and exact permission options. They have no native Goal, preset or

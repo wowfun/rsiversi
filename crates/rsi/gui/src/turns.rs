@@ -28,6 +28,9 @@ pub(crate) struct Turn {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub retries: Vec<RetryRow>,
     pub terminal: Option<String>,
+    /// Exact native position when the terminal block is in the displayed window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_sequence: Option<String>,
     pub timestamps: BTreeMap<String, u64>,
     pub elapsed_ms: Option<u64>,
     pub usage: Option<TokenUsage>,
@@ -402,6 +405,7 @@ impl State {
             feedback_message: None,
             retries: vec![],
             terminal: None,
+            terminal_sequence: None,
             timestamps: BTreeMap::new(),
             elapsed_ms: (!partial)
                 .then_some(self.started_ms.zip(self.ended_ms))
@@ -468,6 +472,7 @@ impl State {
                 .is_some_and(|(seq, _, _)| *seq == block.first_seq)
             {
                 turn.terminal = Some(block.key.clone());
+                turn.terminal_sequence = Some(block.first_seq.to_string());
             }
             let candidate = link.role == "assistant"
                 && (link.image

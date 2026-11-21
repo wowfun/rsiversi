@@ -18,13 +18,12 @@ an explicit refresh can recover it without reactivating the application.
 An automatic full navigation refresh already supplies the newest cursor and skips
 the redundant head comparison query in that round.
 
-Navigation observes the bounded attention API with at most one poll or explicit
-navigation operation in flight. An unchanged page backs off from one to eight
-seconds; a local invalidation or changed page resets that delay. A failed refresh
-retains the last page with an explicit stale-state notice. A typed missing, retiring
-or incompatible operation response clears it. Each poll performs only the read;
-discovery does not precede individual reads. Explicit reading
-acknowledgments are retained operations and never retried after uncertain results.
+Navigation subscribes to the authenticated Host's attention page. The first
+frame establishes the visible baseline. Later frames replace it when the
+caller's visible activity changes. Explicit reading actions use their displayed
+Host and source cut once. A disconnected observation retains the last page
+with a stale-state notice until reconnection. A missing or retired operation,
+incompatible protocol, or loss of authorization clears the page.
 
 Saving a model requires a string deployment identity in its provider definition
 that matches the selected model. Missing, null or mismatched identities are
@@ -121,7 +120,7 @@ separately. Reconnection reads current source choices without recovering old
 results.
 
 Navigation only acknowledges coalesced invalidations when it will query the
-current filter; an attention-only timer tick cannot consume a later publication.
+current filter; an idle navigation timer tick cannot consume a later publication.
 
 Navigation keeps at most 16 independently expanded group pages, each with at most
 64 entries and its own opaque ticket/cursor. Group continuation replaces that
@@ -153,7 +152,7 @@ the last validated page remains usable during a read; identical results preserve
 its ticket. A failed read invalidates only that group, while others can finish.
 No mutation is retried to repair a failed refresh.
 
-Automatic navigation and attention reads have a five-second deadline and yield
+Automatic navigation catalogue reads have a five-second deadline and yield
 to an admitted user action: cancellation releases their serialized read owner
 before that action runs. An unchanged attention page or repeated failure leaves
 the presentation revision intact. Background reads do not occupy the user-operation slot.

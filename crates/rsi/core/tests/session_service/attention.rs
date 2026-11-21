@@ -33,6 +33,36 @@ async fn read(running: &RunningRsi, origin: CallOrigin) -> Page {
     page
 }
 
+async fn follow(running: &RunningRsi, origin: CallOrigin) -> rsi_api_protocol::ApiStream {
+    let spec = Operation::Follow.spec();
+    let input = ByteBudget::default()
+        .encode(&(), spec.maximum_request_bytes)
+        .unwrap();
+    let ApiOutput::Stream(source) = running
+        .api_dispatch()
+        .unwrap()
+        .admit(&spec.call(), origin)
+        .unwrap()
+        .invoke(input)
+        .await
+        .unwrap()
+    else {
+        panic!("attention observation")
+    };
+    source
+}
+async fn next_page(source: &mut rsi_api_protocol::ApiStream) -> Page {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), source.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(frame.binary.is_none());
+    let page: Page = serde_json::from_slice(frame.json.as_bytes()).unwrap();
+    page.validate().unwrap();
+    page
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[expect(
     clippy::too_many_lines,
@@ -116,10 +146,13 @@ async fn attention_shares_live_completions_and_manual_reminders_and_resets_on_re
             .authenticate(&device.token)
             .unwrap(),
     );
+    let mut peer = follow(&running, origin.clone()).await;
+    let mut local = follow(&running, CallOrigin::Local).await;
     assert!(
-        read(&running, origin.clone()).await.entries.is_empty(),
+        next_page(&mut peer).await.entries.is_empty(),
         "Another device sees the Local read"
     );
+    assert!(next_page(&mut local).await.entries.is_empty());
     wire(
         &running,
         origin.clone(),
@@ -136,7 +169,9 @@ async fn attention_shares_live_completions_and_manual_reminders_and_resets_on_re
     )
     .await
     .unwrap();
-    let shared = read(&running, CallOrigin::Local).await;
+    let shared = next_page(&mut local).await;
+    assert_eq!(next_page(&mut peer).await, shared);
+    drop((peer, local));
     assert!(shared.entries[0].reading.manual);
     assert!(!shared.entries[0].reading.unseen);
     assert_eq!(

@@ -155,6 +155,8 @@ impl Page {
 pub enum Operation {
     /// Read current-owner metadata.
     Read,
+    /// Subscribe to complete changes visible to the caller.
+    Follow,
     /// Acknowledge one explicitly displayed source cut.
     Mark,
 }
@@ -170,15 +172,19 @@ impl Operation {
                 "attention",
                 match self {
                     Self::Read => "read",
+                    Self::Follow => "follow",
                     Self::Mark => "mark",
                 },
                 1,
             )
             .expect("static attention name"),
             access: OperationAccess::Authenticated,
-            class: OperationClass::Data,
+            class: match self {
+                Self::Follow => OperationClass::Subscription,
+                Self::Read | Self::Mark => OperationClass::Data,
+            },
             effect: match self {
-                Self::Read => OperationEffect::Read,
+                Self::Read | Self::Follow => OperationEffect::Read,
                 Self::Mark => OperationEffect::Mutation,
             },
             encoding: RequestEncoding::Json,
@@ -232,12 +238,41 @@ impl Client {
             Ok(page) => page,
             Err(never) => match never {},
         };
+        Self::validate_page(page, &self.api.description().host_epoch)
+    }
+
+    fn validate_page(page: Page, epoch: &HostEpoch) -> Result<Page> {
         page.validate()?;
-        if page.host_epoch != self.api.description().host_epoch {
+        if &page.host_epoch != epoch {
             return Err(ApiError::Unavailable);
         }
         Ok(page)
     }
+    /// Opens a caller-scoped observation with an initial page and complete replacements.
+    pub async fn follow(&self) -> Result<futures_util::stream::BoxStream<'static, Result<Page>>> {
+        use futures_util::StreamExt as _;
+        let spec = Operation::Follow.spec();
+        let input = self
+            .api
+            .input_budget(spec.class)
+            .encode(&(), spec.maximum_request_bytes)?;
+        let rsi_api_protocol::ApiOutput::Stream(source) = self.api.call(&spec, input).await? else {
+            return Err(ApiError::Invalid("expected attention subscription".into()));
+        };
+        let epoch = self.api.description().host_epoch.clone();
+        Ok(source
+            .map(move |frame| {
+                let frame = frame?;
+                if frame.binary.is_some() {
+                    return Err(ApiError::Invalid("unexpected attention attachment".into()));
+                }
+                let page = serde_json::from_slice(frame.json.as_bytes())
+                    .map_err(|_| ApiError::Invalid("invalid attention update".into()))?;
+                Self::validate_page(page, &epoch)
+            })
+            .boxed())
+    }
+
     /// Clears the shared reminder through the displayed position.
     pub async fn mark_read(&self, position: Position) -> Result<Position> {
         self.mark(Mark {

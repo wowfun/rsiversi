@@ -337,9 +337,9 @@
     {
       "path": "dockkit-primitives/icons/index.tsx",
       "source": "packages/client/ui-primitives/src/icons/index.tsx",
-      "source_sha256": "36c26776faaaf2126403982e8cd2b83149c22c9a1c1184c397beeb62b978d3d3",
-      "adapted_sha256": "36c26776faaaf2126403982e8cd2b83149c22c9a1c1184c397beeb62b978d3d3",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "2ea8c5d2ade3cb68fccb2223fbb891ea5894806aa489c8b008486785ceddda16",
+      "adapted_sha256": "a9f5b904ec3aa5278779723ab60f3cdec9ec67f13a2286c8d92ace7c08cfbffa",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
       "path": "dockkit-tokens.css",
@@ -372,9 +372,9 @@
     {
       "path": "dockkit-primitives/icons/artwork.ts",
       "source": "packages/client/ui-primitives/src/icons/artwork.ts",
-      "source_sha256": "a6ec039a489c8a4bb0a3c647929935dd039b34a8545de0b9b40d3d58099901fb",
-      "adapted_sha256": "a6ec039a489c8a4bb0a3c647929935dd039b34a8545de0b9b40d3d58099901fb",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "2db05144d2e040a2f017a35e025d594103ce7f68842456a006f8c3da251c4586",
+      "adapted_sha256": "bd6a25cd07f0e67779a7b30a13e8e4a11981b3106e50c3fc3add39b0275e80c6",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
       "path": "theme-base.css",

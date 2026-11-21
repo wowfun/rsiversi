@@ -16,8 +16,8 @@ import './styles.css';import shell from './src/shell.module.css';import navigati
 function ResizeProbe({name,reverse=false}){const [width,setWidth]=useState(280);return <aside className={reverse?'resources':undefined} style={{position:'relative',width,height:40,border:0,borderInlineEnd:'1px solid var(--line)'}}>Resize {name}<ResizeHandle name={name} value={width} min={200} max={420} reverse={reverse} onChange={setWidth}/></aside>}
 createRoot(document.getElementById('root')).render(<main id="workbench" className={[shell.scope,navigation.scope,session.scope,chat.scope].join(' ')} style={{padding:32,maxWidth:720,margin:'auto'}}>
 <h1>Conversation accessibility</h1><Notices/>
-<nav aria-label="Conversations">{['running','waiting','unread','unknown',undefined].map(state=><div className="session-row" key={state??'unobserved'}>
-<button className="nav-item"><strong>Conversation {state??'unobserved'}</strong><ActivityLabel state={state}/></button></div>)}</nav>
+<nav aria-label="Conversations">{['running','waiting','unread','failed','unknown',undefined].map(state=><div className="session-row" key={state??'unobserved'}>
+<button className="nav-item"><strong>Conversation {state??'unobserved'}</strong><ActivityLabel state={state==='failed'?'unread':state} failed={state==='failed'}/></button></div>)}</nav>
 <form className="composer"><label htmlFor="message">Message</label><textarea id="message"/></form>
 <ResizeProbe name="navigation"/><ResizeProbe name="resources" reverse/>
 <button onClick={()=>setStorageNotice('Draft storage is unavailable')}>Storage warning</button>
@@ -40,10 +40,10 @@ createRoot(document.getElementById('root')).render(<main id="workbench" classNam
     for(const [theme,forcedColors] of [['light','none'],['dark','none'],['light','active']]) {
       await page.emulateMedia({colorScheme:theme,forcedColors});
       await page.getByLabel('Message',{exact:true}).focus();
-      const focus=await page.getByLabel('Message',{exact:true}).evaluate(node=>({focused:document.activeElement===node,style:getComputedStyle(node.closest(".composer")).outlineStyle,width:parseFloat(getComputedStyle(node.closest(".composer")).outlineWidth),border:parseFloat(getComputedStyle(node).borderWidth),caret:getComputedStyle(node).caretColor}));
+      const focus=await page.getByLabel('Message',{exact:true}).evaluate(node=>({focused:document.activeElement===node,style:getComputedStyle(node.closest(".composer")).outlineStyle,width:parseFloat(getComputedStyle(node.closest(".composer")).outlineWidth),innerOutline:getComputedStyle(node).outlineStyle,border:parseFloat(getComputedStyle(node).borderWidth),caret:getComputedStyle(node).caretColor}));
       assert(focus.focused,JSON.stringify(focus));
-      if(forcedColors==='active')assert(focus.style==='solid'&&focus.width>=2,JSON.stringify(focus));
-      else assert(focus.style==='none'&&focus.border===0,JSON.stringify(focus));
+      assert(focus.style==='solid'&&focus.width>=2,JSON.stringify(focus));
+      assert(focus.innerOutline==='none'&&focus.border===0,JSON.stringify(focus));
       for(const side of ['navigation','resources']){
         const handle=page.getByRole('separator',{name:'Resize '+side,exact:true});
         await page.getByRole('heading',{name:'Conversation accessibility'}).click();await handle.hover();
@@ -59,14 +59,14 @@ createRoot(document.getElementById('root')).render(<main id="workbench" classNam
         assert(indicator.focused&&indicator.outline==='none'&&indicator.width==='2px'&&!indicator.background.endsWith(', 0)'),JSON.stringify(indicator));
       }
       await page.getByLabel('Message',{exact:true}).focus();
-      for(const label of ['Running','Waiting for you','New activity','Unknown']) assert.equal(await page.locator('.session-activity').filter({hasText:label}).count(),1);
-      assert.equal(await page.locator('.session-state[aria-hidden="true"]').count(),4);
+      for(const label of ['Running','Waiting for you','Unread','Run failed','Unknown']) assert.equal(await page.locator('.session-activity').filter({hasText:label}).count(),1);
+      assert.equal(await page.locator('.session-state[aria-hidden="true"]').count(),5);
       const unobserved=page.getByRole('button',{name:'Conversation unobserved',exact:true});
       assert.equal(await unobserved.locator('.session-activity').count(),0);
       const rowHeights=await page.locator('nav .session-row').evaluateAll(rows=>rows.map(row=>row.getBoundingClientRect().height));
       assert(rowHeights.every(height=>height===rowHeights[0]&&height<=36),`Activity dots must not add a secondary row: ${rowHeights}`);
       const names=await page.locator('nav').ariaSnapshot();
-      for(const label of ['Running','Waiting for you','New activity','Unknown']) assert(names.includes(label),names);
+      for(const label of ['Running','Waiting for you','Unread','Run failed','Unknown']) assert(names.includes(label),names);
       assert(await page.locator('#notice p').evaluateAll(nodes=>nodes[0].getBoundingClientRect().bottom<=nodes[1].getBoundingClientRect().top));
       await page.screenshot({path:join(report,`${name}-accessibility-${theme}-${forcedColors}.png`)});
       evidence.push({theme,forcedColors,focus,activityLabels:true,rowHeights,noticesSeparate:true});

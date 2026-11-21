@@ -19,7 +19,7 @@ fn attention_wire_preserves_coordinates_and_rejects_backend_and_request_ambiguit
                 .is_ok_and(|position| position.validate().is_ok())
         );
     }
-    let page = json!({"host_epoch":rsi_api_protocol::HostEpoch::generate().unwrap(),"truncated":false,"entries":[{"position":position,"status":"waiting","targets":[{"kind":"external","generation":"1","request":"permission-exact"}]}]});
+    let page = json!({"host_epoch":rsi_api_protocol::HostEpoch::generate().unwrap(),"truncated":false,"entries":[{"position":position,"status":"waiting","reading":{"manual":false,"unseen":false,"failed":false},"targets":[{"kind":"external","generation":"1","request":"permission-exact"}]}]});
     serde_json::from_value::<Page>(page.clone())
         .unwrap()
         .validate()

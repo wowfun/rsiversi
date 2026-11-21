@@ -1,7 +1,7 @@
 import {conversationRecency} from "../navigation-presentation.js";
 import {messageClock} from '../message-metrics.js';
 import { IconArchiveOffOutlineRegular, IconArchiveOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular,
-  IconEditOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
+  IconEditOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { useRef, useState, type SyntheticEvent } from "react";
 import { Menu } from "../vendor/dsh/dockkit-primitives/Menu.tsx";
 import { writeClipboard } from "../mounts.js";
@@ -9,6 +9,7 @@ import { Modal, presentationIdentity } from "./presentation.tsx";
 import { Button } from "./button.tsx";
 import dialogCss from "./workspace-header.module.css";
 import css from "./navigation.module.css";
+import {isUnread, markReading} from "./session-reading.ts";
 import { ActivityLabel } from "./activity-label.tsx";
 import { rowContextMenu } from "./row-context-menu.ts";
 import {
@@ -41,7 +42,7 @@ export function ConversationRow({
 }: {
   entry: NavigationEntry;
   title: string | undefined;
-  activity: AttentionEntry["status"] | undefined;
+  activity: AttentionEntry | undefined;
   workspaceLabel?: string;
   openSearchResult?: (entry: NavigationEntry) => unknown;
   unarchive?: () => Promise<unknown>;
@@ -122,7 +123,7 @@ export function ConversationRow({
         }
       >
         {workspaceLabel ? <span className={css.searchLabel}><strong>{title}</strong><small>{workspaceLabel}</small></span> : <strong>{title}</strong>}
-        <ActivityLabel state={activity} iconOnly />
+        <ActivityLabel state={activity?.status} failed={!!activity?.reading.failed} iconOnly />
         {!workspaceLabel && <time className="session-recency" dateTime={clock?.iso} title={clock?.title}>{conversationRecency(entry.last_activity_ms, now)}</time>}
       </button>
       {unarchive ? <button type="button" className={css.sessionActions} aria-label="Unarchive session"
@@ -137,8 +138,10 @@ export function ConversationRow({
   );
 }
 
-export function SessionMenu({target, device, close, rename, mutate}: {
+export function SessionMenu({target, device, reading, epoch, close, rename, mutate}: {
   target: SessionMenuTarget;
+  reading?: AttentionEntry;
+  epoch?: string;
   device: ReturnType<typeof useDeviceNavigation>;
   close(): void;
   rename(): void;
@@ -162,6 +165,9 @@ export function SessionMenu({target, device, close, rename, mutate}: {
   const select = (id: string) => {
     close();
     switch (id) {
+      case "mark":
+        if (epoch) void run(() => markReading(epoch, session, reading, isUnread(reading) ? "read" : "unread"));
+        break;
       case "rename":
         opener.focus({preventScroll: true});
         rename();
@@ -176,6 +182,9 @@ export function SessionMenu({target, device, close, rename, mutate}: {
     isExternalTrigger={node => node instanceof Element && !!node.closest("[data-session-menu-trigger]")}
     items={[
       ...(metadata.archived ? [] : [{id: "pin", label: metadata.pinned ? "Unpin session" : "Pin session", icon: <IconPinOutlineRegular/>}]),
+      ...(metadata.archived ? [] : [{id: "mark", label: isUnread(reading) ? "Mark as read" : "Mark as unread", disabled: !epoch,
+        icon: isUnread(reading) ? <IconMailReadOutlineRegular/> : <IconMailUnreadOutlineRegular/>,
+        shortcut: {keys: [/Mac/.test(navigator.platform) ? "⌘" : "Ctrl", "Shift", "U"]}}]),
       {id: "rename", label: "Rename", icon: <IconEditOutlineRegular/>},
       {id: "first", label: "Move to first", disabled: !device.ready},
       {id: "last", label: "Move to last", disabled: !device.ready},

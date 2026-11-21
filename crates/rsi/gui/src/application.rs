@@ -36,6 +36,7 @@ pub(crate) enum Command {
     },
     AttentionOpen {
         pane: crate::SurfaceId,
+        host_epoch: rsi_api_protocol::HostEpoch,
         position: rsi_navigation_api::attention::Position,
         target: Option<rsi_navigation_api::attention::Target>,
     },
@@ -975,9 +976,13 @@ impl GuiApplication {
             } => self.open_delegation(pane, &generation, &key).await,
             Command::AttentionOpen {
                 pane,
+                host_epoch,
                 position,
                 target,
-            } => self.open_attention(pane, position, target).await,
+            } => {
+                self.open_attention(pane, host_epoch, position, target)
+                    .await
+            }
             Command::ExternalCatalog { next } => self.refresh_external(next).await,
             Command::ExternalOpen { pane, id } => self.open_external(pane, id).await,
             Command::ExternalStart { pane, id, endpoint } => {

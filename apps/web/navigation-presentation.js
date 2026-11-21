@@ -25,7 +25,7 @@ export function navigationAttention(observation) {
   const attention=new Map();
   for(const row of observation?.entries??[]) {
     const {kind,id}=row.position.conversation;
-    if(kind==='native')attention.set(id,row.status);
+    if(kind==='native')attention.set(id,row);
   }
   return attention;
 }

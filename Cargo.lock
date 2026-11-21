@@ -7321,6 +7321,7 @@ dependencies = [
 name = "rsi-navigation"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "futures-util",
  "getrandom 0.3.4",
@@ -7358,6 +7359,7 @@ dependencies = [
 name = "rsi-navigation-api"
 version = "0.0.1"
 dependencies = [
+ "futures-util",
  "rsi-agent-session-protocol",
  "rsi-agent-store-protocol",
  "rsi-api-contract-build",

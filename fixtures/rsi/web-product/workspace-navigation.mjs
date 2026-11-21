@@ -23,6 +23,12 @@ fixture.setReply('command',async text=>{
    fixture.queries.push(nav.filter.query);
    nav.entries=[activeRow,archivedRow].filter(row=>(nav.filter.archived===null||row.metadata.archived===nav.filter.archived)&&row.metadata.title.toLowerCase().includes(nav.filter.query.toLowerCase()));
    await fixture.frame();
+ } else if(command.action==='navigate'&&command.command.kind==='mark'){
+   const {request}=command.command;
+   const entry=nav.attention.entries.find(row=>row.position.conversation.id===request.position.conversation.id);
+   entry.reading.manual=request.action==='unread';
+   fixture.lastMark=request;
+   await fixture.frame();
  } else if(command.action==='navigate'&&command.command.kind==='replace'&&command.command.session==='archived'){
    archivedRow.metadata=command.command.metadata;
    nav.entries=nav.entries.filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);
@@ -188,11 +194,20 @@ try {
    await actions.click();await pin.waitFor();
    await actions.click();await pin.waitFor({state:'detached'});
    await page.evaluate(async()=>{
-     fixture.view.navigation.attention={entries:[{position:{conversation:{kind:'native',id:'active'},epoch:'fixture',sequence:'1'},status:'running',targets:[]}],truncated:false};
+     fixture.view.navigation.attention={host_epoch:'00000000000000000000000000000001',entries:[{position:{conversation:{kind:'native',id:'active'},epoch:'0',sequence:'1'},reading:{manual:false,unseen:false,failed:false},status:'running',targets:[]}],truncated:false};
      await fixture.frame();
    });
    const indicator=sessionRow.getByRole('img',{name:'Running'});
    await indicator.waitFor();
+   await actions.click();
+   await page.getByRole('menuitem',{name:/^Mark as unread/}).click();
+   await page.waitForFunction(()=>fixture.lastMark?.action==='unread');
+   const mark=await page.evaluate(()=>fixture.lastMark);
+   assert.deepEqual(mark,{host_epoch:'00000000000000000000000000000001',action:'unread',position:{conversation:{kind:'native',id:'active'},epoch:'0',sequence:'1'}});
+   assert(await indicator.isVisible(),'live work still takes priority over the manual reminder');
+   await actions.click();
+   await page.getByRole('menuitem',{name:/^Mark as read/}).click();
+   await page.waitForFunction(()=>fixture.lastMark?.action==='read');
    assert(await sessionRow.evaluate(node=>node.querySelector('.session-activity').getBoundingClientRect().right<=node.querySelector('strong').getBoundingClientRect().left),'flat row activity must clear the title');
 
    await page.getByRole('button',{name:'Choose workspace',exact:true}).click();
@@ -331,11 +346,21 @@ try {
    await group.getByRole('button',{name:'Show 1 more session',exact:true}).waitFor();
    await page.evaluate(async()=>{
     fixture.view.navigation.groups.fixture.entries=window.allRows;
-    fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',workspace:fixture.attachedWorkspace('fixture')};
-    fixture.view.navigation.attention={entries:[{position:{conversation:{kind:'native',id:'row-7'},epoch:'fixture',sequence:'1'},status:'running',targets:[]}],truncated:false};
+    fixture.view.surfaces.main={...fixture.savedMain,session:'row-7',draft:false,workspace:fixture.attachedWorkspace('fixture')};
+    fixture.view.navigation.attention={host_epoch:'00000000000000000000000000000001',entries:[{position:{conversation:{kind:'native',id:'row-7'},epoch:'0',sequence:'1'},reading:{manual:false,unseen:false,failed:false},status:'running',targets:[]}],truncated:false};
     await fixture.frame();
    });
    await group.locator('[aria-current=true]').waitFor();
+   const activeEditor=page.getByRole('textbox',{name:'Main message'});
+   const options=page.locator('details.navigation-options');
+   await options.locator('summary').click();
+   await options.getByRole('menu').press('Control+Shift+u');
+   assert.notEqual(await page.evaluate(()=>fixture.lastMark?.position.conversation.id),'row-7');
+   await options.locator('summary').click();
+   await activeEditor.press('Control+Shift+u');
+   await page.waitForFunction(()=>fixture.lastMark?.position.conversation.id==='row-7' && fixture.lastMark.action==='unread');
+   await activeEditor.press('Control+Shift+u');
+   await page.waitForFunction(()=>fixture.lastMark?.position.conversation.id==='row-7' && fixture.lastMark.action==='read');
    assert.equal(await group.getByTestId('conversation-row').count(),6);
    const alignment=await group.evaluate(node=>{
     const workspace=node.querySelector('.workspace-toggle strong').getBoundingClientRect(),row=node.querySelector('[aria-current=true]'),text=row.querySelector('strong').getBoundingClientRect();
@@ -387,10 +412,13 @@ try {
    await page.evaluate(()=>window.finishClose());
    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
    assert.equal(await page.evaluate(()=>window.groupOpens),0,'closing the active workspace must not enqueue an automatic reopen');
-   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
+   assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,composerReadShortcut:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
   } catch (error) {
-   await page.screenshot({path:join(report,name+'-failure.png')});
-   await writeFile(join(report,name+'-failure.txt'),[error.stack,...errors,await page.locator('body').innerText()].join('\n'));
+   const failure=join(report,name+'-failure.txt');
+   await writeFile(failure,[error.stack,...errors].join('\n'));
+   await page.screenshot({path:join(report,name+'-failure.png'),timeout:5000}).catch(()=>{});
+   const body=await page.locator('body').innerText({timeout:5000}).catch(()=>'');
+   if(body)await writeFile(failure,[error.stack,...errors,body].join('\n'));
    throw error;
   } finally {await browser.close()}
  }

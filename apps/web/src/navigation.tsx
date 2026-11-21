@@ -400,7 +400,7 @@ export function Navigation() {
         </>
       )}
       <ExternalNavigation />
-      {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} close={() => setMenu(undefined)}
+      {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} reading={attention.get(menu.entry.session)} epoch={nav?.attention_notice ? undefined : nav?.attention?.host_epoch} close={() => setMenu(undefined)}
         rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
       {edit && <RenameSession title={edit.entry.metadata.title ?? titles.get(edit.entry.session) ?? ""}
         close={() => setEdit(undefined)}

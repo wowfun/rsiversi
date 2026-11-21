@@ -17,7 +17,9 @@ mark an accessible conversation unread, explicitly read an observed position
 or acknowledge it after display. Positions belong to the live Host and apply
 to every caller with access. Acknowledgment preserves a manual reminder.
 Future positions and positions from a replaced source or Host are rejected.
-A 256 KiB response cap can truncate rows. Polling never opens a Session or
+A subscription starts with the caller-visible attention page. Each later frame
+replaces that page. Reading mutations and new native completions wake connected
+clients. Equivalent visible pages produce no frame. A 256 KiB response cap can truncate rows. Polling never opens a Session or
 starts a peer.
 
 The authenticated navigation API reads durable Session truth and edits only

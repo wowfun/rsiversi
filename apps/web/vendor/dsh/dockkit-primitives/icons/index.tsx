@@ -608,3 +608,6 @@ export const IconAppsAddOutlineRegular = appsAddIcon('regular')
 
 /** Three entry tiles and an add mark with 1.3px strokes. */
 export const IconAppsAddOutlineMedium = appsAddIcon('medium')
+
+export const IconMailUnreadOutlineRegular = productIcon('mail-unread-outline', 'regular')
+export const IconMailReadOutlineRegular = productIcon('mail-read-outline', 'regular')

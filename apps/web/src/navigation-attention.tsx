@@ -19,6 +19,7 @@ export function AttentionNavigation({ nav }: { nav: Navigation | undefined }) {
               run(() =>
                 input.open({
                   action: "attention_open",
+                  host_epoch: nav.attention?.host_epoch,
                   position: entry.position,
                   target: null,
                 }),
@@ -29,7 +30,7 @@ export function AttentionNavigation({ nav }: { nav: Navigation | undefined }) {
               {entry.status === "waiting"
                 ? "Waiting for you"
                 : entry.status === "unread"
-                  ? "New activity"
+                  ? (entry.reading.failed ? "Run failed" : "Unread")
                   : entry.status === "running"
                     ? "Running"
                     : "Unknown"}
@@ -44,6 +45,7 @@ export function AttentionNavigation({ nav }: { nav: Navigation | undefined }) {
                 run(() =>
                   input.open({
                     action: "attention_open",
+                    host_epoch: nav.attention?.host_epoch,
                     position: entry.position,
                     target,
                   }),

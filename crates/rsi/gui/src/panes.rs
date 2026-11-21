@@ -529,6 +529,7 @@ impl GuiApplication {
     pub(crate) async fn open_attention(
         self: &Arc<Self>,
         index: crate::SurfaceId,
+        host_epoch: rsi_api_protocol::HostEpoch,
         position: rsi_navigation_api::attention::Position,
         target: Option<rsi_navigation_api::attention::Target>,
     ) -> Result<()> {
@@ -624,7 +625,13 @@ impl GuiApplication {
         }
         if let Some(navigation) = &self.navigation {
             navigation
-                .command(rsi_workbench_ui::NavigationCommand::MarkRead { position })
+                .command(rsi_workbench_ui::NavigationCommand::Mark {
+                    request: rsi_navigation_api::attention::Mark {
+                        host_epoch,
+                        position,
+                        action: rsi_navigation_api::attention::ReadAction::Read,
+                    },
+                })
                 .await?;
         }
         Ok(())

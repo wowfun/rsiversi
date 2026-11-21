@@ -179,7 +179,7 @@ fn reminders_preserve_manual_intent_and_exact_cuts() {
         });
     }
     {
-        let mut rows = records.0.lock().unwrap();
+        let mut rows = records.rows.lock().unwrap();
         let record = rows.get_mut(&id).unwrap();
         assert_eq!(record.completed, 12);
         record.mark(ReadAction::Unread, 0);
@@ -197,7 +197,64 @@ fn reminders_preserve_manual_intent_and_exact_cuts() {
         assert_eq!(record.read, 12);
     }
     records.handle(&SessionActivityEvent::Retired(session));
-    assert!(records.0.lock().unwrap().is_empty());
+    assert!(records.rows.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn follow_wakes_for_visible_changes_and_coalesces_private_and_repeated_events() {
+    use futures_util::{StreamExt as _, poll};
+    use rsi_api_protocol::{
+        ApiContext, ApiHandler as _, ApiOutput, ApiResponseCapacity, ByteBudget,
+    };
+    let owner = Arc::new(fixture());
+    let follow = Follow {
+        owner: owner.clone(),
+        execution: rsi_meta::Execution::native(tokio::runtime::Handle::current()),
+    };
+    let budget = ByteBudget::default();
+    let retiring = tokio_util::sync::CancellationToken::new();
+    let ApiOutput::Stream(mut updates) = follow
+        .invoke(
+            ApiContext {
+                origin: CallOrigin::Local,
+                retiring: retiring.clone(),
+            },
+            budget.encode(&(), 16).unwrap(),
+            ApiResponseCapacity::Subscription {
+                budget,
+                maximum: Operation::Follow.spec().maximum_response_bytes,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing stream")
+    };
+    let initial = updates.next().await.unwrap().unwrap();
+    let baseline: Page = serde_json::from_slice(initial.json.as_bytes()).unwrap();
+    let complete = |name, sequence| {
+        owner.records.handle(&SessionActivityEvent::TurnEnded {
+            session: rsi_agent_session_protocol::SessionId::new(name).unwrap(),
+            sequence,
+            failed: false,
+        })
+    };
+    complete("private", 7);
+    assert!(poll!(updates.next()).is_pending());
+    complete("visible", 3);
+    complete("visible", 5);
+    let update = updates.next().await.unwrap().unwrap();
+    let now: Page = serde_json::from_slice(update.json.as_bytes()).unwrap();
+    assert_eq!(now.entries.len(), baseline.entries.len() + 1);
+    assert!(
+        now.entries
+            .iter()
+            .any(|entry| entry.position.sequence == "5" && entry.reading.unseen)
+    );
+    complete("visible", 3);
+    assert!(poll!(updates.next()).is_pending());
+    retiring.cancel();
+    assert!(updates.next().await.is_none());
 }
 
 #[tokio::test]

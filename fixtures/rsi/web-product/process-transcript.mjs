@@ -8,7 +8,7 @@ import {openSettings} from './controls.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR);await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+String.raw`
 const row={session:'fixture-session',created_at_ms:'1',last_activity_ms:String(Date.now()),path:'/fixture',location:{kind:'local'},workspace:'fixture',metadata:{title:'UI verification',archived:false,pinned:false}};
-fixture.view.navigation={ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[row],more:false,scanned:1,diagnostic:null,attention:{entries:[{position:{conversation:{kind:'native',id:'fixture-session'}},status:'running',targets:[]}],truncated:false}};
+fixture.view.navigation={ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[row],more:false,scanned:1,diagnostic:null,attention:{host_epoch:'00000000000000000000000000000001',entries:[{position:{conversation:{kind:'native',id:'fixture-session'},epoch:'0',sequence:'0'},reading:{manual:false,unseen:false,failed:false},status:'running',targets:[]}],truncated:false}};
 fixture.view.navigation.groups.fixture={entries:[row],more:false,continued:false,stale:false};
 fixture.view.surfaces.main.transcript={status:'Running',blocks:[
  {key:'u',role:'user',title:'User',text:'Inspect this isolated workspace and verify the tools.',sources:0},

@@ -38,7 +38,7 @@ The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks
 visible activity labels and accessible names, compact rows for conversations absent
 from the attention snapshot while preserving explicit unknown states, separate persistent storage and
-ordinary notices, borderless composer focus in ordinary themes and a system-color
+ordinary notices, keyboard focus on the outer composer boundary and a system-color
 outline in forced colors. It also checks transparent resize hit areas during hover
 and drag, keyboard boundary indicators and pointer/arrow-key resizing on both
 sides. This is component/CSS evidence, separate from Worker/HTTP verification.

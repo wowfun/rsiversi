@@ -18,8 +18,8 @@ test('untitled rows use creation time and distinguish same-time IDs across dupli
 test('absent native attention stays distinct from an observed unknown state',()=>{
   const attention=navigationAttention({entries:[{position:{conversation:{kind:'external',id:'a'}},status:'running'},{position:{conversation:{kind:'native',id:'b'}},status:'waiting'},{position:{conversation:{kind:'native',id:'c'}},status:'unknown'}]});
   assert.equal(attention.get('a'),undefined);
-  assert.equal(attention.get('b'),'waiting');
-  assert.equal(attention.get('c'),'unknown');
+  assert.equal(attention.get('b').status,'waiting');
+  assert.equal(attention.get('c').status,'unknown');
   assert.equal(attention.get('unobserved'),undefined);
 });
 test('large groups read each entry once and produce unique titles',()=>{

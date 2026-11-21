@@ -2,6 +2,8 @@ import { ICON_SYMBOLS, type IconSymbolId } from '../vendor/dsh/dockkit-primitive
 
 // Only reviewed, statically imported SVG enters this sink. Never pass runtime data.
 const usedSymbols = [
+  'dsw-icon-mail-read-outline-regular',
+  'dsw-icon-mail-unread-outline-regular',
   'dsw-icon-agent-preset-outline-regular',
   'dsw-icon-api-outline-regular',
   'dsw-icon-branch-outline-regular',

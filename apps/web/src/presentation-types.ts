@@ -46,6 +46,7 @@ export interface TranscriptTurn {
   feedback_message?: string;
   retries?: ModelRetry[];
   terminal?: string | null;
+  terminal_sequence?: string;
   timestamps?: Record<string, number>;
   elapsed_ms?: number | null;
   usage?: TokenUsage | null;

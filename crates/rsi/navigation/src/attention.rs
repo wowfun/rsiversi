@@ -21,7 +21,7 @@ use rsi_navigation_api::{
 };
 use rsi_session_protocol::{ActivityStatus, SessionIngress, SessionIngressContract};
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 struct Record {
     epoch: u64,
     completed: u64,
@@ -50,11 +50,14 @@ impl Record {
 }
 
 #[derive(Default, Debug)]
-struct Records(Mutex<BTreeMap<ConversationIdentity, Record>>);
+struct Records {
+    rows: Mutex<BTreeMap<ConversationIdentity, Record>>,
+    changes: tokio::sync::watch::Sender<()>,
+}
 
 impl EmitEventHandler<SessionActivityEvent> for Records {
     fn handle(&self, event: &SessionActivityEvent) {
-        let mut records = self.0.lock().expect("reading records");
+        let mut records = self.rows.lock().expect("reading records");
         match event {
             SessionActivityEvent::TurnEnded {
                 session,
@@ -67,15 +70,22 @@ impl EmitEventHandler<SessionActivityEvent> for Records {
                 if *sequence > record.completed {
                     record.completed = *sequence;
                     record.failed = *failed;
+                    self.changes.send_replace(());
                 }
             }
             SessionActivityEvent::Retired(session) => {
-                records.remove(&ConversationIdentity::Native(session.clone()));
+                if records
+                    .remove(&ConversationIdentity::Native(session.clone()))
+                    .is_some()
+                {
+                    self.changes.send_replace(());
+                }
             }
         }
     }
 }
 
+#[derive(Debug)]
 struct Attention {
     session: Arc<dyn SessionIngress>,
     external: Arc<dyn ExternalConversations>,
@@ -114,7 +124,7 @@ impl Attention {
         let mut truncated = native.truncated;
         let mut entries = Vec::new();
         let cold = {
-            let records = self.records.0.lock().expect("reading records");
+            let records = self.records.rows.lock().expect("reading records");
             let mut managed = std::collections::BTreeSet::new();
             for row in native.entries {
                 let id = ConversationIdentity::Native(row.session);
@@ -207,7 +217,7 @@ impl Attention {
                 .visible_activity_sessions(batch)
                 .await
                 .map_err(session_error)?;
-            let records = self.records.0.lock().expect("reading records");
+            let records = self.records.rows.lock().expect("reading records");
             for session in visible {
                 let id = ConversationIdentity::Native(session);
                 if let Some(record) = records.get(&id).filter(|r| r.reading().unread()) {
@@ -235,6 +245,7 @@ impl Attention {
                 false
             }
         });
+        super::finish_scope(origin, &[])?;
         Ok(Page {
             host_epoch: self.epoch.clone(),
             entries,
@@ -271,10 +282,8 @@ impl Attention {
                 revision(&row.sequence)?
             }
         };
-        if matches!(origin, CallOrigin::Device(ref device) if device.revoked.is_cancelled()) {
-            return Err(ApiError::Unauthorized);
-        }
-        let mut records = self.records.0.lock().expect("reading records");
+        super::finish_scope(&origin, &[])?;
+        let mut records = self.records.rows.lock().expect("reading records");
         let native = matches!(position.conversation, ConversationIdentity::Native(_));
         if through > current
             || native
@@ -288,6 +297,7 @@ impl Attention {
             ));
         }
         let record = records.entry(position.conversation.clone()).or_default();
+        let before = *record;
         if record.epoch != epoch {
             *record = Record {
                 epoch,
@@ -295,8 +305,61 @@ impl Attention {
             };
         }
         record.mark(request.action, through);
+        if *record != before {
+            self.records.changes.send_replace(());
+        }
         position.sequence = through.max(record.read).to_string();
         Ok(position)
+    }
+}
+
+#[derive(Debug)]
+struct Follow {
+    owner: Arc<Attention>,
+    execution: rsi_meta::Execution,
+}
+
+#[async_trait]
+impl rsi_api_protocol::ApiHandler for Follow {
+    async fn invoke(
+        &self,
+        context: rsi_api_protocol::ApiContext,
+        input: rsi_api_protocol::RetainedBytes,
+        output: rsi_api_protocol::ApiResponseCapacity,
+    ) -> Result<rsi_api_protocol::ApiOutput> {
+        use rsi_api_protocol::{ApiMessage, ApiOutput, ApiResponseCapacity};
+        serde_json::from_slice::<()>(input.as_bytes())
+            .map_err(|_| ApiError::Invalid("invalid attention subscription".into()))?;
+        let ApiResponseCapacity::Subscription { budget, maximum } = output else {
+            return Err(ApiError::Backend(
+                "attention subscription admission required".into(),
+            ));
+        };
+        let owner = self.owner.clone();
+        let execution = self.execution.clone();
+        let mut changes = owner.records.changes.subscribe();
+        Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+            let mut last = None;
+            let mut seconds = 1;
+            loop {
+                let page = owner.read(&context.origin).await?;
+                let changed = last.as_ref() != Some(&page);
+                if changed {
+                    let json = budget.encode(&page, maximum)?;
+                    last = Some(page);
+                    yield ApiMessage { json, binary: None };
+                    seconds = 1;
+                }
+                // Other activity owners expose current state without a change signal.
+                tokio::select! {
+                    () = context.retiring.cancelled() => break,
+                    result = changes.changed() => { if result.is_err() { break; } },
+                    () = execution.sleep(std::time::Duration::from_secs(seconds)) => {
+                        seconds = (seconds * 2).min(8);
+                    },
+                }
+            }
+        })))
     }
 }
 
@@ -355,6 +418,15 @@ impl PluginFactory for AttentionFactory {
                 }),
             )
             .map_err(activation)?;
+        let follow = registrar
+            .register(
+                Operation::Follow.spec(),
+                Arc::new(Follow {
+                    owner: owner.clone(),
+                    execution: plan.context().runtime().execution().clone(),
+                }),
+            )
+            .map_err(activation)?;
         let write = owner.clone();
         let write = registrar
             .register(
@@ -378,7 +450,12 @@ impl PluginFactory for AttentionFactory {
             "drain attention navigation",
             Box::new(move || {
                 Box::pin(async move {
-                    futures_util::join!(owner.admission.close(), read.close(), write.close());
+                    futures_util::join!(
+                        owner.admission.close(),
+                        read.close(),
+                        follow.close(),
+                        write.close()
+                    );
                     Ok(())
                 })
             }),

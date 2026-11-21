@@ -1292,7 +1292,7 @@ async fn interaction_refresh_reads_authoritative_pending_requests_even_without_q
         review: None,
     };
     *backend.pending_approvals.lock().unwrap() = Some(vec![request]);
-    app.command(&serde_json::json!({"action":"attention_open","pane":"main",
+    app.command(&serde_json::json!({"action":"attention_open","pane":"main","host_epoch":rsi_api_protocol::HostEpoch::from_bytes([2;16]),
         "position":rsi_navigation_api::attention::Position { conversation:rsi_conversation::ConversationIdentity::Native(SessionId::new(pane["session"].as_str().unwrap()).unwrap()),epoch:"0".into(),sequence:"0".into()},
         "target":rsi_navigation_api::attention::Target::Native {request:ActivityRequest::Approval {turn:TurnId::new("turn").unwrap(),request:"approval".into()}}
     }).to_string()).await.unwrap();

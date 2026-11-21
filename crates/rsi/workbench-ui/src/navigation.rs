@@ -29,10 +29,10 @@ pub enum NavigationCommand {
         /// At most 64 exact members in desired order.
         sessions: Vec<SessionId>,
     },
-    /// Acknowledge an explicitly displayed attention cut.
-    MarkRead {
-        /// Exact source identity and coordinates.
-        position: rsi_navigation_api::attention::Position,
+    /// Set or clear a shared reminder through a displayed Host cut.
+    Mark {
+        /// Authenticated action and the original Host and source coordinates.
+        request: rsi_navigation_api::attention::Mark,
     },
     /// Expand a workspace group or continue its exact displayed page.
     Group {
@@ -182,7 +182,7 @@ impl View {
 #[derive(Debug)]
 pub struct NavigationFeature {
     client: NavigationClient,
-    attention: Option<rsi_navigation_api::attention::Client>,
+    attention: rsi_navigation_api::attention::Client,
     state: PresentationState<State>,
     work: Work,
     serial: tokio::sync::Mutex<()>,
@@ -244,11 +244,10 @@ impl NavigationFeature {
             },
             changed = async {
                 let continued = self.state.lock().expect("navigation state").view.continued;
-                let changed = if refresh && !continued {
+                if refresh && !continued {
                     let _ = self.execute(NavigationCommand::Query { filter }).await;
                     true
-                } else { self.observe_head(filter).await };
-                self.refresh_attention().await || changed
+                } else { self.observe_head(filter).await }
             } => Some(refresh || changed),
         };
         self.background_read
@@ -519,20 +518,14 @@ impl NavigationFeature {
                 .remove(&group_key(&workspace)?);
             return Ok(());
         }
-        if let NavigationCommand::MarkRead { position } = command {
-            self.attention
-                .as_ref()
-                .ok_or("Attention navigation unavailable")?
-                .mark_read(position)
-                .await
-                .map_err(error)?;
-            self.refresh_attention().await;
+        if let NavigationCommand::Mark { request } = command {
+            self.attention.mark(request).await.map_err(error)?;
             return Ok(());
         }
         let (filter, after) = match command {
             NavigationCommand::OrderSeed { .. }
             | NavigationCommand::OrderSummaries { .. }
-            | NavigationCommand::MarkRead { .. }
+            | NavigationCommand::Mark { .. }
             | NavigationCommand::Group { .. }
             | NavigationCommand::CloseGroup { .. } => unreachable!("handled above"),
             NavigationCommand::Query { filter } => {
@@ -683,18 +676,48 @@ impl NavigationFeature {
         }
         Ok(())
     }
-    async fn refresh_attention(&self) -> bool {
-        let Some(client) = &self.attention else {
-            return false;
-        };
-        let result = client.read().await;
+    async fn follow_attention(&self) {
+        let mut retry = PollDelay::default();
+        loop {
+            let observation = async {
+                let mut source = self.attention.follow().await?;
+                while let Some(update) = source.next().await {
+                    let page = update?;
+                    if self.apply_attention(Ok(page)) {
+                        self.work
+                            .changed
+                            .send_modify(|rev| *rev = rev.saturating_add(1));
+                    }
+                    retry.observe(true);
+                }
+                Err(rsi_api_protocol::ApiError::Unavailable)
+            }
+            .await;
+            if self.apply_attention(observation) {
+                self.work
+                    .changed
+                    .send_modify(|rev| *rev = rev.saturating_add(1));
+            }
+            self.work
+                .execution
+                .sleep(std::time::Duration::from_secs(retry.seconds))
+                .await;
+            retry.observe(false);
+        }
+    }
+
+    fn apply_attention(
+        &self,
+        result: rsi_api_protocol::Result<rsi_navigation_api::attention::Page>,
+    ) -> bool {
         let mut state = self.state.lock().expect("navigation attention view");
         let page = match result {
             Ok(page) => Some(page),
             Err(
                 rsi_api_protocol::ApiError::UnknownOperation
                 | rsi_api_protocol::ApiError::OperationRetiring
-                | rsi_api_protocol::ApiError::ProtocolMismatch,
+                | rsi_api_protocol::ApiError::ProtocolMismatch
+                | rsi_api_protocol::ApiError::Unauthorized,
             ) => None,
             Err(_) => {
                 const NOTICE: &str = "Activity refresh unavailable; showing the last observation";
@@ -731,9 +754,9 @@ impl PluginFactory for NavigationFeatureFactory {
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let (refresh, mut changes) = watch::channel(());
         let feature = Arc::new(NavigationFeature {
-            attention: Some(rsi_navigation_api::attention::Client::new(
+            attention: rsi_navigation_api::attention::Client::new(
                 plan.local::<rsi_api_protocol::ApiClientContract>()?,
-            )),
+            ),
             client: NavigationClient::new(plan.local::<rsi_api_protocol::ApiClientContract>()?),
             state: PresentationState::default(),
             work: Work::new(plan.context().runtime().execution().clone()),
@@ -747,7 +770,6 @@ impl PluginFactory for NavigationFeatureFactory {
                 filter: NavigationFilter::default(),
             })
             .await;
-        feature.refresh_attention().await;
         let supply = plan
             .context()
             .provide_local::<NavigationFeatureContract>(feature.clone())?;
@@ -758,7 +780,7 @@ impl PluginFactory for NavigationFeatureFactory {
                 .execution
                 .spawn(feature.work.tasks.track_future(async move {
                 let work = async {
-                    let mut polling = AttentionPolling::default();
+                    let mut polling = PollDelay::default();
                     let mut pending = false;
                     loop {
                         let refresh = tokio::select! {
@@ -776,7 +798,7 @@ impl PluginFactory for NavigationFeatureFactory {
                             .send_modify(|revision| *revision = revision.saturating_add(1)); }
                     }
                 };
-                tokio::select! { biased; () = background.stop.cancelled() => {}, () = work => {} }
+                tokio::select! { biased; () = background.stop.cancelled() => {}, () = work => {}, () = background.follow_attention() => {} }
             })),
         );
         plan.defer(
@@ -827,15 +849,15 @@ fn acknowledge_refresh(changes: &mut watch::Receiver<()>, refresh: bool) {
         changes.borrow_and_update();
     }
 }
-struct AttentionPolling {
+struct PollDelay {
     seconds: u64,
 }
-impl Default for AttentionPolling {
+impl Default for PollDelay {
     fn default() -> Self {
         Self { seconds: 1 }
     }
 }
-impl AttentionPolling {
+impl PollDelay {
     fn observe(&mut self, changed: bool) {
         self.seconds = if changed {
             1
@@ -846,7 +868,7 @@ impl AttentionPolling {
 }
 #[cfg(test)]
 mod polling_tests {
-    use super::AttentionPolling;
+    use super::PollDelay;
     #[test]
     fn publication_after_an_idle_poll_decision_is_not_consumed() {
         let (send, mut changes) = tokio::sync::watch::channel(());
@@ -858,8 +880,8 @@ mod polling_tests {
         assert!(!changes.has_changed().unwrap());
     }
     #[test]
-    fn unchanged_attention_backs_off_and_invalidation_restores_responsiveness() {
-        let mut polling = AttentionPolling::default();
+    fn unchanged_navigation_backs_off_and_invalidation_restores_responsiveness() {
+        let mut polling = PollDelay::default();
         for expected in [2, 4, 8, 8] {
             polling.observe(false);
             assert_eq!(polling.seconds, expected);
@@ -879,7 +901,6 @@ mod group_tests {
     struct Pages {
         catalog_reads: std::sync::atomic::AtomicUsize,
         attention_reads: std::sync::atomic::AtomicUsize,
-        attention_error: Mutex<Option<ApiError>>,
         summary_workspace: Mutex<Option<String>>,
         block_next_read: std::sync::atomic::AtomicBool,
         read_entered: tokio::sync::Notify,
@@ -911,15 +932,16 @@ mod group_tests {
             operation: &OperationSpec,
             input: RetainedBytes,
         ) -> rsi_api_protocol::Result<ApiOutput> {
-            if operation == &rsi_navigation_api::attention::Operation::Read.spec() {
+            if operation == &rsi_navigation_api::attention::Operation::Follow.spec() {
                 self.attention_reads
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if let Some(error) = self.attention_error.lock().unwrap().clone() {
-                    return Err(error);
-                }
-                return Ok(ApiOutput::Reply(ApiMessage {
+                let first = ApiMessage {
                     json: ByteBudget::default().encode(&json!({"host_epoch":self.description.host_epoch,"entries":[],"truncated":false}), 65536)?, binary: None,
-                }));
+                };
+                return Ok(ApiOutput::Stream(Box::pin(
+                    futures_util::stream::once(async { Ok(first) })
+                        .chain(futures_util::stream::pending()),
+                )));
             }
             if self
                 .block_next_read
@@ -994,7 +1016,6 @@ mod group_tests {
         let api = Arc::new(Pages {
             catalog_reads: 0.into(),
             attention_reads: 0.into(),
-            attention_error: Mutex::new(None),
             summary_workspace: Mutex::new(None),
             block_next_read: false.into(),
             read_entered: tokio::sync::Notify::new(),
@@ -1022,7 +1043,7 @@ mod group_tests {
         });
         let owner = Arc::new(NavigationFeature {
             client: NavigationClient::new(api.clone()),
-            attention: None,
+            attention: rsi_navigation_api::attention::Client::new(api.clone()),
             state: PresentationState::default(),
             work: Work::new(rsi_meta::Execution::native(
                 tokio::runtime::Handle::current(),
@@ -1035,42 +1056,33 @@ mod group_tests {
         (api, owner)
     }
     #[tokio::test]
-    async fn attention_poll_uses_one_call_and_clears_only_typed_retirement() {
-        let (api, mut owner) = fixture();
-        Arc::get_mut(&mut owner).unwrap().attention =
-            Some(rsi_navigation_api::attention::Client::new(api.clone()));
-        assert!(owner.refresh_attention().await);
-        let current = owner.content_revision();
-        assert!(!owner.refresh_attention().await);
-        assert_eq!(owner.content_revision(), current);
-        *api.attention_error.lock().unwrap() = Some(ApiError::Unavailable);
-        assert!(owner.refresh_attention().await);
+    async fn attention_subscription_publishes_once_and_clears_on_retirement_or_lost_access() {
+        use std::sync::atomic::Ordering;
+        let (api, owner) = fixture();
+        let mut changes = owner.changes();
+        let mut follow = std::pin::pin!(owner.follow_attention());
+        tokio::select! {
+            () = &mut follow => panic!("observation ended"),
+            result = changes.changed() => result.unwrap(),
+        }
+        let page = owner.state.lock().unwrap().view.attention.clone().unwrap();
+        assert!(!owner.apply_attention(Ok(page.clone())));
+        assert!(owner.apply_attention(Err(ApiError::Unavailable)));
         assert!(!owner.view()["attention"].is_null());
-        assert!(!owner.view()["attention_notice"].is_null());
-        let failed = owner.content_revision();
-        assert!(!owner.refresh_attention().await);
-        assert_eq!(owner.content_revision(), failed);
+        assert!(!owner.apply_attention(Err(ApiError::Unavailable)));
         for error in [
             ApiError::UnknownOperation,
             ApiError::OperationRetiring,
             ApiError::ProtocolMismatch,
+            ApiError::Unauthorized,
         ] {
-            *api.attention_error.lock().unwrap() = None;
-            owner.refresh_attention().await;
-            *api.attention_error.lock().unwrap() = Some(error);
-            assert!(owner.refresh_attention().await);
+            assert!(owner.apply_attention(Ok(page.clone())));
+            assert!(owner.apply_attention(Err(error)));
             assert!(owner.view()["attention"].is_null());
             assert!(owner.view()["attention_notice"].is_null());
         }
-        assert_eq!(
-            api.catalog_reads.load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
-        assert_eq!(
-            api.attention_reads
-                .load(std::sync::atomic::Ordering::SeqCst),
-            10
-        );
+        assert_eq!(api.catalog_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(api.attention_reads.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
     async fn full_background_refresh_does_not_issue_a_second_query_for_its_head() {

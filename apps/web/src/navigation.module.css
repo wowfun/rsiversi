@@ -124,6 +124,7 @@
 :global(.session-state.waiting):where(.scope, .scope *) {
   background: var(--warning);
 }
+:global(.session-state.failed):where(.scope, .scope *) { background: var(--dsw-alias-state-error-primary); }
 :global(.session-state.unread):where(.scope, .scope *) {
   background: var(--success);
 }

@@ -16,6 +16,7 @@ import { QueueEditor } from "./queue-editor.tsx";
 import { PendingInputs } from "./queue-dock.tsx";
 import { Composer } from "./composer.tsx";
 import {TodoPanel} from './todo-panel.tsx';
+import {SessionReading} from "../session-reading.ts";
 import { Transcript } from "./transcript.tsx";
 import {SessionMetrics} from './metrics.tsx';
 import {ScheduledTasks} from './scheduled-tasks.tsx';
@@ -118,6 +119,7 @@ function NativeSurface({
   );
   return (
     <DocumentSessionScope view={data} owner={owner}>
+    {selected && data && !data.draft && <SessionReading key={data.session} surface={data} visible={tab === "conversation" && !catalogOpen}/>}
     <section
       ref={ref("node")}
       className={`${css.scope} ${chat.scope} pane${selected ? " selected" : ""}${empty ? " is-empty" : ""}`}
