@@ -27,7 +27,7 @@ export async function connectWorkbench(page, service, registration) {
 // Register the fixture directory before first-use initialization can consult the OS Documents folder.
 export async function registerFixtureWorkspace(request, service, registration = service.registration) {
   const headers={authorization:`Bearer ${registration.token}`,'x-rsi-wire-version':'2'};
-  const describe=await request.post(service.origin+'/api/v2/rsi-api-protocol/4/connection/describe/1/read',{headers,data:{wire_version:2}});
+  const describe=await request.post(service.origin+'/api/v2/rsi-api-protocol/5/connection/describe/1/read',{headers,data:{wire_version:2}});
   assert.equal(describe.status(),200);
   const {name,version}=JSON.parse(await readFile(new URL('../../../crates/rsi-workspace/api/wire-contract.json',import.meta.url),'utf8'));
   const coordinates={location:{kind:'local'},path:service.workspace};
@@ -40,7 +40,7 @@ export async function registerFixtureWorkspace(request, service, registration = 
 // Exercise the same cookie, CSRF and Host-generation checks as the real Worker.
 export async function readBrowserCaller(page, expectedDevice) {
   return page.evaluate(async expected => {
-    const root = '/api/v2/rsi-api-protocol/4/connection/';
+    const root = '/api/v2/rsi-api-protocol/5/connection/';
     const headers = {'content-type':'application/json','x-rsi-csrf':'1','x-rsi-wire-version':'2'};
     const description = await fetch(root+'describe/1/read', {
       method:'POST',headers,body:JSON.stringify({wire_version:2}),

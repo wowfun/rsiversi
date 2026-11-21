@@ -67,7 +67,7 @@ async fn request(
         delivery,
     )));
     let request = format!(
-        "POST /api/v2/rsi-api-protocol/4/{path}/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /api/v2/rsi-api-protocol/5/{path}/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         state.epoch.as_str(),
         body.len()
     );

@@ -17,7 +17,7 @@ export async function socketCloseProbe(browser, glue, wasm, catalog) {
       "x-rsi-host-epoch": "03".repeat(16), "content-type": "application/json" }).end(JSON.stringify(body));
   });
   server.on("upgrade", (request, socket, head) => {
-    assert.equal(request.url, "/api/v2/rsi-api-protocol/4/fault/missing-end/1/stream");
+    assert.equal(request.url, "/api/v2/rsi-api-protocol/5/fault/missing-end/1/stream");
     assert.equal(head.length, 0);
     peers.add(socket);
     socket.on("close", () => peers.delete(socket));

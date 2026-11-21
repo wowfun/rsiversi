@@ -359,7 +359,7 @@ async fn local_listener_reports_shared_protocol_failures_and_identity_rejections
         .unwrap();
     malformed.read_to_end(&mut Vec::new()).await.unwrap();
     let mut foreign = connect_stream(&paths).await;
-    foreign.write_all(b"POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: rsi.local\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+    foreign.write_all(b"POST /api/v2/rsi-api-protocol/5/connection/describe/1/read HTTP/1.1\r\nHost: rsi.local\r\nContent-Length: 0\r\n\r\n").await.unwrap();
     let mut response = Vec::new();
     foreign.read_to_end(&mut response).await.unwrap();
     assert!(response.starts_with(b"HTTP/1.1 401"));

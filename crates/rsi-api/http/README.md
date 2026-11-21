@@ -30,8 +30,9 @@ StaticHttpFactory adds an explicitly required HttpAssets capability to the same
 listener and delivery machinery. The ordinary HttpFactory remains API-only.
 An application may additionally supply a private loopback upstream for a closed
 set of route prefixes. A trusted application can exercise host-user privileges.
-Every authenticated browser uses the deployment's shared browser owner for
-native operations, subscriptions and application callbacks. Authentication,
+Authenticated browser calls and subscriptions use the principal selected by
+the registered operation. Credential operations use the actual cookie device.
+Ordinary operations and application callbacks use the shared browser owner. Authentication,
 expected-device checks, `connection/caller` and revocation still use the actual cookie credential.
 An application request that supplies `X-Rsi-Expected-Device` must match that
 credential before the listener forwards it. Browsers may omit this header.

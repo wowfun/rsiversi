@@ -166,10 +166,11 @@ impl ApiDispatch for ApiRegistry {
         }
         Ok(entry.spec.clone())
     }
-    fn admit(
+    fn admit_with_browser_owner(
         &self,
         operation: &rsi_api_protocol::OperationCall,
-        origin: CallOrigin,
+        mut origin: CallOrigin,
+        browser_owner: Option<rsi_api_protocol::DeviceId>,
     ) -> Result<Box<dyn ApiInvocation>> {
         if let CallOrigin::Device(device) = &origin
             && device.revoked.is_cancelled()
@@ -205,6 +206,11 @@ impl ApiDispatch for ApiRegistry {
             let lane = entry.spec.class.lane();
             if state.calls[lane] >= GLOBAL_CALLS[lane] {
                 return Err(ApiError::Capacity);
+            }
+            if entry.spec.access == rsi_api_protocol::OperationAccess::Authenticated
+                && let (CallOrigin::Device(device), Some(owner)) = (&mut origin, browser_owner)
+            {
+                device.id = owner;
             }
             if let CallOrigin::Device(device) = &origin {
                 if state

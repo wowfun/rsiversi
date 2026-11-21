@@ -133,7 +133,10 @@ pub fn operation_operation() -> OperationSpec {
 }
 /// Bounded authenticated discovery of the current invocation's principal.
 pub fn caller_operation() -> OperationSpec {
-    connection_operation("caller", OperationClass::Control, 1024)
+    OperationSpec {
+        access: crate::OperationAccess::Credential,
+        ..connection_operation("caller", OperationClass::Control, 1024)
+    }
 }
 fn connection_operation(
     name: &str,

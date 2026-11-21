@@ -523,7 +523,7 @@ async fn serve_admits_independent_assets_and_connection_loss_retires_only_its_li
     assert_eq!(response.text().await.unwrap(), "index.html");
     let unauthenticated = client
         .post(format!(
-            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+            "{origin}/api/v2/rsi-api-protocol/5/connection/describe/1/read"
         ))
         .body("{}")
         .send()

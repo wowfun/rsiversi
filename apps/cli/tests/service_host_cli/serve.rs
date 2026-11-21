@@ -112,7 +112,7 @@ async fn verify_serve(fixture: &CliFixture, child: &mut tokio::process::Child) {
     assert_eq!(ready["event"], "serving");
     let address = ready["bind"].as_str().unwrap();
     let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-    socket.write_all(format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+    socket.write_all(format!("POST /api/v2/rsi-api-protocol/5/connection/describe/1/read HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
     let mut response = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -313,7 +313,7 @@ async fn check_device_management(fixture: &CliFixture, address: &str, origin: &s
         catalog
             .operations()
             .iter()
-            .all(|spec| spec.access == rsi_api_protocol::OperationAccess::Authenticated)
+            .all(|spec| spec.access != rsi_api_protocol::OperationAccess::Local)
     );
     for operation in [
         "devices/register",

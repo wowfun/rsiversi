@@ -64,7 +64,7 @@ try {
             const login = await fetch("/api/v2/login", { method: "POST", headers: {
               authorization: `Bearer ${"a".repeat(64)}`, "x-rsi-csrf": "1", "x-rsi-wire-version": "2",
             } });
-            const missingCsrf = await fetch("/api/v2/rsi-api-protocol/4/connection/describe/1/read", { method: "POST",
+            const missingCsrf = await fetch("/api/v2/rsi-api-protocol/5/connection/describe/1/read", { method: "POST",
               headers: { "content-type": "application/json", "x-rsi-wire-version": "2" }, body: '{"wire_version":2}' });
             return { login: login.status, missingCsrf: missingCsrf.status, cookie: document.cookie };
           });
@@ -78,7 +78,7 @@ try {
           for (const forgedOrigin of [undefined, "https://foreign.invalid"]) {
             const headers = { "x-rsi-wire-version": "2", "x-rsi-csrf": "1", "content-type": "application/json" };
             if (forgedOrigin) headers.origin = forgedOrigin;
-            const rejected = await context.request.post(`${origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read`, {
+            const rejected = await context.request.post(`${origin}/api/v2/rsi-api-protocol/5/connection/describe/1/read`, {
               headers, data: '{"wire_version":2}',
             });
             assert.equal(rejected.status(), 401, "cookie authority requires exact Origin");

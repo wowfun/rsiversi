@@ -522,7 +522,7 @@ async fn immutable_assets_are_public_exact_and_bounded_without_blocking_api_cont
     assert_eq!(get().send().await.unwrap().status(), 429);
     let control = client
         .post(format!(
-            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            "{}/api/v2/rsi-api-protocol/5/connection/describe/1/read",
             harness.origin
         ))
         .bearer_auth(TOKEN)
@@ -604,7 +604,7 @@ async fn tls_requires_explicit_certificate_trust_and_browser_cookies_are_secure(
     );
     let reply = client
         .post(format!(
-            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            "{}/api/v2/rsi-api-protocol/5/connection/describe/1/read",
             harness.origin
         ))
         .bearer_auth(TOKEN)
@@ -944,7 +944,7 @@ async fn chunked_requests_retain_received_bytes_instead_of_each_operation_maximu
     for expected in 1..=2 {
         let mut peer = TcpStream::connect(harness.address).await.unwrap();
         let headers = format!(
-            "POST /api/v2/rsi-api-protocol/4/test/chunked/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
+            "POST /api/v2/rsi-api-protocol/5/test/chunked/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nX-Rsi-Host-Epoch: {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
             harness.address,
             harness.epoch.as_str()
         );
@@ -1015,7 +1015,7 @@ async fn incomplete_headers_cannot_exceed_thirty_two_unclassified_connections() 
     for _ in 0..32 {
         let mut socket = TcpStream::connect(harness.address).await.unwrap();
         socket
-            .write_all(b"POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\n")
+            .write_all(b"POST /api/v2/rsi-api-protocol/5/connection/describe/1/read HTTP/1.1\r\n")
             .await
             .unwrap();
         sockets.push(socket);
@@ -1186,7 +1186,7 @@ async fn handshake_and_cookie_calls_enforce_origin_epoch_and_closed_requests() {
     let browser = || {
         Harness::client()
             .post(format!(
-                "{}/api/v2/rsi-api-protocol/4/connection/operations/1/read",
+                "{}/api/v2/rsi-api-protocol/5/connection/operations/1/read",
                 harness.origin
             ))
             .header("cookie", credential)
@@ -1630,7 +1630,7 @@ async fn two_listeners_share_connection_operations_after_one_transport_stops() {
     first.task.await.unwrap().unwrap();
     let response = Harness::client()
         .post(format!(
-            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+            "{origin}/api/v2/rsi-api-protocol/5/connection/describe/1/read"
         ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
@@ -1646,7 +1646,7 @@ async fn two_listeners_share_connection_operations_after_one_transport_stops() {
     first.connection.close().await;
     let response = Harness::client()
         .post(format!(
-            "{origin}/api/v2/rsi-api-protocol/4/connection/describe/1/read"
+            "{origin}/api/v2/rsi-api-protocol/5/connection/describe/1/read"
         ))
         .bearer_auth(TOKEN)
         .header("content-type", "application/json")
@@ -1685,7 +1685,7 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
         let client = slow_http2_client();
         let response = client
             .post(format!(
-                "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+                "{}/api/v2/rsi-api-protocol/5/connection/describe/1/read",
                 harness.origin
             ))
             .header("content-type", "application/json")
@@ -1701,7 +1701,7 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
     assert!(
         fresh
             .post(format!(
-                "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+                "{}/api/v2/rsi-api-protocol/5/connection/describe/1/read",
                 harness.origin
             ))
             .body("{}")
@@ -1714,7 +1714,7 @@ async fn idle_h2_connections_retain_unclassified_admission_and_expire() {
     tokio::time::sleep(Duration::from_secs(11)).await;
     let response = fresh
         .post(format!(
-            "{}/api/v2/rsi-api-protocol/4/connection/describe/1/read",
+            "{}/api/v2/rsi-api-protocol/5/connection/describe/1/read",
             harness.origin
         ))
         .bearer_auth(TOKEN)
@@ -1811,7 +1811,7 @@ async fn listener_recovers_from_descriptor_pressure_and_can_stop_during_backoff(
         // Queue a real connection without yielding to accept, then exhaust this
         // isolated subprocess's descriptors before its next scheduler turn.
         let mut peer = std::net::TcpStream::connect(harness.address).unwrap();
-        std::io::Write::write_all(&mut peer, format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{{\"wire_version\":2}}", harness.address).as_bytes()).unwrap();
+        std::io::Write::write_all(&mut peer, format!("POST /api/v2/rsi-api-protocol/5/connection/describe/1/read HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {TOKEN}\r\nX-Rsi-Wire-Version: 2\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{{\"wire_version\":2}}", harness.address).as_bytes()).unwrap();
         peer.set_nonblocking(true).unwrap();
         let mut peer = TcpStream::from_std(peer).unwrap();
         let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);

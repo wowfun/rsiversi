@@ -25,6 +25,8 @@ pub enum RequestEncoding {
 pub enum OperationAccess {
     /// Any authenticated device or trusted local caller.
     Authenticated,
+    /// Authenticated callers with their original credential identity, including browser cookies.
+    Credential,
     /// Trusted local callers only; device credentials grant no authority.
     Local,
 }
@@ -32,7 +34,7 @@ pub enum OperationAccess {
 impl OperationAccess {
     /// Checks the trusted transport origin, never an untrusted request field.
     pub fn permits(self, origin: &CallOrigin) -> bool {
-        self == Self::Authenticated || matches!(origin, CallOrigin::Local)
+        self != Self::Local || matches!(origin, CallOrigin::Local)
     }
 }
 
@@ -282,6 +284,15 @@ pub trait ApiDispatch: fmt::Debug + Send + Sync + 'static {
         &self,
         operation: &crate::OperationCall,
         origin: CallOrigin,
+    ) -> Result<Box<dyn ApiInvocation>> {
+        self.admit_with_browser_owner(operation, origin, None)
+    }
+    /// Admits once, selecting the shared browser principal only for operations that use it.
+    fn admit_with_browser_owner(
+        &self,
+        operation: &crate::OperationCall,
+        origin: CallOrigin,
+        browser_owner: Option<crate::DeviceId>,
     ) -> Result<Box<dyn ApiInvocation>>;
     /// Borrows a lane pool without admitting or executing an operation.
     fn input_budget(&self, class: OperationClass) -> ByteBudget;

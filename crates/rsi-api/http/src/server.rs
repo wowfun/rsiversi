@@ -497,7 +497,7 @@ impl State {
         ) {
             return self.access.cookie(path, &parts.headers, &body);
         }
-        let mut caller = self.access.authenticate(&parts.headers)?;
+        let caller = self.access.authenticate(&parts.headers)?;
         let operation = operation(path)?;
         if operation != rsi_api_protocol::describe_operation().call()
             && one(&parts.headers, "x-rsi-host-epoch")? != Some(self.epoch.as_str())
@@ -510,13 +510,17 @@ impl State {
             return Err(ApiError::Unavailable);
         }
         let content_type = request_content_type(&parts.headers)?;
-        if !parts.headers.contains_key(http::header::AUTHORIZATION)
+        let browser_owner = if !parts.headers.contains_key(http::header::AUTHORIZATION)
             && operation != rsi_api_protocol::caller_operation().call()
-            && let rsi_api_protocol::CallOrigin::Device(device) = &mut caller.origin
+            && matches!(caller.origin, rsi_api_protocol::CallOrigin::Device(_))
         {
-            self.bind_browser(device).await?;
-        }
-        let invocation = self.dispatch.admit(&operation, caller.origin)?;
+            Some(self.browser_principal().await?)
+        } else {
+            None
+        };
+        let invocation =
+            self.dispatch
+                .admit_with_browser_owner(&operation, caller.origin, browser_owner)?;
         let spec = invocation.spec().clone();
         let mime = match spec.encoding {
             RequestEncoding::Json => "application/json",

@@ -31,10 +31,10 @@ try {
   assert(await page.evaluate(()=>window.fixtureEditor===document.querySelector('textarea[aria-label="Main message"]')));
   assert.equal(await input.inputValue(),'draft survives feature HMR 中文');assert.equal(await page.locator('.pane-session').textContent(),session);
   const request={headers:{Origin:origin,'x-rsi-csrf':'1','x-rsi-wire-version':'2'},data:{wire_version:2}};
-  const allowed=await page.request.post(origin+'/api/v2/rsi-api-protocol/4/connection/describe/1/read',request);assert.equal(allowed.status(),200);
-  const forbidden=await page.request.post(origin+'/api/v2/rsi-api-protocol/4/connection/describe/1/read',{...request,headers:{...request.headers,Origin:'http://foreign.invalid'}});
+  const allowed=await page.request.post(origin+'/api/v2/rsi-api-protocol/5/connection/describe/1/read',request);assert.equal(allowed.status(),200);
+  const forbidden=await page.request.post(origin+'/api/v2/rsi-api-protocol/5/connection/describe/1/read',{...request,headers:{...request.headers,Origin:'http://foreign.invalid'}});
   assert.equal(forbidden.status(),401);
-  const missingCsrf=await page.request.post(origin+'/api/v2/rsi-api-protocol/4/connection/describe/1/read',{headers:{Origin:origin,'x-rsi-wire-version':'2'},data:{wire_version:2}});assert.equal(missingCsrf.status(),401);
+  const missingCsrf=await page.request.post(origin+'/api/v2/rsi-api-protocol/5/connection/describe/1/read',{headers:{Origin:origin,'x-rsi-wire-version':'2'},data:{wire_version:2}});assert.equal(missingCsrf.status(),401);
   await page.screenshot({path:join(report,'feature-hmr.png'),fullPage:true});
   changedSource=false;await writeFile(source,original);await page.locator('[data-testid=workspace-heading]:not([data-hmr-revision])').waitFor();
   const navigation=page.waitForEvent('framenavigated',frame=>frame===page.mainFrame());

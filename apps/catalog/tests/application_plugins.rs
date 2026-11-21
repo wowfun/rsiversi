@@ -410,7 +410,7 @@ async fn http_description(address: std::net::SocketAddr, token: Option<&str>) ->
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let body = r#"{"wire_version":2,"expected_endpoint":null}"#;
         let auth = token.map_or_else(String::new, |token| format!("Authorization: Bearer {token}\r\n"));
-        let request = format!("POST /api/v2/rsi-api-protocol/4/connection/describe/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nX-Rsi-Wire-Version: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let request = format!("POST /api/v2/rsi-api-protocol/5/connection/describe/1/read HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nX-Rsi-Wire-Version: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
         stream.take(64 * 1024).read_to_end(&mut response).await.unwrap();

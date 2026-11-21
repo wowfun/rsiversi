@@ -92,17 +92,17 @@ pub(crate) async fn prepare(
         "sec-websocket-protocol",
         protocol.parse().map_err(|_| ApiError::Unauthorized)?,
     );
-    let mut caller = state
+    let caller = state
         .access
         .authenticate_socket(request.headers(), &preface.device)?;
-    if let rsi_api_protocol::CallOrigin::Device(device) = &mut caller.origin {
-        state.bind_browser(device).await?;
-    }
     if preface.epoch != state.epoch {
         return Err(ApiError::ShuttingDown);
     }
     let id = operation(request.uri().path())?;
-    let invocation = state.dispatch.admit(&id, caller.origin)?;
+    let owner = state.browser_principal().await?;
+    let invocation = state
+        .dispatch
+        .admit_with_browser_owner(&id, caller.origin, Some(owner))?;
     let spec = invocation.spec();
     if spec.class != OperationClass::Subscription
         || spec.effect != OperationEffect::Read

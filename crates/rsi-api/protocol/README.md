@@ -1,5 +1,10 @@
 # rsi-api-protocol
 
+An operation registered with credential access receives the authenticated device
+identity, including for browser cookies. Shared browser ownership applies to
+ordinary authenticated operations. Trusted local calls retain their local origin.
+The operation owner checks any further role or resource requirement.
+
 Single-key discovery (`connection.operation`, a required `OperationsQuery.key`)
 uses the Control lane with a 128 KiB response bound, so current owner policy remains
 available when business Data calls fill their lane. The full directory

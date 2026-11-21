@@ -143,18 +143,22 @@ async fn stalled_applications_release_unclassified_admission() {
 #[tokio::test]
 async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers_remain_distinct() {
     let h = Harness::start().await;
+    let principal = rsi_api_protocol::json_handler(|ctx, (): ()| async move {
+        let rsi_api_protocol::CallOrigin::Device(actor) = ctx.origin else {
+            unreachable!()
+        };
+        Ok(Ok::<_, ()>(actor.id))
+    });
     let registration = h
         .registry
         .register(
             spec("principal", OperationClass::Data, OperationEffect::Read),
-            rsi_api_protocol::json_handler(|ctx, (): ()| async move {
-                let rsi_api_protocol::CallOrigin::Device(actor) = ctx.origin else {
-                    unreachable!()
-                };
-                Ok(Ok::<_, ()>(actor.id))
-            }),
+            principal.clone(),
         )
         .unwrap();
+    let mut credential = spec("credential", OperationClass::Data, OperationEffect::Read);
+    credential.access = rsi_api_protocol::OperationAccess::Credential;
+    let credential_registration = h.registry.register(credential, principal).unwrap();
     let mut owners = vec![];
     for (credential, id) in [
         (TOKEN, DeviceId::from_bytes([1; 16])),
@@ -195,6 +199,11 @@ async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers
         )
         .unwrap();
         owners.push(actor);
+        let actual = cookie("test/credential").body("null").send().await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<DeviceId>(&actual.bytes().await.unwrap()).unwrap(),
+            id
+        );
         let reply = Harness::client()
             .post(format!("{}{}", h.origin, h.path("test/principal")))
             .bearer_auth(credential)
@@ -209,7 +218,7 @@ async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers
         assert_eq!(native, id);
     }
     assert_eq!(owners[0], owners[1]);
-    drop(registration);
+    drop((registration, credential_registration));
     h.close().await;
 }
 

@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use rsi_meta::LocalContract;
 use std::fmt;
 
+pub(crate) const LOCAL_WEB_SLOT: &str = "local-web";
+
 /// Active local Host metadata, without backend ownership or preset evaluation.
 #[derive(Debug)]
 pub struct RemoteServiceContract;

@@ -32,15 +32,18 @@ impl Dispatch {
     }
 }
 impl ApiDispatch for Dispatch {
-    fn admit(
+    fn admit_with_browser_owner(
         &self,
         operation: &OperationCall,
         origin: CallOrigin,
+        browser_owner: Option<rsi_api_protocol::DeviceId>,
     ) -> rsi_api_protocol::Result<Box<dyn ApiInvocation>> {
         if Self::owns(&operation.key.id) {
-            self.local.admit(operation, origin)
+            self.local
+                .admit_with_browser_owner(operation, origin, browser_owner)
         } else {
-            self.service.admit(operation, origin)
+            self.service
+                .admit_with_browser_owner(operation, origin, browser_owner)
         }
     }
     fn operation(

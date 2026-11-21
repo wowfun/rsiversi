@@ -28,22 +28,18 @@ pub(crate) struct Caller {
     pub revoked: CancellationToken,
 }
 impl crate::server::State {
-    pub(super) async fn bind_browser(&self, device: &mut AuthenticatedDevice) -> Result<()> {
+    pub(super) async fn browser_principal(&self) -> Result<DeviceId> {
         use sha2::{Digest, Sha256};
-        device.id = if let Some(owner) = &self.browser_owner {
-            owner.owner_id().await?
+        if let Some(owner) = &self.browser_owner {
+            owner.owner_id().await
         } else {
             let mut hash = Sha256::new();
             hash.update(b"rsi.http.browser-owner\0");
             hash.update(self.endpoint.as_str().as_bytes());
             let mut bytes = [0; 16];
             bytes.copy_from_slice(&hash.finalize()[..16]);
-            DeviceId::from_bytes(bytes)
-        };
-        if device.revoked.is_cancelled() {
-            return Err(ApiError::Unauthorized);
+            Ok(DeviceId::from_bytes(bytes))
         }
-        Ok(())
     }
 }
 impl Access {

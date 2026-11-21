@@ -258,13 +258,14 @@ impl Service {
     }
 }
 impl ApiDispatch for Service {
-    fn admit(
+    fn admit_with_browser_owner(
         &self,
         operation: &OperationCall,
         origin: CallOrigin,
+        browser_owner: Option<rsi_api_protocol::DeviceId>,
     ) -> rsi_api_protocol::Result<Box<dyn ApiInvocation>> {
         self.current::<rsi_api_protocol::ApiDispatchContract>()?
-            .admit(operation, origin)
+            .admit_with_browser_owner(operation, origin, browser_owner)
     }
     fn operations(&self) -> rsi_api_protocol::Result<Vec<OperationSpec>> {
         self.current::<rsi_api_protocol::ApiDispatchContract>()?
@@ -411,14 +412,15 @@ async fn authorize_browser<F: std::future::Future<Output = rsi_api_protocol::Res
     administration: &dyn DeviceAdministration,
     grant: impl FnOnce(rsi_api_protocol::DeviceId) -> F,
 ) -> rsi_api_protocol::Result<RegisteredDevice> {
-    if let Some(previous) = administration.managed_device("local-web")? {
+    let slot = crate::application_services::LOCAL_WEB_SLOT;
+    if let Some(previous) = administration.managed_device(slot)? {
         grant(previous.id.clone()).await?;
         return administration
-            .rotate_managed_if("local-web", "Local Web browser", Some(&previous.id))
+            .rotate_managed_if(slot, "Local Web browser", Some(&previous.id))
             .await;
     }
     let device = administration
-        .rotate_managed_if("local-web", "Local Web browser", None)
+        .rotate_managed_if(slot, "Local Web browser", None)
         .await?;
     if let Err(error) = grant(device.record.id.clone()).await {
         if administration.revoke_credential(&device).await.is_err() {
@@ -442,7 +444,10 @@ impl rsi_api_http::BrowserOwner for BrowserOwner {
     async fn owner_id(&self) -> rsi_api_protocol::Result<DeviceId> {
         self.id
             .get_or_try_init(|| async {
-                if let Some(owner) = self.devices.managed_device("local-web")? {
+                if let Some(owner) = self
+                    .devices
+                    .managed_device(crate::application_services::LOCAL_WEB_SLOT)?
+                {
                     return Ok(owner.id);
                 }
                 Ok(self.launcher.launch().await?.record.id)
