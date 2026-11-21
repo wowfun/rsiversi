@@ -302,7 +302,9 @@ contents keep their plain-text presentations.
 Local Markdown image destinations become file-path events. After settlement
 the renderer reads through the attached Session Files service, including local
 absolute paths and parent paths. A read does not change the file picker's selection.
-The document constructs only the closed element set with text nodes, and links
+Links to these same image paths carry a distinct file-link event so the
+document can open the file from its label after settlement.
+The document constructs only the closed element set with text nodes, and HTTP(S) links
 open with no opener or referrer.
 Parsing remains in Rust for Web Worker and Desktop. The document never reparses
 transcript source with a JavaScript Markdown parser. Code presentation may add

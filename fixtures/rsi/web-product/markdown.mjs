@@ -33,6 +33,8 @@ const linkedImage=[start('paragraph'),start('link',{href:'https://media.example.
   start('image',{src:'https://media.example.test/diagram.png'}),text('Diagram'),end,end,end];
 const localImage=[start('paragraph'),start('file_image',{path:'../diagram.svg'}),text('Local diagram'),end,end];
 const brokenImage=[start('paragraph'),start('file_image',{path:'../unreadable.png'}),end,end];
+const fileLink=[start('paragraph'),start('file_image_link',{path:'../diagram.svg'}),text('View drawing'),end,end];
+window.addEventListener('rsi:file-image',e=>window.actions.push(e.detail));
 window.reads=[];window.revoked=[];
 const revoke=URL.revokeObjectURL.bind(URL);
 URL.revokeObjectURL=url=>{window.revoked.push(url);revoke(url)};
@@ -52,9 +54,9 @@ window.mountImageDrop=()=>{
     upload:async files=>{for(const file of files)window.dropped.push({name:file.name,type:file.type,text:await file.text()});}},active=>window.dropOverlay.push(active));
 };
 const root=createRoot(article);
-window.renderLocal=(streaming,generation,broken=false)=>{const view={session:'document',generation};
+window.renderLocal=(streaming,generation,content='image')=>{const view={session:'document',generation};
   flushSync(()=>root.render(React.createElement(DocumentSessionScope,{view,owner:{index:'main',staged:{data:view}}},
-    React.createElement(Markdown,{events:broken?brokenImage:localImage,streaming}))))};
+    React.createElement(Markdown,{events:content==='broken'?brokenImage:content==='link'?fileLink:localImage,streaming}))))};
 window.render=(streaming=false,math=false)=>flushSync(()=>root.render(React.createElement(React.Fragment,null,
   React.createElement(IconSprite),React.createElement(Markdown,{events:math==='image'?linkedImage:math==='tables'?tables:math?formulas:nodes,streaming}))));
 window.render();
@@ -184,7 +186,7 @@ try{
       await page.evaluate(()=>window.render());
       assert.deepEqual(await page.evaluate(()=>window.reads),['1','2'].map(generation=>['transcript_image',{pane:'main',generation,path:'../diagram.svg'}]));
       assert.equal(await page.evaluate(()=>new Set(window.revoked).size),2);
-      await page.evaluate(bytes=>{window.broken=bytes;window.renderLocal(false,'3',true);},Array.from(unreadablePng()));
+      await page.evaluate(bytes=>{window.broken=bytes;window.renderLocal(false,'3','broken');},Array.from(unreadablePng()));
       const failure=page.getByText(/^Image preview unavailable · /);
       await failure.waitFor();
       const fallback=await failure.innerText();
@@ -193,9 +195,28 @@ try{
       await writeFile(join(report,name+'-decode-failure.json'),JSON.stringify({fallback,releasedAfterFailure}));
       assert.equal(fallback,'Image preview unavailable · ../unreadable.png');
       assert.equal(releasedAfterFailure,3,'failed local image is released while its message stays open');
+      const localImageReads=await page.evaluate(()=>window.reads.length);
+      await page.evaluate(()=>window.renderLocal(true,'4','link'));
+      assert.equal(await page.locator('article').innerText(),'View drawing');
+      assert.equal(await page.locator('article button').count(),0);
+      await page.evaluate(()=>window.renderLocal(false,'4','link'));
+      const fileLink=page.getByRole('button',{name:'View drawing',exact:true});
+      const preview=page.getByRole('img',{name:'../diagram.svg',exact:true});
+      assert.equal(await page.evaluate(()=>window.reads.length),localImageReads);
+      await fileLink.hover();await page.clock.runFor(510);
+      await preview.waitFor();await preview.evaluate(el=>el.decode());
+      await preview.hover();await page.clock.runFor(220);assert(await preview.isVisible());
+      await page.keyboard.press('Escape');await preview.waitFor({state:'detached'});
+      await fileLink.focus();await fileLink.press('Tab');await page.keyboard.press('Shift+Tab');
+      await preview.waitFor();await preview.evaluate(el=>el.decode());
+      await page.screenshot({path:join(report,name+'-image-link.png')});
+      await fileLink.press('Enter');
+      assert.deepEqual(await page.evaluate(()=>window.actions),[{pane:'main',generation:'4',path:'../diagram.svg'}]);
+      await preview.waitFor({state:'detached'});
       assert.deepEqual(errors,[]);
       results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,
-        localImage:{readCount:await page.evaluate(()=>window.reads.length),originalName:dropped.name,originalType:dropped.type,
+        imageLink:{hover:true,keyboard:true,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
+        localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});
     }finally{await browser.close()}
   }

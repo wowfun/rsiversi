@@ -126,6 +126,13 @@ and outside-workspace images. The document validates local image bytes before
 decoding and releases the preview Blob URL with the displayed image.
 If the browser cannot decode a local image, the transcript immediately releases
 its original file and preview URL and shows the author's alt text or file path.
+In a settled reply, a Markdown link to a local image opens that image in a
+Session resource tab. A text link previews the file on mouse hover or keyboard
+focus. Escape dismisses the preview. An image inside a link has a single
+navigation target. The dock saves the file path and reads the current image
+through the Session grant when the tab becomes visible.
+The tab identifies the file, fits wider images to the available width, and
+offers an explicit reload to read changed bytes from the execution host.
 Dragging a local transcript thumbnail into a composer copies the original file
 into that composer's normal image import. The gesture uses the bytes already
 read for this occurrence and leaves the editor text and preview dialog alone.

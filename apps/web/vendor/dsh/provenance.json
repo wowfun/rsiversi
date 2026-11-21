@@ -621,6 +621,34 @@
       "source_sha256": "036094c7bcf3bff0008c6487e01cc8a65948392edee16b552013b2f5ceda3ee3",
       "adapted_sha256": "59262d42e121ad3d5d55ff50eb9fd2f9570a9d5e70270da56ed1c43d7261d0fa",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/InlineHoverCard.tsx",
+      "source": "packages/client/ui-primitives/src/HoverCard.tsx",
+      "source_sha256": "9d7116e4ee0eb31324087e0874696eca81ecc0e5699d732ecb8e7abf0c32cd65",
+      "adapted_sha256": "7b5b05a79a595b0953b4a58b16139cfb94c1f627b28d3381203cf29c964b0a7e",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/InlineHoverCard.module.css",
+      "source": "packages/client/ui-primitives/src/HoverCard.module.css",
+      "source_sha256": "4b61d38dc330ffcf7005a66d2ac5610db71b9eb29e7aac455d5f37905c764f67",
+      "adapted_sha256": "105b8294240c52c1f1db37b93dc3a3f6b82cdb9c2a84955ad1681ca8c52f4db9",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/PhotoGlyph.tsx",
+      "source": "packages/client/ui-primitives/src/LinkIcon.tsx",
+      "source_sha256": "fc103908514e3403055dc676bedead917cf87881aad4e0617223199d757e32cb",
+      "adapted_sha256": "a00c7006390e2ccdc7907e137ead90f2778421c695c57a4fa4deeb26bc56d640",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/overlay-top-margin.ts",
+      "source": "packages/client/ui-primitives/src/overlay-top-margin.ts",
+      "source_sha256": "94c769ceb7337056030da13a24a5031c2abee62f7ebde993924e5a1181e67599",
+      "adapted_sha256": "94c769ceb7337056030da13a24a5031c2abee62f7ebde993924e5a1181e67599",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]
 }

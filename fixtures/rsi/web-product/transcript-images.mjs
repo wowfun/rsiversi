@@ -19,6 +19,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     async configure({config,workspace}){
       await writeFile(join(workspace,'图 #1%.png'),png(84,52,[64,128,72,255]));
       await writeFile(join(dirname(workspace),'outside.png'),png(210,90,[175,88,46,255]));
+      await writeFile(join(dirname(workspace),'linked.png'),png(210,90,[52,132,165,255]));
       await writeFile(join(workspace,'drawing.svg'),'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><circle cx="40" cy="24" r="21" fill="teal"/></svg>');
       await writeFile(join(workspace,'ordinary.png'),'An ordinary text document');
       await writeFile(join(dirname(workspace),'unreadable.png'),unreadablePng());
@@ -60,8 +61,10 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       '![Wrong format](ordinary.png)',
       '![Too big](large.png)',
       '![](../unreadable.png)',
+      '[Open drawing](../linked.png)',
+      '[![Thumbnail](drawing.svg)](../linked.png)',
     ].join('\n\n');
-    await page.getByRole('textbox',{name:'Main message'}).fill((live?'Reproduce the following Markdown verbatim. Output only the eight images, with the exact destinations and labels, including the final empty label. No tools.':'Show these eight images.')+'\n\n'+markdown);
+    await page.getByRole('textbox',{name:'Main message'}).fill((live?'Reproduce the following Markdown verbatim, including the empty alt text and both final links. Output only the Markdown. No tools.':'Show these images and links.')+'\n\n'+markdown);
     await page.getByTestId('composer-send').click();
     const session=()=>page.locator('.pane.selected').getAttribute('data-session-id');
     async function inspect(stage,width){
@@ -94,7 +97,34 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
       await dialog.getByRole('button',{name:'Close image preview'}).press('Escape');
       assert(await trigger.evaluate(el=>el===document.activeElement));
       await page.screenshot({path:join(dir,stage+'.png')});
-      result.observations.push({stage,sizes,unreadable:await unreadable.innerText()});
+      const link=article.getByRole('button',{name:'Open drawing',exact:true});
+      const wrapped=article.getByRole('button',{name:'Thumbnail',exact:true});
+      assert.equal(await wrapped.getByRole('button').count(),0);
+      await link.scrollIntoViewIfNeeded();
+      await link.hover();
+      const hovered=page.getByRole('img',{name:'../linked.png',exact:true});
+      await hovered.waitFor();
+      assert.deepEqual(await hovered.evaluate(async el=>{await el.decode();return [el.naturalWidth,el.naturalHeight];}),[width,90]);
+      await page.screenshot({path:join(dir,stage+'-link-hover.png')});
+      await page.keyboard.press('Escape');await hovered.waitFor({state:'hidden'});
+      await link.focus();await link.press('Tab');await page.keyboard.press('Shift+Tab');await hovered.waitFor();
+      await page.keyboard.press('Escape');await hovered.waitFor({state:'hidden'});
+      await wrapped.click();
+      const dock=page.getByRole('region',{name:'Resource workbench'}).filter({visible:true});
+      const displayed=dock.locator('[data-image-preview] img');
+      await displayed.waitFor();
+      assert.deepEqual(await displayed.evaluate(async el=>{await el.decode();return [el.naturalWidth,el.naturalHeight];}),[width,90]);
+      const imageBounds=await displayed.boundingBox();
+      assert.deepEqual([imageBounds.width,imageBounds.height],[width,90]);
+      await page.screenshot({path:join(dir,stage+'-link-open.png')});
+      await writeFile(join(dirname(service.workspace),'linked.png'),png(width+8,90,[68,126,118,255]));
+      await dock.getByRole('button',{name:'Reload file',exact:true}).click();
+      await page.waitForFunction(w=>document.querySelector('[data-image-preview] img')?.naturalWidth===w,width+8);
+      await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      await link.click();await displayed.waitFor();
+      assert.equal(await dock.getByRole('tab').filter({hasText:'linked.png'}).count(),1);
+      await dock.getByRole('button',{name:'Hide resources',exact:true}).click();
+      result.observations.push({stage,sizes,unreadable:await unreadable.innerText(),imageLink:{hover:true,keyboard:true,dock:[imageBounds.width,imageBounds.height],reloadedWidth:width+8,tabs:1}});
     }
     await inspect('author',210);
     if(process.env.RSI_CHECK_IMAGE_DRAG==='1'){
@@ -148,6 +178,7 @@ for(const [name,engine] of Object.entries(live?{chromium}:{chromium,firefox})){
     result.readerConfigurationAccess=devices.includes(second.id);
     assert.equal(result.readerConfigurationAccess,false);
     await writeFile(join(dirname(service.workspace),'outside.png'),png(248,90,[61,106,170,255]));
+    await writeFile(join(dirname(service.workspace),'linked.png'),png(248,90,[52,132,165,255]));
     await connect(second,390);
     await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();
     const row=page.locator('[data-testid="conversation-row"][data-session-id="'+id+'"]').getByTestId('conversation-open');

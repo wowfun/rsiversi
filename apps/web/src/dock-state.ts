@@ -34,6 +34,7 @@ export function coordinate(value:unknown):Coordinate {
   const valid=v.action==='terminal' ? keys(v,'action,terminal')&&text(v.terminal) :
     v.action==='resources' ? keys(v,'action') :
     v.action==='schedule_task' ? keys(v,'action,task')&&text(v.task) :
+    v.action==='file_image' ? keys(v,'action,path')&&text(v.path,16*1024) :
     ['surface','application_surface','remote_surface'].includes(v.action) ? keys(v,'action,bundle,name')&&text(v.bundle,128)&&text(v.name,128) :
     ['ui_block','inspect_block'].includes(v.action) ? keys(v,'action,key')&&text(v.key,512) :
     v.action==='inspect_image' ? keys(v,'action,media')&&plain(v.media) :

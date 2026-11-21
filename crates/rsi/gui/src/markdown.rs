@@ -38,6 +38,7 @@ pub(crate) enum Element {
     Link { href: String },
     Image { src: String },
     FileImage { path: String },
+    FileImageLink { path: String },
     Span,
 }
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -96,6 +97,15 @@ fn file_image(value: &str) -> Option<String> {
         return None;
     }
     Some(path.into_owned())
+}
+
+fn image_link(value: &str) -> Option<String> {
+    let path = file_image(value)?;
+    let (_, extension) = path.rsplit_once('.')?;
+    ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"]
+        .iter()
+        .any(|suffix| extension.eq_ignore_ascii_case(suffix))
+        .then_some(path)
 }
 
 fn leaf(event: Event<'_>) -> Option<Node> {
@@ -189,9 +199,12 @@ pub(crate) fn parse(source: &str) -> Option<Vec<Node>> {
                     Tag::Emphasis => Element::Emphasis,
                     Tag::Strong => Element::Strong,
                     Tag::Strikethrough => Element::Strike,
-                    Tag::Link { dest_url, .. } => {
-                        link(&dest_url).map_or(Element::Span, |href| Element::Link { href })
-                    }
+                    Tag::Link { dest_url, .. } => link(&dest_url)
+                        .map(|href| Element::Link { href })
+                        .or_else(|| {
+                            image_link(&dest_url).map(|path| Element::FileImageLink { path })
+                        })
+                        .unwrap_or(Element::Span),
                     _ => return None,
                 };
                 Node::Start { element }
@@ -236,7 +249,8 @@ fn retained_bytes(nodes: &Vec<Node>) -> usize {
                     element:
                         Element::Link { href }
                         | Element::Image { src: href }
-                        | Element::FileImage { path: href },
+                        | Element::FileImage { path: href }
+                        | Element::FileImageLink { path: href },
                 } => href.capacity(),
                 Node::Start {
                     element:
@@ -391,6 +405,8 @@ mod tests {
         ] {
             let nodes = parse(&format!("![caption]({src})")).unwrap();
             assert!(nodes.iter().any(|node|matches!(node,Node::Start{element:Element::FileImage{path}} if path==expected)));
+            let nodes = parse(&format!("[view file]({src})")).unwrap();
+            assert!(nodes.iter().any(|node|matches!(node,Node::Start{element:Element::FileImageLink{path}} if path==expected)));
         }
         for invalid in [
             "https://example.com/a",
@@ -402,6 +418,15 @@ mod tests {
             "#fragment",
         ] {
             assert!(file_image(invalid).is_none(), "{invalid}");
+        }
+        assert_eq!(image_link("./A%2EPnG#part").as_deref(), Some("./A.PnG"));
+        for value in [
+            "../notes.txt",
+            "./folder.png/notes",
+            "./notes",
+            "//server/image.png",
+        ] {
+            assert!(image_link(value).is_none(), "{value}");
         }
     }
     #[test]

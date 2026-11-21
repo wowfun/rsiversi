@@ -1,0 +1,13 @@
+.media {
+  position: fixed;
+  z-index: 100;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 16px));
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--dsw-radius-lg);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-specific-menu);
+  backdrop-filter: var(--dsw-menu-backdrop-filter);
+  box-shadow: var(--dsw-elevation-panel);
+}

@@ -14,6 +14,7 @@ import { highlights } from "../runtime/highlight-queue.js";
 import { CopyButton } from "./copy-button.tsx";
 import { MarkdownImage } from "./markdown-image.tsx";
 import { TranscriptFileImage } from "./transcript-file-image.tsx";
+import { ImageFileLink } from "./image-file-link.tsx";
 import {
   IconNowrapFillRegular,
   IconWrapFillRegular,
@@ -37,7 +38,7 @@ type Element =
   | { kind: "list"; start: number | null }
   | { kind: "link"; href: string }
   | { kind: "image"; src: string }
-  | { kind: "file_image"; path: string }
+  | { kind: "file_image" | "file_image_link"; path: string }
   | {
       kind: "table_cell";
       header: boolean;
@@ -193,7 +194,7 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
   return nodes.map((node, key) => {
     if (typeof node === "string") return node;
     const element = node.element;
-    const children = () => render(node.children, streaming, inQuote || element.kind === "quote", inLink || element.kind === "link");
+    const children = () => render(node.children, streaming, inQuote || element.kind === "quote", inLink || element.kind === "link" || element.kind === "file_image_link");
     switch (element.kind) {
       case "pre":
         if (element.language === "math" && !streaming)
@@ -224,6 +225,10 @@ function render(nodes: Tree[], streaming: boolean, inQuote = false, inLink = fal
         return <MarkdownImage key={`${key}:${element.src}`} src={element.src} alt={textOf(node.children)} linked={inLink}/>;
       case "file_image":
         return streaming ? textOf(node.children) : <TranscriptFileImage key={`${key}:${element.path}`} path={element.path} alt={textOf(node.children)} linked={inLink}/>;
+      case "file_image_link": {
+        const imagesOnly = node.children.length > 0 && node.children.every(child => typeof child !== "string" && (child.element.kind === "image" || child.element.kind === "file_image"));
+        return streaming ? children() : <ImageFileLink key={`${key}:${element.path}`} path={element.path} imagesOnly={imagesOnly}>{children()}</ImageFileLink>;
+      }
       case "link":
         return (
           <a
