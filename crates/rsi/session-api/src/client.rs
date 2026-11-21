@@ -14,7 +14,10 @@ use rsi_session_protocol::{
     SubmitInput, TurnReceipt,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, RwLock, RwLockReadGuard},
+};
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -80,11 +83,11 @@ impl SessionClient {
         Ok(Arc::new(Handle {
             state: self.state.clone(),
             session_id: header.session_id().clone(),
-            binding: Arc::new(std::sync::RwLock::new(Binding {
-                header,
+            binding: RwLock::new(Binding {
+                header: Arc::new(header),
                 target,
                 draft_revision,
-            })),
+            }),
         }))
     }
 }
@@ -459,33 +462,30 @@ impl SessionService for SessionClient {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct Handle {
     pub state: Arc<State>,
     pub session_id: SessionId,
-    binding: Arc<std::sync::RwLock<Binding>>,
+    binding: RwLock<Binding>,
 }
 #[derive(Clone, Debug)]
 struct Binding {
-    header: SessionHeader,
+    header: Arc<SessionHeader>,
     target: Target,
     draft_revision: Option<u64>,
 }
 impl Handle {
-    fn binding(&self) -> Binding {
-        self.binding
-            .read()
-            .expect("Session binding poisoned")
-            .clone()
+    fn binding(&self) -> RwLockReadGuard<'_, Binding> {
+        self.binding.read().expect("Session binding poisoned")
     }
     pub(super) fn target(&self) -> Target {
-        self.binding().target
+        self.binding().target.clone()
     }
     pub(super) fn frozen(&self) -> Self {
         Self {
             state: self.state.clone(),
             session_id: self.session_id.clone(),
-            binding: Arc::new(std::sync::RwLock::new(self.binding())),
+            binding: RwLock::new(self.binding().clone()),
         }
     }
     pub async fn call<I: Serialize + Sync, O: DeserializeOwned>(
@@ -493,18 +493,12 @@ impl Handle {
         operation: Operation,
         input: &I,
     ) -> rsi_session_protocol::Result<O> {
-        let target = self.target();
-        let reply: HandleReply<O> = self
-            .state
-            .call(
-                operation,
-                &HandleRequest {
-                    target: target.clone(),
-                    input,
-                },
-            )
-            .await?;
-        if reply.target != target {
+        let request = HandleRequest {
+            target: self.target(),
+            input,
+        };
+        let reply: HandleReply<O> = self.state.call(operation, &request).await?;
+        if reply.target != request.target {
             return Err(malformed(operation));
         }
         Ok(reply.body)
@@ -817,7 +811,7 @@ impl SessionHandle for Handle {
         self.checked_command_status(request_id).await
     }
     async fn header(&self) -> rsi_session_protocol::Result<SessionHeader> {
-        Ok(self.binding().header)
+        Ok(self.binding().header.as_ref().clone())
     }
     async fn read_message(
         &self,
@@ -1146,7 +1140,7 @@ impl SessionHandle for Handle {
         inspection
             .validate()
             .map_err(|_| malformed(Operation::Inspect))?;
-        if inspection.header != frozen.binding().header {
+        if inspection.header != *frozen.binding().header {
             return Err(malformed(Operation::Inspect));
         }
         Ok(inspection)

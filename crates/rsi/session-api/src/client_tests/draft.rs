@@ -223,9 +223,10 @@ fn envelope_at(header: &SessionHeader, body: &Value) -> Value {
 #[tokio::test]
 async fn selection_updates_one_atomic_binding_and_already_open_streams_keep_the_old_binding() {
     let (remote, _, handle) = fixture().await;
-    remote.stream(&[envelope(json!({"approvals":[],"questions":[]}))]);
-    let mut stream = handle.observe_interactions().await.unwrap();
     let selected = view("other", 4);
+    let body = json!({"approvals":[],"questions":[]});
+    remote.stream(&[envelope(body.clone()), envelope_at(&selected.header, &body)]);
+    let mut stream = handle.observe_interactions().await.unwrap();
     remote.reply(&envelope(serde_json::to_value(&selected).unwrap()));
     assert_eq!(
         handle.select_preset(select("other", 3)).await.unwrap(),
@@ -233,6 +234,7 @@ async fn selection_updates_one_atomic_binding_and_already_open_streams_keep_the_
     );
     assert_eq!(handle.header().await.unwrap(), selected.header);
     assert!(stream.next().await.unwrap().unwrap().approvals().is_empty());
+    assert!(stream.next().await.unwrap().is_err());
     remote.reply(&envelope_at(
         &selected.header,
         &serde_json::to_value(&selected).unwrap(),

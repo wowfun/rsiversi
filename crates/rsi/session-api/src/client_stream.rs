@@ -1,6 +1,6 @@
 use crate::{
     client::{self, Handle},
-    wire::{self, Failure, HandleReply, HandleRequest, Operation},
+    wire::{self, Failure, HandleReply, HandleRequest, Operation, Target},
 };
 use futures_util::StreamExt as _;
 use rsi_agent_session_protocol::{AgentControlRecord, SessionFact};
@@ -15,22 +15,20 @@ async fn open<I: Serialize + Sync>(
     handle: &Handle,
     operation: Operation,
     input: I,
-) -> rsi_session_protocol::Result<ApiStream> {
+) -> rsi_session_protocol::Result<(Target, ApiStream)> {
     let spec = operation.spec();
+    let request = HandleRequest {
+        target: handle.target(),
+        input,
+    };
     let input = handle
         .state
         .api
         .input_budget(spec.class)
-        .encode(
-            &HandleRequest {
-                target: handle.target(),
-                input,
-            },
-            spec.maximum_request_bytes,
-        )
+        .encode(&request, spec.maximum_request_bytes)
         .map_err(SessionError::Api)?;
     match handle.state.api.call(&spec, input).await {
-        Ok(ApiOutput::Stream(stream)) => Ok(stream),
+        Ok(ApiOutput::Stream(stream)) => Ok((request.target, stream)),
         Ok(ApiOutput::Reply(_)) => Err(client::malformed(operation)),
         Err(error) => Err(stream_error(operation, error)),
     }
@@ -45,7 +43,7 @@ fn stream_error(operation: Operation, error: ApiError) -> SessionError {
     }
 }
 fn decode<T: DeserializeOwned>(
-    handle: &Handle,
+    target: &Target,
     operation: Operation,
     message: &ApiMessage,
 ) -> rsi_session_protocol::Result<T> {
@@ -54,7 +52,7 @@ fn decode<T: DeserializeOwned>(
     }
     let reply: HandleReply<T> = serde_json::from_slice(message.json.as_bytes())
         .map_err(|_| client::malformed(operation))?;
-    if reply.target != handle.target() {
+    if &reply.target != target {
         return Err(client::malformed(operation));
     }
     Ok(reply.body)
@@ -121,25 +119,24 @@ pub(super) async fn terminal_output(
     request: &rsi_session_protocol::terminal::Request,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::terminal::Reply> {
     let operation = Operation::TerminalOutput;
-    let mut source = open(handle, operation, request).await?;
+    let (target, mut source) = open(handle, operation, request).await?;
     let message = source
         .next()
         .await
         .ok_or_else(|| client::malformed(operation))?
         .map_err(|error| stream_error(operation, error))?;
-    decode(handle, operation, &message)
+    decode(&target, operation, &message)
 }
 
 pub(super) async fn goal(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {
-    let handle = handle.frozen();
     let operation = Operation::GoalObserve;
-    let mut source = open(&handle, operation, ()).await?;
+    let (target, mut source) = open(handle, operation, ()).await?;
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
-            let state: rsi_goal::GoalLiveState = decode(&handle, operation, &message)?;
+            let state: rsi_goal::GoalLiveState = decode(&target, operation, &message)?;
             state.validate().map_err(|_| client::malformed(operation))?;
             drop(message);
             yield state;
@@ -150,14 +147,13 @@ pub(super) async fn goal(
 pub(super) async fn draft(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::DraftRevisionStream> {
-    let handle = handle.frozen();
     let operation = Operation::DraftObserve;
-    let mut source = open(&handle, operation, ()).await?;
+    let (target, mut source) = open(handle, operation, ()).await?;
     Ok(Box::pin(async_stream::try_stream! {
         let mut previous = None;
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
-            let revision: Option<u64> = decode(&handle, operation, &message)?;
+            let revision: Option<u64> = decode(&target, operation, &message)?;
             if let Some(next) = revision {
                 if previous.is_some_and(|old| next <= old) { Err(client::malformed(operation))?; }
                 previous = Some(next);
@@ -173,17 +169,17 @@ pub(super) async fn draft(
 pub(super) async fn projections(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionStream> {
-    let handle = handle.frozen();
     let operation = Operation::Projections;
-    let mut source = open(&handle, operation, ()).await?;
+    let (target, mut source) = open(handle, operation, ()).await?;
+    let state = handle.state.clone();
     Ok(Box::pin(async_stream::try_stream! {
         let mut cursor = None;
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
-            let reservation = handle.state.projections.reserve_decode()?;
-            let snapshot: rsi_agent_session_protocol::SessionProjectionSnapshot = decode(&handle, operation, &message)?;
-            if snapshot.session_id() != &handle.target().session_id
-                || snapshot.header_sha256() != handle.target().header_key
+            let reservation = state.projections.reserve_decode()?;
+            let snapshot: rsi_agent_session_protocol::SessionProjectionSnapshot = decode(&target, operation, &message)?;
+            if snapshot.session_id() != &target.session_id
+                || snapshot.header_sha256() != target.header_key
                 || cursor.is_some_and(|previous| !snapshot.cursor().can_follow(previous)) {
                 Err(client::malformed(operation))?;
             }
@@ -198,23 +194,23 @@ pub(super) async fn observe(
     handle: &Handle,
     cursor: ObservationCursor,
 ) -> rsi_session_protocol::Result<SessionObservationStream> {
-    let handle = handle.frozen();
-    let mut source = open(&handle, Operation::Observe, cursor).await?;
+    let (target, mut source) = open(handle, Operation::Observe, cursor).await?;
+    let state = handle.state.clone();
     let mut observed = cursor;
     let mut durable = cursor;
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(Operation::Observe, error))?;
-            let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&handle, Operation::Observe, &message)?;
+            let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&target, Operation::Observe, &message)?;
             let retained = match update {
                 wire::Observation::Control { record, fact_cursor, durable_control_seq } => {
                     advance(&mut observed.control_seq, &mut durable.control_seq, record.seq(), durable_control_seq)?;
-                    let record = handle.state.observations.retain_controls(vec![Arc::new(record)]).map_err(|error| retention_error(&error))?.pop().expect("one admitted control");
+                    let record = state.observations.retain_controls(vec![Arc::new(record)]).map_err(|error| retention_error(&error))?.pop().expect("one admitted control");
                     SessionObservation::Control { record, fact_cursor, durable_control_seq }
                 }
                 wire::Observation::Fact { fact, durable_fact_seq } => {
                     advance(&mut observed.fact_seq, &mut durable.fact_seq, fact.seq(), durable_fact_seq)?;
-                    let fact = handle.state.observations.retain_fact(Arc::new(fact)).map_err(|error| retention_error(&error))?;
+                    let fact = state.observations.retain_fact(Arc::new(fact)).map_err(|error| retention_error(&error))?;
                     SessionObservation::Fact { fact, durable_fact_seq }
                 }
             };
@@ -247,12 +243,12 @@ pub(super) async fn interactions(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<InteractionStream> {
     let handle = handle.frozen();
-    let mut source = open(&handle, Operation::Interactions, ()).await?;
+    let (target, mut source) = open(&handle, Operation::Interactions, ()).await?;
     let mut verified = BTreeSet::from([handle.session_id.to_string()]);
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(Operation::Interactions, error))?;
-            let body: Interactions = decode(&handle, Operation::Interactions, &message)?;
+            let body: Interactions = decode(&target, Operation::Interactions, &message)?;
             client::validate_questions(&body.questions, &handle.session_id)?;
             let retained = handle.state.interactions.retain(body.approvals, body.questions)?;
             drop(message);
@@ -268,15 +264,13 @@ pub(super) async fn export(
 ) -> rsi_session_protocol::Result<rsi_session_protocol::export::ExportStream> {
     use rsi_session_protocol::export::{ExportEvent, ExportVerifier};
     options.validate()?;
-    let handle = handle.frozen();
-    let target = handle.target();
     let operation = Operation::Export;
-    let mut source = open(&handle, operation, &options).await?;
+    let (target, mut source) = open(handle, operation, &options).await?;
     Ok(Box::pin(async_stream::try_stream! {
         let mut verifier = ExportVerifier::default();
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
-            let event: ExportEvent = decode(&handle, operation, &message)?;
+            let event: ExportEvent = decode(&target, operation, &message)?;
             verifier.accept(&event, Some((&target.session_id, &target.header_key, &options)))?;
             drop(message);
             yield event;
@@ -288,9 +282,9 @@ pub(super) async fn export(
 pub(super) async fn models(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {
-    let handle = handle.frozen();
     let operation = Operation::ModelObserve;
-    let mut source = open(&handle, operation, ()).await?;
+    let (target, mut source) = open(handle, operation, ()).await?;
+    let state = handle.state.clone();
     Ok(Box::pin(async_stream::try_stream! {
         let mut decoder = rsi_agent_turn_protocol::ModelLiveDecoder::default();
         let mut reservation = None;
@@ -299,11 +293,11 @@ pub(super) async fn models(
         let mut retained_prefix = None;
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
-            let page: rsi_agent_turn_protocol::ModelLivePage = decode(&handle, operation, &message)?;
-            if page.session_id != handle.target().session_id { Err(client::malformed(operation))?; }
+            let page: rsi_agent_turn_protocol::ModelLivePage = decode(&target, operation, &message)?;
+            if page.session_id != target.session_id { Err(client::malformed(operation))?; }
             if page.index == 0 {
                 if reservation.is_some() { Err(client::malformed(operation))?; }
-                reservation = Some(handle.state.observations.reserve_model_decode(page.encoded_bytes).map_err(|error| retention_error(&error))?);
+                reservation = Some(state.observations.reserve_model_decode(page.encoded_bytes).map_err(|error| retention_error(&error))?);
             }
             if let Some(snapshot) = decoder.push(page).map_err(|_| client::malformed(operation))? {
                 if last.as_ref().is_some_and(|(effect, revision)| effect == &snapshot.effect_id && *revision >= snapshot.revision) {

@@ -151,8 +151,9 @@ the live draft lease remains the domain's idempotency boundary.
 Transport EndpointId/HostEpoch checks independently fence the deployment generation.
 Preset selection validates the returned Header as exactly the previous Header with
 the selected preset, validates the successor draft revision, and replaces that
-handle's binding atomically. Already admitted calls and streams retain their
-captured binding. A stale selection response cannot overwrite a newer binding;
+handle's binding atomically. Each stream checks its frames against the target
+sent at admission. Frame validation needs only the Session identity and Header
+fingerprint. A stale selection response cannot overwrite a newer binding;
 another handle refreshes through attach after a remote switch. Creation replies
 echo the original creation input alongside the current draft snapshot, so a retry
 after selection can return the actual draft without changing its creation identity.

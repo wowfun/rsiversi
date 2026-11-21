@@ -1,4 +1,4 @@
-use super::{Binding, Handle, Operation, SessionError, malformed};
+use super::{Handle, Operation, SessionError, malformed};
 use rsi_agent_session_protocol::CommandRevision;
 use rsi_session_protocol::{Result, SelectDraftPreset, SessionDraftView};
 
@@ -32,11 +32,11 @@ impl Handle {
         view: SessionDraftView,
         operation: Operation,
     ) -> Result<SessionDraftView> {
-        if view.validate().is_err() || view.header != frozen.binding().header {
+        if view.validate().is_err() || view.header != *frozen.binding().header {
             return Err(malformed(operation));
         }
         let mut binding = self.binding.write().expect("Session binding poisoned");
-        if binding.target == frozen.target() {
+        if binding.target == frozen.binding().target {
             binding.draft_revision = Some(binding.draft_revision.unwrap_or(0).max(view.revision));
         }
         Ok(view)
@@ -54,6 +54,8 @@ impl Handle {
         let expected_header = frozen
             .binding()
             .header
+            .as_ref()
+            .clone()
             .with_agent_preset_id(request.preset_id.clone())
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
         let result: Result<SessionDraftView> = frozen.call(Operation::SelectPreset, &request).await;
@@ -70,23 +72,19 @@ impl Handle {
             return Err(malformed(Operation::SelectPreset));
         }
         let mut binding = self.binding.write().expect("Session binding poisoned");
-        if binding.target != frozen.target()
+        if binding.target != frozen.binding().target
             || binding
                 .draft_revision
                 .is_some_and(|current| current > revision)
         {
             return Err(malformed(Operation::SelectPreset));
         }
-        let mut target = binding.target.clone();
-        target.header_key = view
+        binding.target.header_key = view
             .header
             .fingerprint()
             .map_err(|_| malformed(Operation::SelectPreset))?;
-        *binding = Binding {
-            header: view.header.clone(),
-            target,
-            draft_revision: Some(revision),
-        };
+        binding.header = expected_header.into();
+        binding.draft_revision = Some(revision);
         Ok(view)
     }
 }
