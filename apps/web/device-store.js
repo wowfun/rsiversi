@@ -158,7 +158,7 @@ export class DeviceStore {
   static async open(key,{onVersionChange=()=>{}}={}) {
     if(!identity(key))throw new Error('Invalid presentation identity');
     return new Promise((resolve,reject)=>{
-      const opening=indexedDB.open('rsi.presentation',6);
+      const opening=indexedDB.open('rsi.presentation',7);
       opening.onupgradeneeded=event=>{
         const db=opening.result,tx=opening.transaction;
         if(event.oldVersion<2 && db.objectStoreNames.contains('layouts'))db.deleteObjectStore('layouts');
@@ -181,14 +181,20 @@ export class DeviceStore {
                   if(key.length!==3||typeof key[2]!=='string')throw new Error('Invalid presentation scope');
                   const scope=storedScope(key[2]);
                   address=scope===key[2]?key:[key[0],key[1],scope];
-                }else address=layoutAddress(key);
+                }else address=event.oldVersion>=6?key:layoutAddress(key);
                 const oldWidth=event.oldVersion===3&&record.value?.version===4&&Object.hasOwn(record.value,'resourcesWidth');
                 if(oldWidth){delete record.value.resourcesWidth;record.value.version=5;}
+                const oldNavigation=record.value?.version===5 && record.value.kind!=='session-dock';
+                if(oldNavigation){
+                  delete record.value.navigation;
+                  delete record.value.navigationWidth;
+                  record.value.version=6;
+                }
                 if(address!==key){
                   record.key=address;
                   store.add(record);
                   store.delete(key);
-                }else if(oldWidth)store.put(record);
+                }else if(oldNavigation)store.put(record);
               }
             }catch{tx.abort();}
           };

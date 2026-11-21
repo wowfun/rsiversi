@@ -38,7 +38,7 @@ window.chooseDirectory=chooseWorkspace;
 const fixture=await sourceFixture({name:'responsiveness-fixture',source}),results=[];
 try {
  for(const [name,engine] of Object.entries({chromium,firefox})) {
-  const browser=await engine.launch();const page=await browser.newPage({viewport:{width:900,height:900}}),errors=[];
+  const browser=await engine.launch(),context=await browser.newContext({viewport:{width:900,height:900}}),page=await context.newPage(),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   try {
    await page.goto(fixture.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
@@ -83,6 +83,23 @@ try {
    const shortcuts=page.getByRole('navigation',{name:'Workspace tools'}).getByRole('button');
    assert.deepEqual((await shortcuts.allTextContents()).slice(0,2),['Plugins','Automation tasks']);
    const desktop=page.getByRole('button',{name:'Collapse navigation',exact:true});
+   const peer=await page.context().newPage();
+   try {
+    await peer.setViewportSize({width:1440,height:900});await peer.goto(fixture.url);
+    await peer.waitForFunction(()=>window.ready);await peer.evaluate(()=>fixture.frame());
+    const handle=p=>p.getByRole('separator',{name:'Resize navigation',exact:true});
+    const width=p=>p.locator('.workbench > .sidebar').evaluate(el=>Math.round(el.getBoundingClientRect().width));
+    assert.equal(await width(page),280);assert.equal(await width(peer),280);
+    await handle(page).press('ArrowRight');
+    assert.equal(await width(page),290);assert.equal(await width(peer),280);
+    await desktop.click();await page.getByRole('button',{name:'Expand navigation',exact:true}).waitFor();
+    assert.equal(await width(peer),280);
+    await page.getByRole('button',{name:'Expand navigation',exact:true}).click();assert.equal(await width(page),280);
+    await handle(peer).press('ArrowLeft');assert.equal(await width(peer),270);
+    await peer.reload();await peer.waitForFunction(()=>window.ready);await peer.evaluate(()=>fixture.frame());
+    assert.equal(await width(peer),280);
+    checks.desktopNavigation={initial:280,independentWidths:[290,280],reopened:280,reloaded:280};
+   }finally{await peer.close();}
    await desktop.click();await page.evaluate(()=>fixture.tick());
    assert.equal(await desktop.count(),0);
    const rail=page.locator('.workbench > .navigation-rail');

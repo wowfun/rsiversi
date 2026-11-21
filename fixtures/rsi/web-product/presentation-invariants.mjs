@@ -78,7 +78,7 @@ function PolicyProbe(){
  const [policyOwner]=useState(()=>({blocks:new Map(),setReadingSummary(){},action:async()=>{}}));
  window.setPolicy=(mode,running,simple=false)=>flushSync(()=>setPolicy({mode,running,simple}));
  const blocks=policy.simple?[{key:'policy-meta',role:'metadata',title:'Model call',text:'Metadata'},{key:'policy-reply',role:'assistant',title:'Assistant',text:'Reply retained'}]:[{key:'policy-tool',role:'tool',title:'Tool',text:'Full tool result',tool:{name:'file_read',argument_summary:'src/main.rs',phase:policy.running?'running':{settled:'completed'}}},
-  {key:'policy-reasoning',role:'reasoning',title:'Reasoning',text:'Reasoning preview'},
+  {key:'policy-reasoning',role:'reasoning',title:'Reasoning',text:'Reasoning preview\\nCurrent reasoning'},
   {key:'policy-reply',role:'assistant',title:'Assistant',text:'Reply retained'}];
  const data={blocks,turns:{entries:{policy:{id:'policy',running:policy.running,foldable:true,partial:false,status:policy.running?'Running':'Completed',
   blocks:blocks.map(block=>block.key),process:blocks.map(block=>block.key),candidate:[],answer:[]}}}};
@@ -96,7 +96,7 @@ function App(){
  <SessionCommands data={{commands:{revision:{kind:'draft'},commands:[{name:'help',description:'Help',draft_safe:true,composer_input:{kind:'none'}}]}}} owner={owner}/>
  <DraftImages owner={owner} state={{images:[{width:1,height:1,bytes:4}]}}/>
  <DraftReferences owner={owner} state={{references:[{id:'r',label:'Reference'}]}}/>
- <output aria-label="Notice">{notice.transient}</output><output aria-label="Layout storage">{layout.storageNotice}</output><output aria-label="Width">{layout.layout.navigationWidth}</output>
+ <output aria-label="Notice">{notice.transient}</output><output aria-label="Layout storage">{layout.storageNotice}</output><output aria-label="Width">{layout.layout.conversationWidth}</output>
  <div id="workbench" style={{marginLeft:80}}><aside style={{width:"var(--resources-width,450px)",height:40}}><ResizeHandle name="resources" value={800} min={300} max={700} reverse onChange={value=>window.resized=value}/></aside></div><style>{"#workbench .panel-resize{height:40px;width:6px;background:gray}"}</style><ResourcePresentations/><details className="application-options"><summary>Application options</summary><Button onClick={()=>window.actions.push('menu')}>Menu action</Button></details><button>Outside</button>
  <section aria-label="Status colors">{['warning','success','teal'].map(color=><p key={color} style={{color:'var(--'+color+')',background:color==='warning'?'var(--warning-bg)':color==='teal'?'var(--blue)':'var(--paper)'}}>{color} status and link</p>)}</section>{showPolicy&&<PolicyProbe/>}<DockProbe/></main>
 }
@@ -116,10 +116,12 @@ try {
       await page.getByLabel('Member value').filter({hasText:'2'}).waitFor();
       const policy=page.getByRole('region',{name:'Presentation policy'});
       await policy.locator('.message.tool').evaluate(node=>window.policyToolNode=node);
-      for(const [mode,body,preview] of [['compact',false,false],['standard',false,true],['detailed',true,true],['verbose',true,false]]){
+      for(const [mode,body,preview] of [['compact',false,false],['standard',false,true],['detailed',true,false],['verbose',true,false]]){
         await page.evaluate(mode=>window.setPolicy(mode,true),mode);
         assert.equal(await policy.locator('.message.tool .message-text').isVisible(),body,mode+' active tool body');
         assert.equal(await policy.locator('.message.reasoning .process-preview').isVisible(),preview,mode+' reasoning preview');
+        assert.equal(await policy.locator('.message.reasoning .message-text').isVisible(),body,mode+' reasoning body');
+        if(preview)assert.equal(await policy.locator('.message.reasoning .process-preview').textContent(),'Reasoning preview');
         assert.equal(await policy.locator('.message.assistant').isVisible(),true,mode+' assistant reply');
         assert.equal(await policy.locator('.message.tool').evaluate(node=>window.policyToolNode===node),true,mode+' keeps tool node');
         await policy.screenshot({path:join(report,name+'-policy-'+mode+'.png')});
@@ -153,13 +155,13 @@ try {
       await forks.first().getByLabel('Turns',{exact:true}).press('Escape');
       assert.equal(await forks.first().evaluate(element=>element.open),false);
       assert.equal(await forks.last().locator('summary').isVisible(),true,'Verbose retains the fork disclosure');
-      const workspace=disclosures.locator('.workspace-choice');
-      await workspace.locator('summary').click();
-      await workspace.locator('summary').press('Escape');
-      assert.equal(await workspace.evaluate(element=>element.open),false);
-      await workspace.locator('summary').click();
+      const workspace=disclosures.getByRole('button',{name:/^Conversation workspace/});
+      await workspace.click();
+      await page.keyboard.press('Escape');
+      assert.equal(await workspace.getAttribute('aria-expanded'),'false');
+      await workspace.click();
       await page.getByRole('button',{name:'Outside',exact:true}).click();
-      assert.equal(await workspace.evaluate(element=>element.open),false);
+      assert.equal(await workspace.getAttribute('aria-expanded'),'false');
       await disclosures.screenshot({path:join(report,name+'-disclosures.png')});
       await page.evaluate(()=>window.finishPolicy());
       await page.locator('.turn-summary').filter({hasText:'process item'}).first().click();
@@ -191,14 +193,14 @@ try {
       await page.evaluate(()=>window.closeImage());
       assert.equal(await page.evaluate(()=>window.imageReleases),3);
       await page.waitForFunction(()=>window.layout.storageNotice.includes('could not be opened'));
-      await page.evaluate(()=>window.layout.update({navigationWidth:410,detail:'verbose'}));
-      await page.waitForFunction(()=>window.layout.layout.navigationWidth===410);
+      await page.evaluate(()=>window.layout.update({conversationWidth:810,detail:'verbose'}));
+      await page.waitForFunction(()=>window.layout.layout.conversationWidth===810);
       await page.evaluate(()=>window.enableStorage());
       await page.waitForFunction(()=>window.layout.storageNotice==='');
-      assert.equal(await page.getByLabel('Width',{exact:true}).textContent(),'410');
+      assert.equal(await page.getByLabel('Width',{exact:true}).textContent(),'810');
       assert.equal(await page.evaluate(()=>window.layout.layout.detail),'verbose');
       // A fresh read proves retry saved the pending intents, not just React state.
-      assert.equal(await page.evaluate(async()=>{const {PresentationStore}=await import('/presentation-store.js');const store=await PresentationStore.open('review-layout');try{return (await store.load()).navigationWidth}finally{store.close()}}),410);
+      assert.equal(await page.evaluate(async()=>{const {PresentationStore}=await import('/presentation-store.js');const store=await PresentationStore.open('review-layout');try{return (await store.load()).conversationWidth}finally{store.close()}}),810);
       const menu=page.locator('details.application-options');
       for(const close of ['escape','outside','action']) {
         await menu.locator('summary').click();

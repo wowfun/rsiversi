@@ -210,7 +210,7 @@ Changing History's query or source filters clears the displayed matches and thei
 pagination actions. Changing a source filter also drops discovery continuation;
 pagination cannot silently reuse a previous query or workspace.
 
-Device presentation uses IndexedDB `rsi.presentation` schema 6, separately scoped
+Device presentation uses IndexedDB `rsi.presentation` schema 7, separately scoped
 by endpoint and authenticated principal. Three object stores have independent
 origin-wide LRU budgets: preferences 4 KiB each / 64 records / 256 KiB; orders
 128 KiB each / 16 records / 2 MiB; layouts 32 KiB each / 64 records / 2 MiB.
@@ -254,12 +254,11 @@ and show a reload notice. A blocked open exposes Retry after other windows close
 Neither
 presentation records nor channel messages contain credentials, history or input.
 
-The schema-3 upgrade removes the workbench resource-width field. Other layout
-preferences, panel documents, revisions and LRU positions are retained.
-The version 5 device layout records whether navigation is expanded, a rail or hidden.
-Expanded widths clamp to 264 to 420 px (default 280) and the rail is 56 px. Below 1024 px,
-automatic rail presentation does not overwrite the stored preference; mobile
-uses a 280 px overlay. Resources start closed. On first opening, the document
+The version 6 workbench layout stores conversation width, resource visibility,
+detail and workspace expansion. Upgrades discard obsolete column dimensions
+and desktop navigation mode while retaining other preferences, dock documents,
+revisions and LRU positions. The [navigation column](presentation.md) belongs
+to each window. Resources start closed. On first opening, the document
 chooses 45% of the viewport as its preferred width in CSS pixels. The document
 retains that width across window resizes and panel toggles. Reload samples a new
 initial width. The visible column respects the 300 px minimum, 70% maximum and

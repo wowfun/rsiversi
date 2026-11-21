@@ -24,7 +24,7 @@ try{
       opening.onerror=()=>reject(opening.error);
       opening.onsuccess=()=>{
         const db=opening.result,tx=db.transaction(['layouts','preferences','orders'],'readwrite');
-        tx.objectStore('layouts').put({key:'fixture-principal',used:1,revision:'8',value:{...oldLayout,version:3,navigationWidth:301}});
+        tx.objectStore('layouts').put({key:'fixture-principal',used:1,revision:'8',value:{...oldLayout,version:3,navigationWidth:301,navigation:"expanded"}});
         window.retainedDock={key:JSON.stringify(['fixture-principal','dock:retained']),used:2,revision:'11',value:{...emptyDock(),version:1}};
         tx.objectStore('layouts').put(window.retainedDock);
         tx.objectStore('preferences').put({key:'unrelated',used:3,revision:'6',value:{view:'flat',sessionOrder:'manual',workspaceOrder:'updated'}});
@@ -38,18 +38,18 @@ try{
     window.store.subscribe('layouts','',()=>window.invalidated++);
     return window.store.read('layouts');
   });
-  const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,5);
+  const before=await open(one);await open(two);assert.equal(before.revision,'0');assert.equal(before.value.version,6);
   const preserved=await one.evaluate(async()=>{
     const read=(bucket,key)=>new Promise((resolve,reject)=>{const tx=store.database.transaction(bucket,'readonly'),q=tx.objectStore(bucket).get(key);tx.oncomplete=()=>resolve(q.result);tx.onabort=()=>reject(tx.error)});
     return {dock:JSON.stringify(await read('layouts',retainedDock.key))===JSON.stringify(retainedDock),preferences:await read('preferences','unrelated'),order:await read('orders','unrelated')};
   });
   assert.equal(preserved.dock,true);assert.equal(preserved.preferences.value.view,'flat');assert.deepEqual(preserved.order.value.ids,['saved-order']);
   await Promise.all([
-    one.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{navigationWidth:310}})),
+    one.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{conversationWidth:710}})),
     two.evaluate(()=>store.apply('layouts',{kind:'patch',patch:{detail:'detailed'}})),
   ]);
   const after=await one.evaluate(()=>store.read('layouts'));
-  assert.equal(after.revision,'2');assert.equal(after.value.navigationWidth,310);assert.equal(after.value.detail,'detailed');
+  assert.equal(after.revision,'2');assert.equal(after.value.conversationWidth,710);assert.equal(after.value.detail,'detailed');
   await two.waitForFunction(()=>invalidated>=2);
   await Promise.all([
     one.evaluate(()=>store.apply('layouts',{kind:'workspace',id:'one',expanded:true})),
@@ -58,10 +58,10 @@ try{
   const expanded=await one.evaluate(()=>store.read('layouts'));assert.equal(expanded.value.workspaces.length,2);
   const reservedRollback=await one.evaluate(async()=>{
     const before=await store.read('layouts');let observed,error;
-    try{await store.apply('layouts',{kind:'patch',patch:{navigationWidth:320}},'',values=>{observed=values[0].navigationWidth;throw Error('cleanup capacity full')})}catch(failure){error=failure.message}
+    try{await store.apply('layouts',{kind:'patch',patch:{conversationWidth:720}},'',values=>{observed=values[0].conversationWidth;throw Error('cleanup capacity full')})}catch(failure){error=failure.message}
     return {before,after:await store.read('layouts'),observed,error};
   });
-  assert.equal(reservedRollback.observed,320);assert.match(reservedRollback.error,/cleanup capacity full/);assert.deepEqual(reservedRollback.after,reservedRollback.before);
+  assert.equal(reservedRollback.observed,720);assert.match(reservedRollback.error,/cleanup capacity full/);assert.deepEqual(reservedRollback.after,reservedRollback.before);
   const order=await one.evaluate(async()=>{
     const members=Array.from({length:65},(_,i)=>({id:`s-${i}`,partition:'local/project/unpinned'}));
     await store.apply('orders',{kind:'reconcile',members},'sessions');
@@ -69,7 +69,7 @@ try{
   });
   assert.equal(order.value.ids.length,65);assert.equal(order.value.ids[0],'s-64');
   const rollback=await one.evaluate(async()=>{
-    let error;try{await store.apply('layouts',{kind:'patch',patch:{navigation:'invalid'}});}catch(e){error=e.message;}
+    let error;try{await store.apply('layouts',{kind:'patch',patch:{detail:'invalid'}});}catch(e){error=e.message;}
     const members=length=>Array.from({length},(_,i)=>({id:`${String(i).padStart(4,'0')}${'x'.repeat(252)}`,partition:'group'}));
     let quota;try{await store.apply('orders',{kind:'reconcile',members:members(768)},'sessions');}catch(e){quota=e.message;}
     let full;try{await store.apply('orders',{kind:'reconcile',members:members(1024)},'sessions');}catch(e){full=e.message;}
@@ -141,19 +141,23 @@ try{
     old.close();
     const retry=await DeviceStore.open('retry'),version=retry.database.version;retry.close();return {error,version};
   });
-  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,6);await blockedContext.close();
-  const priorContext=await browser.newContext(),prior=await priorContext.newPage();await prior.goto(origin);
-  const upgraded=await prior.evaluate(async()=>{
+  assert.match(blocked.error,/blocked/);assert.equal(blocked.version,7);await blockedContext.close();
+  for(const version of [3,6]){
+   const priorContext=await browser.newContext(),prior=await priorContext.newPage();await prior.goto(origin);
+   const upgraded=await prior.evaluate(async version=>{
     const {defaultLayout}=await import('/presentation-layout.js');
     const {emptyDock}=await import('/src/dock-state.ts');
     const {DeviceStore}=await import('/device-store.js');
-    const layout={...defaultLayout,detail:'verbose',navigationWidth:333,workspaces:[{id:'kept',expanded:true}]};
-    const dock={key:JSON.stringify(['previous','dock:open']),used:7,revision:'3',value:{...emptyDock(),version:1}};
+    const layout={...defaultLayout,detail:'verbose',conversationWidth:733,workspaces:[{id:'kept',expanded:true}]};
+    const {storedNamespace,idBytes}=await import('/storage-namespace.js');
+    const dockKey=version===3?JSON.stringify(['previous','dock:open']):[...storedNamespace('11'.repeat(16),'local'),idBytes('ab'.repeat(16))];
+    const dock={key:dockKey,used:7,revision:'3',value:{...emptyDock(),version:1}};
     await new Promise((resolve,reject)=>{
-      const req=indexedDB.open('rsi.presentation',3);
+      const req=indexedDB.open('rsi.presentation',version);
       req.onupgradeneeded=()=>{
         const bucket=req.result.createObjectStore('layouts',{keyPath:'key'});
-        bucket.put({key:'previous',used:9,revision:'8',value:{...layout,version:4,resourcesWidth:.35}});
+        const previous={...layout,version:5,navigation:'rail',navigationWidth:333};
+        bucket.put({key:'previous',used:9,revision:'8',value:version===3?{...previous,version:4,resourcesWidth:.35}:previous});
         bucket.put(dock);
       };
       req.onsuccess=()=>{req.result.close();resolve()};req.onerror=()=>reject(req.error);
@@ -164,10 +168,12 @@ try{
         const req=store.database.transaction('layouts').objectStore('layouts').getAll();
         req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);
       });
-      return {actual:all,expected:[dock,{key:'previous',used:9,revision:'8',value:layout}]};
+      const shell={key:'previous',used:9,revision:'8',value:layout};
+      return {actual:all,expected:version===3?[dock,shell]:[shell,dock],dockKeyMatches:all.some(item=>indexedDB.cmp(item.key,dockKey)===0)};
     }finally{store.close()}
-  });
-  assert.deepEqual(upgraded.actual,upgraded.expected);await priorContext.close();
+   },version);
+   assert.deepEqual(upgraded.actual,upgraded.expected);assert(upgraded.dockKeyMatches);await priorContext.close();
+  }
   const evidence={browser:browser.version(),module:'current apps/web/device-store.js',schema:blocked.version,widthUpgradePreservesOtherFields:true,realIndexedDb:true,windows:2,resetRevision:before.revision,concurrentRevision:after.revision,workspaceIntents:expanded.value.workspaces.length,completeMembers:order.value.ids.length,abortedWritesPreserved:true,multiStoreAtomicRollback:true,automaticReconciliationPreservesUpdated:true,broadcastInvalidation:true,principalIsolation:true,draftIsolation:true,upgradePreservesDockPreferencesOrders:preserved,corruptSelectedRecordRepaired:true,versionChangeClosesOwners:true,blockedOpenRetry:blocked};
   await mkdir(report,{recursive:true});await writeFile(join(report,'result.json'),JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify(evidence));
 }finally{await browser?.close();await server.close();}

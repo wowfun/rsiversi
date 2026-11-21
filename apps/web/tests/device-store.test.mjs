@@ -20,11 +20,11 @@ test('complete membership reconciles before cross-page moves and rejects partiti
   assert.deepEqual(applyIntent('orders',order,{kind:'updated'}),{ids:[]});
 });
 test('semantic intents preserve unrelated values and reject malformed saves',()=>{
-  let layout=applyIntent('layouts',defaultLayout,{kind:'patch',patch:{navigationWidth:300}});
+  let layout=applyIntent('layouts',defaultLayout,{kind:'patch',patch:{conversationWidth:700}});
   layout=applyIntent('layouts',layout,{kind:'workspace',id:'one',expanded:true});
   layout=applyIntent('layouts',layout,{kind:'workspace',id:'two',expanded:true});
   layout=applyIntent('layouts',layout,{kind:'patch',patch:{detail:'verbose'}});
-  assert.equal(layout.navigationWidth,300);assert.equal(layout.detail,'verbose');assert.equal(layout.workspaces.length,2);
+  assert.equal(layout.conversationWidth,700);assert.equal(layout.detail,'verbose');assert.equal(layout.workspaces.length,2);
   assert.throws(()=>applyIntent('layouts',layout,{kind:'patch',patch:{resourcesWidth:.35}}));
   for(const intent of [{kind:'patch',patch:{navigation:'nope'}},{kind:'patch',patch:{version:3}},{kind:'patch',patch:{workspaces:[]}},{kind:'workspace',expanded:true}])assert.throws(()=>applyIntent('layouts',layout,intent));
   assert.equal(applyIntent('preferences',defaultPreferences,{kind:'patch',patch:{view:'workspace_tree'}}).sessionOrder,'updated');

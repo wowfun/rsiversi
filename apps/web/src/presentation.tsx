@@ -5,7 +5,7 @@ import {observable,useView,type View} from './bridge.ts'
 import {applyIntent} from '../device-store.js'
 import {LayoutEdits} from '../layout-edits.js'
 
-export interface Layout {version:5;navigationWidth:number;conversationWidth:number|null;navigation:'expanded'|'rail'|'hidden';resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
+export interface Layout {version:6;conversationWidth:number|null;resourcesClosed:boolean;detail:'compact'|'standard'|'detailed'|'verbose';workspaces:{id:string;expanded:boolean}[]}
 export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:defaultLayout as Layout,update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)

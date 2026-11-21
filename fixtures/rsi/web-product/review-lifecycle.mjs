@@ -155,30 +155,30 @@ window.stalePresentationReply=async(mode)=>{
  PresentationStore.open=async()=>store;
  presentationIdentity.set('presentation-race:'+mode);source.set({surfaces:{},application_surfaces:[]});
  const node=document.createElement('main');document.body.append(node);const root=createRoot(node);
- function Probe(){current=usePresentation();return <output>{current.layout.navigationWidth}</output>}
+ function Probe(){current=usePresentation();return <output>{current.layout.conversationWidth}</output>}
  try{
   await React.act(async()=>root.render(<Probe/>));
   if(mode==='read'){
    pauseRead=true;await React.act(async()=>notify());
-   await React.act(async()=>current.update({navigationWidth:310}));
+   await React.act(async()=>current.update({conversationWidth:710}));
    await React.act(async()=>readReply());
   }else if(mode==='reload'){
    pauseRead=true;await React.act(async()=>notify());
-   saved=applyIntent('layouts',saved,{kind:'patch',patch:{navigationWidth:310}});
+   saved=applyIntent('layouts',saved,{kind:'patch',patch:{conversationWidth:710}});
    await React.act(async()=>notify());pauseRead=false;
    await React.act(async()=>readReply());
   }else{
-   await React.act(async()=>current.update({navigationWidth:300}));
-   await React.act(async()=>current.update({navigationWidth:310}));
+   await React.act(async()=>current.update({conversationWidth:700}));
+   await React.act(async()=>current.update({conversationWidth:710}));
    await React.act(async()=>mode==='write-error'?writes[0].reject(Error('old save failed')):writes[0].resolve());
    if(mode==='write-error'){
-    failedSave={width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,writes:writes.length};
+    failedSave={width:current.layout.conversationWidth,notice:current.storageNotice,persisted:saved.conversationWidth,writes:writes.length};
     await React.act(async()=>current.retry());
     if(writes.length!==2)throw Error('Explicit retry did not submit the pending layout intent');
     await React.act(async()=>writes[1].resolve());
    }
   }
-  return {width:current.layout.navigationWidth,notice:current.storageNotice,persisted:saved.navigationWidth,failedSave};
+  return {width:current.layout.conversationWidth,notice:current.storageNotice,persisted:saved.conversationWidth,failedSave};
  }finally{
   for(const write of writes)await React.act(async()=>write.resolve());
   await React.act(async()=>readReply?.());
@@ -275,10 +275,10 @@ try{
  checks.push({settingsEditor:await page.evaluate(()=>window.settingsChecks()),settingsDrafts:await page.evaluate(()=>window.settingsDraftChecks()),settingsRuntime:await page.evaluate(()=>window.settingsRuntimeChecks())});
  for(const mode of ['write','read','write-error','reload']){
   const presentation=await page.evaluate(mode=>window.stalePresentationReply(mode),mode);
-  assert.equal(presentation.width,310);assert.equal(presentation.notice,'');
+  assert.equal(presentation.width,710);assert.equal(presentation.notice,'');
   if(mode==='write-error'){
-   assert.equal(presentation.failedSave.width,310);assert.match(presentation.failedSave.notice,/could not be saved.*Retry layout/);
-   assert.equal(presentation.failedSave.persisted,280);assert.equal(presentation.failedSave.writes,1);assert.equal(presentation.persisted,310);
+   assert.equal(presentation.failedSave.width,710);assert.match(presentation.failedSave.notice,/could not be saved.*Retry layout/);
+   assert.equal(presentation.failedSave.persisted,null);assert.equal(presentation.failedSave.writes,1);assert.equal(presentation.persisted,710);
   }
   checks.push({stalePresentationReply:mode,...presentation});
  }
@@ -418,11 +418,11 @@ try{
    });
    const owner=await modules.DeviceStore.open('legacy'),before=await owner.read('layouts');
    const removed=!owner.database.objectStoreNames.contains('legacy-layouts-v1');
-   const saved=await owner.apply('layouts',{kind:'patch',patch:{navigationWidth:311}});owner.close();
+   const saved=await owner.apply('layouts',{kind:'patch',patch:{conversationWidth:711}});owner.close();
    const reopened=await modules.DeviceStore.open('legacy'),after=await reopened.read('layouts');reopened.close();
-   return {revision:before.revision,removed,after:after.revision,saved:saved.revision,width:after.value.navigationWidth};
+   return {revision:before.revision,removed,after:after.revision,saved:saved.revision,width:after.value.conversationWidth};
   },legacy);
-  assert.equal(result.revision,'0');assert.equal(result.removed,true);assert.equal(result.after,result.saved);assert.equal(result.width,311);checks.push({legacy,...result});await migration.close();
+  assert.equal(result.revision,'0');assert.equal(result.removed,true);assert.equal(result.after,result.saved);assert.equal(result.width,711);checks.push({legacy,...result});await migration.close();
  }
  await page.setViewportSize({width:1400,height:900});
  await page.evaluate(()=>{window.unmountWidth=window.mountConversationWidth()});

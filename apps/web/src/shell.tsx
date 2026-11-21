@@ -58,6 +58,7 @@ import settingsCss from "./settings/settings.module.css";
 import { Automation } from "./automation.tsx";
 import { ResourceCleanupNotice } from "./resource-dock.tsx";
 const ScheduleCatalog = lazy(()=>import('./schedule-catalog.tsx'));
+const defaultNavigationWidth = 280;
 export function Shell({
   renderSlot,
 }: PropsRenderSlots<"rsi.navigation" | "rsi.main" | "rsi.resources">) {
@@ -96,6 +97,7 @@ export function Shell({
     hasResources,
   );
   const [resourceWidth,setResourceWidth] = useState<number>();
+  const [navigationWidth, setNavigationWidth] = useState(defaultNavigationWidth);
   const [deletedTask,setDeletedTask] = useState(0);
   const openingWidth = Math.max(300, Math.round(viewport.width * .45));
   useLayoutEffect(() => {
@@ -108,7 +110,7 @@ export function Shell({
     ? "hidden"
     : compact
       ? expansion === "column" ? "expanded" : "rail"
-      : layout.navigation;
+      : navigationWidth ? "expanded" : "rail";
   const [palette, setPalette] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -116,9 +118,9 @@ export function Shell({
     setSearchOpen(true);
     if (narrow) compactNavigation.set("drawer");
     else if (compact) compactNavigation.set("column");
-    else if (navigationMode !== "expanded") update({navigation:"expanded"});
+    else setNavigationWidth(width => width || defaultNavigationWidth);
     searchInputRef.current?.focus({preventScroll:true});
-  }, [narrow, compact, navigationMode, update]);
+  }, [narrow, compact]);
   useLayoutEffect(() => { compactNavigation.set(undefined); }, [narrow, compact]);
   useLayoutEffect(() => {
     if (!layout.resourcesClosed && compact) compactNavigation.set(undefined);
@@ -145,13 +147,13 @@ export function Shell({
   useLayoutEffect(() => {
     workbench.current?.style.setProperty(
       "--navigation-width",
-      `${layout.navigationWidth}px`,
+      `${navigationWidth || defaultNavigationWidth}px`,
     );
     workbench.current?.style.setProperty(
       "--resources-width",
       `${resourceWidth ?? openingWidth}px`,
     );
-  }, [layout.navigationWidth, resourceWidth, openingWidth]);
+  }, [navigationWidth, resourceWidth, openingWidth]);
   useLayoutEffect(() => {
     (connected
       ? document.getElementById("connection-controls-host")
@@ -183,11 +185,8 @@ export function Shell({
   }, [connected]);
   const navigation = () => {
     if (!narrow && navigationMode === "expanded") setSearchOpen(false);
-    return compact
-      ? compactNavigation.set(expansion ? undefined : narrow ? "drawer" : "column")
-      : update({
-          navigation: layout.navigation === "expanded" ? "rail" : "expanded",
-        });
+    if (compact) compactNavigation.set(expansion ? undefined : narrow ? "drawer" : "column");
+    else setNavigationWidth(width => width ? 0 : defaultNavigationWidth);
   };
   const resources = () => update({ resourcesClosed: !layout.resourcesClosed });
   const appearance = () => setSettings("appearance");
@@ -390,10 +389,10 @@ export function Shell({
             {sidebar}
             <ResizeHandle
               name="navigation"
-              value={layout.navigationWidth}
+              value={navigationWidth || defaultNavigationWidth}
               min={264}
               max={420}
-              onChange={(navigationWidth) => update({ navigationWidth })}
+              onChange={setNavigationWidth}
             />
           </aside>
         )}

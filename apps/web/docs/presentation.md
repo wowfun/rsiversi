@@ -382,7 +382,11 @@ Selecting a conversation or a destination closes the drawer. Reopening it preser
 its search and workspace controls. From 768px through 1023px, the 56px rail
 expands in place and the conversation remains interactive. Crossing either
 breakpoint resets the temporary expansion. Opening resources at a compact width
-also collapses navigation. Desktop navigation retains its saved preference.
+also collapses navigation. Each desktop window starts with a 280px navigation
+column. Dragging adjusts it between 264px and 420px for that window. A temporary
+compact layout preserves the desktop choice. Expanding a collapsed desktop rail
+and refreshing the window both restore 280px. Opening search from the rail
+uses the same expansion. These gestures perform no device storage writes.
 The command palette uses
 Ctrl/Meta+K. Dialogs restore focus to their surviving trigger or composer. Standard
 modal triggers are captured before their children mount; initial focus is applied

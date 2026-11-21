@@ -4,7 +4,7 @@ import {defaultLayout,validateLayout,presentationKey} from '../presentation-stor
 import {boundedRecords} from '../device-store.js';
 import {parseLayout,conversationWidth} from '../presentation-layout.js';
 test('layout storage is closed, clamped and scoped to the authenticated principal',()=>{
-  assert.deepEqual(validateLayout({...defaultLayout,navigationWidth:900}),{...defaultLayout,navigationWidth:420});
+  assert.throws(()=>parseLayout({...defaultLayout,navigationWidth:280}),/Invalid layout/);
   for(const value of [null,[],{...defaultLayout,token:'forbidden'},{...defaultLayout,navigationWidth:NaN},{...defaultLayout,navigation:'invalid'}]) assert.deepEqual(validateLayout(value),defaultLayout);
   assert.notEqual(presentationKey('one',{kind:'local'}),presentationKey('two',{kind:'local'}));
   assert.notEqual(presentationKey('one',{kind:'local'}),presentationKey('one',{kind:'device',device_id:'abc'}));
@@ -22,7 +22,7 @@ test('layout eviction is bounded and retains the recently touched identity',()=>
 
 test('obsolete pixel layouts reset without touching current preferences',()=>{
   assert.deepEqual(validateLayout({navigationWidth:180,resourcesWidth:300,navigationClosed:true,resourcesClosed:false}),defaultLayout);
-  assert.deepEqual(validateLayout({...defaultLayout,navigation:'hidden',detail:'verbose'}),{...defaultLayout,navigation:'hidden',detail:'verbose'});
+  assert.deepEqual(validateLayout({...defaultLayout,detail:'verbose'}),{...defaultLayout,detail:'verbose'});
 });
 
 test('conversation width retains the preferred value while its display fits the column',()=>{
@@ -48,13 +48,13 @@ test('unsaved layout intents remain bounded and cannot be cleared by an older sa
   edits.add(collapse);edits.add({kind:'reveal_workspace',id:'one'});
   assert.equal(edits.first()[1],collapse);
   edits.saved(edits.first()[0],collapse);
-  edits.add({kind:'patch',patch:{navigationWidth:300}});
+  edits.add({kind:'patch',patch:{conversationWidth:700}});
   const [key,old]=edits.first();
-  edits.add({kind:'patch',patch:{navigationWidth:410,detail:'verbose'}});
+  edits.add({kind:'patch',patch:{conversationWidth:810,detail:'verbose'}});
   edits.saved(key,old);assert.equal(edits.size,2);
   for(let i=0;i<100;i++)edits.add({kind:'workspace',id:String(i),expanded:false});
   assert.equal(edits.size,18);
   edits.add({kind:'reset'});assert.equal(edits.size,1);
-  edits.add({kind:'patch',patch:{navigation:'rail'}});assert.equal(edits.size,2);
+  edits.add({kind:'patch',patch:{resourcesClosed:false}});assert.equal(edits.size,2);
   assert.equal(edits.first()[1].kind,'reset');
 });
