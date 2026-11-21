@@ -224,12 +224,6 @@
 :global(.resource-dock):where(.scope, .scope *) {
   font-family: var(--dsw-font-family);
 }
-:global(.resource-dock):where(.scope, .scope *),
-:global(.resource-dock *):where(.scope, .scope *) {
-  --dsw-elevation-prominent:
-    0 0 0 0.5px var(--dsw-elevation-stroke-color), 0 3px 8px 0 rgb(0 0 0 / 4%),
-    0 0 20px 0 rgb(0 0 0 / 5%);
-}
 :global(.approval-review):where(.scope, .scope *) {
   min-width: 0;
   overflow-wrap: anywhere;

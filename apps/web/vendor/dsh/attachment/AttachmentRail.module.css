@@ -23,6 +23,7 @@
 }
 
 .arrow {
+  composes: rsi-elevation from global;
   position: absolute;
   top: 50%;
   z-index: 2;

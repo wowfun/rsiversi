@@ -64,6 +64,15 @@ export async function verifyAttachmentRail(page, pane, report) {
       assert.equal(await thumbnail.evaluate(async el => { await el.decode(); return el.naturalWidth; }), width);
     }
     await left.waitFor();
+    const pager=await left.evaluate(el=>{
+      const sample=document.createElement('span');
+      sample.style.color='var(--dsw-alias-border-l2-darkmode-thin)';
+      el.append(sample);
+      try {return {shadow:getComputedStyle(el).boxShadow,stroke:getComputedStyle(sample).color};}
+      finally {sample.remove();}
+    });
+    assert.match(pager.shadow,/0\.5px/);
+    assert(pager.shadow.includes(pager.stroke),JSON.stringify(pager));
     assert.equal(await editor.getAttribute('placeholder'), null);
     assert.equal(await right.count(), 0);
     assert(await rail.evaluate(el => el.scrollLeft > 0 && el.lastElementChild.getBoundingClientRect().right <= el.getBoundingClientRect().right + 1));

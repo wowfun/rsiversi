@@ -210,8 +210,9 @@ bundle as a fixed document-stage bootstrap asset.
 
 DSH tokens retain their fill and indicator roles. The document theme owns separate
 warning, success and accent text aliases, with at least 4.5:1 contrast against
-their base and tinted surfaces in both themes. Menu material uses the pinned
-DSH backdrop filter; vendor files remain byte-tracked by their provenance record.
+their base and tinted surfaces in both themes. Menus and inline image previews
+use the DSH menu tint and backdrop filter. Preview panels and attachment paging
+buttons use the panel shadow with their own hairline color.
 Imported controls use the corresponding DSH font size, weight and line height.
 Native dialogs use the theme's modal mask color and filter.
 
@@ -613,9 +614,8 @@ opens navigation only when the narrow layout has no rail. Missing model setup is
 an actionable composer control rather than a global banner. Status and admission errors retain visible
 text even where secondary navigation labels are omitted.
 
-All vendored DSH source, including resource dockkit, slots, primitives and platform
-tokens, uses `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`. Per-file provenance records
-source and adapted SHA-256. Only source is vendored; RSI resolves its own dependencies.
+The [vendor provenance record](../vendor/dsh/provenance.json) pins each DSH
+source revision and its source and adapted SHA-256. RSI resolves its own dependencies.
 The icon sprite is built from the pinned, static product SVG artwork and mounted
 once with the React document root. Runtime content cannot supply SVG markup.
 Brand artwork, model marketing labels, fonts and DSH's inline theme bootstrap are

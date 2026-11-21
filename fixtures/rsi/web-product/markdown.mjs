@@ -214,6 +214,27 @@ try{
       await fileLink.hover();await page.clock.runFor(510);
       await preview.waitFor();await preview.evaluate(el=>el.decode());
       assert.equal(await preview.getAttribute('loading'),'eager');
+      const triggerStyle=await fileLink.evaluate(el=>{
+        const s=getComputedStyle(el);
+        return [s.backgroundColor,s.borderInlineStartWidth,s.textDecorationStyle];
+      });
+      assert.deepEqual(triggerStyle,['rgba(0, 0, 0, 0)','3px','dotted']);
+      const previewThemes=[];
+      for (const [theme,system] of [['light','dark'],['dark','light'],['system','dark'],['system','light']]) {
+        await page.emulateMedia({colorScheme:system});
+        await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+        const style=await preview.evaluate(el=>{
+          let card=el.parentElement;
+          while (card && getComputedStyle(card).position!=='fixed') card=card.parentElement;
+          const {backgroundColor,boxShadow}=getComputedStyle(card);
+          return {backgroundColor,boxShadow};
+        });
+        const dark=(theme==='system'?system:theme)==='dark';
+        assert.equal(style.backgroundColor,dark?'rgba(48, 49, 54, 0.64)':'rgba(252, 253, 254, 0.7)');
+        assert.match(style.boxShadow,/0\.5px/);
+        assert(style.boxShadow.includes(dark?'rgba(255, 255, 255, 0.2)':'rgba(0, 0, 0, 0.16)'));
+        previewThemes.push({theme,system,...style});
+      }
       await preview.hover();await page.clock.runFor(220);assert(await preview.isVisible());
       await page.keyboard.press('Escape');await preview.waitFor({state:'detached'});
       await fileLink.focus();await fileLink.press('Tab');await page.keyboard.press('Shift+Tab');
@@ -224,7 +245,7 @@ try{
       await preview.waitFor({state:'detached'});
       assert.deepEqual(errors,[]);
       results.push({browser:name,version:browser.version(),literalMarkup:true,headers:true,alignment:true,exactCopy:true,wrap:true,themeColors:colors,ordinaryMathLoads:0,streamingMathLoads:0,annotations,copiedTex,layout,wideTable,linkedImage:true,
-        imageLink:{hover:true,keyboard:true,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
+        imageLink:{hover:true,keyboard:true,previewThemes,readCount:await page.evaluate(()=>window.reads.length)-localImageReads},
         localImage:{readCount:localImageReads,originalName:dropped.name,originalType:dropped.type,
           releasedUrls:await page.evaluate(()=>new Set(window.revoked).size),droppedFiles:await page.evaluate(()=>window.dropped.length)},errors});
     }finally{await browser.close()}

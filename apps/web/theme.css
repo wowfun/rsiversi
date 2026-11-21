@@ -9,6 +9,7 @@
   --rsi-text-success:#197544;
   --rsi-text-warning:#8a5b22;
   --dsw-menu-backdrop-filter:blur(40px) saturate(150%);
+  --dsw-elevation-stroke-color:var(--dsw-alias-border-l4);
   --mist:var(--dsw-specific-sidebar-fill);
   --paper:var(--dsw-alias-bg-base);
   --ink:var(--dsw-alias-label-primary);
@@ -44,6 +45,15 @@
   color:var(--ink);
   background:var(--paper);
 }
+/* Recompute the shadow on surfaces that locally rebind the stroke color. */
+:root, [data-menu-material], [data-dockkit-float], .rsi-elevation {
+  --dsw-elevation-stroke: 0 0 0 .5px var(--dsw-elevation-stroke-color);
+  --dsw-elevation-panel: var(--dsw-elevation-stroke), 0 3px 8px rgb(0 0 0 / 3%), 0 0 16px rgb(0 0 0 / 2%);
+  --dsw-elevation-prominent: var(--dsw-elevation-stroke), 0 3px 8px rgb(0 0 0 / 4%), 0 0 20px rgb(0 0 0 / 5%);
+}
+:root[data-theme=dark] [data-menu-material] {
+  --dsw-elevation-stroke-color:var(--dsw-alias-border-l3);
+}
 :root[data-theme=dark] {
   color-scheme:dark;
   --rsi-text-accent:var(--dsw-static-deepseek-300);
@@ -52,6 +62,9 @@
   --rsi-text-error:#ffb3b8;
 }
 @media(prefers-color-scheme:dark) {
+  :root:not([data-theme=light]):not([data-theme=dark]) [data-menu-material] {
+    --dsw-elevation-stroke-color:var(--dsw-alias-border-l3);
+  }
   :root:not([data-theme=light]):not([data-theme=dark]) {
     color-scheme:dark;
     --rsi-text-accent:var(--dsw-static-deepseek-300);

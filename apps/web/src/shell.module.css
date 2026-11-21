@@ -498,9 +498,6 @@
 }
 :global(.settings-modal):where(.scope, .scope *) {
   font-family: var(--dsw-font-family);
-  --dsw-elevation-prominent:
-    0 0 0 0.5px var(--dsw-elevation-stroke-color), 0 3px 8px 0 rgb(0 0 0 / 4%),
-    0 0 20px 0 rgb(0 0 0 / 5%);
 }
 :global(.automation-modal):where(.scope, .scope *) {
   width: min(1100px, calc(100vw - 40px));

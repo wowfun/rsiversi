@@ -7,7 +7,7 @@
     "Menu accepts an explicit portal container so navigation actions opened in a native modal stay in its interactive layer.",
     "Product SVG artwork and icon components are unchanged. The RSI root mounts the static sprite; no DSH brand or font assets are imported.",
     "theme-base.css omits the unused brand font declaration; system text/code fonts and focus rules remain.",
-    "dockkit-tokens.css retains the full platform token source, adapts selectors to RSI appearance, and repeats dark declarations for system appearance.",
+    "dockkit-tokens.css adapts the platform palette and menu fills to RSI appearance selectors, repeats dark declarations for system appearance, and omits unused token families.",
     "slots/index.ts exposes the keyed Hook member overload already implemented by renderer/bindings.tsx.",
     "TabLayout releases scroll offsets when their pane is removed, after child strip cleanup; TabPanel documents this bounded lifetime.",
     "Split separators and floating move/resize controls expose host-owned accessible labels, bounded keyboard intents and visible focus boxes; undo uses the existing intent history.",
@@ -345,9 +345,9 @@
     {
       "path": "dockkit-tokens.css",
       "source": "packages/client/ui-theme/src/styles/design-platform.css",
-      "source_sha256": "a2f8f02ebc769915100034b76dc5076a715b0d9e23284e68c398055a56da5d77",
-      "adapted_sha256": "8f06fef792f3d4c3ea4c7ea06cf9ebd095cc4678ab83b98498b7d2898b51737a",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "3234f318769ea5065013793d58d98b235948486789d69ea16e850bd3713babcc",
+      "adapted_sha256": "ef9f3bd5cedd4de74c2e32ba9069dee480c9327bc1c0f885d3d9081448ae838c",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
       "path": "dockkit-primitives/exports.ts",
@@ -619,7 +619,7 @@
       "path": "attachment/AttachmentRail.module.css",
       "source": "packages/client/ui-attachment/src/AttachmentRail.module.css",
       "source_sha256": "036094c7bcf3bff0008c6487e01cc8a65948392edee16b552013b2f5ceda3ee3",
-      "adapted_sha256": "59262d42e121ad3d5d55ff50eb9fd2f9570a9d5e70270da56ed1c43d7261d0fa",
+      "adapted_sha256": "c5efefd96289d8f1b506af1172cebd2417e6ecc143962716ff4d35fc38588c13",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {
