@@ -391,7 +391,8 @@ Picking a directory focuses its current row in the parent column. New folder
 opens a modal for the selected directory. Escape returns to the picker, and
 successful creation selects the new child, including a hidden directory.
 Breadcrumbs begin at Home when it is an ancestor and at the filesystem root
-elsewhere.
+elsewhere. When a long path opens, the trail scrolls to its selected end.
+Each segment is a navigation button. The remaining space and pencil open the path editor.
 Editing a newer path supersedes a submitted listing. Escape in the path editor
 restores the last listed location and returns focus to the path control.
 Leaving a location or closing the picker cancels its outstanding directory read.

@@ -225,6 +225,9 @@ try {
    const breadcrumbs=dialog.getByRole('navigation',{name:'Directory breadcrumbs'});
    await breadcrumbs.getByRole('button',{name:'demo',exact:true}).waitFor();
    assert.deepEqual(await breadcrumbs.getByRole('button').allTextContents(),['Home','demo']);
+   assert.equal(await breadcrumbs.locator('svg use[href="#dsw-icon-chevron-right-outline-regular"]').count(),1);
+   const editZone=dialog.getByRole('button',{name:'Edit directory path',exact:true});
+   assert((await editZone.boundingBox()).width>100,'unused space after a short path opens the editor');
    const selected=dialog.locator('button[aria-current="true"]');
    assert(await selected.evaluate(node=>node===document.activeElement));
    const newFolder=dialog.getByRole('button',{name:'New folder',exact:true});
@@ -260,6 +263,13 @@ try {
    await pathInput.fill('C:/elsewhere');await pathInput.press('Enter');
    await dialog.getByRole('navigation',{name:'Directory breadcrumbs'}).getByRole('button',{name:'elsewhere',exact:true}).waitFor();
    assert.deepEqual(await breadcrumbs.getByRole('button').allTextContents(),['C:/','elsewhere']);
+   const parts=Array.from({length:16},(_,i)=>`directory-segment-${i}`),longPath='C:/'+parts.join('/');
+   await editPath.click();await pathInput.fill(longPath);await pathInput.press('Enter');
+   await breadcrumbs.getByRole('button',{name:parts.at(-1),exact:true}).waitFor();
+   const endVisible=()=>breadcrumbs.evaluate(trail=>trail.scrollLeft>0&&trail.scrollWidth-trail.clientWidth-trail.scrollLeft<2);
+   assert(await endVisible(),'long paths reveal their last segment');
+   await editPath.click();await pathInput.press('Escape');
+   assert(await endVisible(),'returning from path entry restores the selected end');
    await editPath.click();
    await pathInput.fill('C:/delayed');await pathInput.press('Enter');
    await page.waitForFunction(()=>!!fixture.delayedId);

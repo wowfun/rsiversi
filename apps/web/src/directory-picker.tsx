@@ -4,7 +4,7 @@ import {input,useView,type ExecutionLocation} from './bridge.ts'
 import {Modal} from './presentation.tsx'
 import {Button} from './button.tsx'
 import {directory} from './directory-input.ts';
-import {IconChevronRightOutlineRegular,IconFolderCloseRegular,IconFolderOpenRegular,IconPlusOutlineRegular} from '../vendor/dsh/dockkit-primitives/icons/index.tsx'
+import {IconChevronRightOutlineRegular,IconEditOutlineRegular,IconFolderCloseRegular,IconFolderOpenRegular,IconPlusOutlineRegular} from '../vendor/dsh/dockkit-primitives/icons/index.tsx'
 interface Entry {name:string;path:string;hidden:boolean;symlink:boolean}
 interface Listing {path:string;home:string|null;breadcrumbs:string[];entries:Entry[];truncated:boolean;unrepresentable:boolean}
 function directoryCrumbs(listing?:Listing) {
@@ -34,6 +34,10 @@ function DirectoryPicker({close}:{close:()=>void}) {
   const [busy,setBusy]=useState<string>(),[name,setName]=useState<string|null>(null),[uncertain,setUncertain]=useState(false)
   const readId=useRef<string>(),request=useRef(0),current=columns.at(-1)
   const selectedEntry=useRef<HTMLButtonElement>(null),header=useRef<HTMLElement>(null)
+  const trail=useRef<HTMLElement>(null)
+  useLayoutEffect(()=>{
+    if(trail.current)trail.current.scrollLeft=trail.current.scrollWidth
+  },[current?.path,editing])
   const focusAfter=useRef<'row'|'path'>()
   useLayoutEffect(()=>{
     if(editing||busy)return
@@ -130,9 +134,12 @@ function DirectoryPicker({close}:{close:()=>void}) {
       {editing?<form className="directory-path" onSubmit={event=>{event.preventDefault();if(!busy&&path.trim()){if(available)void browse(path);else void open()}}}><input autoFocus aria-label="Directory path" value={path} disabled={busy==='open'} onChange={event=>{
         if(readId.current){cancelRead();setBusy(undefined)}
         setPath(event.target.value)
-      }} maxLength={16384} placeholder="/path/to/project"/><Button type="submit" disabled={!!busy||!path.trim()}>{available?'Go':'Open'}</Button></form>:<div className="directory-location"><nav className="directory-breadcrumbs" aria-label="Directory breadcrumbs">
-        {crumbs.map(crumb=><button key={crumb.path} title={crumb.path} disabled={!!busy} onClick={()=>void browse(crumb.path)}>{crumb.label}</button>)}
-      </nav><Button aria-label="Edit directory path" disabled={!!busy} onClick={()=>setEditing(true)}>✎</Button></div>}
+      }} maxLength={16384} placeholder="/path/to/project"/><Button type="submit" disabled={!!busy||!path.trim()}>{available?'Go':'Open'}</Button></form>:<div className="directory-location"><nav className={css.trail} aria-label="Directory breadcrumbs" ref={trail}>
+        {crumbs.map((crumb,index)=><span key={crumb.path}>
+          {index>0&&<IconChevronRightOutlineRegular size={12}/>}
+          <button type="button" title={crumb.path} disabled={!!busy} onClick={()=>void browse(crumb.path)}>{crumb.label}</button>
+        </span>)}
+      </nav><button type="button" className={css.editZone} aria-label="Edit directory path" title="Edit directory path" disabled={!!busy} onClick={()=>setEditing(true)}><IconEditOutlineRegular size={14}/></button></div>}
     </header>
     <div className="directory-columns" aria-busy={!!busy}>{columns.map((column,index)=>{
       const selectedPath=columns[index+1]?.path
