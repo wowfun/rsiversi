@@ -282,6 +282,19 @@ try {
    await page.getByRole('tab',{name:'Chat',exact:true}).click();
    await page.evaluate(async()=>{Object.assign(fixture.view.surfaces.main.transcript.turns.entries.turn,{status:'Failed',foldable:false});await fixture.frame();});
    assert.equal(await page.locator('.message.metadata').isVisible(),true,'Failed history retains diagnostic model metadata');
+   assert.equal(await page.locator('button.turn-summary').count(),0,'Failed history cannot be collapsed');
+   assert.equal(await page.locator('.turn-summary').innerText(),'Failed');
+   await page.evaluate(async()=>{
+     Object.assign(fixture.view.surfaces.main.transcript.turns.entries.turn,{status:'Completed',foldable:true,elapsed_ms:80});
+     await fixture.frame();
+   });
+   const completed=page.getByRole('button',{name:'Completed in 1s',exact:true});
+   await completed.focus();
+   const before=await completed.getAttribute('aria-expanded');
+   await completed.press('Enter');
+   assert.equal(await completed.getAttribute('aria-expanded'),String(before!=='true'));
+   await completed.press('Space');
+   assert.equal(await completed.getAttribute('aria-expanded'),before);
    await page.evaluate(async()=>{fixture.view.surfaces.main.history_more=true;await fixture.frame();});
    const earlier=page.getByRole('region',{name:'Conversation transcript'}).getByRole('button',{name:'Load earlier'});
    await earlier.focus();await earlier.press('Enter');

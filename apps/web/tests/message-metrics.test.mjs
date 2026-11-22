@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {messageClock, usageReadings, tokenTotal, elapsedLabel, tokenCount, durationReading} from '../message-metrics.js';
+import {messageClock, usageReadings, tokenTotal, elapsedLabel, turnDurationLabel, tokenCount, durationReading} from '../message-metrics.js';
 import {visibleConversations} from '../navigation-presentation.js';
 
 test('missing provider metrics remain absent and inclusive input is not double counted',()=>{
@@ -20,6 +20,14 @@ test('clocks reject absent or out-of-range evidence and elapsed time permits zer
   for(const timestamp of [undefined,null,0,Number.MAX_VALUE,'bad'])assert.equal(messageClock(timestamp),null);
   assert.equal(messageClock(1000).iso,'1970-01-01T00:00:01.000Z');
   assert.equal(elapsedLabel(0),'0s');assert.equal(elapsedLabel(62000),'1m 2s');
+});
+test('settled headings show whole units while retaining failure and stop outcomes',()=>{
+  for (const [ms, expected] of [[undefined,''], [0,'1s'], [1950,'1s'], [60000,'1m 0s'], [3600111,'1h 0m 0s']]) {
+    assert.equal(turnDurationLabel('Completed',ms),expected);
+  }
+  for (const status of ['Failed','Partially failed','Cancelled','Interrupted']) {
+    assert.equal(turnDurationLabel(status,12000),'');
+  }
 });
 test('collapsed workspace keeps its selected conversation and preserves order',()=>{
   const entries=Array.from({length:9},(_,i)=>({session:String(i)}));

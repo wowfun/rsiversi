@@ -164,7 +164,7 @@ try {
       assert.equal(await workspace.getAttribute('aria-expanded'),'false');
       await disclosures.screenshot({path:join(report,name+'-disclosures.png')});
       await page.evaluate(()=>window.finishPolicy());
-      await page.locator('.turn-summary').filter({hasText:'process item'}).first().click();
+      await page.locator('button.turn-summary').first().click();
       await page.getByRole('button',{name:'Open external conversation'}).waitFor({state:'visible'});
       await page.locator('.delegation-action').click();
       await page.locator('.source-reference').click();

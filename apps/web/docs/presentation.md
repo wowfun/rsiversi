@@ -481,8 +481,10 @@ message. A turn ending without a visible assistant reply keeps the action at
 its terminal boundary. The action exposes the full, recent, and empty history choices.
 Process disclosures and Turn summaries remain transparent on pointer hover.
 Turn expansion reveals process rows; each row owns its disclosure independently.
-Summary counts include only Tool and reasoning rows. A Turn with no such rows
-shows its status without a disclosure control.
+A Turn heading shows its outcome and, when available, its duration.
+The heading offers a disclosure only when there is process content the reader
+can fold. Protected history remains expanded. Failed and stopped Turns show
+their outcome without a duration. A completed duration displays at least one second.
 Expanding a summary retains its screen position and pauses automatic following.
 Stop sends the displayed Turn identity with its attachment generation, preserving
 queued input and the draft. It cannot cancel a newer Turn or a pending submission.

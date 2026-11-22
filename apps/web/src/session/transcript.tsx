@@ -2,7 +2,7 @@ import {DocumentContributions, DocumentTranscript} from "../document-plugins.tsx
 import {IconApiOutlineRegular, IconClockOutlineRegular, IconContextInjectionOutlineRegular, IconChevronDownOutlineRegular, IconChevronRightOutlineRegular, IconGoalOutlineRegular, IconPaperPlaneOutlineRegular, IconUsersOutlineRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import {MessageFeedback} from './message-feedback.tsx';
 import {CopyButton} from "./copy-button.tsx";
-import {messageClock, elapsedLabel} from '../../message-metrics.js';
+import {messageClock, turnDurationLabel} from '../../message-metrics.js';
 import {TurnUsage} from './metrics.tsx';
 import {ProcessTitle, RunningStatus} from './process-row.tsx';
 import {
@@ -356,16 +356,12 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
       if (block.role !== 'status' && block.role !== 'metadata') latestContent = block.key;
     }
     for (const turn of Object.values(transcript.turns?.entries ?? {})) {
-      const process = turn.process.filter(key => {
-        const role = blocks.get(key)?.role;
-        return role === 'tool' || role === 'reasoning' || role === 'context';
-      });
-      const Summary = process.length ? 'button' : 'div';
       if (turn.terminal && !turn.running) completed.set(turn.terminal, turn);
+      const open = this.state.expanded.has(turn.id);
       const state = turnVisibility(
         turn,
         mode,
-        this.state.expanded.has(turn.id),
+        open,
         replies,
       );
       const lastProse = turn.closing_prose?.at(-1);
@@ -381,23 +377,28 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         });
       const first = turn.process.find(key => blocks.has(key))
         ?? (turn.terminal && turn.foldable && !turn.running ? turn.answer.find(key => blocks.has(key)) : undefined);
-      if (first && (!turn.running || mode === 'compact') && mode !== "verbose")
+      if (first && (!turn.running || mode === 'compact') && mode !== "verbose") {
+        const expandable = turn.foldable && turn.process.some(key => {
+          const role = blocks.get(key)?.role;
+          return role === 'tool' || role === 'reasoning' || role === 'context';
+        });
+        const Summary = expandable ? 'button' : 'div';
+        const duration = !turn.running && turnDurationLabel(turn.status, turn.elapsed_ms);
         summaries.set(
           first,
           <Summary
             key={`turn:${turn.id}`}
-            type={process.length ? "button" : undefined}
+            type={expandable ? "button" : undefined}
             className="turn-summary"
             data-turn-id={turn.id}
-            aria-expanded={process.length ? !process.some(key=>state.hidden.has(key)) : undefined}
-            onClick={process.length ? event => this.toggle(turn.id,event.currentTarget) : undefined}
+            aria-expanded={expandable ? open : undefined}
+            onClick={expandable ? event => this.toggle(turn.id,event.currentTarget) : undefined}
           >
-            {turn.running ? "Working" : turn.status}
-            {!turn.running && turn.elapsed_ms != null && ` in ${elapsedLabel(turn.elapsed_ms)}`}
-            {process.length > 0 && <> · {process.length} process {process.length === 1 ? "item" : "items"} {process.some(key=>state.hidden.has(key)) ? "⌄" : "⌃"}</>}
-            {turn.partial ? " · Partial history" : ""}
+            <span>{turn.running ? "Working" : turn.status}{duration && ` in ${duration}`}{turn.partial && " · Partial history"}</span>
+            {expandable && <IconChevronDownOutlineRegular size={14} aria-hidden="true"/>}
           </Summary>,
         );
+      }
       for (const retry of turn.retries ?? []) {
         const key = turn.blocks[retry.block];
         summaries.set(key, <Fragment key={`retry:${turn.id}:${key}`}>

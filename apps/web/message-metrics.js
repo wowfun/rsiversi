@@ -19,10 +19,19 @@ export function tokenTotal(usage) {
   const total = usage && usage.input_tokens + usage.output_tokens;
   return Number.isSafeInteger(total) ? total : undefined;
 }
+function minutesAndSeconds(seconds) {
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
 export function elapsedLabel(milliseconds) {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return '';
-  const seconds = Math.round(milliseconds / 1000);
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return minutesAndSeconds(Math.round(milliseconds / 1000));
+}
+export function turnDurationLabel(status, milliseconds) {
+  if (milliseconds == null || ['Failed', 'Partially failed', 'Interrupted', 'Cancelled'].includes(status)) return '';
+  const seconds = Math.max(1, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  if (!hours) return minutesAndSeconds(seconds);
+  return `${hours}h ${Math.floor(seconds / 60) % 60}m ${seconds % 60}s`;
 }
 export function usageReadings(summary, capacity) {
   const usage = summary?.reported_attempts > 0 ? summary.tokens : undefined;
