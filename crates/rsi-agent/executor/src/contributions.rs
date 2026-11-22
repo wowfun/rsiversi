@@ -759,28 +759,12 @@ impl Driver {
         if !entries.iter().any(|entry| entry.stage() == stage) {
             return Ok((request.require_approval, None));
         }
-        let program = match origin {
-            rsi_agent_session_protocol::ToolOrigin::Program {
-                parent_effect_id, ..
-            } => Some(parent_effect_id),
-            rsi_agent_session_protocol::ToolOrigin::Model { .. } => None,
-        };
         let run = StageRun::new(stage, cancellation, stop);
         let context = run
-            .capture(async {
-                match program {
-                    Some(parent) => {
-                        self.turns
-                            .program_policy_context(claim, parent, run.token.clone())
-                            .await
-                    }
-                    None => {
-                        self.turns
-                            .contribution_context(claim, Vec::new(), run.token.clone())
-                            .await
-                    }
-                }
-            })
+            .capture(
+                self.turns
+                    .tool_policy_context(claim, origin, run.token.clone()),
+            )
             .await?;
         for entry in entries {
             let ContributionKind::ToolPolicy(callback) = entry.kind() else {

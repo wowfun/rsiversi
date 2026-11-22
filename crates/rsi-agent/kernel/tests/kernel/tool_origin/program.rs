@@ -192,13 +192,28 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     )
     .await;
     publish_model_source(&kernel, &claim, "outer", "run_code", &snapshot()).await;
+    let model = |id: &str| ToolOrigin::Model {
+        effect_id: EffectId::new(id).unwrap(),
+    };
+    let program = |parent: &str, ordinal| ToolOrigin::Program {
+        parent_effect_id: EffectId::new(parent).unwrap(),
+        ordinal,
+    };
+    kernel
+        .tool_policy_context(&claim, &model("source-model"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        kernel
+            .tool_policy_context(&claim, &model("foreign"), CancellationToken::new())
+            .await
+            .is_err()
+    );
     let turn = claim.turn_id();
     let outer = intent(
         turn,
         "outer",
-        ToolOrigin::Model {
-            effect_id: EffectId::new("source-model").unwrap(),
-        },
+        model("source-model"),
         "run_code",
         ToolProgramRole::Coordinator,
     );
@@ -208,14 +223,17 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     }
     assert!(kernel.publish(&claim, vec![forged]).await.is_err());
     flush_bodies(&kernel, &claim, vec![outer]).await;
+    assert!(
+        kernel
+            .tool_policy_context(&claim, &model("source-model"), CancellationToken::new())
+            .await
+            .is_err()
+    );
     let nested = |id: &str, ordinal| {
         intent(
             turn,
             id,
-            ToolOrigin::Program {
-                parent_effect_id: EffectId::new("outer").unwrap(),
-                ordinal,
-            },
+            program("outer", ordinal),
             "file_read",
             ToolProgramRole::Callable,
         )
@@ -229,11 +247,7 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     );
     assert!(
         kernel
-            .program_policy_context(
-                &claim,
-                &EffectId::new("outer").unwrap(),
-                CancellationToken::new()
-            )
+            .tool_policy_context(&claim, &program("outer", 1), CancellationToken::new())
             .await
             .is_err()
     );
@@ -264,20 +278,12 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     );
     assert!(
         kernel
-            .program_policy_context(
-                &claim,
-                &EffectId::new("foreign").unwrap(),
-                CancellationToken::new()
-            )
+            .tool_policy_context(&claim, &program("foreign", 1), CancellationToken::new())
             .await
             .is_err()
     );
     kernel
-        .program_policy_context(
-            &claim,
-            &EffectId::new("outer").unwrap(),
-            CancellationToken::new(),
-        )
+        .tool_policy_context(&claim, &program("outer", 1), CancellationToken::new())
         .await
         .unwrap();
     assert!(
@@ -299,11 +305,7 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     flush_bodies(&kernel, &claim, vec![nested("one", 1)]).await;
     assert!(
         kernel
-            .program_policy_context(
-                &claim,
-                &EffectId::new("outer").unwrap(),
-                CancellationToken::new()
-            )
+            .tool_policy_context(&claim, &program("outer", 1), CancellationToken::new())
             .await
             .is_err()
     );
@@ -383,11 +385,7 @@ async fn nested_program_calls_bind_frozen_catalog_parent_and_ordinals_and_stay_o
     );
     assert!(
         kernel
-            .program_policy_context(
-                &claim,
-                &EffectId::new("outer").unwrap(),
-                CancellationToken::new()
-            )
+            .tool_policy_context(&claim, &program("outer", 1), CancellationToken::new())
             .await
             .is_err()
     );

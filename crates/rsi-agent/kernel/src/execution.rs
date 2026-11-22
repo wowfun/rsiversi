@@ -247,13 +247,13 @@ impl TurnExecution for AgentKernel {
             facts: captured_history::capture(self, caller.session_id(), through, cancellation),
         })
     }
-    async fn program_policy_context(
+    async fn tool_policy_context(
         &self,
         claim: &TurnClaim,
-        parent: &EffectId,
+        origin: &rsi_agent_session_protocol::ToolOrigin,
         cancellation: CancellationToken,
     ) -> TurnResult<rsi_agent_composition_protocol::ContributionContext> {
-        self.capture_contribution_context(claim, Vec::new(), cancellation, Some(parent))
+        self.capture_contribution_context(claim, Vec::new(), cancellation, Some(origin))
             .await
     }
     async fn park_human_wait(

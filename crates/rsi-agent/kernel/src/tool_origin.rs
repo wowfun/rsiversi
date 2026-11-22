@@ -243,6 +243,10 @@ impl ToolSource {
         Ok(())
     }
 
+    pub(super) fn completed_from(&self, source: &EffectId) -> bool {
+        self.completed && &self.effect_id == source
+    }
+
     pub(super) fn pending_source(&self) -> Option<&EffectId> {
         (self.completed
             && self
@@ -296,7 +300,7 @@ impl ToolSource {
         name: &str,
         arguments: &serde_json::Value,
     ) -> TurnResult<()> {
-        if &self.effect_id != source || !self.completed {
+        if !self.completed_from(source) {
             return Err(invalid("source is not the completed Conversation"));
         }
         let call = self

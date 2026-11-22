@@ -503,9 +503,11 @@ executor assigns call ordinals and identities, bounds outstanding requests to 16
 and owns settlement even if a request waiter disappears. It grants neither Agent
 control nor detached authority, and it is never encoded in portable Tool input.
 
-A foreground program policy snapshot names its exact still-started coordinator.
-Kernel permits that read only while the coordinator is the sole active effect;
-ordinary contribution capture retains its no-active-effect requirement. Nested
+Tool policy reads the open Step at a fresh durable horizon for each call. A
+model-origin call names its completed model request and may observe parallel-safe
+siblings from that request still running. A foreground program call names its
+started coordinator, which must be the sole active effect. Ordinary contribution
+capture requires the Turn to have no active effects. Nested
 PostTool callbacks run in settled source order after coordinator settlement, so
 no context input or callback domain write enters during the active coordinator.
 

@@ -2545,8 +2545,41 @@ async fn byte_pressure_pauses_admission_and_recovers_the_retained_result_in_orde
     run_skewed_reads(5, 2, 2 * 1024 * 1024 + 256, 3).await;
 }
 
+#[derive(Debug, Default)]
+struct ReadPolicy(AtomicUsize);
+
+#[async_trait]
+impl rsi_agent_composition_protocol::ToolPolicy for ReadPolicy {
+    async fn decide(
+        &self,
+        _: &rsi_agent_composition_protocol::ContributionContext,
+        request: &rsi_agent_composition_protocol::ToolPolicyRequest<'_>,
+        _: CancellationToken,
+    ) -> rsi_agent_composition_protocol::ContributionResult<
+        rsi_agent_composition_protocol::ToolPolicyDecision,
+    > {
+        assert_eq!(request.name, "skew_read");
+        assert_eq!(
+            request.arguments["index"],
+            self.0.fetch_add(1, Ordering::SeqCst)
+        );
+        Ok(rsi_agent_composition_protocol::ToolPolicyDecision::Abstain)
+    }
+}
+
 async fn run_skewed_reads(call_count: usize, limit: usize, payload_bytes: usize, window: usize) {
+    use rsi_agent_composition_protocol::{ContributionKind, ContributionRegistration};
     let stack = BaseStack::activate().await;
+    let policy = Arc::new(ReadPolicy::default());
+    let callbacks = super::contributions::install(
+        &stack,
+        vec![ContributionRegistration::new(
+            rsi_agent_session_protocol::ContributionId::new("fixture.read-policy").unwrap(),
+            0,
+            ContributionKind::ToolPolicy(policy.clone()),
+        )],
+    )
+    .await;
     let read = Arc::new(DelayedRead {
         payload_bytes,
         ..Default::default()
@@ -2637,10 +2670,12 @@ async fn run_skewed_reads(call_count: usize, limit: usize, payload_bytes: usize,
         })
         .collect();
     assert_eq!(results, (0..call_count as u64).collect::<Vec<_>>());
+    assert_eq!(policy.0.load(Ordering::SeqCst), call_count);
     eprintln!(
         "skew reads={call_count} bytes_per_result={payload_bytes} cap={limit} peak_active={peak} started_while_first_held={held} elapsed_ms={}",
         start.elapsed().as_millis()
     );
     drop((turns, registration));
+    assert!(callbacks.dispose().await.is_clean());
     stack.dispose(language, executor).await;
 }

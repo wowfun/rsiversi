@@ -466,17 +466,7 @@ pub(super) fn apply_tool_body(turn: &mut TurnControl, body: &SessionFactBody) ->
             let source_selection = match origin {
                 ToolOrigin::Model { effect_id: source } => {
                     if !turn.effects.is_empty()
-                        && (!parallel_safe
-                            || turn.effects.values().any(|effect| {
-                                !matches!(
-                                    effect,
-                                    ActiveEffect::Tool {
-                                        parallel_safe: true,
-                                        origin: ToolOrigin::Model { .. },
-                                        ..
-                                    }
-                                )
-                            }))
+                        && (!parallel_safe || !only_parallel_model_tools(turn, source))
                     {
                         return Err(TurnError::Invalid(
                             "overlapping Tool intents require parallel-safe definitions".into(),
@@ -602,6 +592,19 @@ fn admit_program_origin(
     }
     *next_program_ordinal = ordinal.checked_add(1).ok_or(TurnError::Capacity)?;
     Ok(source_selection.as_ref().clone())
+}
+
+pub(super) fn only_parallel_model_tools(turn: &TurnControl, source: &EffectId) -> bool {
+    turn.effects.values().all(|effect| {
+        matches!(
+            effect,
+            ActiveEffect::Tool {
+                parallel_safe: true,
+                origin: ToolOrigin::Model { effect_id },
+                ..
+            } if effect_id == source
+        )
+    })
 }
 
 pub(super) fn ensure_no_active_effect(turn: &TurnControl) -> TurnResult<()> {

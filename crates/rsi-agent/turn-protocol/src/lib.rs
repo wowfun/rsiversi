@@ -1720,17 +1720,17 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = (caller, cancellation);
         Err(TurnError::Invalid("Tool history is unsupported".into()))
     }
-    /// Captures a read-only policy horizon for one exact started foreground coordinator.
-    /// No nested effect may be active; this does not authorize contribution writes.
-    async fn program_policy_context(
+    /// Reads policy state in the producing model's open Step or under the sole
+    /// started program coordinator. This snapshot grants no mutation authority.
+    async fn tool_policy_context(
         &self,
         claim: &TurnClaim,
-        parent: &EffectId,
+        origin: &rsi_agent_session_protocol::ToolOrigin,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_composition_protocol::ContributionContext> {
-        let _ = (claim, parent, cancellation);
+        let _ = (claim, origin, cancellation);
         Err(TurnError::Invalid(
-            "program policy snapshots are unsupported".into(),
+            "tool policy snapshots are unsupported".into(),
         ))
     }
     /// Publishes an ordinary charged Step closure. Turn finalization uses `finish_turn`.

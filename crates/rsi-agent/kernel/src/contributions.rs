@@ -5,7 +5,7 @@ use rsi_agent_composition_protocol::{
     ContributionContext, ContributionError, ContributionFactPage, ContributionFactReader,
     ContributionHorizon, ContributionResult,
 };
-use rsi_agent_session_protocol::{DomainStateView, SettledToolContext, StepId};
+use rsi_agent_session_protocol::{DomainStateView, SettledToolContext, StepId, ToolOrigin};
 
 #[derive(Debug)]
 struct CapturedFacts {
@@ -58,15 +58,15 @@ impl AgentKernel {
         claim: &TurnClaim,
         pending: Vec<SettledToolContext>,
         cancellation: CancellationToken,
-        program: Option<&EffectId>,
+        origin: Option<&ToolOrigin>,
     ) -> TurnResult<ContributionContext> {
         let snapshot = self
-            .open_step_snapshot(claim, pending, &cancellation, program)
+            .open_step_snapshot(claim, pending, &cancellation, origin)
             .await?;
         let page = self
             .read_step_domains(claim, snapshot.through, None)
             .await?;
-        self.finish_step_snapshot(claim, &cancellation, program)?;
+        self.finish_step_snapshot(claim, &cancellation, origin)?;
         Ok(ContributionContext {
             header: Arc::new(claim.header().clone()),
             execution: claim.execution().cloned(),
@@ -116,14 +116,14 @@ impl AgentKernel {
         claim: &TurnClaim,
         pending: Vec<SettledToolContext>,
         cancellation: &CancellationToken,
-        program: Option<&EffectId>,
+        origin: Option<&ToolOrigin>,
     ) -> TurnResult<StepSnapshot> {
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
             ));
         }
-        if program.is_none() {
+        if origin.is_none() {
             self.ensure_contribution_step(claim, pending).await?;
         }
         let admission = self
@@ -133,7 +133,7 @@ impl AgentKernel {
             .await?;
         let snapshot = {
             let state = lock_state(&self.inner);
-            let turn = self.validate_contribution_claim(&state, claim, program)?;
+            let turn = self.validate_contribution_claim(&state, claim, origin)?;
             let step_id = turn.current_step.clone().ok_or_else(|| {
                 TurnError::Invalid("contribution capture requires an open Step".into())
             })?;
@@ -180,9 +180,9 @@ impl AgentKernel {
         &self,
         claim: &TurnClaim,
         cancellation: &CancellationToken,
-        program: Option<&EffectId>,
+        origin: Option<&ToolOrigin>,
     ) -> TurnResult<()> {
-        self.validate_contribution_claim(&lock_state(&self.inner), claim, program)?;
+        self.validate_contribution_claim(&lock_state(&self.inner), claim, origin)?;
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
@@ -243,7 +243,7 @@ impl AgentKernel {
         &self,
         state: &'a KernelState,
         claim: &TurnClaim,
-        program: Option<&EffectId>,
+        origin: Option<&ToolOrigin>,
     ) -> TurnResult<&'a TurnControl> {
         let turn = self.validate_claim(state, claim)?;
         if turn.cancel_requested || turn.terminal.is_some() {
@@ -251,24 +251,40 @@ impl AgentKernel {
                 "contribution capture follows cancellation or the Turn ending boundary".into(),
             ));
         }
-        if let Some(parent) = program {
-            if turn.effects.len() != 1
-                || !matches!(
-                    turn.effects.get(parent),
-                    Some(ActiveEffect::Tool {
-                        started: true,
-                        program_role: rsi_tools_protocol::ToolProgramRole::Coordinator,
-                        origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
-                        ..
-                    })
-                )
-            {
-                return Err(TurnError::Invalid(
-                    "program policy snapshot requires its sole started coordinator".into(),
-                ));
+        match origin {
+            Some(ToolOrigin::Model { effect_id }) => {
+                if !turn
+                    .tool_source
+                    .as_ref()
+                    .is_some_and(|source| source.completed_from(effect_id))
+                    || !turn_state::only_parallel_model_tools(turn, effect_id)
+                {
+                    return Err(TurnError::Invalid(
+                        "tool policy snapshot requires its completed model and compatible siblings"
+                            .into(),
+                    ));
+                }
             }
-        } else {
-            turn_state::ensure_no_active_effect(turn)?;
+            Some(ToolOrigin::Program {
+                parent_effect_id, ..
+            }) => {
+                if turn.effects.len() != 1
+                    || !matches!(
+                        turn.effects.get(parent_effect_id),
+                        Some(ActiveEffect::Tool {
+                            started: true,
+                            program_role: rsi_tools_protocol::ToolProgramRole::Coordinator,
+                            origin: ToolOrigin::Model { .. },
+                            ..
+                        })
+                    )
+                {
+                    return Err(TurnError::Invalid(
+                        "program policy snapshot requires its sole started coordinator".into(),
+                    ));
+                }
+            }
+            None => turn_state::ensure_no_active_effect(turn)?,
         }
         Ok(turn)
     }
