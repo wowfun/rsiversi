@@ -327,6 +327,30 @@ fn now_ms() -> u64 {
 }
 
 impl JobRecord {
+    fn retained_preview(&self, id: &str, limits: [usize; 2]) -> Option<JobRead> {
+        let Retention::Background(Some(tail)) = &self.retention else {
+            return None;
+        };
+        let sample = |index: usize| {
+            let end = self.stream_ends[index];
+            let bytes = &tail[index];
+            let start = bytes.len().saturating_sub(limits[index]);
+            let oldest_offset = end - (bytes.len() - start) as u64;
+            JobOutputRead {
+                bytes: bytes[start..].to_vec(),
+                oldest_offset,
+                next_offset: end,
+                lossy: oldest_offset > 0,
+                full_output: None,
+            }
+        };
+        Some(JobRead {
+            job: self.summary(id),
+            stdout: sample(0),
+            stderr: sample(1),
+        })
+    }
+
     fn summary(&self, id: &str) -> JobSummary {
         JobSummary {
             id: id.to_owned(),
@@ -554,6 +578,24 @@ impl Jobs for Service {
         Ok(record.summary(id))
     }
 
+    fn output_changes(
+        &self,
+        scope: &JobScopeAuthority,
+        id: &str,
+        origin: &str,
+    ) -> Result<Option<[tokio::sync::watch::Receiver<()>; 2]>> {
+        let control = {
+            let registry = lock(&self.registry);
+            self.validate_scope(&registry, scope)?;
+            let record = originating_record(&registry, scope, id, origin)?;
+            record.control.clone()
+        };
+        std::panic::catch_unwind(AssertUnwindSafe(|| {
+            control.and_then(|control| control.output_changes())
+        }))
+        .map_err(|_| JobsError::Execution("job output subscription panicked".into()))
+    }
+
     fn peek(
         &self,
         scope: &JobScopeAuthority,
@@ -569,32 +611,9 @@ impl Jobs for Service {
         let (control, sequence) = {
             let registry = lock(&self.registry);
             self.validate_scope(&registry, scope)?;
-            let record = visible_record(&registry, scope, id)?;
-            if record.origin.as_deref() != Some(origin) {
-                return Err(JobsError::UnknownJob(id.into()));
-            }
+            let record = originating_record(&registry, scope, id, origin)?;
             let Some(control) = &record.control else {
-                let Retention::Background(Some(tail)) = &record.retention else {
-                    return Ok(None);
-                };
-                let sample = |index: usize| {
-                    let end = record.stream_ends[index];
-                    let bytes = &tail[index];
-                    let start = bytes.len().saturating_sub(limits[index]);
-                    let oldest_offset = end - (bytes.len() - start) as u64;
-                    JobOutputRead {
-                        bytes: bytes[start..].to_vec(),
-                        oldest_offset,
-                        next_offset: end,
-                        lossy: oldest_offset > 0,
-                        full_output: None,
-                    }
-                };
-                return Ok(Some(JobRead {
-                    job: record.summary(id),
-                    stdout: sample(0),
-                    stderr: sample(1),
-                }));
+                return Ok(record.retained_preview(id, limits));
             };
             (Arc::clone(control), record.sequence)
         };
@@ -617,8 +636,8 @@ impl Jobs for Service {
         }
         let registry = lock(&self.registry);
         self.validate_scope(&registry, scope)?;
-        let record = visible_record(&registry, scope, id)?;
-        if record.sequence != sequence || record.origin.as_deref() != Some(origin) {
+        let record = originating_record(&registry, scope, id, origin)?;
+        if record.sequence != sequence {
             return Err(JobsError::UnknownJob(id.into()));
         }
         if !record
@@ -626,7 +645,7 @@ impl Jobs for Service {
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &control))
         {
-            return Ok(None);
+            return Ok(record.retained_preview(id, limits));
         }
         Ok(Some(JobRead {
             job: record.summary(id),
@@ -1234,6 +1253,19 @@ fn visible_record<'a>(
         .get(id)
         .filter(|record| record.scope.same_generation(scope))
         .ok_or_else(|| JobsError::UnknownJob(id.to_owned()))
+}
+
+fn originating_record<'a>(
+    registry: &'a Registry,
+    scope: &JobScopeAuthority,
+    id: &str,
+    origin: &str,
+) -> Result<&'a JobRecord> {
+    let record = visible_record(registry, scope, id)?;
+    if record.origin.as_deref() != Some(origin) {
+        return Err(JobsError::UnknownJob(id.into()));
+    }
+    Ok(record)
 }
 
 fn visible_record_mut<'a>(

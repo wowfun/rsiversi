@@ -168,6 +168,9 @@ struct ControlledProcess {
     fail_settlement: bool,
 }
 impl rsi_process::ProcessOutput for Port {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
     fn read_from(&self, _: u64) -> rsi_process::Result<rsi_process::ProcessRead> {
         match self.capture_failure {
             Some(CaptureFailure::Io) => {

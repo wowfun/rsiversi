@@ -54,6 +54,13 @@ struct ShellJobControl {
 
 #[async_trait]
 impl JobControl for ShellJobControl {
+    fn output_changes(&self) -> Option<[tokio::sync::watch::Receiver<()>; 2]> {
+        Some([
+            self.process.stdout().changes()?,
+            self.process.stderr().changes()?,
+        ])
+    }
+
     fn stream_end(&self, stream: JobStream) -> rsi_jobs::Result<u64> {
         let reader = match stream {
             JobStream::Stdout => self.process.stdout(),

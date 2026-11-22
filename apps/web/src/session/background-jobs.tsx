@@ -4,7 +4,7 @@ import {Tooltip} from '../../vendor/dsh/dockkit-primitives/Tooltip.tsx';
 import {StateDot, type StateDotState} from '../../vendor/dsh/primitives/StateDot.tsx';
 import {TerminalBlock, type TerminalBlockLabels} from '../../vendor/dsh/primitives/TerminalBlock.tsx';
 import css from '../../vendor/dsh/jobs/JobsSection.module.css';
-import {input} from '../bridge.ts';
+import {input, type BackgroundOutput} from '../bridge.ts';
 import type {BackgroundJob} from '../presentation-types.ts';
 
 const colors: Record<BackgroundJob['status'], StateDotState> = {
@@ -25,29 +25,16 @@ function elapsed(ms:number) {
 }
 const identity = (job:BackgroundJob) => job.origin ?? job.id;
 type Binding = {pane:string; generation:string};
-type Sample = {stdout:string; stderr:string; truncated:boolean};
 
 function Output({pane, generation, job}:Binding & {job:BackgroundJob}) {
-  const [output, setOutput] = useState<Sample|null>(null);
+  const [output, setOutput] = useState<BackgroundOutput|null>(null);
   const [error, setError] = useState('');
   const live = liveJob(job);
   const {id, origin} = job;
-  useEffect(() => {
-    let active = true, timer:ReturnType<typeof setTimeout>;
-    async function sample() {
-      try {
-        const next = await input.backgroundJob(pane, generation, {kind:'peek',job:{id,origin}}) as Sample|null;
-        if (!active) return;
-        setOutput(previous => previous?.stdout === next?.stdout && previous?.stderr === next?.stderr && previous?.truncated === next?.truncated ? previous : next);
-        setError('');
-        if (live) timer = setTimeout(sample, 250);
-      } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : String(reason));
-      }
-    }
-    void sample();
-    return () => { active = false; clearTimeout(timer); };
-  }, [pane, generation, id, origin, live]);
+  useEffect(() => input.observeBackgroundJob(pane, generation, {id,origin}, value => {
+    setOutput(value);
+    setError('');
+  }, setError), [pane, generation, id, origin]);
   return <div className={css.panel}>
     {output?.truncated && <div className={css.notice}>… earlier output dropped …</div>}
     {error && <div role="status" className={css.noticeError}>live output stream interrupted: {error}</div>}

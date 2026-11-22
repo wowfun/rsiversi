@@ -148,6 +148,7 @@ impl Registry {
 #[cfg(unix)]
 #[derive(Debug)]
 struct Tail {
+    changes: rsi_process::OutputChanges,
     capture: Option<Arc<dyn rsi_spill::SpillCapture>>,
     maximum: usize,
     inner: Mutex<TailInner>,
@@ -198,6 +199,7 @@ impl Tail {
     fn new(maximum: usize, reservation: Arc<CaptureReservation>) -> Self {
         assert!(maximum > 0, "capture tail requires a nonzero bound");
         Self {
+            changes: Default::default(),
             capture: None,
             maximum,
             inner: Mutex::new(TailInner {
@@ -234,12 +236,18 @@ impl Tail {
         inner.bytes[start..start + first].copy_from_slice(&suffix[..first]);
         inner.bytes[..suffix.len() - first].copy_from_slice(&suffix[first..]);
         inner.length += suffix.len();
+        drop(inner);
+        self.changes.notify();
         Ok(())
     }
 }
 
 #[cfg(unix)]
 impl ProcessOutput for Tail {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        Some(self.changes.subscribe())
+    }
+
     fn peek_tail(&self, maximum: usize) -> Result<ProcessRead> {
         if !(1..=32 * 1024).contains(&maximum) {
             return Err(ProcessError::InvalidInput(

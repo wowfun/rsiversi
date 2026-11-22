@@ -8,9 +8,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct CountingTail {
     bytes: Vec<u8>,
     copied: AtomicUsize,
+    reads: AtomicUsize,
+    ready: std::sync::atomic::AtomicBool,
+    sampled: tokio::sync::Notify,
+    changes: rsi_process::OutputChanges,
 }
 impl ProcessOutput for CountingTail {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        Some(self.changes.subscribe())
+    }
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.sampled.notify_one();
+        if !self.ready.load(Ordering::Acquire) {
+            return Ok(ProcessRead {
+                bytes: vec![],
+                oldest_offset: 0,
+                next_offset: 0,
+                lossy: false,
+                full_output: None,
+            });
+        }
         let start = usize::try_from(offset.saturating_sub(37))
             .unwrap()
             .min(self.bytes.len());
@@ -42,6 +60,10 @@ async fn fragmented_capture_copies_each_retained_byte_once_and_preserves_offsets
     let source = Arc::new(CountingTail {
         bytes: vec![91; 4 * 1024 * 1024],
         copied: AtomicUsize::new(0),
+        reads: 0.into(),
+        ready: false.into(),
+        sampled: Default::default(),
+        changes: Default::default(),
     });
     let entry = Arc::new(Entry {
         prepared: Prepared {
@@ -60,17 +82,18 @@ async fn fragmented_capture_copies_each_retained_byte_once_and_preserves_offsets
         },
         plan: std::sync::Mutex::new(None),
         native: std::sync::Mutex::new(None),
-        outcome: tokio::sync::watch::channel(Some(Ok(Outcome {
-            exit_code: Some(0),
-            signal: None,
-        })))
-        .0,
+        outcome: tokio::sync::watch::channel(None).0,
         settlement: tokio::sync::watch::channel(Some(Ok(()))).0,
         cancel: tokio_util::sync::CancellationToken::new(),
         terminated: false.into(),
         task: std::sync::Mutex::new(None),
     });
-    let task = tokio::spawn(tail(source.clone(), send, entry));
+    let task = tokio::spawn(tail(source.clone(), send, entry.clone()));
+    source.sampled.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+    source.ready.store(true, Ordering::Release);
+    source.changes.notify();
     let mut bytes = Vec::new();
     let mut next = 37;
     while let Some(chunk) = receive.next().await.unwrap() {
@@ -78,6 +101,12 @@ async fn fragmented_capture_copies_each_retained_byte_once_and_preserves_offsets
         assert_eq!(offset, next);
         next += part.len() as u64;
         bytes.extend_from_slice(part);
+        if bytes.len() == source.bytes.len() && !chunk.eof {
+            entry.outcome.send_replace(Some(Ok(Outcome {
+                exit_code: Some(0),
+                signal: None,
+            })));
+        }
     }
     task.await.unwrap();
     assert_eq!(bytes, source.bytes);

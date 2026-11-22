@@ -141,6 +141,7 @@ impl SessionApi {
             Operation::DraftObserve,
             Operation::GoalObserve,
             Operation::TerminalOutput,
+            Operation::ObserveBackgroundOutput,
         ] {
             registrations.push(registrar.register(
                 operation.spec(),
@@ -416,12 +417,6 @@ fn handle_operations(
         add!(BackgroundJobControl, |owner, (): ()| async move {
             owner.background_job_control().await
         }),
-        add!(
-            PeekBackgroundJob,
-            |owner, job: rsi_session_protocol::BackgroundJobId| async move {
-                owner.peek_background_job(job).await
-            }
-        ),
         add!(
             StopBackgroundJob,
             |owner, job: rsi_session_protocol::BackgroundJobId| async move {

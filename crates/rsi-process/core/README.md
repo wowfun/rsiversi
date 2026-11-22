@@ -1,5 +1,10 @@
 # rsi-process
 
+Observers may subscribe to changes of a captured stream before sampling its
+retained bytes. Native and SSH captures publish changes after appending bytes.
+Execution-bound reads and subscriptions use the same pinned provider. A
+slow observer can coalesce notifications and read the current bounded tail.
+
 `ProcessOutput::peek_tail` copies only the requested newest raw bytes, within
 1..=32 KiB, under the capture lock. It preserves whole-stream offsets and the
 best-effort completed-output identity without waiting or changing process state.

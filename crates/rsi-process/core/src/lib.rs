@@ -233,8 +233,28 @@ pub struct ProcessRead {
     pub full_output: Option<rsi_spill::SpillRef>,
 }
 
+/// Lazily allocated change signal for one captured output stream.
+#[derive(Debug, Default)]
+pub struct OutputChanges(std::sync::OnceLock<tokio::sync::watch::Sender<()>>);
+impl OutputChanges {
+    /// Subscribes before taking the initial sample.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0
+            .get_or_init(|| tokio::sync::watch::channel(()).0)
+            .subscribe()
+    }
+    /// Publishes a committed append to any live readers.
+    pub fn notify(&self) {
+        if let Some(sender) = self.0.get() {
+            let _ = sender.send(());
+        }
+    }
+}
+
 /// Cursor-free reader for one retained raw process stream.
 pub trait ProcessOutput: fmt::Debug + Send + Sync + 'static {
+    /// Subscribes before a tail read so appends racing that read remain observable.
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>>;
     /// Reads retained bytes using whole-stream byte coordinates.
     fn read_from(&self, offset: u64) -> Result<ProcessRead>;
     /// Copies at most 1..=32768 newest bytes without waiting or changing state.

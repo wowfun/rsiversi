@@ -1,11 +1,15 @@
 # rsi-session-api
 
-Interface version 34 exposes `surface-observe` for one attached conversation.
+`surface-observe` follows one attached conversation.
 One read subscription carries tagged Session updates under the authenticated
 target and immutable Header. A draft receives projections and Goal state. A
 durable reader also supplies its Fact/control cursors and receives history,
 interactions and incremental model pages. Each source keeps the bounds and
 validation of its individual read. Cancelling the surface releases every source.
+
+Opening a background job starts a `background-job-output` subscription for its
+attached Session and originating Tool invocation. Its bounded initial sample,
+subsequent changes and cancellation follow the [Session contract](../session-protocol/README.md).
 
 The caller can run or delete a scheduled task through the
 `run-scheduled-task` and `delete-scheduled-task` mutations. Run queues one explicit follow-up in the

@@ -696,11 +696,11 @@ impl SessionHandle for Handle {
             .call(Operation::BackgroundJobControl, &())
             .await
     }
-    async fn peek_background_job(
+    async fn observe_background_output(
         &self,
         job: rsi_session_protocol::BackgroundJobId,
-    ) -> rsi_session_protocol::Result<Option<rsi_agent_turn_protocol::JobPreview>> {
-        self.frozen().call(Operation::PeekBackgroundJob, &job).await
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::BackgroundOutputStream> {
+        crate::client_stream::background_output(&self.frozen(), &job).await
     }
     async fn stop_background_job(
         &self,

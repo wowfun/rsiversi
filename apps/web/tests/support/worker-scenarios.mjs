@@ -11,7 +11,7 @@ const gate = () => {
   const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
   return {promise, resolve, reject};
 };
-const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','prepare_submission','export_input','reference_input','file_input','transcript_file','directory_input','scheduled_tasks','background_job','message_feedback','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
+const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','read_pending_interaction','read_session_resource','prepare_submission','export_input','reference_input','file_input','transcript_file','directory_input','scheduled_tasks','background_job','background_output','message_feedback','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
 async function fixture(overrides = {}) {
   const view = gate(), messages = [], failures = [];
   let terminated = 0, disposed = 0;
@@ -42,6 +42,30 @@ async function fixture(overrides = {}) {
   return {owner, view, messages, failures, context, transport,
     get terminated() {return terminated;}, get disposed() {return disposed;}};
 }
+
+test('background output releases its stream on replacement and collapse', async () => {
+  const stopped = [];
+  const f = await fixture({background_output:async (source, deliver, closed) => {
+    deliver(source);
+    await closed;
+    stopped.push(source);
+  }});
+  async function observe(source) {
+    const {port1, port2} = new MessageChannel();
+    const frame = new Promise(resolve => { port1.onmessage = ({data}) => resolve(data.value); });
+    await f.owner.request('background_output', {pane:'primary',source,port:port2}, [port2]);
+    assert.equal(await frame, source);
+    return port1;
+  }
+  const first = await observe('first'), second = await observe('second');
+  assert.deepEqual(stopped,['first']);
+  first.close();
+  const closed = new Promise(resolve => second.on('close',resolve));
+  second.postMessage(null);
+  await closed;
+  assert.deepEqual(stopped,['first','second']);
+  await f.owner.retire();
+});
 
 test('Rust admission metadata distinguishes refusal from unknown outcome', async () => {
   let failure;

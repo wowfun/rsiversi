@@ -103,6 +103,9 @@ impl Child {
 #[derive(Debug)]
 struct Port(Arc<Events>);
 impl ProcessOutput for Port {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
     fn read_from(&self, _: u64) -> PResult<ProcessRead> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
         Ok(ProcessRead {

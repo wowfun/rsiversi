@@ -3,8 +3,10 @@
 The Session panel observes the roster of background commands belonging to its
 authenticated Session and immutable Header. Its initial snapshot includes
 running and retained terminal jobs. Hosts without Jobs omit this observation.
-Later snapshots follow roster changes. An
-expanded row may sample retained stdout and stderr without reporting the job.
+Later snapshots follow roster changes. Expanding a row opens a non-consuming
+output observation. It delivers the current retained stdout and stderr, wakes
+when output changes and drains the terminal sample. Collapsing the row releases
+the observation. A quiet native command produces no output reads over the transport.
 Stopping a running command requires Host owner access. Closing the panel or
 losing the observation has no effect on the command.
 

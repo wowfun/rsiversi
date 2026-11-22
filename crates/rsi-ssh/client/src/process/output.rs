@@ -15,6 +15,7 @@ struct Capture {
 }
 #[derive(Debug)]
 pub(super) struct Tail {
+    changes: rsi_process::OutputChanges,
     capture: Mutex<Capture>,
     maximum: usize,
     done: watch::Sender<Option<Result<()>>>,
@@ -23,6 +24,7 @@ impl Tail {
     pub fn spawn(mut input: ReceiveStream, maximum: usize, client: ProcessConnection) -> Arc<Self> {
         let (done, _) = watch::channel(None);
         let tail = Arc::new(Self {
+            changes: Default::default(),
             capture: Mutex::new(Capture {
                 bytes: VecDeque::new(),
                 next: 0,
@@ -69,6 +71,7 @@ impl Tail {
                         }
                         capture.next = offset + bytes.len() as u64;
                     }
+                    retained.changes.notify();
                     if chunk.eof {
                         return Ok(());
                     }
@@ -95,6 +98,9 @@ impl Tail {
     }
 }
 impl ProcessOutput for Tail {
+    fn changes(&self) -> Option<watch::Receiver<()>> {
+        Some(self.changes.subscribe())
+    }
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
         let capture = lock(&self.capture);
         if let Some(error) = &capture.error {

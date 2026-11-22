@@ -92,7 +92,7 @@ pub enum Operation {
     Jobs,
     PeekJob,
     BackgroundJobControl,
-    PeekBackgroundJob,
+    ObserveBackgroundOutput,
     StopBackgroundJob,
     Inspect,
     Metrics,
@@ -164,7 +164,7 @@ impl Operation {
         Self::Jobs,
         Self::PeekJob,
         Self::BackgroundJobControl,
-        Self::PeekBackgroundJob,
+        Self::ObserveBackgroundOutput,
         Self::StopBackgroundJob,
         Self::Inspect,
         Self::Metrics,
@@ -277,7 +277,9 @@ impl Operation {
             Self::Metrics => ("metrics", Data, Read, 8192, 64 * 1024),
             Self::TreeMetrics => ("tree-metrics", Data, Read, 8192, 256 * 1024),
             Self::BackgroundJobControl => ("background-job-control", Control, Read, 8192, 4096),
-            Self::PeekBackgroundJob => ("peek-background-job", Data, Read, 8192, 32768),
+            Self::ObserveBackgroundOutput => {
+                ("background-job-output", Subscription, Read, 8192, 32768)
+            }
             Self::StopBackgroundJob => ("stop-background-job", Control, Mutation, 8192, 4096),
             Self::PeekJob => ("peek-job", Data, Read, 8192, 64 * 1024),
             Self::Evidence => ("evidence", Data, Read, 8192, 2 * 1024 * 1024),

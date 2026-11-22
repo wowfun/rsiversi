@@ -102,6 +102,9 @@ impl PluginFactory for ProcessSupplyFactory {
 struct EmptyProcessOutput;
 
 impl ProcessOutput for EmptyProcessOutput {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
     fn peek_tail(&self, _: usize) -> rsi_process::Result<ProcessRead> {
         self.read_from(0)
     }

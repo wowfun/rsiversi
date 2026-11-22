@@ -1459,7 +1459,40 @@ impl GuiApplication {
         state.history = Some(transcript);
         Ok(())
     }
-    /// Reads one visible background job or requests its cancellation in the attached Session.
+    /// Observes output only for the bound pane and attachment generation.
+    pub fn background_output(
+        &self,
+        source: &str,
+    ) -> Result<futures_util::stream::BoxStream<'static, Result<String>>> {
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            pane: crate::SurfaceId,
+            generation: String,
+            job: rsi_session_protocol::BackgroundJobId,
+        }
+        if source.len() > 4096 {
+            return Err("Background job request exceeds 4 KiB".into());
+        }
+        let request: Request = serde_json::from_str(source).map_err(error)?;
+        let attachment = self.pane(request.pane)?.attachment(&request.generation)?;
+        let stopped = attachment.stop.clone();
+        Ok(async_stream::try_stream! {
+            let mut updates = attachment.handle.observe_background_output(request.job).await.map_err(error)?;
+            while let Some(output) = updates.try_next().await.map_err(error)? {
+                let stdout = output.stdout.bytes(8192).map_err(error)?;
+                let stderr = output.stderr.bytes(8192).map_err(error)?;
+                yield serde_json::to_string(&serde_json::json!({
+                    "stdout": String::from_utf8_lossy(&stdout),
+                    "stderr": String::from_utf8_lossy(&stderr),
+                    "truncated": output.stdout.truncated || output.stderr.truncated,
+                })).map_err(error)?;
+            }
+        }.take_until(stopped.cancelled_owned()).boxed())
+    }
+
+    /// Reads control authority or requests cancellation in the attached Session.
     pub fn background_job(
         self: &Arc<Self>,
         source: &str,
@@ -1468,9 +1501,6 @@ impl GuiApplication {
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum Action {
             Control,
-            Peek {
-                job: rsi_session_protocol::BackgroundJobId,
-            },
             Stop {
                 job: rsi_session_protocol::BackgroundJobId,
             },
@@ -1487,22 +1517,24 @@ impl GuiApplication {
         }
         let request = serde_json::from_str::<Request>(source).map_err(error);
         self.admit_reply(move |app| async move {
-            let request=request?;
-            let attachment=app.pane(request.pane)?.attachment(&request.generation)?;
+            let request = request?;
+            let attachment = app.pane(request.pane)?.attachment(&request.generation)?;
             match request.action {
-                Action::Control => serde_json::to_string(&attachment.handle.background_job_control().await.map_err(error)?).map_err(error),
-                Action::Stop {job} => {
-                    attachment.handle.stop_background_job(job).await.map_err(error)?;
+                Action::Control => serde_json::to_string(
+                    &attachment
+                        .handle
+                        .background_job_control()
+                        .await
+                        .map_err(error)?,
+                )
+                .map_err(error),
+                Action::Stop { job } => {
+                    attachment
+                        .handle
+                        .stop_background_job(job)
+                        .await
+                        .map_err(error)?;
                     Ok("null".into())
-                }
-                Action::Peek {job} => {
-                    let Some(output)=attachment.handle.peek_background_job(job).await.map_err(error)? else {return Ok("null".into())};
-                    let stdout=output.stdout.bytes(8192).map_err(error)?;
-                    let stderr=output.stderr.bytes(8192).map_err(error)?;
-                    serde_json::to_string(&serde_json::json!({
-                        "stdout":String::from_utf8_lossy(&stdout), "stderr":String::from_utf8_lossy(&stderr),
-                        "truncated":output.stdout.truncated || output.stderr.truncated,
-                    })).map_err(error)
                 }
             }
         })

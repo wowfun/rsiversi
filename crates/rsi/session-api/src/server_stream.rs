@@ -40,6 +40,35 @@ impl ApiHandler for Handler {
             Operation::TerminalOutput => {
                 terminal_output(service.as_ref(), input, budget, maximum).await
             }
+            Operation::ObserveBackgroundOutput => {
+                let request: HandleRequest<rsi_session_protocol::BackgroundJobId> =
+                    serde_json::from_slice(input.as_bytes()).map_err(|_| {
+                        ApiError::Invalid("invalid background output request".into())
+                    })?;
+                let result = async {
+                    handle(service.as_ref(), &request.target)
+                        .await?
+                        .observe_background_output(request.input)
+                        .await
+                }
+                .await;
+                let mut source = match wire::domain(result)? {
+                    Ok(source) => source,
+                    Err(failure) => {
+                        return Err(ApiError::Domain(budget.encode(&failure, maximum)?));
+                    }
+                };
+                Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
+                    while let Some(update) = source.next().await {
+                        let body = match wire::domain(update)? {
+                            Ok(body) => body,
+                            Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))?,
+                        };
+                        let json = budget.encode(&HandleReply { target: request.target.clone(), body }, maximum)?;
+                        yield ApiMessage { json, binary: None };
+                    }
+                })))
+            }
             Operation::GoalObserve => goal(service.as_ref(), input, budget, maximum).await,
             Operation::DraftObserve => draft(service.as_ref(), input, budget, maximum).await,
             Operation::Projections => projections(service.as_ref(), input, budget, maximum).await,

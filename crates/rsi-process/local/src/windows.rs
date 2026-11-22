@@ -392,6 +392,7 @@ impl ProcessControl for Child {
 }
 #[derive(Debug)]
 struct Tail {
+    changes: rsi_process::OutputChanges,
     capture: Option<Arc<dyn rsi_spill::SpillCapture>>,
     maximum: usize,
     data: Mutex<(VecDeque<u8>, u64)>,
@@ -407,6 +408,7 @@ impl Tail {
             capture,
             maximum,
             data: Mutex::new((VecDeque::with_capacity(maximum), 0)),
+            changes: Default::default(),
             reservation,
         }
     }
@@ -429,9 +431,15 @@ impl Tail {
                 .skip(bytes.len().saturating_sub(self.maximum))
                 .copied(),
         );
+        drop(data);
+        self.changes.notify();
     }
 }
 impl ProcessOutput for Tail {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        Some(self.changes.subscribe())
+    }
+
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
         let data = self.data.lock().expect("Windows process tail");
         let oldest = data.1 - data.0.len() as u64;

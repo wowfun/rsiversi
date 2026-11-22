@@ -51,6 +51,9 @@ impl DuplexOutput for Output {
 #[derive(Debug)]
 struct EmptyOutput;
 impl ProcessOutput for EmptyOutput {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
     fn read_from(&self, _: u64) -> rsi_process::Result<ProcessRead> {
         Err(ProcessError::Io("no stderr".into()))
     }

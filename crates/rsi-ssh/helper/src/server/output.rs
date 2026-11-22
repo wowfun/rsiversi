@@ -1,7 +1,6 @@
 use super::{Arc, Connection, Entry, JoinSet, Native, SendStream};
 use rsi_process::ProcessOutput;
 use rsi_ssh_protocol::frame::MAXIMUM_FRAGMENT_BYTES;
-use std::time::Duration;
 
 pub(super) async fn run(
     entry: Arc<Entry>,
@@ -53,8 +52,13 @@ async fn send(output: &mut SendStream, bytes: Vec<u8>, eof: bool, entry: &Entry)
 }
 async fn tail(source: Arc<dyn ProcessOutput>, mut output: SendStream, entry: Arc<Entry>) {
     let mut offset = 0u64;
+    let mut changes = source.changes();
+    let mut outcome = entry.outcome.subscribe();
     loop {
-        let settled = entry.outcome.borrow().is_some();
+        if let Some(changes) = &mut changes {
+            changes.borrow_and_update();
+        }
+        let settled = outcome.borrow_and_update().is_some();
         let Ok(read) = source.read_from(offset) else {
             let _ = send(&mut output, vec![1], true, &entry).await;
             return;
@@ -80,7 +84,16 @@ async fn tail(source: Arc<dyn ProcessOutput>, mut output: SendStream, entry: Arc
                 return;
             }
         } else {
-            tokio::select! { () = entry.cancel.cancelled() => return, () = tokio::time::sleep(Duration::from_millis(10)) => {} }
+            tokio::select! {
+                () = entry.cancel.cancelled() => return,
+                _ = outcome.changed() => {}
+                closed = async {
+                    match &mut changes {
+                        Some(changes) => changes.changed().await.is_err(),
+                        None => std::future::pending().await,
+                    }
+                } => { if closed { changes = None; } }
+            }
         }
     }
 }

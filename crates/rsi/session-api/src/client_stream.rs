@@ -128,6 +128,22 @@ pub(super) async fn terminal_output(
     decode(&target, operation, &message)
 }
 
+pub(super) async fn background_output(
+    handle: &Handle,
+    job: &rsi_session_protocol::BackgroundJobId,
+) -> rsi_session_protocol::Result<rsi_session_protocol::BackgroundOutputStream> {
+    let operation = Operation::ObserveBackgroundOutput;
+    let (target, mut source) = open(handle, operation, job).await?;
+    Ok(Box::pin(async_stream::try_stream! {
+        while let Some(message) = source.next().await {
+            let message = message.map_err(|error| stream_error(operation, error))?;
+            let sample = decode(&target, operation, &message)?;
+            drop(message);
+            yield sample;
+        }
+    }))
+}
+
 pub(super) async fn goal(
     handle: &Handle,
 ) -> rsi_session_protocol::Result<rsi_session_protocol::GoalStream> {

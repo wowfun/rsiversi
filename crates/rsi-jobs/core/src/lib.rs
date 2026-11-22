@@ -554,6 +554,10 @@ pub trait JobCompletion: fmt::Debug + Send + Sync + 'static {
 /// blocking I/O or waiting for completion. `wait` owns asynchronous settlement.
 #[async_trait]
 pub trait JobControl: fmt::Debug + Send + Sync + 'static {
+    /// Independent stdout and stderr notifications, installed only by a live observer.
+    fn output_changes(&self) -> Option<[tokio::sync::watch::Receiver<()>; 2]> {
+        None
+    }
     /// Reads raw retained producer output at one whole-stream offset.
     fn read(&self, stream: JobStream, offset: u64) -> Result<JobOutputRead>;
     /// Returns the whole-stream length at settlement. Buffered producers can read their cursor directly.
@@ -664,6 +668,13 @@ pub trait Jobs: fmt::Debug + Send + Sync + 'static {
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>>;
     /// Lists the status and timing needed by a visible panel, oldest first.
     fn roster(&self, scope: &JobScopeAuthority) -> Result<Vec<JobRosterRow>>;
+    /// Observes a producer's captured streams under the same identity check as a peek.
+    fn output_changes(
+        &self,
+        scope: &JobScopeAuthority,
+        id: &str,
+        origin: &str,
+    ) -> Result<Option<[tokio::sync::watch::Receiver<()>; 2]>>;
     /// Requests a human stop without waiting or consuming the terminal result.
     fn request_stop(&self, scope: &JobScopeAuthority, id: &str, origin: &str) -> Result<()>;
     /// Lists only running and stopping identities in the original scope.

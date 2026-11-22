@@ -638,6 +638,41 @@ async fn terminal_peek_preserves_unreported_finalization_and_original_scope_gene
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panel_preview_finishes_from_retained_tail_when_model_collects_concurrently() {
+    let (_runtime, _fiber, jobs) = activated(json!({})).await;
+    let _lease = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    let authority = jobs.acquire_scope(scope("concurrent-panel")).unwrap();
+    let gate = Arc::new((Notify::new(), Mutex::new(false), Condvar::new()));
+    let mut control = TestControl::new(
+        TestSettlement::Immediate(JobStatus::Completed),
+        b"result",
+        b"",
+    );
+    Arc::get_mut(&mut control).unwrap().peek_gate = Some(gate.clone());
+    let mut input = submission("test", "preview", control);
+    let (tx, _notices) = tokio::sync::mpsc::unbounded_channel();
+    input.reporting = rsi_jobs::JobReporting::Notify(Arc::new(Notices(tx)));
+    input.origin = Some("effect".into());
+    let id = jobs.submit(&authority, input).await.unwrap();
+    wait_terminal(&jobs, &authority, &id).await;
+    let preview = tokio::task::spawn_blocking({
+        let (jobs, authority, id) = (jobs.clone(), authority.clone(), id.clone());
+        move || jobs.peek(&authority, &id, "effect", [3, 1])
+    });
+    gate.0.notified().await;
+    let collected = jobs.read(&authority, &id, 0, 0);
+    *gate.1.lock().unwrap() = true;
+    gate.2.notify_all();
+    assert!(collected.unwrap().job.reported);
+    let panel = preview.await.unwrap().unwrap().unwrap();
+    assert_eq!(panel.stdout.bytes, b"ult");
+    assert_eq!(panel.stdout.oldest_offset, 3);
+    assert_eq!(panel.job.status, JobStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocked_preview_does_not_block_registry_and_rechecks_revoked_scope() {
     let (_runtime, fiber, jobs) = activated(json!({})).await;
     let _lease = jobs

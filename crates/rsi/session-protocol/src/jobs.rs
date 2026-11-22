@@ -76,6 +76,10 @@ impl JobsCollection {
 pub type BackgroundJobsStream =
     futures_util::stream::BoxStream<'static, Result<Vec<rsi_jobs::JobRosterRow>>>;
 
+/// Current bounded output, followed by updates through terminal settlement.
+pub type BackgroundOutputStream =
+    futures_util::stream::BoxStream<'static, Result<rsi_agent_turn_protocol::JobPreview>>;
+
 /// An observed job and the exact Tool invocation that started it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

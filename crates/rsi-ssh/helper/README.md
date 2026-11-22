@@ -6,7 +6,8 @@ validated target account is shared for the helper process lifetime; distinct
 policies do not repeatedly launch account lookup.
 
 Captured output drains each bounded native tail snapshot once into transport
-fragments, preserving whole-stream offsets and reported gaps. It never rereads
+fragments, preserving whole-stream offsets and reported gaps. A quiet pump
+waits for a capture change, native settlement or cancellation. It never rereads
 the unsent remainder for each fragment or substitutes a newest-only tail read.
 
 Reusable Linux helper mechanics belong here; executable argument handling and

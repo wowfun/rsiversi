@@ -15,6 +15,7 @@ rsi-meta-contract = { path = "../../rsi-meta/contract" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 serde.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true

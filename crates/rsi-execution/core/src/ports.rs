@@ -26,6 +26,10 @@ fn tail(inner: Arc<dyn ProcessOutput>, pin: ExecutionPin) -> Arc<dyn ProcessOutp
     Arc::new(Bound { inner, pin })
 }
 impl ProcessOutput for Bound<Arc<dyn ProcessOutput>> {
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        let _permit = self.pin.admit().ok()?;
+        self.inner.changes()
+    }
     fn read_from(&self, offset: u64) -> Result<ProcessRead> {
         let _permit = self.pin.admit()?;
         self.inner.read_from(offset)

@@ -25,12 +25,21 @@ test('session jobs observe visible output and separate human controls from model
         <SessionPanel titleActions={toolbar} chat local pane="primary" path="/work" generation={generation} jobs={[...rows]} />
       </div></header></>);
     installActions({call:async (method, payload) => {
+      if (method === 'background_output') {
+        const {job, pane, generation} = JSON.parse(payload.source);
+        const record = kind => window.events.push({pane,generation,action:{kind,job}});
+        const emit = stdout => payload.port.postMessage({value:JSON.stringify({stdout,stderr:'\\nretained stderr',truncated:true})});
+        record('observe');
+        payload.port.onmessage = () => { record('close'); payload.port.close(); };
+        window.emit = emit;
+        emit('retained stdout');
+        return;
+      }
       if (method !== 'background_job') throw new Error(method);
       const request = JSON.parse(payload);
       window.events.push(request);
       switch(request.action.kind) {
         case 'control': return JSON.stringify(window.owner);
-        case 'peek': return JSON.stringify({stdout:'retained stdout',stderr:'\\nretained stderr',truncated:true});
         case 'stop': {
           const job = rows.find(row => row.id === request.action.job.id);
           if (!window.owner || job.origin !== request.action.job.origin) throw new Error('invalid stop');
@@ -61,9 +70,12 @@ test('session jobs observe visible output and separate human controls from model
       await row('Show live output of command 0').click();
       await panel.getByText('retained stdout',{exact:true}).waitFor();
       await panel.getByText('retained stderr',{exact:true}).waitFor();
-      await page.waitForFunction(() => window.events.filter(event => event.action.kind === 'peek').length >= 2);
+      await page.evaluate(() => window.emit('new native output'));
+      await panel.getByText('new native output',{exact:true}).waitFor();
+      assert.equal(await page.evaluate(() => window.events.filter(event => event.action.kind === 'observe').length),1);
       await row('Show less (running background jobs)').click();
       await panel.locator('[data-terminal]').waitFor({state:'detached'});
+      await page.waitForFunction(() => window.events.some(event => event.action.kind === 'close'));
       const count = await page.evaluate(() => window.events.length);
       await page.waitForTimeout(550);
       assert.equal(await page.evaluate(() => window.events.length),count);

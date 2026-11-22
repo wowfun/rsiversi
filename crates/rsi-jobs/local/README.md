@@ -36,7 +36,8 @@ notification.
 Once a terminal job is reported, the provider releases its producer control.
 A Session background job with output keeps up to 8 KiB from the end of each
 stream for non-consuming panel reads. The model's reporting cursor stays at the
-end. Other reported records keep only an immutable tombstone. Oldest reported
+end. A panel read racing that release finishes from the retained tail. Other
+reported records keep only an immutable tombstone. Oldest reported
 tombstones are compacted at the configured retention bounds, except while an
 already-admitted read holds that exact record. Such a read completes from one
 stable record identity even when concurrent settlement and admission would

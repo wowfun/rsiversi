@@ -959,6 +959,26 @@ fn background_job_error(error: rsi_jobs::JobsError) -> SessionError {
     }
 }
 
+fn background_sample(
+    jobs: &dyn rsi_jobs::Jobs,
+    scope: &rsi_jobs::JobScopeAuthority,
+    job: &rsi_session_protocol::BackgroundJobId,
+) -> Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+    let Some(sample) = jobs
+        .peek(scope, &job.id, job.origin.as_str(), [8192; 2])
+        .map_err(background_job_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(rsi_agent_turn_protocol::JobPreview {
+        status: sample.job.status,
+        stdout: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stdout, 8192)
+            .map_err(map_turn_error)?,
+        stderr: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stderr, 8192)
+            .map_err(map_turn_error)?,
+    }))
+}
+
 impl LocalSessionHandle {
     async fn background_scope(
         &self,
@@ -1400,24 +1420,51 @@ impl SessionHandle for LocalSessionHandle {
             }
         }))
     }
-    async fn peek_background_job(
+    async fn observe_background_output(
         &self,
         job: rsi_session_protocol::BackgroundJobId,
-    ) -> Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+    ) -> Result<rsi_session_protocol::BackgroundOutputStream> {
         let (jobs, scope) = self.background_scope().await?;
-        let _admission = self.admit()?;
-        let Some(sample) = jobs
-            .peek(&scope, &job.id, job.origin.as_str(), [8192; 2])
-            .map_err(background_job_error)?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(rsi_agent_turn_protocol::JobPreview {
-            status: sample.job.status,
-            stdout: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stdout, 8192)
-                .map_err(map_turn_error)?,
-            stderr: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stderr, 8192)
-                .map_err(map_turn_error)?,
+        let changes = jobs
+            .output_changes(&scope, &job.id, job.origin.as_str())
+            .map_err(background_job_error)?;
+        let owner = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut changes = changes;
+            let mut previous = None;
+            loop {
+                let roster = scope.roster_changed();
+                if let Some(streams) = &mut changes {
+                    for stream in streams { stream.borrow_and_update(); }
+                }
+                let sample = {
+                    let _admission = owner.admit()?;
+                    background_sample(jobs.as_ref(), &scope, &job)?
+                };
+                let Some(sample) = sample else {break};
+                let terminal = sample.status.is_terminal();
+                let position = (sample.stdout.end, sample.stderr.end, sample.status);
+                if previous != Some(position) {
+                    previous = Some(position);
+                    yield sample;
+                }
+                if terminal {break}
+                tokio::select! {
+                    () = owner.projection_stopped.cancelled() => break,
+                    () = roster => {},
+                    closed = async {
+                        let Some([stdout, stderr]) = &mut changes else { return std::future::pending().await };
+                        tokio::select! { update = stdout.changed() => update.is_err(), update = stderr.changed() => update.is_err() }
+                    } => {
+                        if closed {changes = None;}
+                    }
+                }
+                // Match the Job controller's burst window without waking an idle stream.
+                tokio::select! {
+                    () = owner.projection_stopped.cancelled() => break,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
+            }
         }))
     }
     async fn background_job_control(&self) -> Result<bool> {

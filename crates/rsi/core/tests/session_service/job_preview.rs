@@ -22,7 +22,10 @@ async fn remote_job_preview_follows_actual_tool_origin_and_leaves_the_durable_re
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let fixture = fixture(&format!(
+        "http://localhost:{}",
+        listener.local_addr().unwrap().port()
+    ));
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -112,13 +115,16 @@ async fn remote_job_preview_follows_actual_tool_origin_and_leaves_the_durable_re
         "preview-before-exit-completed"
     );
     assert_eq!(result.value["stderr"]["text"], "warning");
-    assert!(history.facts.iter().any(|fact| matches!(
-        fact.body(),
-        SessionFactBody::TurnTerminal {
-            outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
-            ..
-        }
-    )));
+    let outcome = history.facts.iter().find_map(|fact| match fact.body() {
+        SessionFactBody::TurnTerminal { outcome, .. } => Some(outcome),
+        _ => None,
+    });
+    assert_eq!(
+        outcome,
+        Some(&rsi_agent_session_protocol::TurnOutcome::Completed),
+        "provider requests: {}",
+        count.load(Ordering::SeqCst)
+    );
     assert_eq!(count.load(Ordering::SeqCst), 2);
     let local = daemon
         .running
@@ -179,8 +185,15 @@ async fn approve_job(handle: &Arc<dyn rsi_session_protocol::SessionHandle>) {
             }
         }
     })
-    .await
-    .unwrap();
+    .await;
+    let Ok(approval) = approval else {
+        let history = handle.history_before(None, 128).await.unwrap();
+        let outcome = history.facts.iter().find_map(|fact| match fact.body() {
+            SessionFactBody::TurnTerminal { outcome, .. } => Some(outcome),
+            _ => None,
+        });
+        panic!("Expected a shell approval in the isolated fixture; terminal outcome {outcome:?}");
+    };
     assert!(
         handle
             .answer_approval(
@@ -197,7 +210,7 @@ async fn approve_job(handle: &Arc<dyn rsi_session_protocol::SessionHandle>) {
 async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let command = format!(
-        "exec 3<>/dev/tcp/127.0.0.1/{}; printf ready >&3; IFS= read -r -u 3; printf 'fixture complete'",
+        "exec 3<>/dev/tcp/127.0.0.1/{}; printf ready >&3; IFS= read -r -u 3; printf 'progress' >&2; IFS= read -r -u 3; printf 'fixture complete'",
         gate.local_addr().unwrap().port()
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -220,7 +233,10 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let fixture = fixture(&format!(
+        "http://localhost:{}",
+        listener.local_addr().unwrap().port()
+    ));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let daemon = DaemonFixture::new(&fixture).await;
     let handle = job_session(&daemon, &fixture, "background-session").await;
@@ -248,6 +264,31 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         id: rows[0].id.clone(),
         origin: rsi_agent_session_protocol::EffectId::new(rows[0].origin.clone().unwrap()).unwrap(),
     };
+    let mut output = handle
+        .observe_background_output(identity.clone())
+        .await
+        .unwrap();
+    let start = output.next().await.unwrap().unwrap();
+    assert_eq!(start.status, rsi_jobs::JobStatus::Running);
+    assert!(start.stderr.bytes(8192).unwrap().is_empty());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), output.next())
+            .await
+            .is_err()
+    );
+    child.write_all(b"progress\n").await.unwrap();
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(5), output.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.stderr.bytes(8192).unwrap(), b"progress");
+    drop(output);
+    let mut reopened = handle
+        .observe_background_output(identity.clone())
+        .await
+        .unwrap();
+    assert_eq!(reopened.next().await.unwrap().unwrap(), progress);
     let header = handle.header().await.unwrap();
     let target = serde_json::json!({"session_id":header.session_id(), "header_key":header.fingerprint().unwrap()});
     let admin = daemon.running.device_administration().unwrap();
@@ -301,6 +342,21 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
     };
     assert_eq!(terminals(&before.facts), 1);
     child.write_all(b"finish\n").await.unwrap();
+    let final_output = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = reopened.next().await.unwrap().unwrap();
+            if frame.status.is_terminal() {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        final_output.stdout.bytes(8192).unwrap(),
+        b"fixture complete"
+    );
+    assert!(reopened.next().await.is_none());
     tokio::time::timeout(std::time::Duration::from_secs(12), async {
         let mut ticks = tokio::time::interval(std::time::Duration::from_millis(35));
         loop {

@@ -48,7 +48,8 @@ pub use surface::{SurfaceSource, SurfaceStream, SurfaceUpdate, SurfaceView};
 mod interactions;
 mod jobs;
 pub use jobs::{
-    BackgroundJobId, BackgroundJobsStream, JobsCollection, JobsRetention, JobsSnapshot,
+    BackgroundJobId, BackgroundJobsStream, BackgroundOutputStream, JobsCollection, JobsRetention,
+    JobsSnapshot,
 };
 pub use rsi_jobs::{JobRosterRow, MAXIMUM_JOBS_PER_LIST as MAXIMUM_BACKGROUND_JOBS};
 mod projections;
@@ -780,11 +781,11 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn observe_background_jobs(&self) -> Result<BackgroundJobsStream> {
         Err(SessionError::NotFound("background jobs".into()))
     }
-    /// Peeks a background job's retained output without consuming it.
-    async fn peek_background_job(
+    /// Observes changes without reporting the job or cancelling it on disconnect.
+    async fn observe_background_output(
         &self,
         _job: BackgroundJobId,
-    ) -> Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+    ) -> Result<BackgroundOutputStream> {
         Err(SessionError::NotFound("background job".into()))
     }
     /// Checks the original caller's authority to stop a Session job.

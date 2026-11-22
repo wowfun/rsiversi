@@ -775,7 +775,29 @@ pub async fn scheduled_tasks(action: String, id: u32) -> Result<Option<String>, 
     updates.try_next().await.map_err(failure)
 }
 
-/// Samples or stops a Session-owned background job through the bound pane.
+/// Delivers output on the caller's port until the row closes or the job settles.
+#[wasm_bindgen]
+pub async fn background_output(
+    source: String,
+    deliver: js_sys::Function,
+    closed: js_sys::Promise,
+) -> Result<(), JsValue> {
+    use futures_util::TryStreamExt as _;
+    let mut updates = application()?.background_output(&source).map_err(failure)?;
+    let closed = wasm_bindgen_futures::JsFuture::from(closed);
+    tokio::pin!(closed);
+    loop {
+        tokio::select! { biased;
+            _ = &mut closed => return Ok(()),
+            next = updates.try_next() => match next.map_err(failure)? {
+                Some(value) => { deliver.call1(&JsValue::UNDEFINED, &JsValue::from_str(&value))?; }
+                None => return Ok(()),
+            }
+        }
+    }
+}
+
+/// Reads authority or stops a Session-owned background job through the bound pane.
 #[wasm_bindgen]
 pub async fn background_job(source: String) -> Result<String, JsValue> {
     application()?

@@ -115,7 +115,8 @@ export const publish = source.set
 export const selectSurface = selection.set
 type Command = Record<string, unknown>
 export type {SetupBinding} from './runtime/setup-binding.ts'
-interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command, startingText?: string): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown): Promise<unknown> }
+export type BackgroundOutput = {stdout:string; stderr:string; truncated:boolean};
+interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command, startingText?: string): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown, transfer?:Transferable[]): Promise<unknown> }
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
@@ -131,6 +132,19 @@ export const input = {
   async backgroundJob(pane:string, generation:string, action:unknown):Promise<unknown> {
     if (!actions) throw new Error('Application is starting');
     return JSON.parse(await actions.call('background_job',JSON.stringify({pane,generation,action})) as string);
+  },
+  observeBackgroundJob(pane:string, generation:string, job:{id:string;origin?:string|null},
+    update:(value:BackgroundOutput)=>void, failed:(reason:string)=>void) {
+    if (!actions) { failed('Application is starting'); return; }
+    const {port1, port2} = new MessageChannel();
+    let active = true;
+    port1.onmessage = ({data}) => {
+      if (data.error !== undefined) failed(data.error);
+      else update(JSON.parse(data.value) as BackgroundOutput);
+    };
+    void actions.call('background_output',{pane,source:JSON.stringify({pane,generation,job}),port:port2},[port2])
+      .catch(reason => { if (active) failed(String(reason)); port1.close(); });
+    return () => { active = false; port1.postMessage(null); port1.close(); };
   },
   async messageFeedback(pane: string, generation: string, message: string, action: unknown) {
     if (!actions) throw new Error('Application is starting');

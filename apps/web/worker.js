@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, directory_input, scheduled_tasks, background_job, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, directory_input, scheduled_tasks, background_job, background_output, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -13,10 +13,13 @@ let pumping;
 const calls = Object.fromEntries(Object.keys(limits).map(key => [key, 0]));
 let accepting = false;
 const ordinary = new Set();
+const outputObservers = new Map();
 let draining;
 let drainSignsOut = false;
 async function shutdown(signOut) {
   connected = false; accepting = false;
+  for (const close of outputObservers.values()) close();
+  outputObservers.clear();
   acknowledgement?.finish(true);
   if (!draining) {
     drainSignsOut = signOut;
@@ -83,6 +86,18 @@ async function dispatch(data) {
     result = await prepare_submission(data.payload);
   } else if (data.method === "background_job") {
     result = await background_job(data.payload);
+  } else if (data.method === "background_output") {
+    const {pane, source, port} = data.payload;
+    outputObservers.get(pane)?.();
+    const {promise, resolve} = Promise.withResolvers();
+    outputObservers.set(pane, resolve);
+    port.onmessage = () => resolve();
+    void background_output(source, value => port.postMessage({value}), promise)
+      .catch(error => port.postMessage({error:String(error)}))
+      .finally(() => {
+        if (outputObservers.get(pane) === resolve) outputObservers.delete(pane);
+        port.close();
+      });
   } else if (data.method === "message_feedback") {
     result = await message_feedback(data.payload);
   } else if (data.method === "automation_artifact") {
