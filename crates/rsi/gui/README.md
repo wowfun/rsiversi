@@ -472,8 +472,10 @@ control cut and pending set. Unknown outcomes and receipts newer than that cut
 remain retained. This uses the existing inspection without per-message status reads.
 The application retains no editable composer
 mirror. Ordinary command documents are limited to 1 MiB plus their small envelope;
-submission preparation and opaque execution have separate 8 MiB message and 32 KiB
-command bounds. Encoded views use a separate 32 MiB reservation.
+submission preparation and opaque execution accept envelopes up to 8 MiB.
+The Session protocol bounds the encoded command arguments inside that envelope
+at 64 KiB, including quoted text and attachment descriptors. Encoded views use
+a separate 32 MiB reservation.
 Preparation reads the current Header and validates full text/image input without
 mutation. Dispatch revalidates the exact Session/Header and opaque typed request,
 including absent sandbox, model and effort overrides for both next-turn and steer

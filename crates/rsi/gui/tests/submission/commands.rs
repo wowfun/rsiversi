@@ -191,7 +191,16 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
     let generation = generation.as_str().unwrap();
     assert_commands_survive_unavailable_skills(&app, generation).await;
     assert_completion_discovery_is_cached(&app, &backend, generation).await;
-    let prepared = prepare(&app, generation, "/plan on", vec![], false).await;
+    // The two JSON string delimiters count toward the Session's argument limit.
+    let task = "a".repeat(rsi_agent_session_protocol::MAXIMUM_COMMAND_ARGUMENT_BYTES - 2);
+    let oversized = json!({"pane":"main","generation":generation,"text":format!("/plan {task}a")});
+    assert!(
+        app.prepare_submission(&oversized.to_string())
+            .await
+            .unwrap_err()
+            .contains("command arguments")
+    );
+    let prepared = prepare(&app, generation, &format!("/plan {task}"), vec![], false).await;
     assert_eq!(prepared["kind"], "command");
     assert!(backend.commands.lock().unwrap().is_empty());
     assert_eq!(
@@ -199,7 +208,7 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
         "unknown"
     );
     let invocation = backend.commands.lock().unwrap()[0].clone();
-    assert_eq!(invocation.arguments.value(), "on");
+    assert_eq!(invocation.arguments.value().as_str(), Some(task.as_str()));
     assert!(backend.requests.lock().unwrap().is_empty());
     app.command(
         &json!({"action":"open","pane":"main","session":initial["surfaces"]["main"]["session"]})

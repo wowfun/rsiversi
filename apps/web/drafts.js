@@ -67,7 +67,7 @@ function validatePending(pending) {
   require(pending && ["message", "command", "queue"].includes(pending.kind) && identity(pending.id));
   require(typeof pending.opaque === "string");
   const opaqueBytes = bytes(pending.opaque);
-  require(opaqueBytes <= (pending.kind !== "command" ? 8 * MiB : 32 * 1024));
+  require(opaqueBytes <= 8 * MiB);
   require(integer(pending.text_bytes, MiB) && integer(pending.images, 8));
   validateCaptures(pending.captures, 4);
   require(["prepared", "dispatching", "unknown"].includes(pending.phase) && integer(pending.editRevision));

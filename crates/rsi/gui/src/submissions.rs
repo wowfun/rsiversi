@@ -3,16 +3,15 @@ use crate::application::{Result, error};
 use futures_util::future::BoxFuture;
 use rsi_agent_session_protocol::{
     AttachedCommandArguments, CommandArguments, CommandAttachment, ComposerCommandInput,
-    DomainRequestId, FrozenReference, MessageDelivery, MessageId, ReferenceCapture,
-    SessionCommandInvocation, SessionId,
+    DomainRequestId, FrozenReference, MAXIMUM_COMMAND_ARGUMENT_BYTES, MessageDelivery, MessageId,
+    ReferenceCapture, SessionCommandInvocation, SessionId,
 };
 use rsi_media_protocol::MediaRef;
 use rsi_session_protocol::{SessionError, SessionInput, SubmitInput};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const MAXIMUM_MESSAGE: usize = 8 * 1024 * 1024;
-const MAXIMUM_COMMAND: usize = 32 * 1024;
+const MAXIMUM_SUBMISSION: usize = 8 * 1024 * 1024;
 
 fn capture_identity(reference: &rsi_agent_session_protocol::FrozenReference) -> serde_json::Value {
     serde_json::json!({"target": reference.metadata.target, "snapshot": reference.snapshot})
@@ -48,17 +47,17 @@ async fn composer_command_arguments(
         ) {
             return Err("Quote a passage to use it in a command. Whole conversations can be attached to messages.".into());
         }
-        if text.len().saturating_add(reference.metadata.text_bytes) > MAXIMUM_COMMAND {
-            return Err("Quoted command exceeds 32 KiB".into());
+        if text.len().saturating_add(reference.metadata.text_bytes) > MAXIMUM_COMMAND_ARGUMENT_BYTES
+        {
+            return Err("Quoted command exceeds the Session command argument limit".into());
         }
-        // One validated page covers any excerpt that fits this command's journal envelope.
         let page = attached
             .handle
-            .preview_reference(reference.clone(), 0, MAXIMUM_COMMAND)
+            .preview_reference(reference.clone(), 0, MAXIMUM_COMMAND_ARGUMENT_BYTES)
             .await
             .map_err(error)?;
         if page.has_more {
-            return Err("Quoted command exceeds 32 KiB".into());
+            return Err("Command requires the complete quoted passage".into());
         }
         if !text.is_empty() {
             text.push_str("\n\n");
@@ -308,7 +307,7 @@ impl GuiApplication {
         source: &str,
     ) -> BoxFuture<'static, Result<String>> {
         let input = (|| -> Result<_> {
-            if source.len() > MAXIMUM_MESSAGE {
+            if source.len() > MAXIMUM_SUBMISSION {
                 return Err("Submission preparation exceeds 8 MiB".into());
             }
             let input: Prepare = serde_json::from_str(source).map_err(error)?;
@@ -361,11 +360,11 @@ impl GuiApplication {
                     }
                 }
             }
-            let (kind, id, request, maximum) = if let Some((id, request)) = command {
+            let (kind, id, request) = if let Some((id, request)) = command {
                 if !attached.controller.is_host_owner().await.map_err(error)? {
                     return Err("Only the Host owner can run Session commands".into());
                 }
-                ("command", id, request, MAXIMUM_COMMAND)
+                ("command", id, request)
             } else {
                 let delivery = app.composer_delivery(input.pane, &input.generation,
                     input.action_revision.as_deref().ok_or("Missing displayed action revision")?,
@@ -387,11 +386,11 @@ impl GuiApplication {
                     model: None,
                     sandbox: input.sandbox,
                 };
-                ("message", id.to_string(), Request::Message { input: request }, MAXIMUM_MESSAGE)
+                ("message", id.to_string(), Request::Message { input: request })
             };
             let frozen = Frozen { session: attached.id.clone(), header, request };
             let opaque = serde_json::to_string(&frozen).map_err(error)?;
-            if opaque.len() > maximum { return Err("Frozen submission exceeds its encoded limit".into()); }
+            if opaque.len() > MAXIMUM_SUBMISSION { return Err("Frozen submission exceeds its encoded limit".into()); }
             serde_json::to_string(&serde_json::json!({ "kind":kind, "id":id, "opaque":opaque,
                 "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":image_count, "captures":input.references.iter().map(capture_identity).collect::<Vec<_>>() })).map_err(error)
         })
@@ -411,7 +410,7 @@ impl GuiApplication {
             Err(reason) => return Box::pin(async { Err(reason) }),
         };
         let input = (|| -> Result<_> {
-            if opaque.len() > MAXIMUM_MESSAGE {
+            if opaque.len() > MAXIMUM_SUBMISSION {
                 return Err("Frozen submission exceeds 8 MiB".into());
             }
             let frozen: Frozen = serde_json::from_str(opaque).map_err(error)?;
@@ -451,9 +450,6 @@ impl GuiApplication {
                     }
                 }
                 Request::Command { invocation } => {
-                    if opaque.len() > MAXIMUM_COMMAND {
-                        return Err("Frozen command exceeds 32 KiB".into());
-                    }
                     invocation.digest().map_err(error)?;
                     if mode == Mode::RetryMessage {
                         return Err("Commands can only be queried after dispatch".into());
@@ -595,7 +591,7 @@ impl GuiApplication {
             request: Request::Queue { input },
         })
         .map_err(error)?;
-        if opaque.len() > MAXIMUM_MESSAGE {
+        if opaque.len() > MAXIMUM_SUBMISSION {
             return Err("Frozen queue mutation exceeds 8 MiB".into());
         }
         serde_json::to_string(&serde_json::json!({"kind":"queue","id":id,"opaque":opaque,"text_bytes":text_bytes,"images":images,"captures":captures})).map_err(error)

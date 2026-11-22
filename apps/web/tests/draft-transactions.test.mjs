@@ -8,6 +8,17 @@ beforeEach(() => clearDraftRecords());
 const open = () => DraftStore.open('a'.repeat(32), {kind:'local'});
 const header = 'b'.repeat(64);
 
+test('a maximum-size Session command survives reopening its submission journal', async () => {
+  const store = await open();
+  const task = 'a'.repeat(64 * 1024 - 2);
+  const draft = await store.edit(await store.ensure('main','session',header), '/plan ' + task, []);
+  const opaque = JSON.stringify({request:{kind:'command',invocation:{arguments:task}}});
+  await store.startDispatch(draft,{kind:'command',id:'plan-request',opaque,text_bytes:0,images:0,captures:[]});
+  const restored = await (await open()).get('main','session');
+  assert.equal(restored.pending.opaque, opaque);
+  assert.equal(restored.pending.id, 'plan-request');
+});
+
 test('primary key prefix returns only this endpoint, principal and pane in Session ID order', async () => {
   const local=await open();
   const other=await DraftStore.open('c'.repeat(32),{kind:'local'});
