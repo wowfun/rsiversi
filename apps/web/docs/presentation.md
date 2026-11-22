@@ -59,7 +59,9 @@ immutable message coordinate bind every request. Feedback has no browser persist
 
 Manual compaction occupies one chronological row in the issuing conversation.
 Its command identity anchors progress and settlement across observation, paging
-and reopen. An installation marker enables disclosure of the cited summary
+and reopen. A live start shows progress. A start recovered from history reports
+that the outcome is unrecorded until a later fact establishes it.
+An installation marker enables disclosure of the cited summary
 when its text is present in the loaded window. A busy or empty command shows
 its outcome in the issuing pane without publishing an empty session.
 

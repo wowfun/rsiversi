@@ -631,7 +631,7 @@ impl Transcript {
 
     pub fn observation(&mut self, update: &SessionObservation) {
         match update {
-            SessionObservation::Fact { fact, .. } => self.fact(fact),
+            SessionObservation::Fact { fact, .. } => self.project_fact(fact, true),
             SessionObservation::Control { record, .. } => {
                 self.queue.observe(record);
                 if let AgentControlRecordBody::MessageDiscarded { message_id, reason } =
@@ -748,21 +748,24 @@ impl Transcript {
         self.trim();
     }
 
-    #[allow(clippy::too_many_lines)] // One closed Fact-to-block projection preserves its common sequence fence.
+    /// Folds recorded history without claiming its effects are still running.
     pub fn fact(&mut self, fact: &SessionFact) {
+        self.project_fact(fact, false);
+    }
+    fn project_fact(&mut self, fact: &SessionFact, live: bool) {
         let admitted = if let SessionFactBody::ModelStarted { effect_id, .. } = fact.body() {
             self.live_model.started(fact.seq(), effect_id)
         } else {
             false
         };
-        self.fact_blocks(fact);
+        self.fact_blocks(fact, live);
         self.turns.observe(fact, &self.blocks);
         if admitted {
             self.project_live_model();
         }
     }
     #[allow(clippy::too_many_lines)] // Closed Fact-to-block projection with one shared sequence fence.
-    fn fact_blocks(&mut self, fact: &SessionFact) {
+    fn fact_blocks(&mut self, fact: &SessionFact, live: bool) {
         self.project_request(fact);
         if BlockIdentity::tool(fact).is_some() {
             self.seq = self.seq.max(fact.seq());
@@ -786,7 +789,7 @@ impl Transcript {
             SessionFactBody::ManualCompaction {
                 command_id, event, ..
             } => {
-                self.project_compaction(command_id, event, fact);
+                self.project_compaction(command_id, event, fact, live);
             }
             SessionFactBody::ImageOutput {
                 turn_id,
@@ -928,6 +931,7 @@ impl Transcript {
         command: &rsi_agent_session_protocol::DomainRequestId,
         event: &rsi_agent_session_protocol::ManualCompactionEvent,
         fact: &SessionFact,
+        live: bool,
     ) {
         use rsi_agent_session_protocol::ManualCompactionEvent;
         use rsi_agent_turn_protocol::CompactionOutcome;
@@ -948,7 +952,7 @@ impl Transcript {
         if block.compact.is_none_or(|(seq, _)| seq < fact.seq()) {
             let outcome = CompactionOutcome::recorded(fact).expect("command fact");
             block.title = match outcome {
-                CompactionOutcome::Started => "Compacting context…",
+                CompactionOutcome::Started if live => "Compacting context…",
                 _ => outcome.message(),
             }
             .into();
@@ -1136,6 +1140,11 @@ mod tests {
         let installed = fact(4, Event::Installed);
         let view = |t: &Transcript| serde_json::to_value(&t.blocks).unwrap();
         let mut forward = Transcript::default();
+        forward.fact(&fact(2, Event::Started));
+        assert_eq!(
+            view(&forward)[0]["title"],
+            rsi_agent_turn_protocol::CompactionOutcome::Started.message()
+        );
         forward.fact(&settled);
         assert_eq!(view(&forward)[0]["text"], "");
         let mut backward = Transcript::default();
