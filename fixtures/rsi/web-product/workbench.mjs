@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
+import {connectHostOwner} from './browser-fixture.mjs';
 import {startService} from './service.mjs';
 
 const root=resolve(import.meta.dirname,'../../..');
@@ -19,7 +20,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
   if(process.env.RSI_WEB_BROWSER && process.env.RSI_WEB_BROWSER!==name) continue;
   const directory=join(report,name);await mkdir(directory,{recursive:true});
   let endpoint;
-  const service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report:directory,configure:async({config,provider})=>{
+  const service=await startService({localWeb:true,binary,assets:process.env.RSI_WEB_ASSETS,report:directory,configure:async({config,provider})=>{
     endpoint=provider.origin;
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':staleDefault?{default_model:{deployment:'removed-provider',model:'unavailable-model'}}:{}}));
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),'format = 1\n');
@@ -49,19 +50,16 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
             const command=JSON.parse(data.payload);
             if(command.action==='new_conversation')window.paneResets++;
             if(command.action==='navigate'&&command.command.kind==='query')this.queries.add(data.id);
-            if(window.holdArchive&&command.action==='navigate'&&command.command.metadata?.archived){
-              this.archive=data.id;window.holdArchive=false;
-            }
+          }
+          if(data.kind==='call'&&data.method==='archive_session'&&window.holdArchive&&JSON.parse(data.payload).command.metadata.archived){
+            this.archive=data.id;window.holdArchive=false;
           }
           super.postMessage(data,...rest);
         }
       };
     });
     page=await context.newPage();page.on('pageerror',error=>{errors.push(error.stack ?? error.message);console.error('page error',error.message)});
-    await page.goto(service.origin);
-    await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register(`${name}-workbench`)));
-    await page.getByRole('button',{name:'Connect',exact:true}).click();
-    await page.locator('#workbench').waitFor({state:'visible',timeout:30000});
+    await connectHostOwner(page,service);
     if(!staleDefault)await page.getByRole('button',{name:'Choose model',exact:true}).waitFor();
     await addWorkspace(page,service.workspace);
     await openSettings(page);

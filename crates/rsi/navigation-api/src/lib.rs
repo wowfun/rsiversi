@@ -19,7 +19,7 @@ pub use order::{
     OrderGroup, OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
 };
 
-/// Exact title and archive state. Archiving preserves admitted Session work.
+/// Host-owned title, archive and pin state.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMetadata {
@@ -148,6 +148,8 @@ pub struct NavigationEntry {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NavigationPage {
+    /// Whether this caller may archive, restore and stop work during archive.
+    pub can_archive: bool,
     /// Metadata revision used by this page and later explicit edits.
     pub metadata_revision: String,
     /// Newest activity key in the selected coordinate scope at this read.
@@ -185,6 +187,31 @@ pub struct PinnedPage {
     /// Available rows in pin order, then missing IDs descending.
     pub entries: Vec<PinnedEntry>,
 }
+/// A running job or subagent presented for archive confirmation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveItem {
+    /// Stable activity identity.
+    pub id: String,
+    /// Display name.
+    pub label: String,
+}
+/// Activity that would stop when the owner confirms an archive.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArchiveActivity {
+    /// Session work in progress.
+    Turn,
+    /// Owned subagents.
+    Subagent {
+        /// Running subagents.
+        items: Vec<ArchiveItem>,
+    },
+    /// Running jobs.
+    Job {
+        /// Running jobs.
+        items: Vec<ArchiveItem>,
+    },
+}
 /// Exact metadata mutation receipt.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -196,6 +223,9 @@ pub struct MetadataReceipt {
     /// Complete resulting metadata.
     pub metadata: SessionMetadata,
 }
+/// An applied metadata edit or the work awaiting archive confirmation.
+pub type MetadataEditResult = std::result::Result<MetadataReceipt, Vec<ArchiveActivity>>;
+
 /// Canonical exact revision parser shared by the endpoint owner and client.
 pub fn revision(text: &str) -> Result<u64> {
     text.parse::<u64>()
@@ -322,12 +352,14 @@ impl NavigationClient {
         session: SessionId,
         expected_revision: &str,
         mut metadata: SessionMetadata,
-    ) -> Result<MetadataReceipt> {
+        stop_activity: bool,
+    ) -> Result<MetadataEditResult> {
         #[derive(Serialize)]
         struct Replace<'a> {
             session: &'a SessionId,
             expected_revision: &'a str,
             metadata: &'a SessionMetadata,
+            stop_activity: bool,
         }
         if metadata.archived {
             metadata.pinned = false;
@@ -336,19 +368,23 @@ impl NavigationClient {
         let next = revision(expected_revision)?
             .checked_add(1)
             .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
-        let receipt = match call_json::<_, MetadataReceipt, Never>(
+        let receipt = match call_json::<_, MetadataReceipt, Vec<ArchiveActivity>>(
             self.api.as_ref(),
             &NavigationOperation::Replace.spec(),
             &Replace {
                 session: &session,
                 expected_revision,
                 metadata: &metadata,
+                stop_activity,
             },
         )
         .await?
         {
             Ok(value) => value,
-            Err(never) => match never {},
+            Err(activity) if metadata.archived && !stop_activity && !activity.is_empty() => {
+                return Ok(Err(activity));
+            }
+            Err(_) => return Err(ApiError::OutcomeUnknown),
         };
         if receipt.revision != next.to_string()
             || receipt.session != session
@@ -356,7 +392,7 @@ impl NavigationClient {
         {
             return Err(ApiError::OutcomeUnknown);
         }
-        Ok(receipt)
+        Ok(Ok(receipt))
     }
 }
 /// Shared title/path/identity search semantics at both sides of the wire.

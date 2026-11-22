@@ -104,8 +104,13 @@ struct OrderView {
     entries: Vec<Option<NavigationEntry>>,
 }
 #[derive(Debug, Default, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Archive permission, new activity and pagination flags vary independently"
+)]
 struct View {
     order: Option<OrderView>,
+    can_archive: bool,
     newer_activity: bool,
     #[serde(skip)]
     newest: Option<ActivityCursor>,
@@ -245,7 +250,7 @@ impl NavigationFeature {
             changed = async {
                 let continued = self.state.lock().expect("navigation state").view.continued;
                 if refresh && !continued {
-                    let _ = self.execute(NavigationCommand::Query { filter }).await;
+                    let _ = self.execute(NavigationCommand::Query { filter }, false).await;
                     true
                 } else { self.observe_head(filter).await }
             } => Some(refresh || changed),
@@ -279,6 +284,24 @@ impl NavigationFeature {
     /// # Panics
     /// Panics if an earlier panic poisoned this owner's state lock.
     pub fn command(self: &Arc<Self>, command: NavigationCommand) -> BoxFuture<'static, Result<()>> {
+        let reply = self.command_reply(command, false);
+        Box::pin(async move {
+            match reply.await? {
+                None => Ok(()),
+                Some(_) => Err("Session has running work; confirm before archiving".into()),
+            }
+        })
+    }
+
+    /// Returns the Host's running-work list when an archive needs confirmation.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned the observation lock.
+    pub fn command_reply(
+        self: &Arc<Self>,
+        command: NavigationCommand,
+        stop_activity: bool,
+    ) -> BoxFuture<'static, Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>>> {
         let owner = self.clone();
         self.work.run(async move {
             if let Some(read) = owner
@@ -290,10 +313,14 @@ impl NavigationFeature {
                 read.cancel();
             }
             let _serial = owner.serial.lock().await;
-            owner.execute(command).await
+            owner.execute(command, stop_activity).await
         })
     }
-    async fn execute(&self, command: NavigationCommand) -> Result<()> {
+    async fn execute(
+        &self,
+        command: NavigationCommand,
+        stop_activity: bool,
+    ) -> Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>> {
         {
             let mut state = self.state.lock().expect("navigation view poisoned");
             if state.view.diagnostic.is_some() {
@@ -301,7 +328,7 @@ impl NavigationFeature {
             }
         }
         let mut saved = false;
-        let result = self.execute_inner(command, &mut saved).await;
+        let result = self.execute_inner(command, &mut saved, stop_activity).await;
         if let Err(message) = &result {
             let mut state = self.state.lock().expect("navigation view poisoned");
             if saved {
@@ -316,7 +343,7 @@ impl NavigationFeature {
                 }
                 state.view.diagnostic =
                     Some(format!("Change saved. Refresh unavailable: {message}"));
-                return Ok(());
+                return Ok(None);
             }
             state.view.diagnostic = Some(message.clone());
         }
@@ -328,6 +355,8 @@ impl NavigationFeature {
         };
         {
             let mut state = self.state.lock().expect("navigation state");
+            let permission_changed = state.view.can_archive != page.can_archive;
+            state.view.can_archive = page.can_archive;
             let view = &state.view;
             let newer =
                 view.newest != page.newest || view.metadata_revision != page.metadata_revision;
@@ -336,7 +365,7 @@ impl NavigationFeature {
                 if changed {
                     state.view.newer_activity = newer;
                 }
-                return changed;
+                return changed || permission_changed;
             }
         }
         let refreshed = async {
@@ -491,7 +520,12 @@ impl NavigationFeature {
         );
         Ok(())
     }
-    async fn execute_inner(&self, command: NavigationCommand, saved: &mut bool) -> Result<()> {
+    async fn execute_inner(
+        &self,
+        command: NavigationCommand,
+        saved: &mut bool,
+        stop_activity: bool,
+    ) -> Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>> {
         if let NavigationCommand::OrderSeed { scope } = command {
             let seed = self.client.order_seed(scope).await.map_err(error)?;
             let ticket = rsi_ui::fresh_identity("order")?;
@@ -501,14 +535,14 @@ impl NavigationFeature {
                 requested: Vec::new(),
                 entries: Vec::new(),
             });
-            return Ok(());
+            return Ok(None);
         }
         if let NavigationCommand::OrderSummaries { ticket, sessions } = command {
-            return self.order_summaries(&ticket, sessions).await;
+            return self.order_summaries(&ticket, sessions).await.map(|()| None);
         }
         let continued = matches!(&command, NavigationCommand::Next { .. });
         if let NavigationCommand::Group { workspace, ticket } = command {
-            return self.group(workspace, ticket).await;
+            return self.group(workspace, ticket).await.map(|()| None);
         }
         if let NavigationCommand::CloseGroup { workspace } = command {
             self.state
@@ -517,11 +551,11 @@ impl NavigationFeature {
                 .view
                 .groups
                 .remove(&group_key(&workspace)?);
-            return Ok(());
+            return Ok(None);
         }
         if let NavigationCommand::Mark { request } = command {
             self.attention.mark(request).await.map_err(error)?;
-            return Ok(());
+            return Ok(None);
         }
         let (filter, after) = match command {
             NavigationCommand::OrderSeed { .. }
@@ -539,7 +573,7 @@ impl NavigationFeature {
                     return Err("Navigation changed; use the current controls".into());
                 }
                 if state.after.is_none() {
-                    return Ok(());
+                    return Ok(None);
                 }
                 (state.view.filter.clone(), state.after.clone())
             }
@@ -560,19 +594,25 @@ impl NavigationFeature {
                 }
                 let receipt = self
                     .client
-                    .replace(session, &metadata_revision, metadata)
+                    .replace(session, &metadata_revision, metadata, stop_activity)
                     .await
                     .map_err(error)?;
+                let receipt = match receipt {
+                    Ok(receipt) => receipt,
+                    Err(activity) => return Ok(Some(activity)),
+                };
                 *saved = true;
                 let mut state = self.state.lock().expect("navigation view poisoned");
                 if state.view.apply_metadata_receipt(receipt)? {
-                    return Ok(());
+                    return Ok(None);
                 }
                 (state.view.filter.clone(), None)
             }
         };
         let (page, scanned) = self.page(filter.clone(), after).await?;
-        self.install_page(filter, page, scanned, continued).await
+        self.install_page(filter, page, scanned, continued)
+            .await
+            .map(|()| None)
     }
     async fn install_page(
         &self,
@@ -631,6 +671,7 @@ impl NavigationFeature {
             *state = State {
                 view: View {
                     order,
+                    can_archive: page.can_archive,
                     newer_activity,
                     newest,
                     continued,
@@ -1013,7 +1054,7 @@ mod group_tests {
                     .and_then(|token| u64::from_str_radix(token, 16).ok())
                     .unwrap_or(10000);
                 let next=(group&&before>5904).then(||json!({"filter":filter,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"after":request["after"]["after"],"token":format!("{:032x}",before-256)}));
-                json!({"metadata_revision":revision,"newest":if group {Some(json!({"last_activity_ms":10000,"session_id":"row-10000"}))} else {None},"entries":[],"scanned":if group {256}else{0},"next":next})
+                json!({"can_archive":true,"metadata_revision":revision,"newest":if group {Some(json!({"last_activity_ms":10000,"session_id":"row-10000"}))} else {None},"entries":[],"scanned":if group {256}else{0},"next":next})
             };
             Ok(ApiOutput::Reply(ApiMessage {
                 json: ByteBudget::default().encode(&page, 2 * 1024 * 1024)?,

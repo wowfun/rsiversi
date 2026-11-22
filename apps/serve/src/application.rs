@@ -275,8 +275,6 @@ struct Sessions {
     tools: Option<Arc<tools::Publisher>>,
     ingress: Arc<dyn rsi_session_protocol::SessionIngress>,
     projections: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
-    jobs: Arc<dyn rsi_agent_turn_protocol::TurnJobs>,
-    background_jobs: Option<Arc<dyn rsi_jobs::Jobs>>,
     workspaces: Arc<dyn rsi_workspace_protocol::WorkspaceIngress>,
     navigation: Arc<rsi_navigation::Navigation>,
     dispatch: Arc<dyn rsi_api_protocol::ApiDispatch>,
@@ -579,7 +577,6 @@ impl PluginFactory for Factory {
             .requiring_local::<rsi_api_http::BrowserOwnerContract>()
             .requiring_local::<rsi_session_protocol::SessionIngressContract>()
             .requiring_local::<rsi_agent_turn_protocol::SessionProjectionsContract>()
-            .requiring_local::<rsi_agent_turn_protocol::TurnJobsContract>()
             .requiring_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
             .requiring_local::<rsi_navigation::NavigationContract>()
             .requiring_local::<rsi_api_protocol::ApiDispatchContract>()
@@ -635,8 +632,6 @@ impl PluginFactory for Factory {
             tools,
             ingress: plan.local::<rsi_session_protocol::SessionIngressContract>()?,
             projections: plan.local::<rsi_agent_turn_protocol::SessionProjectionsContract>()?,
-            jobs: plan.local::<rsi_agent_turn_protocol::TurnJobsContract>()?,
-            background_jobs: plan.context().lookup_local::<rsi_jobs::JobsContract>(),
             workspaces: plan.local::<rsi_workspace_protocol::WorkspaceIngressContract>()?,
             navigation: plan.local::<rsi_navigation::NavigationContract>()?,
             dispatch: plan.local::<rsi_api_protocol::ApiDispatchContract>()?,

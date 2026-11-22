@@ -206,9 +206,28 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     let page = query(&running, origin.clone(), false).await;
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].workspace, Some(workspace.id.clone()));
+    assert!(!page.can_archive);
+    for stop_activity in [false, true] {
+        assert!(matches!(wire(&running, origin.clone(), NavigationOperation::Replace,
+            json!({"session":session, "expected_revision":"0","metadata":metadata,"stop_activity":stop_activity})).await, Err(ApiError::Unauthorized)));
+    }
+    let owner = running
+        .device_administration()
+        .unwrap()
+        .rotate_managed("local-web", "Host owner")
+        .await
+        .unwrap();
+    let managed = CallOrigin::Device(
+        running
+            .device_authentication()
+            .unwrap()
+            .authenticate(&owner.token)
+            .unwrap(),
+    );
+    assert!(query(&running, managed.clone(), false).await.can_archive);
     let receipt = wire(
         &running,
-        origin.clone(),
+        managed,
         NavigationOperation::Replace,
         json!({"session":session,"expected_revision":"0","metadata":metadata}),
     )
@@ -225,6 +244,16 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         query(&running, origin.clone(), true).await.entries[0].metadata,
         metadata
     );
+    assert!(matches!(
+        wire(
+            &running,
+            origin.clone(),
+            NavigationOperation::Replace,
+            json!({"session":session,"expected_revision":"1","metadata":SessionMetadata::default()})
+        )
+        .await,
+        Err(ApiError::Unauthorized)
+    ));
     assert_eq!(handle.header().await.unwrap(), header);
     assert_eq!(handle.inspect().await.unwrap(), before);
     assert!(matches!(

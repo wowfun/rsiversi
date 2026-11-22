@@ -18,7 +18,7 @@ fixture.view.setup.agent.default_model=null;
 fixture.view.catalog.models=[];
 const activeRow={session:'active',created_at_ms:'1',last_activity_ms:String(Date.now()-3600000),path:'/fixture',location:{kind:'local'},workspace:'fixture',metadata:{title:'Active conversation',archived:false,pinned:false}};
 const archivedRow={...activeRow,session:'archived',metadata:{title:'Archived conversation',archived:true,pinned:false}};
-fixture.view.navigation={ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[activeRow],more:false,continued:true,scanned:1,diagnostic:null};
+fixture.view.navigation={can_archive:true,ticket:'nav',metadata_revision:'0',newer_activity:false,filter:{query:'',archived:false,workspace:{kind:'all'}},pins:[],groups:{},entries:[activeRow],more:false,continued:true,scanned:1,diagnostic:null};
 fixture.queries=[];
 fixture.setReply('command',async text=>{
  const command=JSON.parse(text);const nav=fixture.view.navigation;
@@ -35,12 +35,18 @@ fixture.setReply('command',async text=>{
    if(request.action!=='unread')entry.reading.unseen=false;
    fixture.lastMark=request;
    await fixture.frame();
- } else if(command.action==='navigate'&&command.command.kind==='replace'&&command.command.session==='archived'){
-   archivedRow.metadata=command.command.metadata;
-   nav.entries=nav.entries.filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);
-   await fixture.frame();
  }
  return '{}';
+});
+fixture.archiveCalls=[];
+fixture.setReply('archive_session',async text=>{
+ const {command,stop_activity}=JSON.parse(text), nav=fixture.view.navigation;
+ fixture.archiveCalls.push({session:command.session,stop_activity});
+ if(command.session==='active' && !stop_activity)return JSON.stringify([{kind:'job',items:[{id:'j1',label:'Compile preview'}]},{kind:'turn'}]);
+ (command.session==='archived'?archivedRow:activeRow).metadata=command.metadata;
+ nav.entries=nav.entries.filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);
+ await fixture.frame();
+ return 'null';
 });
 const createdDirectories=[];
 fixture.setReply('directory_input',text=>{
@@ -176,6 +182,20 @@ try {
    await page.keyboard.press('Escape');
    await pin.waitFor({state:'detached'});
    assert(await sessionOpen.evaluate(node=>document.activeElement===node));
+   await sessionOpen.click({button:'right'});
+   await page.getByRole('menuitem',{name:'Archive session',exact:true}).click();
+   const confirmArchive=page.getByRole('dialog',{name:'Stop and archive this session?',exact:true});
+   await confirmArchive.getByText('1 background job: Compile preview').waitFor();
+   assert(await confirmArchive.getByRole('button',{name:'Cancel'}).evaluate(node=>node===document.activeElement));
+   await page.screenshot({path:join(report,name+'-archive-confirm.png')});
+   await confirmArchive.getByRole('button',{name:'Cancel'}).click();
+   assert.deepEqual(await page.evaluate(()=>fixture.archiveCalls.filter(row=>row.session==='active')),[{session:'active',stop_activity:false}]);
+   await page.evaluate(async()=>{fixture.view.navigation.can_archive=false;await fixture.frame()});
+   await sessionOpen.click({button:'right'});
+   await page.getByRole('menuitem',{name:'Rename',exact:true}).waitFor();
+   assert.equal(await page.getByRole('menuitem',{name:'Archive session',exact:true}).count(),0);
+   await page.keyboard.press('Escape');
+   await page.evaluate(async()=>{fixture.view.navigation.can_archive=true;await fixture.frame()});
    await sessionOpen.click({button:'right'});
    await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
    const rename=page.getByRole('dialog',{name:'Rename session',exact:true});

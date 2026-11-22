@@ -16,7 +16,8 @@ export interface AttentionEntry {position:AttentionPosition;reading:{unseen:bool
 export type WorkspaceFilter = {kind:'all'} | {kind:'registered';id:string} | {kind:'unregistered'}
 export interface NavigationGroup {ticket:string;workspace:WorkspaceFilter;entries:NavigationEntry[];more:boolean;scanned:number;continued:boolean;stale:boolean}
 export type PinnedEntry = {status:'available';entry:NavigationEntry} | {status:'missing';session:string;metadata:NavigationEntry['metadata']}
-export interface Navigation { order?:ManualOrder|null;newer_activity:boolean;metadata_revision:string; ticket: string; filter: {query: string; archived: boolean|null; workspace: WorkspaceFilter}; pins:PinnedEntry[]; groups:Record<string,NavigationGroup>; entries: NavigationEntry[]; more: boolean; continued:boolean; scanned: number; diagnostic: string | null; attention?:{host_epoch:string;entries:AttentionEntry[];truncated:boolean};attention_notice?:string }
+export type ArchiveActivity = {kind:'turn'} | {kind:'job'|'subagent';items:{id:string;label:string}[]};
+export interface Navigation { can_archive:boolean; order?:ManualOrder|null;newer_activity:boolean;metadata_revision:string; ticket: string; filter: {query: string; archived: boolean|null; workspace: WorkspaceFilter}; pins:PinnedEntry[]; groups:Record<string,NavigationGroup>; entries: NavigationEntry[]; more: boolean; continued:boolean; scanned: number; diagnostic: string | null; attention?:{host_epoch:string;entries:AttentionEntry[];truncated:boolean};attention_notice?:string }
 export interface Provider { provider: 'deepseek' | 'openai' | 'openai-compatible'; config: Record<string, unknown> }
 export interface Setup { discovery?:{request:{provider:string;endpoint:string;slot:string};models:{id:string;name?:string|null;context_window_tokens?:number|null;max_output_tokens?:number|null}[]}|null; ticket: string; allowed: boolean; credentials_available: boolean; providers_writable: boolean; settings_writable: boolean; agent: {default_model?: Model; default_reasoning_effort?: string | null;sandbox:import('./presentation-types.ts').SandboxMode} | null; default_model_description?: {model: Model; profile: {reasoning_efforts: {supported: string[]; default?: string | null}}} | null; presets: {default?: string} | null; providers: {desired_revision: string; applied_revision: string; applying: boolean; diagnostic: string | null; deployments: Provider[]} | null; credential?: {provider: string; slot: string; status: {editable: boolean; availability: {kind: 'configured'|'missing'|'unavailable'; source?: unknown}}}; diagnostic: string | null; receipts: {operation: string; outcome: string; message: string}[] }
 import type {Surface, ExternalSnapshot, MediaLimits, SettingsCatalog} from './presentation-types.ts'
@@ -120,6 +121,10 @@ interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').S
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export const input = {
+  async archive(command: Command, stop_activity: boolean): Promise<ArchiveActivity[]|null> {
+    if (!actions) throw new Error('Application is starting');
+    return JSON.parse(await actions.call("archive_session", JSON.stringify({command,stop_activity})) as string);
+  },
   transcriptFile(pane:string,generation:string,kind:"image"|"document",path:string):Promise<[string,Uint8Array<ArrayBuffer>]> {
     if (!actions) return Promise.reject(new Error('Application is starting'));
     return actions.call("transcript_file",JSON.stringify({pane,generation,kind,path})) as Promise<[string,Uint8Array<ArrayBuffer>]>;

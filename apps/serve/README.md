@@ -320,9 +320,7 @@ their IDs and labels from the root's current executor and its Session background
 scope. A finished Turn can still have live Session commands. Confirming the
 archive stops those commands and reaps the active Turn's work.
 Independent forks and detached program branches have their own lifetimes.
-On confirmation the archive is durable before cancellation. Serve stops the
-active subagents and handles the root when its live Agent did not take the
-stop. The parent's history records the stopped child's cancellation notice
+The owner confirms by sending the archive command with `stop_activity` set. Navigation publishes the archive, then asks the Session and job owners to stop the root's work and active subagents. The parent's history records the stopped child's cancellation notice
 without starting another Turn. Repeating the archive skips
 the stop.
 It uses the Workspace registry for creating, renaming and deleting

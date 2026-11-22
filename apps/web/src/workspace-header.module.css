@@ -17,3 +17,5 @@
 .dialog p {line-height:22px;margin:0 0 20px;}
 .dialog input {width:100%;box-sizing:border-box;}
 .dialog footer {display:flex;justify-content:flex-end;gap:8px;margin-top:32px;}
+
+.archiveActivity {margin:0 0 8px;padding-left:18px;font-size:13px;line-height:20px;overflow-wrap:anywhere;}

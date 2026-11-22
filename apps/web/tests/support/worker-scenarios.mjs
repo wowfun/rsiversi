@@ -11,7 +11,7 @@ const gate = () => {
   const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
   return {promise, resolve, reject};
 };
-const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','read_pending_interaction','read_session_resource','prepare_submission','export_input','reference_input','file_input','transcript_file','directory_input','scheduled_tasks','background_job','background_output','message_feedback','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
+const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','read_pending_interaction','read_session_resource','prepare_submission','export_input','reference_input','file_input','transcript_file','archive_session','directory_input','scheduled_tasks','background_job','background_output','message_feedback','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
 async function fixture(overrides = {}) {
   const view = gate(), messages = [], failures = [];
   let terminated = 0, disposed = 0;

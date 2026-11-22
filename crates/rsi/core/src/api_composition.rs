@@ -211,7 +211,9 @@ fn factories() -> Vec<(&'static str, std::sync::Arc<dyn rsi_meta::PluginFactory>
         ),
         (
             "rsi.navigation",
-            std::sync::Arc::new(rsi_navigation::NavigationFactory),
+            std::sync::Arc::new(rsi_navigation::NavigationFactory {
+                browser_slot: crate::application_services::LOCAL_WEB_SLOT,
+            }),
         ),
         (
             "rsi.media.api",

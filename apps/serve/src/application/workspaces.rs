@@ -1,8 +1,5 @@
 use super::Sessions;
 use rsi_agent_session_protocol::SessionId;
-use rsi_agent_store_protocol::{
-    StoreAgentDescendantStatus, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
-};
 use rsi_extension::{Error, Result};
 use rsi_navigation::{ArchiveIntent, ArchiveOutcome};
 use rsi_navigation_api::{OrderMembership, OrderScope};
@@ -42,10 +39,8 @@ enum Operation {
     },
     Archive {
         session: SessionId,
-    },
-    StopArchiveActivity {
-        session: SessionId,
-        stop_root: bool,
+        #[serde(default)]
+        stop_activity: bool,
     },
     Unarchive {
         session: SessionId,
@@ -69,10 +64,13 @@ enum Operation {
 impl Sessions {
     pub(super) async fn workspace_operation(&self, payload: Value) -> Result<Value> {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let origin = self
-            .routes
-            .caller(&input.request)
-            .map_err(|_| Error::Cancelled)?;
+        let origin = match input.operation {
+            Operation::ArchiveActivity { .. }
+            | Operation::Archive { .. }
+            | Operation::Unarchive { .. } => self.routes.credential(&input.request),
+            _ => self.routes.caller(&input.request),
+        }
+        .map_err(|_| Error::Cancelled)?;
         let value = match input.operation {
             Operation::List { after } => {
                 let registry = self.workspaces.scoped(origin);
@@ -114,14 +112,20 @@ impl Sessions {
                 self.workspace_archive(origin, session, ArchiveIntent::Inspect)
                     .await?
             }
-            Operation::StopArchiveActivity { session, stop_root } => {
-                self.stop_archive_activity(origin, &session, stop_root)
-                    .await?;
-                Value::Null
-            }
-            Operation::Archive { session } => {
-                self.workspace_archive(origin, session, ArchiveIntent::Archive)
-                    .await?
+            Operation::Archive {
+                session,
+                stop_activity,
+            } => {
+                self.workspace_archive(
+                    origin,
+                    session,
+                    if stop_activity {
+                        ArchiveIntent::StopAndArchive
+                    } else {
+                        ArchiveIntent::Archive
+                    },
+                )
+                .await?
             }
             Operation::Unarchive { session } => {
                 self.workspace_archive(origin, session, ArchiveIntent::Restore)
@@ -274,108 +278,11 @@ impl Sessions {
             .map_err(remote)?;
         match result {
             ArchiveOutcome::Unknown => Ok(json!({"status":"unknown"})),
-            ArchiveOutcome::Ready => {
-                let tree = self
-                    .store
-                    .read_agent_subtree_snapshot(&session)
-                    .await
-                    .map_err(remote)?;
-                let subagents = active_subagents(&tree)
-                    .map(|child| json!({"id":child.status.session_id,"label":child.task_name}))
-                    .collect::<Vec<_>>();
-                let mut activity = Vec::new();
-                if !subagents.is_empty() {
-                    activity.push(json!({"kind":"subagent","items":subagents}));
-                }
-                let mut active = if tree.session.has_open_turn {
-                    self.jobs.active_jobs(&session).map_err(remote)?
-                } else {
-                    Vec::new()
-                };
-                if let Some((jobs, scope)) = self.archive_background_scope(&session).await? {
-                    active.extend(jobs.active(&scope).map_err(remote)?);
-                }
-                if !active.is_empty() {
-                    activity.push(json!({"kind":"job","items":active}));
-                }
-                if running(&tree.session) {
-                    activity.push(json!({"kind":"turn"}));
-                }
-                Ok(json!({"status":"ready","activity":activity}))
-            }
+            ArchiveOutcome::Ready(activity) => Ok(json!({"status":"ready","activity":activity})),
             ArchiveOutcome::Applied { changed, ids } => {
                 Ok(json!({"status":"applied","changed":changed,"archivedSessionIds":ids}))
             }
         }
-    }
-
-    async fn archive_background_scope(
-        &self,
-        session: &SessionId,
-    ) -> Result<Option<(&dyn rsi_jobs::Jobs, rsi_jobs::JobScopeAuthority)>> {
-        let Some(registry) = &self.background_jobs else {
-            return Ok(None);
-        };
-        let fingerprint = self
-            .store
-            .header(session)
-            .await
-            .map_err(remote)?
-            .fingerprint()
-            .map_err(remote)?;
-        let id = rsi_agent_turn_protocol::session_job_scope(&fingerprint).map_err(remote)?;
-        Ok(registry
-            .find_scope(&id)
-            .map(|scope| (registry.as_ref(), scope)))
-    }
-
-    async fn stop_archive_activity(
-        &self,
-        origin: rsi_api_protocol::CallOrigin,
-        session: &SessionId,
-        stop_root: bool,
-    ) -> Result<()> {
-        const STOP: rsi_agent_turn_protocol::CancelTarget =
-            rsi_agent_turn_protocol::CancelTarget::Session { keep_inbox: false };
-        let service = self.ingress.scoped(origin);
-        let root = service.attach(session).await.map_err(remote)?;
-        let tree = self
-            .store
-            .read_agent_subtree_snapshot(session)
-            .await
-            .map_err(remote)?;
-        let mut result = Ok(());
-        if stop_root && running(&tree.session) {
-            result = root.cancel(STOP, None).await.map(|_| ()).map_err(remote);
-        }
-        let stop_jobs = async {
-            let Some((jobs, scope)) = self.archive_background_scope(session).await? else {
-                return Ok(());
-            };
-            let mut result = Ok(());
-            for row in jobs.roster(&scope).map_err(remote)? {
-                if !row.status.is_terminal()
-                    && let Some(origin) = row.origin
-                {
-                    result =
-                        result.and(jobs.request_stop(&scope, &row.id, &origin).map_err(remote));
-                }
-            }
-            result
-        }
-        .await;
-        result = result.and(stop_jobs);
-        for child in active_subagents(&tree) {
-            let stop = async {
-                let handle = service.attach(&child.status.session_id).await?;
-                handle.cancel(STOP, None).await
-            }
-            .await;
-            if let Err(error) = stop {
-                result = result.and(Err(remote(error)));
-            }
-        }
-        result
     }
 
     async fn set_workspace_pin(
@@ -415,18 +322,6 @@ impl Sessions {
         };
         Ok(reply)
     }
-}
-
-fn running(state: &StoreAgentSessionStatus) -> bool {
-    state.has_open_turn || state.has_active_activation || state.has_waking_message
-}
-
-fn active_subagents(
-    tree: &StoreAgentSubtreeSnapshot,
-) -> impl Iterator<Item = &StoreAgentDescendantStatus> {
-    tree.descendants
-        .iter()
-        .filter(|child| running(&child.status) && tree.activation_owns(child))
 }
 
 fn record(row: &WorkspaceRecord) -> Value {

@@ -18,6 +18,8 @@ struct Replace {
     session: SessionId,
     expected_revision: String,
     metadata: SessionMetadata,
+    #[serde(default)]
+    stop_activity: bool,
 }
 pub(super) fn register(
     registrar: &dyn ApiRegistrar,
@@ -30,7 +32,12 @@ pub(super) fn register(
             let service = service.clone();
             async move {
                 service
-                    .query(&context.origin, input.filter, input.after)?
+                    .query_for(
+                        &context.origin,
+                        service.can_archive(&context.credential_origin())?,
+                        input.filter,
+                        input.after,
+                    )?
                     .await
                     .map(Ok::<_, Never>)
             }
@@ -80,15 +87,17 @@ pub(super) fn register(
         json_handler(move |context, input: Replace| {
             let service = owner.clone();
             async move {
+                let credential = context.credential_origin();
                 service
-                    .replace(
+                    .edit(
                         context.origin,
+                        credential,
                         input.session,
                         &input.expected_revision,
                         input.metadata,
+                        input.stop_activity,
                     )?
                     .await
-                    .map(Ok::<_, Never>)
             }
         }),
     )?;

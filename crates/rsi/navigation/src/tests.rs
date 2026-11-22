@@ -10,6 +10,27 @@ mod workspace_account;
 
 mod persistence;
 
+impl Navigation {
+    /// Replaces navigation metadata once and retains the write independently of its waiter.
+    ///
+    /// # Panics
+    /// Panics if an earlier panic poisoned this owner's state lock.
+    fn replace(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        session: SessionId,
+        expected: &str,
+        metadata: SessionMetadata,
+    ) -> Result<BoxFuture<'static, Result<MetadataReceipt>>> {
+        let future = self.edit(origin.clone(), origin, session, expected, metadata, false)?;
+        Ok(Box::pin(async move {
+            future
+                .await?
+                .map_err(|_| ApiError::Invalid("Session has running work".into()))
+        }))
+    }
+}
+
 #[tokio::test]
 async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_forks() {
     use rsi_agent_session_protocol::{
@@ -58,24 +79,31 @@ async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_
         session_id: header.session_id().clone(),
         expected_seq: 0,
         header: Some(header.clone()),
-        facts: vec![Arc::new(
-            SessionFact::new(
-                1,
-                1000,
-                SessionFactBody::TurnAccepted {
-                    turn_id: TurnId::new("turn").unwrap(),
-                    text: "hello".into(),
-                    model: None,
-                    reasoning_effort: None,
-                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
-                    require_approval: false,
-                },
-            )
-            .unwrap(),
-        )],
+        facts: vec![
+            Arc::new(
+                SessionFact::new(
+                    1,
+                    1000,
+                    SessionFactBody::TurnAccepted {
+                        turn_id: TurnId::new("turn").unwrap(),
+                        text: "hello".into(),
+                        model: None,
+                        reasoning_effort: None,
+                        sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                        require_approval: false,
+                    },
+                )
+                .unwrap(),
+            ),
+            terminal(1000),
+        ],
     };
-    owner.store.append(first_fact(&first)).await.unwrap();
-    owner.store.append(first_fact(&middle)).await.unwrap();
+    rsi_agent_testkit::append_history_fixture(owner.store.as_ref(), first_fact(&first))
+        .await
+        .unwrap();
+    rsi_agent_testkit::append_history_fixture(owner.store.as_ref(), first_fact(&middle))
+        .await
+        .unwrap();
     let change = |id: &SessionId, intent| {
         owner
             .archive_intent(CallOrigin::Local, id.clone(), intent)
@@ -91,6 +119,7 @@ async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_
         .await
         .unwrap();
     assert!(!owner.is_archived(&leaf).await.unwrap());
+    finish_fixture_turn(&owner, &root_id).await;
     change(&root_id, ArchiveIntent::Archive).await.unwrap();
     assert!(owner.is_archived(&first).await.unwrap());
     assert!(owner.is_archived(&leaf).await.unwrap());
@@ -350,6 +379,34 @@ impl WorkspaceRegistry for Workspaces {
 }
 mod storage;
 use storage::{FixtureOwner, TestDomain};
+fn terminal(at: u64) -> Arc<SessionFact> {
+    Arc::new(
+        SessionFact::new(
+            2,
+            at,
+            SessionFactBody::TurnTerminal {
+                turn_id: TurnId::new("turn").unwrap(),
+                outcome: rsi_agent_session_protocol::TurnOutcome::Completed,
+                result: None,
+            },
+        )
+        .unwrap(),
+    )
+}
+async fn finish_fixture_turn(owner: &Navigation, id: &SessionId) {
+    let header = owner.store.header(id).await.unwrap();
+    rsi_agent_testkit::append_history_fixture(
+        owner.store.as_ref(),
+        AppendBatch {
+            session_id: id.clone(),
+            expected_seq: 1,
+            header: None,
+            facts: vec![terminal(header.created_at_ms())],
+        },
+    )
+    .await
+    .unwrap();
+}
 async fn owner() -> FixtureOwner {
     let settings = FrozenAgentSettings::new(
         "default",
@@ -397,6 +454,7 @@ async fn owner() -> FixtureOwner {
     let mut document = Document::default();
     document.validate().unwrap();
     let owner = Arc::new(Navigation {
+        archive_host: None,
         domain: storage.domain.clone(),
         resolver: Arc::new(Visibility),
         store,
@@ -1119,6 +1177,7 @@ async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
         .await
         .unwrap();
     assert_eq!(owner.document().records[&newer].partition_revision, Some(4));
+    finish_fixture_turn(&owner, &newer).await;
     owner
         .replace(
             CallOrigin::Local,
@@ -1209,9 +1268,36 @@ async fn archive_admission_preserves_title_clears_pin_and_repeats_without_a_writ
         .unwrap()
         .await
         .unwrap();
+    let running = vec![rsi_navigation_api::ArchiveActivity::Turn];
+    assert_eq!(
+        apply(&id, ArchiveIntent::Archive).await.unwrap(),
+        ArchiveOutcome::Ready(running.clone())
+    );
+    let metadata = SessionMetadata {
+        archived: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        owner
+            .edit(
+                CallOrigin::Local,
+                CallOrigin::Local,
+                id.clone(),
+                "1",
+                metadata,
+                false
+            )
+            .unwrap()
+            .await
+            .unwrap(),
+        Err(running)
+    );
+    assert!(!changes.has_changed().unwrap());
+    assert_eq!(owner.document().revision, 1);
+    finish_fixture_turn(&owner, &id).await;
     assert_eq!(
         apply(&id, ArchiveIntent::Inspect).await.unwrap(),
-        ArchiveOutcome::Ready
+        ArchiveOutcome::Ready(vec![])
     );
     for (intent, changed) in [
         (ArchiveIntent::Archive, true),
@@ -1244,6 +1330,7 @@ async fn unarchive_returns_visible_archives_in_entry_order_and_preserves_other_m
     Arc::get_mut(&mut owner).unwrap().domain = domain.domain.clone();
     let ids = ["row-300", "row-001", "row-002"].map(|id| SessionId::new(id).unwrap());
     for (index, id) in ids.iter().enumerate() {
+        finish_fixture_turn(&owner, id).await;
         owner
             .replace(
                 CallOrigin::Local,
@@ -1753,28 +1840,15 @@ async fn protected_scope_is_hidden_in_pages_pins_order_membership_and_exact_summ
         )]),
         ..Default::default()
     });
-    assert_eq!(
-        owner
-            .archive_intent(
-                device.clone(),
-                SessionId::new("unknown").unwrap(),
-                ArchiveIntent::Restore
-            )
-            .unwrap()
-            .await
-            .unwrap(),
-        ArchiveOutcome::Applied {
-            changed: false,
-            ids: vec![]
-        }
-    );
-    assert!(matches!(
-        owner
-            .archive_intent(device, header.session_id().clone(), ArchiveIntent::Restore)
-            .unwrap()
-            .await,
-        Err(ApiError::Unauthorized)
-    ));
+    for id in [
+        SessionId::new("unknown").unwrap(),
+        header.session_id().clone(),
+    ] {
+        assert!(matches!(
+            owner.archive_intent(device.clone(), id, ArchiveIntent::Restore),
+            Err(ApiError::Unauthorized)
+        ));
+    }
     assert!(owner.document().records[header.session_id()].archived);
     Arc::get_mut(&mut owner).unwrap().protection = Some(Arc::new(Unavailable));
     assert!(matches!(

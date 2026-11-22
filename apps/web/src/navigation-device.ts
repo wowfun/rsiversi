@@ -66,14 +66,17 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
       await work();setNotice('')
     }).catch(error=>{setNotice(String(error));throw error})
   }
-  const command=(value:Record<string,unknown>,current?:()=>boolean)=>{
+  function enqueue<T>(work:()=>Promise<T>) {
     const store=owner.current,generation=lifetime.current
     return navigationLane.run(()=>{
       if(store!==owner.current || generation!==lifetime.current)throw new Error('Connection changed before navigation dispatch.')
-      if(current && !current())return
-      return input.command(value)
+      return work()
     })
   }
+  const command=(value:Record<string,unknown>,current?:()=>boolean)=>enqueue(async()=> {
+    if(!current || current())return input.command(value)
+  })
+  const archive=(value:Record<string,unknown>,stop:boolean)=>enqueue(()=>input.archive(value,stop))
   const seed=async()=>{
     const latest=source.getSnapshot()?.navigation
     const previous=latest?.order?.ticket
@@ -165,7 +168,7 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
   },[manual,ticket,requestKey,nav?.order?.requested])
   const loaded=JSON.stringify(nav?.order?.requested)===requestKey
   const entries=manual && loaded?(nav?.order?.entries??[]).flatMap(row=>row?[row]:[]):[]
-  return {preferences,notice,ready,command,view,mode,move,workspaceIds,workspaceMove,workspaceUpdated,manual,loading:manual&&!loaded,entries,ordered,offset,total:all.length,
+  return {preferences,notice,ready,command,archive,view,mode,move,workspaceIds,workspaceMove,workspaceUpdated,manual,loading:manual&&!loaded,entries,ordered,offset,total:all.length,
     paused:preferences.sessionOrder==='manual' && complete?.kind==='too_large',
     previous:()=>setOffset(value=>Math.max(0,value-64)),next:()=>setOffset(value=>Math.min(Math.max(0,Math.floor((all.length-1)/64)*64),value+64)),
     refresh:()=>{seedRequest.current='';lastReconciled.current='';void command({action:'navigate',command:{kind:'order_seed',scope:{kind:'all'}}}).catch(error=>setNotice(String(error)))},

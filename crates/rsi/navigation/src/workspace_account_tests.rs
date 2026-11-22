@@ -100,6 +100,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
         .unwrap()
         .await
         .unwrap();
+    finish_fixture_turn(&owner, &id(299)).await;
     owner
         .archive_intent(CallOrigin::Local, id(299), ArchiveIntent::Archive)
         .unwrap()

@@ -717,6 +717,12 @@ pub fn acknowledge_frame(id: String) -> Result<(), JsValue> {
     application()?.acknowledge_frame(&id).map_err(failure)
 }
 
+/// Applies an archive edit or returns the activity requiring confirmation.
+#[wasm_bindgen]
+pub async fn archive_session(source: String) -> Result<String, JsValue> {
+    application()?.archive_input(&source).await.map_err(failure)
+}
+
 /// Executes one bounded directory selection request through the shared client.
 #[wasm_bindgen]
 pub async fn directory_input(source: String) -> Result<String, JsValue> {

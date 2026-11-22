@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, directory_input, scheduled_tasks, background_job, background_output, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, archive_session, directory_input, scheduled_tasks, background_job, background_output, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -104,6 +104,8 @@ async function dispatch(data) {
     result = await automation_artifact(data.payload);
   } else if (data.method === "scheduled_tasks") {
     result = await scheduled_tasks(data.payload.action, data.payload.id);
+  } else if (data.method === "archive_session") {
+    result = await archive_session(data.payload);
   } else if (data.method === "directory_input") {
     result = await directory_input(data.payload);
   } else if (data.method === "transcript_file") {

@@ -94,6 +94,7 @@ fn fixture() -> (NavigationPage, NavigationFilter, HostEpoch) {
     };
     (
         NavigationPage {
+            can_archive: true,
             metadata_revision: "1".into(),
             newest: Some(key),
             entries: vec![NavigationEntry {

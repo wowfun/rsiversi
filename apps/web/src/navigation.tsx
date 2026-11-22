@@ -1,4 +1,4 @@
-import { archivedSessionHint, ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
+import { archivedSessionHint, ConfirmArchive, ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
 import { WorkspaceNavigation } from "./navigation-workspaces.tsx";
 import {NavigationOptions, type ConversationFilter} from "./navigation-options.tsx";
 import { AttentionNavigation } from "./navigation-attention.tsx";
@@ -13,14 +13,14 @@ import {
   IconWarningOutlineRegular,
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import css from "./navigation.module.css";
-import { useLayout } from "./presentation.tsx";
+import { presentationIdentity, useLayout } from "./presentation.tsx";
 import { recentFirst, useDeviceNavigation } from "./navigation-device.ts";
 import { TextSearchIndex } from "../vendor/dsh/text-search.ts";
 import {workspaceName} from "../workspace-name.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
-import { input, run, useView, useSelected, type NavigationEntry } from "./bridge.ts";
+import { input, run, source, selection, useView, useSelected, type ArchiveActivity, type NavigationEntry } from "./bridge.ts";
 import {
   navigationTitles, navigationAttention,
   GroupRestoration,
@@ -132,6 +132,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
   const dispatchedQuery = useRef<string | undefined>("");
   const [menu, setMenu] = useState<SessionMenuTarget>();
   const [edit, setEdit] = useState<SessionMenuTarget>();
+  const [confirmation, setConfirmation] = useState<{title:string; activity:ArchiveActivity[]; confirm():Promise<void>}>();
   const [feedback, setFeedback] = useState<{sequence: number; text: string; success: boolean}>();
   const notify = (text: string, success = false) =>
     setFeedback(previous => ({sequence: (previous?.sequence ?? 0) + 1, text, success}));
@@ -199,6 +200,28 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       action: "navigate",
       command: { kind: "replace", ticket: nav?.ticket, session, metadata, metadata_revision: revision },
     });
+  const archive = async (entry: NavigationEntry, revision = nav?.metadata_revision) => {
+    const identity = presentationIdentity.getSnapshot(), pane = selection.getSnapshot();
+    const current = () => {
+      const surface = source.getSnapshot()?.surfaces[pane];
+      return surface?.kind === "native" && surface.session === entry.session ? surface.generation : undefined;
+    };
+    const generation = current(), archived = !entry.metadata.archived;
+    const command = {kind:"replace", ticket:nav?.ticket, session:entry.session, metadata_revision:revision,
+      metadata:{...entry.metadata, archived, pinned:false}};
+    const apply = async (stop: boolean) => {
+      if (identity !== presentationIdentity.getSnapshot()) throw new Error("Connection changed before archive.");
+      const activity = await device.archive(command, stop);
+      if (identity !== presentationIdentity.getSnapshot()) return;
+      if (activity) {
+        setConfirmation({title: entry.metadata.title || titles.get(entry.session) || entry.session,
+          activity, confirm:() => apply(true)});
+      } else if (archived && generation && pane === selection.getSnapshot() && generation === current()) {
+        await input.open({action:"new_conversation"});
+      }
+    };
+    await apply(false);
+  };
   const visibleEntries = useMemo(() => [
     ...(nav?.entries ?? []),
     ...Object.values(nav?.groups ?? {}).flatMap((group) => group.entries),
@@ -243,7 +266,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       activity={attention.get(entry.session)}
       workspaceLabel={workspaceLabels && (entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped")}
       openSearchResult={searching ? openSearchResult : undefined}
-      unarchive={searching && entry.metadata.archived ? () => mutate(entry.session, {...entry.metadata, archived:false}) : undefined}
+      unarchive={searching && nav?.can_archive && entry.metadata.archived ? () => archive(entry) : undefined}
       device={device}
       opener={menu?.opener}
       onMenu={target => setMenu(target && {...target, revision: nav?.metadata_revision})}
@@ -442,7 +465,9 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
         tone={feedback.success ? "success" : undefined} icon={<IconWarningOutlineRegular/>}
         onDone={() => setFeedback(undefined)}/>}
       {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} reading={attention.get(menu.entry.session)} epoch={nav?.attention_notice ? undefined : nav?.attention?.host_epoch} close={() => setMenu(undefined)}
+        archive={nav?.can_archive ? () => archive(menu.entry, menu.revision) : undefined}
         copy={() => void copySessionId(menu.entry.session)} rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
+      {confirmation && <ConfirmArchive {...confirmation} close={() => setConfirmation(undefined)}/>}
       {edit && <RenameSession title={edit.entry.metadata.title ?? titles.get(edit.entry.session) ?? ""}
         close={() => setEdit(undefined)}
         save={title => mutate(edit.entry.session, {...edit.entry.metadata, title: title || null}, edit.revision)}/>}

@@ -16,6 +16,11 @@ export async function openBrowserPage(engine, errors) {
     throw error;
   }
 }
+export async function connectHostOwner(page, service) {
+  assert(service.launchUrl, 'Host owner needs the local Web launch ticket');
+  await page.goto(service.launchUrl);
+  await page.locator('#workbench').waitFor({state:'visible'});
+}
 export async function connectWorkbench(page, service, registration) {
   await page.goto(service.origin);
   if (typeof registration === 'string') registration = service.register(registration);

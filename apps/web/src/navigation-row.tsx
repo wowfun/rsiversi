@@ -4,7 +4,7 @@ import { IconArchiveOffOutlineRegular, IconArchiveOutlineRegular, IconCloseOutli
   IconEditOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { useRef, useState, type SyntheticEvent } from "react";
 import { Menu } from "../vendor/dsh/dockkit-primitives/Menu.tsx";
-import { Modal, presentationIdentity } from "./presentation.tsx";
+import { Modal } from "./presentation.tsx";
 import { Button } from "./button.tsx";
 import dialogCss from "./workspace-header.module.css";
 import css from "./navigation.module.css";
@@ -12,10 +12,10 @@ import {isUnread, markReading} from "./session-reading.ts";
 import { ActivityLabel } from "./activity-label.tsx";
 import { rowContextMenu } from "./row-context-menu.ts";
 import {
-  input, selection, source,
+  input,
   run,
   type NavigationEntry,
-  type AttentionEntry,
+  type AttentionEntry, type ArchiveActivity,
 } from "./bridge.ts";
 import type { useDeviceNavigation } from "./navigation-device.ts";
 export const archivedSessionHint = "Unarchive this session to open it.";
@@ -137,7 +137,7 @@ export function ConversationRow({
   );
 }
 
-export function SessionMenu({target, device, reading, epoch, close, copy, rename, mutate}: {
+export function SessionMenu({target, device, reading, epoch, close, copy, rename, mutate, archive}: {
   target: SessionMenuTarget;
   reading?: AttentionEntry;
   epoch?: string;
@@ -145,23 +145,11 @@ export function SessionMenu({target, device, reading, epoch, close, copy, rename
   close(): void;
   copy(): void;
   rename(): void;
+  archive?: () => Promise<void>;
   mutate(metadata: NavigationEntry["metadata"]): Promise<unknown>;
 }) {
   const {entry, opener, point} = target;
   const {metadata, session} = entry;
-  async function toggleArchive() {
-    const owner = presentationIdentity.getSnapshot();
-    const pane = selection.getSnapshot();
-    const idleGeneration = () => {
-      const surface = source.getSnapshot()?.surfaces[pane];
-      return surface?.kind === "native" && surface.session === session && !surface.active ? surface.generation : undefined;
-    };
-    const generation = !metadata.archived && idleGeneration();
-    await mutate({...metadata, pinned: false, archived: !metadata.archived});
-    if (generation && owner === presentationIdentity.getSnapshot() && pane === selection.getSnapshot() && generation === idleGeneration()) {
-      await input.open({action: "new_conversation"});
-    }
-  }
   const select = (id: string) => {
     close();
     switch (id) {
@@ -173,7 +161,7 @@ export function SessionMenu({target, device, reading, epoch, close, copy, rename
         rename();
         break;
       case "pin": void run(() => mutate({...metadata, pinned: !metadata.pinned})); break;
-      case "archive": void run(toggleArchive); break;
+      case "archive": if (archive) void run(archive); break;
       case "copy": copy(); break;
       case "first": case "last": void run(() => device.move(session, id)); break;
     }
@@ -191,9 +179,29 @@ export function SessionMenu({target, device, reading, epoch, close, copy, rename
       {type: "separator", id: "copy-separator"},
       {id: "copy", label: "Copy Session ID", icon: <IconCopyOutlineRegular/>},
     ]}
-    footer={[{id: "archive", label: metadata.archived ? "Unarchive session" : "Archive session",
-      icon: metadata.archived ? <IconArchiveOffOutlineRegular/> : <IconArchiveOutlineRegular/>}]}
+    footer={archive ? [{id: "archive", label: metadata.archived ? "Unarchive session" : "Archive session",
+      icon: metadata.archived ? <IconArchiveOffOutlineRegular/> : <IconArchiveOutlineRegular/>}] : []}
     onClose={close} onSelect={select}/>;
+}
+
+export function ConfirmArchive({title, activity, close, confirm}: {
+  title: string; activity: ArchiveActivity[]; close(): void; confirm(): Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const dismiss = () => { if (!busy) close(); };
+  return <Modal label="Stop and archive this session?" className={dialogCss.dialog} close={dismiss} initialFocus="[data-archive-cancel]">
+    <header><h2>Stop and archive this session?</h2><button type="button" onClick={dismiss} disabled={busy} aria-label="Close"><IconCloseOutlineRegular/></button></header>
+    <p>“{title}” still has work in progress. You can restore the session later from the sidebar’s All conversations filter. Stopped work will not resume on its own.</p>
+    <ul className={dialogCss.archiveActivity} aria-label="Work that will be stopped">{activity.map(entry => <li key={entry.kind}>
+      {entry.kind === "turn" ? "The turn in progress" : `${entry.items.length} ${entry.kind === "job" ? "background job" : "running subagent"}${entry.items.length === 1 ? "" : "s"}: ${entry.items.map(item => item.label || item.id).join(", ")}`}
+    </li>)}</ul>
+    {error && <p role="alert" className={dialogCss.danger}>{error}</p>}
+    <footer><Button data-archive-cancel variant="outline" disabled={busy} onClick={dismiss}>Cancel</Button>
+      <Button variant="outline" className={dialogCss.danger} disabled={busy} onClick={async () => {
+        setBusy(true);
+        try { await confirm(); close(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy(false); }
+      }}>{busy ? "Stopping and archiving…" : "Stop and archive"}</Button></footer>
+  </Modal>;
 }
 
 export function RenameSession({title, close, save}: {title: string; close(): void; save(value: string): Promise<unknown>}) {

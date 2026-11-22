@@ -3,20 +3,20 @@ import {mkdir, writeFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
 import {join, resolve} from 'node:path';
 import {startService} from './service.mjs';
-import {openBrowserPage,connectWorkbench,chooseStartingWorkspace,registerFixtureWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage,connectHostOwner,connectWorkbench,chooseStartingWorkspace,registerFixtureWorkspace} from './browser-fixture.mjs';
 import {setSessionArchived} from './controls.mjs';
 import {cleanupAll} from './cleanup.mjs';
 const report=resolve(process.env.RSI_REPORT_DIR);
 await mkdir(report,{recursive:true});
 const service=await startService({report,binary:resolve(process.env.RSI_WEB_BINARY),assets:resolve(process.env.RSI_WEB_ASSETS),
-  foregroundHost:true,developmentHttp:process.platform==='win32'});
+  localWeb:true,foregroundHost:true,developmentHttp:process.platform==='win32'});
 const errors=[];
 let page,browser;
 try {
   ({page,browser}=await openBrowserPage(chromium,errors));
   const registration=service.register('Schedule creation card');
   await registerFixtureWorkspace(page.request,service,registration);
-  await connectWorkbench(page,service,registration);
+  await connectHostOwner(page,service);
   await chooseStartingWorkspace(page,service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true});
   {

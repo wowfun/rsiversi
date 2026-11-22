@@ -24,8 +24,7 @@ clients. Equivalent visible pages produce no frame. A 256 KiB page cap can
 truncate rows. A mark returns one position and reserves 512 bytes of response
 capacity. Polling never opens a Session or starts a peer.
 
-The authenticated navigation API reads durable Session truth and edits only
-Host-owned title/archive metadata. It never stops or deletes a Session. Titles
+Authenticated callers can read visible Sessions and edit their titles and pins. Only the local operator and the current managed Host browser can change archive membership. Query pages advertise this capability. An archive request with active work returns the running turn, jobs and subagents for confirmation. Explicit stop-and-archive publishes the archive before stopping work. Restoration preserves the title. Titles
 are at most 256 UTF-8 bytes. Search accepts up to 500 UTF-16 code units
 without control characters. A query scans at most
 256 indexed activity rows and returns at most 64 matches. Its continuation carries an opaque process-local scan token, the exact query,

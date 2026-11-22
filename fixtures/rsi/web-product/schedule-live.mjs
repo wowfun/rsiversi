@@ -5,19 +5,19 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
 import {assistantText, modelEvents} from './model-attempt.mjs';
 import {openConversation, setSessionArchived} from './controls.mjs';
-import {openBrowserPage, connectWorkbench, chooseStartingWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectHostOwner, connectWorkbench, chooseStartingWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 import {liveFixture} from './live-fixture.mjs';
 
-let hostProfile;
-const fixture = await liveFixture({foregroundHost:true,developmentHttp:process.platform === 'win32',
-  configure:async({config})=>{hostProfile=join(config,'host-profiles/fixture/host.profile.toml');}});
-const {service, report, model} = fixture;
 const manual = process.argv.includes('--run-now');
 const crashHost = process.argv.includes('--crash-host');
 const pendingRestart = process.argv.includes('--pending-restart');
 const withoutNavigation = pendingRestart || process.argv.includes('--without-navigation');
 const archived = withoutNavigation || process.argv.includes('--archive');
+let hostProfile;
+const fixture = await liveFixture({localWeb:archived,foregroundHost:true,developmentHttp:process.platform === 'win32',
+  configure:async({config})=>{hostProfile=join(config,'host-profiles/fixture/host.profile.toml');}});
+const {service, report, model} = fixture;
 const errors = [];
 let page, browser;
 
@@ -34,10 +34,14 @@ async function terminalFacts(session, expectedCount) {
 async function reconnect() {
   page = await browser.contexts()[0].newPage();
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto(service.origin);
-  if (service.developmentHttp) await page.getByLabel('Allow local HTTP for development', {exact:true}).check();
-  await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
-  await page.locator('#workbench').waitFor({state:'visible'});
+  if (archived) {
+    await connectHostOwner(page, service);
+  } else {
+    await page.goto(service.origin);
+    if (service.developmentHttp) await page.getByLabel('Allow local HTTP for development', {exact:true}).check();
+    await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
+    await page.locator('#workbench').waitFor({state:'visible'});
+  }
 }
 
 async function verifyScheduledTranscript(pane) {
@@ -60,7 +64,8 @@ async function verify() {
   ({browser, page} = await openBrowserPage(chromium, errors));
   const registration=service.register('schedule creation');
   await registerFixtureWorkspace(page.request,service,registration);
-  await connectWorkbench(page, service, registration);
+  if (archived) await connectHostOwner(page, service);
+  else await connectWorkbench(page, service, registration);
   await chooseStartingWorkspace(page, service);
   const pane = page.getByRole('region', {name: 'Main conversation', exact: true});
   await pane.getByRole('textbox', {name: 'Main message'}).fill(

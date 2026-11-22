@@ -30,6 +30,7 @@ use std::{
 };
 use tokio::sync::Semaphore;
 mod admission;
+mod archive;
 mod attention;
 use admission::Admission;
 mod endpoint;
@@ -224,6 +225,8 @@ pub enum ArchiveIntent {
     Inspect,
     /// Archive and clear any pin atomically.
     Archive,
+    /// Archive before stopping active work.
+    StopAndArchive,
     /// Clear only the archive flag.
     Restore,
 }
@@ -233,7 +236,7 @@ pub enum ArchiveOutcome {
     /// No published Session is available to archive.
     Unknown,
     /// The caller may proceed to check activity before archiving.
-    Ready,
+    Ready(Vec<rsi_navigation_api::ArchiveActivity>),
     /// The visible archive set, in entry order, with the mutation outcome.
     Applied {
         /// True only when this intent changed the durable metadata.
@@ -289,6 +292,7 @@ impl rsi_agent_turn_protocol::SessionArchive for Navigation {
 /// One Host's navigation owner; it never owns Session execution.
 #[derive(Debug)]
 pub struct Navigation {
+    archive_host: Option<(rsi_meta::Context, &'static str)>,
     domain: Domain,
     resolver: Arc<dyn rsi_execution::ExecutionResolver>,
     store: Arc<dyn SessionStore>,
@@ -336,11 +340,24 @@ impl Navigation {
         filter: NavigationFilter,
         after: Option<NavigationCursor>,
     ) -> Result<BoxFuture<'static, Result<NavigationPage>>> {
+        self.query_for(origin, self.can_archive(origin)?, filter, after)
+    }
+    fn query_for(
+        self: &Arc<Self>,
+        origin: &CallOrigin,
+        can_archive: bool,
+        filter: NavigationFilter,
+        after: Option<NavigationCursor>,
+    ) -> Result<BoxFuture<'static, Result<NavigationPage>>> {
         filter.validate()?;
         let visibility = self.resolver.visibility(origin)?;
         let origin = origin.clone();
         self.run_read(move |owner| {
-            Box::pin(async move { owner.scan(visibility, origin, filter, after).await })
+            Box::pin(async move {
+                owner
+                    .scan(visibility, origin, can_archive, filter, after)
+                    .await
+            })
         })
     }
     #[expect(
@@ -351,6 +368,7 @@ impl Navigation {
         &self,
         visibility: rsi_execution::ExecutionVisibility,
         origin: CallOrigin,
+        can_archive: bool,
         filter: NavigationFilter,
         after: Option<NavigationCursor>,
     ) -> Result<NavigationPage> {
@@ -375,6 +393,7 @@ impl Navigation {
                     Ok(record) => record,
                     Err(WorkspaceError::Unknown(_)) => {
                         return Ok(NavigationPage {
+                            can_archive,
                             metadata_revision: document.revision.to_string(),
                             newest: None,
                             entries: Vec::new(),
@@ -489,6 +508,7 @@ impl Navigation {
         };
         finish_scope(&origin, &leases)?;
         Ok(NavigationPage {
+            can_archive,
             newest,
             metadata_revision: document.revision.to_string(),
             entries,
@@ -675,17 +695,18 @@ impl Navigation {
             })
         })
     }
-    /// Replaces navigation metadata once and retains the write independently of its waiter.
-    ///
-    /// # Panics
-    /// Panics if an earlier panic poisoned this owner's state lock.
-    pub fn replace(
+    fn edit(
         self: &Arc<Self>,
         origin: CallOrigin,
+        credential: CallOrigin,
         session: SessionId,
         expected: &str,
         mut metadata: SessionMetadata,
-    ) -> Result<BoxFuture<'static, Result<MetadataReceipt>>> {
+        stop_activity: bool,
+    ) -> Result<BoxFuture<'static, Result<rsi_navigation_api::MetadataEditResult>>> {
+        if stop_activity && !metadata.archived {
+            return Err(ApiError::Invalid("Only archiving can stop work".into()));
+        }
         if metadata.archived {
             metadata.pinned = false;
         }
@@ -705,8 +726,16 @@ impl Navigation {
                         "navigation revision conflict; refresh before editing".into(),
                     ));
                 }
-                let _admission = match owner.metadata_header(&session).await? {
-                    Some(header) => Some(owner.admit_metadata(&header, &origin)?),
+                let was_archived = document
+                    .records
+                    .get(&session)
+                    .is_some_and(|row| row.archived);
+                if was_archived != metadata.archived || stop_activity {
+                    owner.require_archive_owner(&credential)?;
+                }
+                let header = owner.metadata_header(&session).await?;
+                let _admission = match &header {
+                    Some(header) => Some(owner.admit_metadata(header, &origin)?),
                     None if matches!(origin, CallOrigin::Local)
                         && document.records.get(&session).is_some_and(|old| {
                             metadata == SessionMetadata::default() || old.pinned && !metadata.pinned
@@ -717,12 +746,25 @@ impl Navigation {
                     None => return Err(ApiError::Invalid("Session is not available".into())),
                 };
                 drop(document);
-                let updated = owner.write_metadata(&session, &metadata).await?;
-                Ok(MetadataReceipt {
+                let updated = match owner
+                    .commit_edit(
+                        &origin,
+                        &session,
+                        header.as_ref(),
+                        was_archived,
+                        &metadata,
+                        stop_activity,
+                    )
+                    .await?
+                {
+                    Ok(document) => document,
+                    Err(activity) => return Ok(Err(activity)),
+                };
+                Ok(Ok(MetadataReceipt {
                     revision: updated.revision.to_string(),
                     session,
                     metadata,
-                })
+                }))
             })
         })
     }
@@ -774,6 +816,7 @@ impl Navigation {
         session: SessionId,
         intent: ArchiveIntent,
     ) -> Result<BoxFuture<'static, Result<ArchiveOutcome>>> {
+        self.require_archive_owner(&origin)?;
         if intent == ArchiveIntent::Inspect {
             return self.run_read(move |owner| {
                 Box::pin(async move {
@@ -787,7 +830,9 @@ impl Navigation {
                         .get(&session)
                         .is_some_and(|row| row.archived)
                     {
-                        return Ok(ArchiveOutcome::Ready);
+                        return Ok(ArchiveOutcome::Ready(
+                            owner.archive_activity(&header).await?,
+                        ));
                     }
                     let visibility = owner.resolver.visibility(&origin)?;
                     let ids = owner
@@ -813,17 +858,16 @@ impl Navigation {
                     let previous = current.records.get(&session);
                     let archived = previous.is_some_and(|row| row.archived);
                     let restore = intent == ArchiveIntent::Restore;
-                    let _admission = if archived || !restore {
-                        match owner.metadata_header(&session).await? {
-                            Some(header) => Some(owner.admit_metadata(&header, &origin)?),
-                            None if restore && matches!(origin, CallOrigin::Local) => None,
-                            None if !restore => return Ok(ArchiveOutcome::Unknown),
-                            None => {
-                                return Err(ApiError::Invalid("Session is not available".into()));
-                            }
-                        }
+                    let header = if archived || !restore {
+                        owner.metadata_header(&session).await?
                     } else {
                         None
+                    };
+                    let _admission = match &header {
+                        Some(header) => Some(owner.admit_metadata(header, &origin)?),
+                        None if !restore => return Ok(ArchiveOutcome::Unknown),
+                        None if !archived || matches!(origin, CallOrigin::Local) => None,
+                        None => return Err(ApiError::Invalid("Session is not available".into())),
                     };
                     let desired = !restore;
                     if archived == desired {
@@ -834,7 +878,21 @@ impl Navigation {
                         metadata.archived = desired;
                         metadata.pinned = false;
                         drop(current);
-                        (owner.write_metadata(&session, &metadata).await?, true)
+                        let document = match owner
+                            .commit_edit(
+                                &origin,
+                                &session,
+                                header.as_ref(),
+                                archived,
+                                &metadata,
+                                intent == ArchiveIntent::StopAndArchive,
+                            )
+                            .await?
+                        {
+                            Ok(document) => document,
+                            Err(activity) => return Ok(ArchiveOutcome::Ready(activity)),
+                        };
+                        (document, true)
                     }
                 };
                 let ids = owner
@@ -1038,8 +1096,11 @@ impl LocalContract for NavigationContract {
     type Service = Navigation;
 }
 /// Ordinary Host plugin with an explicit Storage route.
-#[derive(Clone, Debug, Default)]
-pub struct NavigationFactory;
+#[derive(Clone, Debug)]
+pub struct NavigationFactory {
+    /// Slot assigned to the managed Host browser by the application.
+    pub browser_slot: &'static str,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -1074,6 +1135,7 @@ impl PluginFactory for NavigationFactory {
             .map_err(activation)?;
         let document = load_document(&domain).map_err(activation)?;
         let owner = Arc::new(Navigation {
+            archive_host: Some((plan.context().clone(), self.browser_slot)),
             domain,
             resolver: plan.local::<rsi_execution::ExecutionResolverContract>()?,
             store: plan.local::<SessionStoreContract>()?,

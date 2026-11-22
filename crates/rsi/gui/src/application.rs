@@ -658,6 +658,25 @@ impl GuiApplication {
     {
         self.try_admit_inner(report_error, affected_pane, true, &self.slots, operation)
     }
+    /// Applies one navigation edit and forwards any Host archive confirmation.
+    pub fn archive_input(self: &Arc<Self>, source: &str) -> BoxFuture<'static, Result<String>> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            command: rsi_workbench_ui::NavigationCommand,
+            stop_activity: bool,
+        }
+        let request = serde_json::from_str::<Request>(source).map_err(error);
+        self.admit_reply(move |app| async move {
+            let request = request?;
+            let navigation = app.navigation.as_ref().ok_or("Navigation unavailable")?;
+            let activity = navigation
+                .command_reply(request.command, request.stop_activity)
+                .await?;
+            serde_json::to_string(&activity).map_err(error)
+        })
+    }
+
     pub(crate) fn admit_reply<T, F, Fut>(
         self: &Arc<Self>,
         operation: F,
