@@ -1323,7 +1323,7 @@ pub(crate) async fn arm_signal(
 
 pub(crate) fn report_terminal_diagnostic(outcome: &TurnOutcome) {
     match outcome {
-        TurnOutcome::Blocked => eprintln!("Input preparation blocked the request."),
+        TurnOutcome::Blocked => eprintln!("Model request blocked."),
         TurnOutcome::Failed { code, message }
         | TurnOutcome::PartialFailed { code, message, .. } => eprintln!("{code}: {message}"),
         TurnOutcome::Interrupted { reason, .. } => eprintln!("interrupted: {reason}"),

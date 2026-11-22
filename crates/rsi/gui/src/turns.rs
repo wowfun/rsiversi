@@ -806,6 +806,16 @@ mod tests {
         }
     }
     #[test]
+    fn blocked_turn_displays_its_status_without_inferring_a_cause() {
+        let mut transcript = Transcript::default();
+        apply(&mut transcript, accepted());
+        apply(&mut transcript, terminal(TurnOutcome::Blocked));
+        let block = transcript.blocks.back().unwrap();
+        assert_eq!(block.title, "Blocked");
+        assert!(block.text.is_empty());
+    }
+
+    #[test]
     fn terminal_identity_is_explicit_without_removing_chronological_evidence() {
         let mut t = Transcript::default();
         apply(&mut t, accepted());

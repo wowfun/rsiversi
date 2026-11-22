@@ -2120,7 +2120,7 @@ pub enum EffectKind {
 pub enum TurnOutcome {
     /// The request completed normally, including an initially empty input decision.
     Completed,
-    /// Input preparation declined to enter a provider request.
+    /// Admission rejected the step before a provider request.
     Blocked,
     /// Durable cancellation won terminal classification.
     Cancelled,

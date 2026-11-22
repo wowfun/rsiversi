@@ -779,9 +779,7 @@ impl Transcript {
                     rsi_agent_session_protocol::TurnOutcome::Completed => {
                         ("Completed", String::new())
                     }
-                    rsi_agent_session_protocol::TurnOutcome::Blocked => {
-                        ("Blocked", "Input preparation blocked the request".into())
-                    }
+                    rsi_agent_session_protocol::TurnOutcome::Blocked => ("Blocked", String::new()),
                     rsi_agent_session_protocol::TurnOutcome::Cancelled => {
                         ("Cancelled", String::new())
                     }

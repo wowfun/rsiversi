@@ -164,8 +164,8 @@ to an answer or folding the completed Turn’s process. Direct Image output is a
 answer of its own fact type. Missing evidence
 produces a completion row, not an invented answer. Failed, cancelled, interrupted,
 partially failed and MaxTokens Turns retain content and expanded process.
-A preparation rejection displays a Blocked terminal row without inventing an
-assistant response or a provider failure.
+An admission rejection displays a Blocked terminal row. The durable outcome
+carries no explanation of which admission check rejected the step.
 
 The device-local detail mode is Compact, Standard (default), Detailed or Verbose.
 Verbose includes the former Trajectory view. Compact collapses successful process

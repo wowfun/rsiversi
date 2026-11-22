@@ -317,8 +317,8 @@ pub(super) fn activation_outcome(
     match outcome {
         TurnOutcome::Completed => ActivationOutcome::Completed { result },
         TurnOutcome::Blocked => ActivationOutcome::Failed {
-            code: "input.rejected".into(),
-            message: "Input preparation blocked the request.".into(),
+            code: "turn.blocked".into(),
+            message: "Model request blocked.".into(),
         },
         TurnOutcome::Cancelled => ActivationOutcome::Cancelled,
         TurnOutcome::Failed { code, message }
@@ -340,7 +340,7 @@ pub(super) fn activation_outcome(
 pub(super) fn completion_message(outcome: &TurnOutcome) -> String {
     match outcome {
         TurnOutcome::Completed => "Subagent activation completed.".into(),
-        TurnOutcome::Blocked => "Subagent input preparation blocked the request.".into(),
+        TurnOutcome::Blocked => "Subagent model request blocked.".into(),
         TurnOutcome::Cancelled => "Subagent activation was cancelled.".into(),
         TurnOutcome::Failed { message, .. } | TurnOutcome::PartialFailed { message, .. } => {
             bounded_diagnostic(&format!("Subagent activation failed: {message}"))
