@@ -181,6 +181,29 @@ mod tests {
         );
     }
     #[test]
+    fn reasoning_uses_cached_markdown_while_preserving_its_source() {
+        let mut transcript = Transcript::default();
+        let source = "**A detail**\n\n- first\n- second";
+        transcript.add("thought".into(), "reasoning", "Think", source, false);
+        let block = transcript.blocks.back().unwrap();
+        let view = serde_json::to_value(block).unwrap();
+        assert_eq!(view["text"], source);
+        let events = view["markdown"].as_array().expect("structured reasoning");
+        let tags: Vec<_> = events
+            .iter()
+            .filter_map(|event| event["element"]["kind"].as_str())
+            .collect();
+        assert!(tags.contains(&"strong"));
+        assert_eq!(tags.iter().filter(|tag| **tag == "item").count(), 2);
+        assert_eq!(serde_json::to_value(block).unwrap(), view);
+        assert_eq!(
+            block
+                .markdown_parses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+    #[test]
     fn missing_interior_delta_is_inserted_once_without_regressing_terminal_status() {
         let mut transcript = Transcript::default();
         for (seq, text) in [(3, "丙"), (1, "甲"), (2, "乙"), (3, "丙"), (2, "乙")] {

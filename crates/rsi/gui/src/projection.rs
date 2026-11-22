@@ -85,15 +85,16 @@ impl Serialize for BlockView<'_> {
         } else {
             ""
         };
-        let markdown = (block.role == "assistant" || installed && !text.is_empty())
-            .then(|| {
-                #[cfg(test)]
-                block
-                    .markdown_parses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::markdown::parse(text)
-            })
-            .flatten();
+        let markdown = (matches!(block.role, "assistant" | "reasoning")
+            || installed && !text.is_empty())
+        .then(|| {
+            #[cfg(test)]
+            block
+                .markdown_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::markdown::parse(text)
+        })
+        .flatten();
         let request_seq = block
             .request
             .as_ref()

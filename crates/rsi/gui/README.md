@@ -280,8 +280,10 @@ and commits replacements only after successful output encoding. Generation
 replacement and pane removal discard the corresponding baseline. Asset-only
 changes still deliver a frame and participate in renderer mounting and ACK.
 
-Assistant text may carry a restricted Markdown event stream alongside its exact
-retained source. The application uses at most 64 KiB input, 4,096 events and 32 nested
+Assistant and reasoning blocks may carry a restricted Markdown event stream
+alongside their exact retained source. The chat renders an open reasoning body
+with compact paragraph, heading and list spacing. A folded body retains its
+plain-text preview. The application uses at most 64 KiB input, 4,096 events and 32 nested
 elements per block. Encoded events may occupy at most four times source bytes
 plus 16 KiB; exceeding any bound preserves the complete retained plain text.
 Across the retained transcript, events therefore add at most 4.5 MiB of JSON.

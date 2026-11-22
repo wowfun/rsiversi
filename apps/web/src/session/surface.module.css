@@ -37,8 +37,34 @@
     monospace;
 }
 :global(.message.reasoning .message-text):where(.scope, .scope *) {
-  color: var(--muted);
-  font-size: 0.8rem;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(var(--dsh-content-font-size-secondary, 13px) + 7px);
+}
+:global(.message.reasoning .markdown :is(h1, h2, h3, h4, h5, h6)):where(.scope, .scope *) {
+  margin: 8px 0 4px;
+  font: inherit;
+  font-weight: 600;
+}
+:global(.message.reasoning .markdown :is(p, ul, ol, blockquote)):where(.scope, .scope *) {
+  margin: 4px 0;
+}
+:global(.message.reasoning .markdown li:not(:first-child)):where(.scope, .scope *) {
+  margin-top: 2px;
+}
+:global(.message.reasoning .markdown li)::marker {
+  color: inherit;
+  line-height: inherit;
+}
+:global(.message.reasoning .markdown blockquote):where(.scope, .scope *) {
+  padding-left: 8px;
+}
+:global(.message.reasoning .markdown hr):where(.scope, .scope *) {
+  margin: 8px 0;
+}
+:global(.message.reasoning .markdown a):where(.scope, .scope *) {
+  color: inherit;
+  text-decoration: underline dotted;
 }
 :global(.message.metadata .message-title):where(.scope, .scope *) {
   font-weight: 400;

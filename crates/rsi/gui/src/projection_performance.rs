@@ -8,7 +8,7 @@ struct Uncached<'a>(&'a Block);
 impl Serialize for Uncached<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let markdown = (self.0.role == "assistant")
+        let markdown = matches!(self.0.role, "assistant" | "reasoning")
             .then(|| crate::markdown::parse(&self.0.text))
             .flatten();
         let mut view = serializer.serialize_struct(
