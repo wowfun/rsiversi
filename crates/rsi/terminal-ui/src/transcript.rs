@@ -658,7 +658,7 @@ impl Transcript {
         for (source, part) in row.parts() {
             let piece = match part {
                 rsi_conversation::InputPart::Text(text) => Piece::new(source, text, 0, WINDOW),
-                rsi_conversation::InputPart::Image(media) => Piece::json(source, media, 0),
+                rsi_conversation::InputPart::Image(media, _) => Piece::json(source, media, 0),
                 rsi_conversation::InputPart::File(file) => Piece::json(source, file, 0),
             };
             self.add(key.clone(), &title, role, piece);

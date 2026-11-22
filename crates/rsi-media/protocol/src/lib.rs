@@ -281,6 +281,13 @@ pub struct ImagePresentation {
     pub original_dimensions: Option<ImageDimensions>,
 }
 
+impl ImagePresentation {
+    /// Returns the validated display name supplied for this occurrence.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 fn image_display_name<'de, D: serde::Deserializer<'de>>(
     de: D,
 ) -> std::result::Result<Option<String>, D::Error> {

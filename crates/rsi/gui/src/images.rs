@@ -146,7 +146,7 @@ impl GuiApplication {
                         .find(|block| block.key == key)
                         .and_then(|block| block.images.as_ref()?.get(index))
                         .ok_or("This image is no longer in the retained message")?;
-                    (reference.clone(), attached.stop.clone())
+                    (reference.media.clone(), attached.stop.clone())
                 }
                 Preview::Draft {
                     pane,

@@ -15,7 +15,7 @@ export interface TranscriptBlock {
   role: string;
   title: string;
   text: string;
-  images?: Media[];
+  images?: {media:Media;name?:string}[];
   markdown?: MarkdownEvent[];
   clipped?: boolean;
   sources: number;

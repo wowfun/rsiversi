@@ -19,11 +19,17 @@ fn input_with_image(media: &rsi_media_protocol::MediaRef) -> SessionFact {
                     text: "before".into(),
                 },
                 AgentMessageContent::Image {
-                    presentation: None,
+                    presentation: Some(Box::new(
+                        serde_json::from_value(serde_json::json!({"name":"swatch.jpeg"})).unwrap(),
+                    )),
                     media: media.clone(),
                 },
                 AgentMessageContent::Text {
                     text: "after".into(),
+                },
+                AgentMessageContent::Image {
+                    media: media.clone(),
+                    presentation: None,
                 },
             ],
         },
@@ -96,7 +102,7 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
     assert_eq!(transcript.blocks.len(), 3);
     let message = &transcript.blocks[0];
     assert_eq!(message.text, "before\nafter");
-    assert_eq!(message.sources.len(), 3);
+    assert_eq!(message.sources.len(), 4);
     assert!(
         message
             .sources
@@ -108,7 +114,7 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
     );
     assert_eq!(
         serde_json::to_value(message).unwrap()["images"],
-        serde_json::json!([media])
+        serde_json::json!([{"media":media, "name":"swatch.jpeg"}, {"media":media}])
     );
     assert_eq!(
         transcript.blocks[1].text,

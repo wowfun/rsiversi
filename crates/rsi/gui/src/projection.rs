@@ -19,6 +19,13 @@ const MAX_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
 const MAX_METADATA: usize = 512 * 1024;
 
+#[derive(Debug, Serialize)]
+pub(crate) struct MessageImage {
+    pub(crate) media: rsi_media_protocol::MediaRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<Box<str>>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Block {
     pub(crate) revision: std::sync::Arc<()>,
@@ -28,7 +35,7 @@ pub(crate) struct Block {
     pub text: String,
     pub clipped: bool,
     pub tool: Option<ToolState>,
-    pub(crate) images: Option<Arc<Vec<rsi_media_protocol::MediaRef>>>,
+    pub(crate) images: Option<Arc<Vec<MessageImage>>>,
     presented: Option<Arc<rsi_session_files_ui::PresentedCards>>,
     request: Option<rsi_conversation::RequestPresentation>,
     compact: Option<(u64, rsi_agent_turn_protocol::CompactionOutcome)>,
@@ -430,10 +437,14 @@ impl Transcript {
             metadata += block.key.capacity()
                 + block.title.capacity()
                 + block.images.as_ref().map_or(0, |images| {
-                    images.capacity() * std::mem::size_of::<rsi_media_protocol::MediaRef>()
+                    images.capacity() * std::mem::size_of::<MessageImage>()
                         + images
                             .iter()
-                            .map(|m| m.id.as_str().len() + m.mime.capacity())
+                            .map(|image| {
+                                image.media.id.as_str().len()
+                                    + image.media.mime.capacity()
+                                    + image.name.as_deref().map_or(0, str::len)
+                            })
                             .sum::<usize>()
                 })
                 + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
@@ -544,7 +555,7 @@ impl Transcript {
             let image;
             let text = match value {
                 rsi_conversation::InputPart::Text(text) => text,
-                rsi_conversation::InputPart::Image(media) => {
+                rsi_conversation::InputPart::Image(media, _) => {
                     image = rsi_conversation::MediaSource { source, media }.label();
                     &image
                 }
@@ -579,8 +590,13 @@ impl Transcript {
         for (source, part) in row.parts() {
             let file_label;
             let text = match part {
-                rsi_conversation::InputPart::Image(media) => {
-                    images.push(media.clone());
+                rsi_conversation::InputPart::Image(media, presentation) => {
+                    images.push(MessageImage {
+                        media: media.clone(),
+                        name: presentation
+                            .and_then(rsi_media_protocol::ImagePresentation::name)
+                            .map(Into::into),
+                    });
                     ""
                 }
                 rsi_conversation::InputPart::Text(text) => text,

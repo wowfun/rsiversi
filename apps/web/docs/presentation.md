@@ -818,7 +818,9 @@ Submitted user images appear 8 px above their message text, including after reop
 history. A single thumbnail fits within 240 px. Multiple images share a row of
 64 px tiles that wraps to the available width. Visible thumbnails load when the
 transcript scrolls or the window resizes. Opening a thumbnail shows its
-original in the image viewer. An unavailable preview offers a retry.
+original in the image viewer. The thumbnail and viewer use the display name
+recorded for that occurrence, falling back to its position when unnamed.
+An unavailable preview offers a retry.
 
 Workspace rows use the active conversation's workspace to color the folder icon.
 Conversation activity uses an accessible leading status mark: a muted animated

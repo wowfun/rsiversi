@@ -1,7 +1,7 @@
 //! Borrowed presentation of one final user message.
 use crate::{FactField, SourceRef};
 use rsi_agent_session_protocol::{AgentMessageContent, InputMessageSource};
-use rsi_media_protocol::MediaRef;
+use rsi_media_protocol::{ImagePresentation, MediaRef};
 
 /// Contents of an entered input, still borrowing the owning Fact.
 #[derive(Clone, Copy, Debug)]
@@ -19,8 +19,8 @@ pub enum EnteredContent<'a> {
 pub enum InputPart<'a> {
     /// User text or a recorded reference preview.
     Text(&'a str),
-    /// An immutable image identity.
-    Image(&'a MediaRef),
+    /// An immutable image identity and the publisher's optional presentation for this occurrence.
+    Image(&'a MediaRef, Option<&'a ImagePresentation>),
     /// An immutable verbatim file identity.
     File(&'a rsi_media_protocol::FileRef),
 }
@@ -103,7 +103,10 @@ impl<'a> EnteredInput<'a> {
                         AgentMessageContent::Reference { reference } => {
                             InputPart::Text(&reference.preview)
                         }
-                        AgentMessageContent::Image { media, .. } => InputPart::Image(media),
+                        AgentMessageContent::Image {
+                            media,
+                            presentation,
+                        } => InputPart::Image(media, presentation.as_deref()),
                         AgentMessageContent::File { file } => InputPart::File(file),
                     };
                     (FactField::input(index, block), part)

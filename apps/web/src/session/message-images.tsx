@@ -1,5 +1,6 @@
 import {useEffect, useRef, useState} from 'react';
 import type {ImageInterest} from '../details/model.ts';
+import type {TranscriptBlock} from '../presentation-types.ts';
 import {singleFit} from '../../vendor/dsh/attachment/single-fit.ts';
 import css from '../../vendor/dsh/attachment/MessageImage.module.css';
 import type {Media} from './composer-state.ts';
@@ -9,8 +10,8 @@ import type {TranscriptOwner} from './transcript.tsx';
 
 type Source = {owner:TranscriptOwner; generation:string; messageKey:string};
 
-function Thumbnail({owner, generation, messageKey, media, index, single, visible}: Source & {
-  media:Media; index:number; single:boolean; visible:boolean;
+function Thumbnail({owner, generation, messageKey, media, name, index, single, visible}: Source & {
+  media:Media; name?:string; index:number; single:boolean; visible:boolean;
 }) {
   const [attempt, retry] = useState(0);
   const [original, setOriginal] = useState<string>();
@@ -18,7 +19,7 @@ function Thumbnail({owner, generation, messageKey, media, index, single, visible
   const [preview, setPreview] = useState<{url:string; interest:ImageInterest} | null>();
   const dragged = useRef(false);
   const fit = single ? singleFit(media) : undefined;
-  const label = 'Image ' + (index + 1);
+  const label = name ?? 'Image ' + (index + 1);
   const acquire = () => owner.acquireTranscriptImage(media, generation, messageKey, index);
   useEffect(() => {
     setPreview(undefined);
@@ -62,8 +63,9 @@ function Thumbnail({owner, generation, messageKey, media, index, single, visible
     const interest = acquire();
     try {
       await interest.result;
-      if (!interest.file) throw new Error('This image is no longer available');
-      return interest.file;
+      const file = interest.file;
+      if (!file) throw new Error('This image is no longer available');
+      return name && name !== file.name ? new File([file], name, {type:file.type}) : file;
     } finally { interest.release(); }
   }
 
@@ -89,7 +91,7 @@ function Thumbnail({owner, generation, messageKey, media, index, single, visible
   </>;
 }
 
-export function MessageImages({owner,generation,messageKey,images}: Source & {images:Media[]}) {
+export function MessageImages({owner,generation,messageKey,images}: Source & {images:NonNullable<TranscriptBlock['images']>}) {
   const gallery = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -99,6 +101,6 @@ export function MessageImages({owner,generation,messageKey,images}: Source & {im
     return () => observer.disconnect();
   }, []);
   return <div ref={gallery} className={css.gallery} data-align="end" data-message-attachments="" aria-label="Message images">
-    {images.map((media,index) => <Thumbnail key={media.id + ':' + index} {...{owner,generation,messageKey,media,index,visible}} single={images.length === 1}/>)}
+    {images.map(({media,name},index) => <Thumbnail key={media.id + ':' + index} {...{owner,generation,messageKey,media,name,index,visible}} single={images.length === 1}/>)}
   </div>;
 }
