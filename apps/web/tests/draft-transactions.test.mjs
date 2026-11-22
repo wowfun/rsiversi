@@ -15,8 +15,7 @@ test('primary key prefix returns only this endpoint, principal and pane in Sessi
   for(const [store,pane,id] of [[local,'main','工作'],[local,'main','abc'],[local,'main-2','hidden'],[other,'main','hidden'],[device,'main','hidden']]) {
     await store.edit(await store.ensure(pane,id,header),id,[]);
   }
-  assert.deepEqual((await local.list('main')).map(record=>record.text),['abc','工作']);
-  assert.equal(local.database.transaction('drafts').objectStore('drafts').indexNames.length,0);
+  assert.deepEqual((await local.list('main')).rows.map(record=>record.text),['abc','工作']);
 });
 
 test('editing charges UTF-8 bytes and keeps the original frozen request and its caller-owned record', async () => {
@@ -103,35 +102,48 @@ test('changing a draft preset rebinds the latest text, media and fork while fenc
   await store.verify();
 });
 
-test('more than 128 completed conversations reclaim empty dispatched records atomically', async()=>{
-  const store=await open(); let first;
-  for(let i=0;i<140;i++) {
-    let saved=await store.ensure('main',`sent-${String(i).padStart(3,'0')}`,header);
-    saved=await store.edit(saved,'hello',[]);
-    saved=await store.startDispatch(saved,{kind:'message',id:`request-${i}`,opaque:'opaque',text_bytes:5,images:0,captures:[]});
-    saved=await store.settle(saved,{status:'complete'});
-    if(!i) first=saved;
+test('ordinary Session drafts beyond 128 records and four MiB restore in bounded pages', async()=>{
+  const store=await open(), ids=[];
+  for(let i=0;i<129;i++) {
+    const id=`draft-${String(i).padStart(3,'0')}`;
+    await store.edit(await store.ensure('main',id,header),i<5?'x'.repeat(1024*1024):id,[]);
+    ids.push(id);
   }
-  assert.equal((await store.list('main')).length,128);
-  await assert.rejects(store.edit(first,'stale editor input',[]),{code:'conflict'});
+  let after;
+  const found=[], reopened=await open();
+  do {
+    const page=await reopened.list('main',after);
+    assert(page.rows.length<=32);
+    found.push(...page.rows.map(row=>row.key[3]));
+    after=page.next;
+  } while(after);
+  assert.deepEqual(found,ids);
+  assert.equal((await reopened.get('main',ids[0])).text.length,1024*1024);
+  assert.equal((await reopened.get('main',ids.at(-1))).text,ids.at(-1));
   await store.verify();
 });
 
-test('quota reclamation preserves unsent intent, pending writes, input and other principals', async()=>{
+test('128 outstanding obligations across principals still allow saving ordinary text', async()=>{
   const store=await open();
   const other=await DraftStore.open('a'.repeat(32),{kind:'device',device_id:'d'.repeat(32)});
   for(let i=0;i<128;i++) {
     const session=`fresh-${i}`;
-    if(i%6===5) {await other.edit(await other.ensure('main',session,header),'',[]);continue;}
-    let saved=await store.ensure('main',session,header,i%6===0?{workspace_id:header,session_id:session,agent_preset_id:null}:undefined);
-    const owned=reference(`owned-${i}`); owned.metadata.target.session_id=session;
-    saved=await store.edit(saved,i%6===1?'keep':'',[],i%6===3?[owned]:[]);
-    if(i%6===2) await store.startDispatch(saved,{kind:'message',id:`pending-${i}`,opaque:'opaque',text_bytes:0,images:0,captures:[]});
-    if(i%6===4) await store.retireUnowned(saved,[captureOf(owned)]);
+    const owner=i%2 ? store : other, saved=await owner.ensure('main',session,header);
+    if(i%2) await owner.startDispatch(saved,{kind:'message',id:session,opaque:'original '+session,text_bytes:0,images:0,captures:[]});
+    else {
+      const owned=reference(`owned-${i}`); owned.metadata.target.session_id=session;
+      await owner.retireUnowned(saved,[captureOf(owned)]);
+    }
   }
   const fresh=await store.ensure('main','overflow',header);
-  await assert.rejects(store.edit(fresh,'new',[]),/Saved drafts/);
-  assert.equal(await store.get('main','overflow'),undefined);
+  const plain=await store.edit(fresh,'new',[]);
+  const image={id:header,mime:'image/png',bytes:72,width:1,height:1};
+  await assert.rejects(store.edit(plain,'new',[image]),/origin storage limit/);
+  assert.deepEqual(await store.get('main','overflow'),plain);
+  const first=await store.get('main','fresh-1');
+  assert.equal(first.pending.opaque,'original fresh-1');
+  await store.settle(first,{status:'complete'});
+  assert.deepEqual((await store.edit(plain,'new',[image])).images,[image]);
   await store.verify();
 });
 function reference(id) {
@@ -143,7 +155,7 @@ function reference(id) {
 test('empty visits use no quota and concurrent editors restore the last save',async()=>{
   const store=await open();
   for(let index=0;index<140;index++) await store.ensure('main',`visit-${index}`,header);
-  assert.equal((await store.list('main')).length,0);
+  assert.equal((await store.list('main')).rows.length,0);
   const first=await store.ensure('main','session',header),second=await store.ensure('main','session',header);
   const left=new DraftEditor(store,first),right=new DraftEditor(store,second);
   left.edit('first');await left.flush();

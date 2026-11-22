@@ -41,7 +41,7 @@ export async function verifyDraftMigration(browser, root) {
         const actual=store.database.version;store.database.close();device.database.close();
         return {rejected,version:actual,isolated,keys};
       }, version);
-      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:11,isolated:true,
+      assert.deepEqual(report, version ? {rejected:true,version,unchanged:true} : {rejected:false,version:12,isolated:true,
         keys:[[16,0,'main','session',false],[16,16,'main','session',false]]});
       reports.push(report);
     } finally {await context.close();}
@@ -146,7 +146,7 @@ export async function verifyDraftUpgradeErrors(browser, root) {
   return reports;
 }
 
-export async function verifyComposerWriterFence(browser, root, version = 10) {
+export async function verifyComposerWriterFence(browser, root, version = 11) {
   const context=await browser.newContext();
   await serveDraftModules(context,root,37918);
   try {
@@ -156,13 +156,14 @@ export async function verifyComposerWriterFence(browser, root, version = 10) {
       const {DraftStore}=await import('/drafts.js'),store=new DraftStore(undefined,'a'.repeat(32),'local');
       const record={...store.blank('main','session','b'.repeat(64)),version,text:'retained',editRevision:3,receipt:'{"accepted_control_seq":18446744073709551615}',
         pending:{kind:'command',id:'original-command',opaque:'opaque',text_bytes:0,images:0,captures:[],phase:'unknown',editRevision:3,preserve_editor:true}};
+      if(version===11) delete record.receipt;
       if(version<9) record.scope=record.key.slice(0,3);
       await new Promise((resolve,reject)=>{
         const request=indexedDB.open('rsi.composer',version);
         request.onupgradeneeded=()=>{
-          const records=request.result.createObjectStore('drafts',version===10 ? undefined : {keyPath:'key'});
+          const records=request.result.createObjectStore('drafts',version>=10 ? undefined : {keyPath:'key'});
           if(version<9) records.createIndex('scope','scope');
-          if(version===10) {
+          if(version>=10) {
             const {key,...content}=record;
             records.put(content,[new Uint8Array(16).fill(0xaa).buffer,new ArrayBuffer(0),key[2],key[3]]);
           } else records.put(record);
@@ -177,7 +178,7 @@ export async function verifyComposerWriterFence(browser, root, version = 10) {
       return store.get('main','session');
     });
     const {scope,receipt,...retained}=before;
-    assert.deepEqual(after,{...retained,version:11});
+    assert.deepEqual(after,{...retained,version:12});
     const oldWriter=await old.evaluate(async version=>({versionChanged:window.versionChanged,reopen:await new Promise(resolve=>{
       const request=indexedDB.open('rsi.composer',version);
       request.onerror=()=>resolve(request.error.name);request.onsuccess=()=>{request.result.close();resolve('opened');};

@@ -42,6 +42,8 @@ export interface SavedDraftsState {
   close(): void;
   discard?: () => Promise<void>;
   more?: () => Promise<void>;
+  previousSessions?: () => Promise<void>;
+  nextSessions?: () => Promise<void>;
   notice?: string;
 }
 export function SavedDrafts({ state }: { state?: SavedDraftsState }) {
@@ -155,6 +157,10 @@ export function SavedDrafts({ state }: { state?: SavedDraftsState }) {
           ))}
           {state.loading && <p role="status" className="hint">Loading saved drafts…</p>}
           {!state.loading && !state.notice && !state.rows.length && <p className="hint">No saved drafts</p>}
+          {state.previousSessions && <button type="button" className="quiet" disabled={state.busy}
+            onClick={event=>act(state.previousSessions!,event.currentTarget)}>Previous conversation drafts</button>}
+          {state.nextSessions && <button type="button" className="quiet" disabled={state.busy}
+            onClick={event=>act(state.nextSessions!,event.currentTarget)}>Next conversation drafts</button>}
           {state.more && <button type="button" className="quiet" disabled={state.busy}
             onClick={event=>act(state.more!,event.currentTarget)}>Load more starting drafts</button>}
           {state.discard && <button type="button" className="quiet" disabled={state.busy}

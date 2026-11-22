@@ -9,7 +9,7 @@ globalThis.requestAnimationFrame = callback => queueMicrotask(callback);
 
 const record={key:['endpoint','local','main','saved'],header:'header',text:'',images:[],references:[],releases:[],pending:null,creation:{},everDispatched:false};
 function fixture(records=[record]) {
-  const calls=[],scope={connection:{drafts:{namespace:['endpoint','local'],list:async()=>records}},call:async(_method,payload)=>{calls.push(JSON.parse(payload));return '{"status":"expired"}'}};
+  const calls=[],scope={connection:{drafts:{namespace:['endpoint','local'],list:async()=>({rows:records})}},call:async(_method,payload)=>{calls.push(JSON.parse(payload));return '{"status":"expired"}'}};
   const Pane=createPaneClass(scope),pane=new Pane('main');
   pane.flush=async()=>{};pane.renderComposer=()=>{};pane.focusInput=()=>{};
   return {pane,scope,calls};
@@ -69,6 +69,43 @@ test('loading more starting drafts retains earlier rows and cancellable deletion
   assert.deepEqual(cursors,[undefined,first.key]);
 });
 
+test('paging Session drafts replaces the visible Session rows and preserves starting input',async t=>{
+  const {pane,scope}=fixture();
+  const second={...record,key:['endpoint','local','main','two'],text:'second'};
+  const cursors=[];
+  scope.connection.drafts.list=async(_pane,after)=>{
+    cursors.push(after);
+    return after ? {rows:[second]} : {rows:[record],next:record.key[3]};
+  };
+  t.mock.method(StartingDraft,'list',async()=>({rows:[{key:JSON.stringify(['endpoint','local','compare']),text:'starting'}]}));
+  await pane.restoreDrafts();
+  const panel=pane.recoveryView,starting=panel.rows[1];
+  assert.equal(panel.previousSessions,undefined);
+  await panel.nextSessions();
+  assert.equal(panel.nextSessions,undefined);
+  assert.deepEqual(panel.rows.map(row=>row.text),['second','starting']);
+  assert.equal(panel.rows[1],starting);
+  await panel.previousSessions();
+  assert.deepEqual(cursors,[undefined,'saved',undefined]);
+  assert.deepEqual(panel.rows.map(row=>row.text),['','starting']);
+});
+
+test('Session paging waits for the initial starting-draft read',async t=>{
+  const {pane,scope}=fixture();
+  const loading=Promise.withResolvers(), started=Promise.withResolvers();
+  let reads=0;
+  scope.connection.drafts.list=async()=>{reads++;return {rows:[record],next:'saved'};};
+  t.mock.method(StartingDraft,'list',async()=>{started.resolve();return loading.promise;});
+  const opening=pane.restoreDrafts();
+  await started.promise;
+  const panel=pane.recoveryView;
+  assert.equal(panel.busy,true);
+  await panel.nextSessions();
+  assert.equal(reads,1);
+  loading.resolve({rows:[]});await opening;
+  assert.equal(panel.busy,false);
+});
+
 test('recovery uses known conversation titles while retaining unavailable identities and full coordinates',async(t)=>{
   const {pane,scope}=fixture([record,{...record,key:['endpoint','local','main','expired-id']}]);
   scope.view={surfaces:{main:{kind:'native',session:'saved',workspace:{key:'test',coordinates:{location:{kind:'local'},path:'/workspace'},registration:{status:'unregistered'}}}},catalog:{workspaces:[]},navigation:{entries:[{session:'saved',metadata:{title:'Research notes'}}]}};
@@ -101,7 +138,7 @@ test('a failed first save remains discoverable only in its current namespace',as
     const editor=new DraftEditor(store,blank);
     t.mock.method(store,'edit',async()=>{throw Error('disk full')});
     editor.edit('valuable unsaved text');await assert.rejects(editor.flush(),/disk full/);
-    assert.equal((await store.list('main')).length,0);
+    assert.equal((await store.list('main')).rows.length,0);
     const {pane,scope}=fixture([]);scope.connection.drafts=store;
     pane.editors.set(JSON.stringify(blank.key),editor);
     pane.editors.set('foreign',{record:{...blank,key:['other','local','main','foreign']},dirty:true,text:'private'});

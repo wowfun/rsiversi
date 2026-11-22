@@ -35,21 +35,9 @@ export async function restoreDrafts(pane, context) {
   };
   pane.recoveryView = panel;
   pane.invalidate();
-  let records = new Map(), sessionFailure;
-  try { records = new Map((await store.list(pane.index)).map(record => [JSON.stringify(record.key), record])); }
-  catch (error) {
-    sessionFailure = `Saved drafts could not be read: ${error.message}`;
-    if (active()) { panel.notice = sessionFailure; pane.invalidate(); }
-  }
-  if (!active()) return;
-  for (const [key, local] of pane.editors) {
-    if (local.record.key[2] === pane.index &&
-        JSON.stringify(local.record.key.slice(0, 2)) === JSON.stringify(store.namespace) &&
-        (local.dirty || local.failure) && !records.has(key)) records.set(key, local.record);
-  }
-  for (const record of records.values()) {
+  const appendSession = record => {
     const local = pane.editors.get(JSON.stringify(record.key));
-    if (local && local === pane.editor && !local.dirty && !local.failure) continue;
+    if (local && local === pane.editor && !local.dirty && !local.failure) return;
     const surface = Object.keys(context.view?.surfaces ?? {}).find(key=>context.view.surfaces[key]?.kind==='native' && context.view.surfaces[key].session===record.key[3]);
     const row = {
       id: JSON.stringify(record.key),
@@ -176,10 +164,48 @@ export async function restoreDrafts(pane, context) {
       },
     };
     panel.rows.push(row);
-  }
+  };
+  let sessionFailure;
+  const starts = [undefined];
+  const loadSessions = async (index, after) => {
+    panel.loading = panel.busy = true; pane.invalidate();
+    try {
+      let page;
+      try {
+        page = await store.list(pane.index,after);
+        sessionFailure = undefined;
+      } catch (error) {
+        sessionFailure = `Saved drafts could not be read: ${error.message}`;
+        if (panel.rows.length || index) return;
+        page = {rows:[]};
+      }
+      if (!active()) return;
+      starts[index] = after;
+      const startingRows = panel.rows.filter(row => row.starting);
+      panel.rows = [];
+      const records = new Map(page.rows.map(record => [JSON.stringify(record.key),record]));
+      if (!index) for (const [key, local] of pane.editors) {
+        if (local.record.key[2] === pane.index &&
+            JSON.stringify(local.record.key.slice(0, 2)) === JSON.stringify(store.namespace) &&
+            (local.dirty || local.failure) && !records.has(key)) records.set(key,local.record);
+      }
+      for (const record of records.values()) appendSession(record);
+      panel.rows.push(...startingRows);
+      const navigate = (target, cursor) => () => { if (active() && !panel.busy) return loadSessions(target,cursor); };
+      panel.previousSessions = index ? navigate(index-1,starts[index-1]) : undefined;
+      panel.nextSessions = page.next ? navigate(index+1,page.next) : undefined;
+    } finally {
+      if (active()) {
+        panel.notice = [sessionFailure,pane.startingStorageError].filter(Boolean).join(' ');
+        panel.loading = panel.busy = false; pane.invalidate();
+      }
+    }
+  };
+  await loadSessions(0);
+  if (!active()) return;
   let next;
   const loadStarting = async () => {
-    panel.loading = true; panel.notice = sessionFailure; pane.invalidate();
+    panel.loading = panel.busy = true; panel.notice = sessionFailure; pane.invalidate();
     try {
       const page = await StartingDraft.list(store.namespace,next);
       if (!active()) return;

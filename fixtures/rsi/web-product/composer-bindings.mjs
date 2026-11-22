@@ -135,9 +135,7 @@ export async function verifyComposerBindings(page, report, name) {
       releaseSave();
       await saving;
       await pane.editor.flush();
-      const record = (await store.list(pane.index)).find(
-        (record) => record.key[3] === data.session,
-      );
+      const record = await store.get(pane.index,data.session);
       return {
         unbound,
         waitedForSave,

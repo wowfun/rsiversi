@@ -123,7 +123,7 @@ function validateCreation(creation, session) {
     && Object.keys(selection).join() === "last" && integer(selection.last) && selection.last > 0));
 }
 function validateRecord(record) {
-  require(record?.version === 11 && Array.isArray(record.key) && record.key.length === 4 &&
+  require(record?.version === 12 && Array.isArray(record.key) && record.key.length === 4 &&
     hex(record.key[0], 32) && (principalKey(record.key[1]) && surface(record.key[2])) && identity(record.key[3]));
   require(hex(record.header) && hex(record.incarnation, 32));
   require(integer(record.editRevision) && integer(record.pendingRevision) && typeof record.everDispatched === "boolean");
@@ -147,6 +147,7 @@ function validateRecord(record) {
 const referenceBytes = references => references?.length ? bytes(JSON.stringify(references)) : 0;
 const emptyUsage = [0, 0, 0, 0];
 const limits = [128, 4 * MiB, 4 * MiB, 32 * MiB];
+const charged = record => !!(record.pending || record.images.length || record.references.length || record.releases.length);
 function validateCounters(value) {
   require(Array.isArray(value) && value.length === limits.length && value.every((count, index) => integer(count, limits[index])));
   return value;
@@ -205,25 +206,57 @@ function withKey(value, key) {
   value.key = key;
   return value;
 }
+function storedUsage(value, key) {
+  const record = withKey(value, key);
+  const marker = record.charged;
+  delete record.charged;
+  const usage = validateRecord(record);
+  const retained = charged(record);
+  require(marker === (retained ? 1 : undefined));
+  return retained ? usage : emptyUsage;
+}
 function putDraft(store, record, address) {
   const {key, ...content} = record;
+  if (charged(record)) content.charged = 1;
   store.put(content, address);
 }
 function openDatabase() {
-  return openDraftDatabase(draftDatabaseNames.composer, 11, (db, tx, oldVersion, fail) => {
+  return openDraftDatabase(draftDatabaseNames.composer, 12, (db, tx, oldVersion, fail) => {
     if (oldVersion === 0) {
-      db.createObjectStore("drafts");
+      db.createObjectStore("drafts").createIndex("charged","charged");
       db.createObjectStore("usage");
-    } else if ([7,8,9,10].includes(oldVersion)) {
+    } else if ([7,8,9,10,11].includes(oldVersion)) {
       const previous = tx.objectStore('drafts');
       const rekey = oldVersion < 10;
       if (rekey) previous.name = 'previousDrafts';
       const records = rekey ? db.createObjectStore('drafts') : previous;
+      records.createIndex('charged','charged');
+      const usage = tx.objectStore('usage');
+      const original = [0,0,0,0], retained = [0,0,0,0];
       const request = previous.openCursor();
       request.onsuccess = () => {
         try {
           const cursor = request.result;
-          if (!cursor) { if (rekey) db.deleteObjectStore(previous.name); return; }
+          if (!cursor) {
+            if (rekey) db.deleteObjectStore(previous.name);
+            let foundLedger = false;
+            const ledger = usage.openCursor();
+            ledger.onsuccess = () => {
+              try {
+                const entry = ledger.result;
+                if (entry) {
+                  require(entry.key === "aggregate" && equal(original,entry.value), "Saved draft counters are inconsistent");
+                  foundLedger = true;
+                  entry.continue();
+                  return;
+                }
+                require(original[0] === 0 || foundLedger, "Saved draft counters are missing");
+                if (retained[0]) usage.put(retained,"aggregate");
+                else usage.delete("aggregate");
+              } catch (error) { fail(error); }
+            };
+            return;
+          }
           const record = rekey ? cursor.value : withKey(cursor.value,cursorKey(cursor.primaryKey));
           require(record.version === oldVersion);
           if (rekey) require(Array.isArray(record.key) && equal(cursor.primaryKey,record.key));
@@ -231,9 +264,12 @@ function openDatabase() {
             require(equal(record.scope,record.key.slice(0,3)));
             delete record.scope;
           }
-          delete record.receipt;
-          record.version = 11;
-          validateRecord(record);
+          if (oldVersion < 11) delete record.receipt;
+          record.version = 12;
+          const cost = validateRecord(record);
+          cost.forEach((amount,index) => original[index] += amount);
+          validateCounters(original);
+          if (charged(record)) cost.forEach((amount,index) => retained[index] += amount);
           const [endpoint,principal,pane,session] = record.key;
           putDraft(records,record,rekey ? [...storedNamespace(endpoint,principal),pane,session] : cursor.primaryKey);
           cursor.continue();
@@ -262,15 +298,15 @@ export class DraftStore {
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(["drafts","usage"],"readonly");
       const totals = [0,0,0,0]; let saved = [0,0,0,0], failure;
-      const scan = (name, visit) => {
-        const request = tx.objectStore(name).openCursor();
+      const scan = (source, visit) => {
+        const request = source.openCursor();
         request.onsuccess = () => {
-          try { const cursor = request.result; if (!cursor) return; visit(cursor.key,cursor.value); cursor.continue(); }
+          try { const cursor = request.result; if (!cursor) return; visit(cursor.primaryKey,cursor.value); cursor.continue(); }
           catch (error) { failure = error; tx.abort(); }
         };
       };
-      scan("drafts", (key,value) => { const cost = validateRecord(withKey(value,cursorKey(key))); cost.forEach((amount,index) => totals[index] += amount); validateCounters(totals); });
-      scan("usage", (key,value) => { require(key === "aggregate"); saved = validateCounters(value); });
+      scan(tx.objectStore("drafts").index("charged"), (key,value) => { const cost = storedUsage(value,cursorKey(key)); cost.forEach((amount,index) => totals[index] += amount); validateCounters(totals); });
+      scan(tx.objectStore("usage"), (key,value) => { require(key === "aggregate"); saved = validateCounters(value); });
       tx.oncomplete = () => equal(totals,saved) ? resolve() : reject(new Error("Saved draft counters are inconsistent; records were left unchanged"));
       tx.onabort = () => reject(failure ?? tx.error);
     });
@@ -289,47 +325,38 @@ export class DraftStore {
       const tx = this.db.transaction(["drafts", "usage"], "readwrite", { durability: "strict" });
       const records = tx.objectStore("drafts"), counters = tx.objectStore("usage");
       const saved = Array(keys.length);
-      let counts, reads = 0, result, failure;
+      let reads = 0, result, failure;
       const apply = () => {
-        if (++reads !== keys.length + 1) return;
+        if (++reads !== keys.length) return;
         try {
-          const before = saved.map((record,index) => record === undefined ? emptyUsage : validateRecord(withKey(record,keys[index])));
+          const before = saved.map((record,index) => record === undefined ? emptyUsage : storedUsage(record,keys[index]));
           const previousOwners = saved.map(record => record && owners(record));
-          counts = validateCounters(counts ?? [0, 0, 0, 0]);
           const next = change(saved);
           require(next.length === keys.length);
           const after = next.map((record, index) => {
             if (!record) return emptyUsage;
             if (previousOwners[index]?.length) retireCaptures(previousOwners[index], record);
             require(equal(record.key, keys[index]));
-            return validateRecord(record);
+            const usage = validateRecord(record);
+            return charged(record) ? usage : emptyUsage;
           });
-          const total = counts.map((count, dimension) => before.reduce((sum, cost, index) => sum - cost[dimension] + after[index][dimension], count));
-          const finish = () => {
-            require(total.every((count, index) => integer(count, limits[index])), "Saved drafts exceed the origin storage limit; open Restore drafts and delete an unused draft");
-            next.forEach((record, index) => { if (record) putDraft(records,record,addresses[index]); else records.delete(addresses[index]); });
-            if (total.some((count, index) => count !== counts[index])) counters.put(total, "aggregate");
-            result = next;
-          };
-          if (total[0] <= limits[0] || total.slice(1).some((count, index) => !integer(count, limits[index + 1]))) return finish();
-          const scan = records.openCursor();
-          scan.onsuccess = () => {
-            try {
-              const cursor = scan.result;
-              if (!cursor || total[0] <= limits[0]) return finish();
-              const record = withKey(cursor.value,cursorKey(cursor.primaryKey));
-              validateRecord(record);
-              if (equal(record.key.slice(0, 2), this.namespace) && !keys.some(key => equal(key, record.key)) && record.everDispatched && empty(record)) {
-                cursor.delete(); total[0]--;
-              }
-              cursor.continue();
-            } catch (error) { failure = error; tx.abort(); }
-          };
+          const delta = emptyUsage.map((_, dimension) => before.reduce((sum, cost, index) => sum - cost[dimension] + after[index][dimension], 0));
+          if (delta.some(Boolean)) {
+            const read = counters.get("aggregate");
+            read.onsuccess = () => {
+              try {
+                const total = validateCounters(read.result ?? emptyUsage).map((count,index) => count + delta[index]);
+                require(total.every((count,index) => integer(count,limits[index])), "Saved attachments and pending requests exceed the origin storage limit");
+                if (total[0]) counters.put(total,"aggregate");
+                else counters.delete("aggregate");
+              } catch (error) { failure = error; tx.abort(); }
+            };
+          }
+          next.forEach((record, index) => { if (record) putDraft(records,record,addresses[index]); else records.delete(addresses[index]); });
+          result = next;
         } catch (error) { failure = error; tx.abort(); }
       };
       addresses.forEach((address, index) => { const request = records.get(address); request.onsuccess = () => { saved[index] = request.result; apply(); }; });
-      const count = counters.get("aggregate");
-      count.onsuccess = () => { counts = count.result; apply(); };
       tx.oncomplete = () => resolve(result);
       tx.onabort = () => reject(failure ?? tx.error ?? new Error("Draft transaction was aborted; input was not saved"));
       tx.onerror = () => { /* onabort owns rejection and preserves the specific CAS error. */ };
@@ -341,31 +368,31 @@ export class DraftStore {
       const tx = this.db.transaction("drafts", "readonly");
       const request = tx.objectStore("drafts").get([...this.storedNamespace,pane,session]);
       let result, failure;
-      request.onsuccess = () => { try { if (request.result !== undefined) { result = withKey(request.result,key); validateRecord(result); } } catch (error) { failure = error; } };
+      request.onsuccess = () => { try { result = request.result; if (result !== undefined) storedUsage(result,key); } catch (error) { failure = error; } };
       tx.oncomplete = () => failure ? reject(failure) : resolve(result);
       tx.onabort = () => reject(tx.error);
     });
   }
-  async list(pane) {
-    require(surface(pane));
+  async list(pane, after) {
+    require(surface(pane) && (after === undefined || identity(after)));
     const scope = [...this.storedNamespace,pane];
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction("drafts", "readonly");
       // Session IDs are strings. An array sorts after every possible string key.
-      const request = tx.objectStore("drafts").openCursor(IDBKeyRange.bound(scope, [...scope, []], false, true));
-      const result = [], total = [0, 0, 0, 0];
-      let failure;
+      const request = tx.objectStore("drafts").openCursor(IDBKeyRange.bound(after ? [...scope,after] : scope, [...scope, []], !!after, true));
+      const rows = [];
+      let next, failure;
       request.onsuccess = () => {
         try {
           const cursor = request.result;
           if (!cursor) return;
-          const record = withKey(cursor.value,cursorKey(cursor.primaryKey)), cost = validateRecord(record);
-          cost.forEach((value, index) => { total[index] += value; });
-          validateCounters(total);
-          result.push(record); cursor.continue();
+          if (rows.length === 32) { next = rows.at(-1).key[3]; return; }
+          const record = cursor.value;
+          storedUsage(record,cursorKey(cursor.primaryKey));
+          rows.push(record); cursor.continue();
         } catch (error) { failure = error; }
       };
-      tx.oncomplete = () => failure ? reject(failure) : resolve(result);
+      tx.oncomplete = () => failure ? reject(failure) : resolve({rows,next});
       tx.onabort = () => reject(tx.error);
     });
   }
@@ -385,7 +412,7 @@ export class DraftStore {
   blank(pane, session, header, creation) {
     const key = this.key(pane, session);
     const blank = {
-      version: 11, key, incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
+      version: 12, key, incarnation: [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, "0")).join(""),
       editRevision: 0, pendingRevision: 0, text: "", images: [], references: [], releases: [], header,
       creation: creation ?? null, everDispatched: !creation, pending: null,
     };

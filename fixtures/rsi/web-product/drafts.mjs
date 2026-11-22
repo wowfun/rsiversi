@@ -88,11 +88,10 @@ export async function verifyDrafts(browser, root) {
       const originalBytes = new TextEncoder().encode((await store.get("main", "first")).text).length;
       let d = await second.ensure("fourth", "full-d", "c".repeat(64));
       await second.edit(d, "x".repeat(1024 * 1024 - originalBytes), []);
-      let bounded = false;
-      try { await store.edit(replacement, "one byte too many", []); } catch { bounded = true; }
-      return { aba, bounded, otherDevice: (await second.list("main")).length, originalDevice: (await store.list("main")).length };
+      await store.edit(replacement, "over four MiB across Sessions", []);
+      return { aba, restored:(await store.get("compare","aba")).text, otherDevice: (await second.list("main")).rows.length, originalDevice: (await store.list("main")).rows.length };
     });
-    assert.deepEqual(boundaries, { aba: true, bounded: true, otherDevice: 0, originalDevice: 1 });
+    assert.deepEqual(boundaries, { aba: true, restored:"over four MiB across Sessions", otherDevice: 0, originalDevice: 1 });
     const aborted = await page.evaluate(async () => {
       const captured = await store.get("main", "first");
       const transaction = store.db.transaction.bind(store.db);
@@ -171,7 +170,8 @@ export async function verifyDrafts(browser, root) {
       await editor.transfer(async record=>{if(record.text!=="after transfer") throw new Error("resolved input changed");});
       await clear();
       for (let index=0; index<128; index++) await store.edit(await store.ensure("main", `record-${index}`, "c".repeat(64)), "retained input", []);
-      const recordBound = await rejects(async () => store.edit(await store.ensure("main","record-129","c".repeat(64)), "overflow", [])) && (await store.list("main")).length === 128;
+      await store.edit(await store.ensure("main","record-129","c".repeat(64)), "another note", []);
+      const extraRestored = (await store.get("main","record-129")).text === "another note" && (await store.get("main","record-0")).text === "retained input";
       await clear();
       let a=await store.ensure("main","frozen-a","c".repeat(64)), b=await store.ensure("main","frozen-b","c".repeat(64)), c=await store.ensure("main","frozen-c","c".repeat(64));
       const freeze = (record, length, text_bytes=0) => store.startDispatch(record,{kind:"message",id:record.key[3],opaque:"x".repeat(length),text_bytes,images: 0, captures: []});
@@ -192,8 +192,8 @@ export async function verifyDrafts(browser, root) {
       const {key,...invalid}=malformed;
       invalid.pending=false;
       await new Promise((resolve,reject) => {const tx=store.db.transaction("drafts","readwrite");tx.objectStore("drafts").put(invalid,[...store.storedNamespace,key[2],key[3]]);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
-      const invalidPending = await rejects(() => DraftStore.open("a".repeat(32), {kind:"device",device_id:"b".repeat(32)}));
-      return {freshMove,noReplay,settlementBlocked,invalidSettlement,conservativeMarker,transferLocked,transferSaved,resolvingBlocksTransfer,recordBound,frozenBound,corruptRejected,unchanged,invalidPending};
+      const invalidPending = await rejects(() => store.get("main","malformed")) && await rejects(() => store.list("main"));
+      return {freshMove,noReplay,settlementBlocked,invalidSettlement,conservativeMarker,transferLocked,transferSaved,resolvingBlocksTransfer,extraRestored,frozenBound,corruptRejected,unchanged,invalidPending};
     });
     assert(Object.values(more).every(value => value === true), JSON.stringify(more));
     return { two_documents: true, single_dispatch: true, opaque_u64: true, host_only_receipt: true, edited_suffix: true, aba: true, cross_namespace_bounds: true, transaction_abort: true, reload: true, ...more };

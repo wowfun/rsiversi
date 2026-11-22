@@ -28,13 +28,13 @@ the opaque request before its existing durable freeze; retry never rereads the
 current preference. These preferences grant no capability or exemption from
 tool approval, and do not change terminal policy or another client's messages.
 
-IndexedDB schema 11 namespaces composer records by endpoint, real principal
+IndexedDB schema 12 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. The first
 three components of that primary key select a pane's saved drafts in key order.
 The primary key alone serves listing and single-record lookup. Its endpoint and
 device IDs use their 16 bytes; a zero-length principal selects local access.
 The value stores the draft content once and takes its scope from the key.
-Upgrading schemas 7 through 10 preserves editor text, captures, pending identities
+Upgrading schemas 7 through 11 preserves editor text, captures, pending identities
 and their exact request bodies in one transaction. It drops completed receipt
 copies and fences older writers. Other schemas are refused without rewriting
 their records, ledgers or version. Refusal explains that the saved drafts remain on this device;
@@ -43,17 +43,17 @@ and abort the whole upgrade, including earlier cursor updates. Explicit discard
 permanently deletes them. After a failed read, the window retains its input
 and exposes recovery. Rust
 checks every pending operation and immutable Header binding before reconciliation.
-The origin-wide allowance is: 128 records, 4 MiB
-editable text, 4 MiB pending text and 32 MiB opaque pending requests. Creating
-another surface or connecting another principal does not increase that allowance.
+Ordinary Session text drafts use the available browser storage independently for
+each Session. Records containing images, references, outstanding releases or an
+unresolved submission share an origin allowance of 128 records, 4 MiB editable
+text, 4 MiB pending text and 32 MiB opaque pending requests. Settling the last
+such obligation returns the record to ordinary storage.
 Opening a Session reads its record without creating an empty durable draft. A
 blank editor is materialized atomically on its first edit, freeze or cleanup
 obligation. Concurrent first edits for the same Header share the record
-created by the first writer. When admitting a record at the count limit, the same transaction
-reclaims empty dispatched records in the current endpoint/principal namespace.
-It never removes unsent Fresh intent, pending requests, references or cleanup
-obligations. A stale editor still fails its incarnation check and keeps local
-input. Saved empty records also remain removable from the recovery list.
+created by the first writer. A stale editor fails its incarnation check after
+explicit deletion and keeps local input. The recovery panel reads Session drafts
+in pages of 32 and allows removal of saved empty records.
 Restore drafts also permits confirmed removal of nonempty records without pending
 requests, references or cleanup obligations. Removal checks the saved incarnation
 and edit revision. The same panel exposes the existing confirmed site-wide discard
@@ -122,10 +122,10 @@ retains the selected preset, source Session, completed Turn and history selectio
 (all, none, or a positive number of recent Turns). Moving a never-submitted draft
 may change its new Session ID, but must preserve this creation intent; the Session
 service reauthorizes the source when recreating it.
-All namespaces share the fixed origin allowance defined above. Each record permits
+Each record permits
 1 MiB text, eight canonical Media references and one unresolved submission.
 No image bytes, object URLs or credentials are persisted. Counters and records
-change in one transaction. Validation supplies the byte counts used for quota
+change in one transaction when the charged usage changes. Validation supplies the byte counts used for quota
 accounting. The transaction edits IndexedDB's private read copy and retains the
 previous capture owners until retirement is computed. Nonempty or pending records are never evicted.
 Unresolved requests continue consuming these limits even if their Session becomes
@@ -134,8 +134,10 @@ submissions across every namespace in that origin. Individual uncertain requests
 cannot be discarded as unexecuted: absence of a Session is not proof of
 non-execution. The explicit whole-database reset discards reconciliation identities,
 warns that pending requests may already have run, and does not undo execution.
-Opening storage verifies records and aggregate counters in one bounded read
-transaction; malformed or inconsistent storage fails closed without rewriting it.
+Opening storage verifies the indexed records with obligations and their aggregate
+counters in one bounded read transaction. Direct reads and recovery pages validate
+each selected record and its index membership before exposing it. A failed read
+preserves the stored data.
 
 Each window keeps its own Session editor. The latest committed edit supplies
 the text, images and conversation references restored by a newly opened window.
