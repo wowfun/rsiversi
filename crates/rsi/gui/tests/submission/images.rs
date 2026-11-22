@@ -277,6 +277,11 @@ async fn preview_uses_exact_media_and_cancels_with_its_detail_or_application() {
     let direct = json!({"kind":"draft","pane":"main","generation":"retired","media":media});
     let reads = backend.media.reads.load(Ordering::SeqCst);
     assert!(app.read_image(&direct.to_string()).await.is_err());
+    for selected_generation in ["retired", generation.as_str()] {
+        let missing = json!({"kind":"transcript","pane":"main","generation":selected_generation,
+            "key":"absent-message","index":0});
+        assert!(app.read_image(&missing.to_string()).await.is_err());
+    }
     assert_eq!(backend.media.reads.load(Ordering::SeqCst), reads);
     let stale =
         json!({"action":"inspect_image","pane":"main","generation":"retired","media":media});

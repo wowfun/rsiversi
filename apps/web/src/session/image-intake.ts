@@ -14,9 +14,10 @@ let dragTarget: Target | undefined;
 let depth = 0;
 let listeners: AbortController | undefined;
 const transcriptImageType = 'application/x-rsi-transcript-image';
-let transcriptDrag: {token: string; file: File} | undefined;
+type DragImage = File | (() => Promise<File>);
+let transcriptDrag: {token: string; file: DragImage} | undefined;
 
-export function startTranscriptImageDrag(transfer: DataTransfer, file: File) {
+export function startTranscriptImageDrag(transfer: DataTransfer, file: DragImage) {
   const token = crypto.randomUUID();
   transfer.clearData();
   transfer.effectAllowed = 'copy';
@@ -120,12 +121,16 @@ function install() {
     const internal = transcriptDrag && event.dataTransfer.getData(transcriptImageType) === transcriptDrag.token
       ? transcriptDrag.file : undefined;
     transcriptDrag = undefined;
-    const files = internal ? [internal] : Array.from(event.dataTransfer.files).filter(file => file.type.startsWith("image/"));
-    if (!files.length) return;
+    const files = internal ? [] : Array.from(event.dataTransfer.files).filter(file => file.type.startsWith("image/"));
+    if (!internal && !files.length) return;
     const target = destination(event);
     if (!target) return;
     event.preventDefault();
-    if (!target.owner.composerView?.imageDisabled) void run(() => target.owner.upload(files));
+    if (!target.owner.composerView?.imageDisabled) void run(async () => {
+      const generation = target.owner.composerView?.generation;
+      const selected = internal ? [typeof internal === 'function' ? await internal() : internal] : files;
+      if (target.owner.composerView?.generation === generation) await target.owner.upload(selected);
+    });
   }, options);
   window.addEventListener("dragend", () => { transcriptDrag = undefined; resetDrag(); }, options);
   return controller;

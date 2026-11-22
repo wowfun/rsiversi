@@ -28,6 +28,7 @@ pub(crate) struct Block {
     pub text: String,
     pub clipped: bool,
     pub tool: Option<ToolState>,
+    pub(crate) images: Option<Arc<Vec<rsi_media_protocol::MediaRef>>>,
     presented: Option<Arc<rsi_session_files_ui::PresentedCards>>,
     request: Option<rsi_conversation::RequestPresentation>,
     compact: Option<(u64, rsi_agent_turn_protocol::CompactionOutcome)>,
@@ -114,6 +115,7 @@ impl Serialize for BlockView<'_> {
         let mut view = serializer.serialize_struct(
             "Block",
             7 + usize::from(block.tool.is_some())
+                + usize::from(block.images.is_some())
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
                 + usize::from(schedule.is_some())
@@ -132,6 +134,9 @@ impl Serialize for BlockView<'_> {
         }
         view.serialize_field("title", &block.title)?;
         view.serialize_field("text", text)?;
+        if let Some(images) = &block.images {
+            view.serialize_field("images", images.as_slice())?;
+        }
         view.serialize_field("clipped", &block.clipped)?;
         view.serialize_field("sources", &block.sources.len())?;
         if let Some(seq) = request_seq {
@@ -163,6 +168,30 @@ impl Serialize for BlockView<'_> {
     }
 }
 impl Block {
+    fn new(key: String, role: &'static str, title: &str, first_seq: u64) -> Self {
+        Self {
+            revision: Arc::new(()),
+            key,
+            role,
+            title: short(title, 512).into(),
+            text: String::new(),
+            clipped: false,
+            tool: None,
+            images: None,
+            presented: None,
+            request: None,
+            compact: None,
+            tool_start_seq: None,
+            tool_argument_bytes: 0,
+            sources: SourceIndex::default(),
+            source_bytes: VecDeque::new(),
+            first_seq,
+            encoded: OnceLock::new(),
+            #[cfg(test)]
+            markdown_parses: Arc::default(),
+        }
+    }
+
     pub(crate) fn encoded(&self) -> rsi_api_protocol::Result<&Arc<CachedBlock>> {
         self.encoded
             .get_or_init(|| CachedBlock::capture(&self.key, &BlockView(self)).ok())
@@ -360,26 +389,8 @@ impl Transcript {
         let index = self.blocks.iter().position(|block| block.key == key);
         let existed = index.is_some();
         let index = index.unwrap_or_else(|| {
-            self.blocks.push_back(Block {
-                revision: std::sync::Arc::new(()),
-                key,
-                role,
-                title: short(title, 512).into(),
-                text: String::new(),
-                clipped: false,
-                tool: None,
-                presented: None,
-                request: None,
-                compact: None,
-                tool_start_seq: None,
-                tool_argument_bytes: 0,
-                sources: SourceIndex::default(),
-                source_bytes: VecDeque::new(),
-                first_seq: self.seq,
-                encoded: OnceLock::new(),
-                #[cfg(test)]
-                markdown_parses: std::sync::Arc::default(),
-            });
+            self.blocks
+                .push_back(Block::new(key, role, title, self.seq));
             self.blocks.len() - 1
         });
         let block = &mut self.blocks[index];
@@ -418,6 +429,13 @@ impl Transcript {
             text += block.text.capacity();
             metadata += block.key.capacity()
                 + block.title.capacity()
+                + block.images.as_ref().map_or(0, |images| {
+                    images.capacity() * std::mem::size_of::<rsi_media_protocol::MediaRef>()
+                        + images
+                            .iter()
+                            .map(|m| m.id.as_str().len() + m.mime.capacity())
+                            .sum::<usize>()
+                })
                 + block.tool.as_ref().map_or(0, ToolState::owned_bytes)
                 + block
                     .presented
@@ -506,6 +524,13 @@ impl Transcript {
         let mut parts = row.parts().peekable();
         let seq = fact.seq();
         self.seq = self.seq.max(seq);
+        if role == "user"
+            && matches!(row.content, rsi_conversation::EnteredContent::Blocks(blocks)
+            if blocks.iter().any(|part| matches!(part, rsi_agent_session_protocol::AgentMessageContent::Image { .. })))
+        {
+            self.entered_image_message(seq, row, title);
+            return;
+        }
         if parts.peek().is_none() {
             self.add(
                 format!("prepared:{seq}:{}:0", row.index),
@@ -537,6 +562,55 @@ impl Transcript {
                 Some(seq),
             );
         }
+    }
+
+    fn entered_image_message(
+        &mut self,
+        seq: u64,
+        row: rsi_conversation::EnteredInput<'_>,
+        title: &str,
+    ) {
+        let key = format!("prepared:{seq}:{}:0", row.index);
+        if self.blocks.iter().any(|block| block.key == key) {
+            return;
+        }
+        let mut block = Block::new(key, "user", title, seq);
+        let mut images = Vec::new();
+        for (source, part) in row.parts() {
+            let file_label;
+            let text = match part {
+                rsi_conversation::InputPart::Image(media) => {
+                    images.push(media.clone());
+                    ""
+                }
+                rsi_conversation::InputPart::Text(text) => text,
+                rsi_conversation::InputPart::File(file) => {
+                    file_label = format!("File: {} ({} bytes)", file.name(), file.bytes());
+                    &file_label
+                }
+            };
+            let start = block.text.len();
+            if !text.is_empty() && start > 0 && start < MAX_BLOCK_BYTES {
+                block.text.push('\n');
+            }
+            let retained = short(text, MAX_BLOCK_BYTES - block.text.len());
+            block.text.push_str(retained);
+            block.clipped |= retained.len() < text.len();
+            let rsi_conversation::SourceAdmission::Inserted(index) = block
+                .sources
+                .insert(source)
+                .expect("bounded entered message")
+            else {
+                unreachable!("each entered part owns a distinct source");
+            };
+            block.source_bytes.insert(index, block.text.len() - start);
+        }
+        block.images = Some(Arc::new(images));
+        let index = self
+            .blocks
+            .partition_point(|existing| existing.first_seq <= seq);
+        self.blocks.insert(index, block);
+        self.trim();
     }
 
     pub fn observation(&mut self, update: &SessionObservation) {

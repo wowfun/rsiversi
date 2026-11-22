@@ -615,6 +615,7 @@
 :global(.message.user > .message-text):where(.scope, .scope *) {
   background: var(--user-fill); border-radius: 16px; padding: 10px 16px;
 }
+:global(.message.user > [data-message-attachments] + .message-text):where(.scope, .scope *) { margin-top: 8px; }
 :global(.message-actions):where(.scope, .scope *) { display: flex; align-items: center; gap: 12px; margin-top: 8px; color: var(--muted); }
 :global(.message-actions > button):where(.scope, .scope *) {
   display: flex; align-items: center; justify-content: center; width: 24px; height: 24px;

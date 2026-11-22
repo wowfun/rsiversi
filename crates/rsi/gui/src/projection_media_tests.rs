@@ -93,24 +93,30 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
         }
         transcript.fact(fact);
     }
-    assert_eq!(transcript.blocks.len(), 5);
-    assert_eq!(transcript.blocks[0].text, "before");
+    assert_eq!(transcript.blocks.len(), 3);
+    let message = &transcript.blocks[0];
+    assert_eq!(message.text, "before\nafter");
+    assert_eq!(message.sources.len(), 3);
+    assert!(
+        message
+            .sources
+            .position(SourceRef {
+                seq: 1,
+                field: FactField::InputImage { index: 1 }
+            })
+            .is_some()
+    );
+    assert_eq!(
+        serde_json::to_value(message).unwrap()["images"],
+        serde_json::json!([media])
+    );
     assert_eq!(
         transcript.blocks[1].text,
-        "[Image · image/png · 1×1 · 7 bytes]"
-    );
-    assert_eq!(transcript.blocks[2].text, "after");
-    assert_eq!(
-        transcript.blocks[1].sources.get(0).unwrap().field,
-        FactField::InputImage { index: 1 }
-    );
-    assert_eq!(
-        transcript.blocks[3].text,
         "before[Image · image/png · 1×1 · 7 bytes]after"
     );
-    assert_eq!(transcript.blocks[3].sources.len(), 4);
+    assert_eq!(transcript.blocks[1].sources.len(), 4);
     assert!(
-        transcript.blocks[3]
+        transcript.blocks[1]
             .sources
             .position(SourceRef {
                 seq: 2,
@@ -119,7 +125,7 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
             .is_some()
     );
     assert_eq!(
-        transcript.blocks[4].sources.get(0).unwrap().field,
+        transcript.blocks[2].sources.get(0).unwrap().field,
         FactField::ImageOutput
     );
 }

@@ -19,7 +19,8 @@
     "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included.",
     "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls.",
     "Background job rows use the upstream section styles and terminal block. Terminal copy uses the document clipboard bridge.",
-    "Quote selection uses the upstream DOM text projection, gesture placement, button styles and Markdown formatter. Its hook includes only the upstream interaction types it consumes."
+    "Quote selection uses the upstream DOM text projection, gesture placement, button styles and Markdown formatter. Its hook includes only the upstream interaction types it consumes.",
+    "Entered message images use the upstream gallery stylesheet and single-image size calculation. The owner supplies pane-bound Media reads and its shared image dialog."
   ],
   "files": [
     {
@@ -755,6 +756,20 @@
       "source": "packages/session/message-quotes/src/client/QuoteSelection.module.css",
       "source_sha256": "7c9e6e0725c620ee1ccd6dada0d21afcd14a96b6e1cd6f639c14d702cdb83c9a",
       "adapted_sha256": "7c9e6e0725c620ee1ccd6dada0d21afcd14a96b6e1cd6f639c14d702cdb83c9a",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/single-fit.ts",
+      "source": "packages/client/ui-attachment/src/MessageImage.tsx",
+      "source_sha256": "8c18e33246e05fdd209128b8b30f264529b619a14827c4d3a510781ce1f0c7cb",
+      "adapted_sha256": "885e95f1e719ae78f1058d91bdc10471dcb3157a05e7068ed2e0200aff32105c",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "attachment/MessageImage.module.css",
+      "source": "packages/client/ui-attachment/src/MessageImage.module.css",
+      "source_sha256": "21278a1b8b8303d8e7817e59b416cb9a11317fdd5ac0f7490bd0e67bbdc99e67",
+      "adapted_sha256": "21278a1b8b8303d8e7817e59b416cb9a11317fdd5ac0f7490bd0e67bbdc99e67",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]

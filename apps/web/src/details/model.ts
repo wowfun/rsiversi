@@ -4,7 +4,7 @@ interface SourceRef {seq: string; field: {kind: string; index?: number}}
 export type Command = (value: Record<string, unknown>) => Promise<unknown>;
 // Presentation projections of gui/details.rs and the approval/question protocols.
 // Rust owns validation; these types describe the fields consumed by React.
-export interface ImageInterest {result: Promise<string | undefined>; release(): void}
+export interface ImageInterest {result: Promise<string | undefined>; readonly file?:File; release(): void}
 export interface ImageData {
   owner: object;
   ticket: string;

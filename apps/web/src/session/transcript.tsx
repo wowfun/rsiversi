@@ -3,6 +3,9 @@ import {IconApiOutlineRegular, IconClockOutlineRegular, IconContextInjectionOutl
 import {MessageFeedback} from './message-feedback.tsx';
 import {CopyButton} from "./copy-button.tsx";
 import {TranscriptFlow} from './quote-action.tsx';
+import {MessageImages} from './message-images.tsx';
+import type {ImageInterest} from '../details/model.ts';
+import type {Media} from './composer-state.ts';
 import {messageClock, turnDurationLabel} from '../../message-metrics.js';
 import {TurnUsage} from './metrics.tsx';
 import {ProcessTitle, RunningStatus} from './process-row.tsx';
@@ -43,6 +46,7 @@ export interface TranscriptOwner {
   readingSummary?: boolean;
   setReadingSummary(value: boolean): void;
   insertQuote?(text: string): boolean;
+  acquireTranscriptImage(media:Media, generation:string, key:string, index:number): ImageInterest;
   action(action: string, fields?: Record<string, unknown>): Promise<unknown>;
   renderTranscript?(transcript: TranscriptView): void;
 }
@@ -171,6 +175,7 @@ function SourceMenu({block, cards, mode, owner}: {
 
 const Message = memo(function Message({
   block,
+  generation,
   owner,
   mode,
   cards,
@@ -184,6 +189,7 @@ const Message = memo(function Message({
   revealActions,
 }: {
   block: TranscriptBlock;
+  generation?: string;
   owner: TranscriptOwner;
   mode: string;
   cards: boolean;
@@ -244,7 +250,8 @@ const Message = memo(function Message({
       {showHeader && !block.trigger && <DocumentTranscript block={block}>{foldable ? (
          <ProcessTitle block={block} open={summary || expanded} flat={expanded} preview={preview} running={streaming} toggle={() => setSummary(value => !value)}/>
       ) : !context && <p className="message-title">{block.title}</p>}
-      {showBody && <div
+      {showBody && generation && block.images && <MessageImages owner={owner} generation={generation} messageKey={block.key} images={block.images}/>}
+      {showBody && (!block.images || block.text) && <div
         className={`message-text${block.markdown ? " markdown" : ""}`}
         data-text-interaction-source={block.role === 'user' || (!streaming && (block.role === 'assistant' || block.role === 'reasoning')) ? '' : undefined}
       >
@@ -437,6 +444,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         <Message
           key={`${generation}:${block.key}`}
           block={block}
+          generation={generation}
           owner={owner}
           mode={mode}
           cards={cards}

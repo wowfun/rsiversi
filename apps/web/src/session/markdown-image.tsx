@@ -5,6 +5,14 @@ import {IconCloseOutlineRegular} from '../../vendor/dsh/dockkit-primitives/icons
 import css from './markdown-image.module.css';
 import {startTranscriptImageDrag} from './image-intake.ts';
 
+export function ImageLightbox({src,alt,close}: {src:string;alt:string;close():void}) {
+  return createPortal(<Modal className={css.lightbox} label="Image preview" close={close} initialFocus="button">
+    <div className={css.mask} aria-hidden="true" onMouseDown={close}/>
+    <img className={css.original} alt={alt} referrerPolicy="no-referrer" src={src}/>
+    <button type="button" className={css.close} aria-label="Close image preview" onClick={close}><IconCloseOutlineRegular size={16}/></button>
+  </Modal>,document.body);
+}
+
 export function MarkdownImage({src,alt,linked,original,onDecodeError}: {
   src:string; alt:string; linked:boolean; original?:File; onDecodeError?:()=>void
 }) {
@@ -29,10 +37,6 @@ export function MarkdownImage({src,alt,linked,original,onDecodeError}: {
   return <>
     <button type="button" className={css.thumbnail} aria-label={alt ? 'View full image: '+alt : 'View full image'}
       onClick={()=>setOpen(true)}>{image}</button>
-    {open && createPortal(<Modal className={css.lightbox} label="Image preview" close={()=>setOpen(false)} initialFocus="button">
-      <div className={css.mask} aria-hidden="true" onMouseDown={()=>setOpen(false)}/>
-      <img className={css.original} alt={alt} referrerPolicy="no-referrer" src={src}/>
-      <button type="button" className={css.close} aria-label="Close image preview" onClick={()=>setOpen(false)}><IconCloseOutlineRegular size={16}/></button>
-    </Modal>,document.body)}
+    {open && <ImageLightbox src={src} alt={alt} close={()=>setOpen(false)}/>}
   </>;
 }

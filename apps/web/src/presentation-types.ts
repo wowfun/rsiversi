@@ -1,6 +1,6 @@
 // Document types for the Rust GUI presentation; no runtime or validation owner.
 import type {Model} from './bridge.ts';
-import type {ComposerProjection} from './session/composer-state.ts';
+import type {ComposerProjection, Media} from './session/composer-state.ts';
 import type {MarkdownEvent} from './session/markdown.tsx';
 import type {TokenUsage, MetricsRead} from './session/metrics.tsx';
 import type {InlineCard} from './session/transcript.tsx';
@@ -15,6 +15,7 @@ export interface TranscriptBlock {
   role: string;
   title: string;
   text: string;
+  images?: Media[];
   markdown?: MarkdownEvent[];
   clipped?: boolean;
   sources: number;

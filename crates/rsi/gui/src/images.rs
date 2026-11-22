@@ -36,6 +36,12 @@ impl AsRef<[u8]> for PreviewBody {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Preview {
+    Transcript {
+        pane: crate::SurfaceId,
+        generation: String,
+        key: String,
+        index: usize,
+    },
     Source {
         ticket: String,
     },
@@ -107,7 +113,7 @@ impl GuiApplication {
         Ok(())
     }
 
-    /// Reads an image for a current source detail or the attached draft.
+    /// Reads an image for a current transcript block, source detail or attached draft.
     /// Byte leases stay with the returned immutable object until its consumer releases them.
     ///
     /// # Panics
@@ -121,6 +127,27 @@ impl GuiApplication {
                 serde_json::from_str(source).map_err(|_| "Invalid image selection")?;
             let media = self.media.clone().ok_or("Image preview is unavailable")?;
             let (reference, stop) = match selection {
+                Preview::Transcript {
+                    pane,
+                    generation,
+                    key,
+                    index,
+                } => {
+                    let attached = self.pane(pane)?.attachment(&generation)?;
+                    let state = attached
+                        .renderer
+                        .state
+                        .lock()
+                        .expect("Web renderer poisoned");
+                    let transcript = state.history.as_ref().unwrap_or(&state.transcript);
+                    let reference = transcript
+                        .blocks
+                        .iter()
+                        .find(|block| block.key == key)
+                        .and_then(|block| block.images.as_ref()?.get(index))
+                        .ok_or("This image is no longer in the retained message")?;
+                    (reference.clone(), attached.stop.clone())
+                }
                 Preview::Draft {
                     pane,
                     generation,

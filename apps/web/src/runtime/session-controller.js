@@ -752,6 +752,10 @@ export function createPaneClass(context) {
         throw new Error("This draft is unavailable");
       return context.previews(context.connection).acquire(media, {kind:"draft", pane:this.index, generation, media});
     }
+    acquireTranscriptImage(media, generation, key, index) {
+      if (this.generation !== generation) throw new Error("This conversation changed");
+      return context.previews(context.connection).acquire(media, {kind:"transcript", pane:this.index, generation, key, index});
+    }
     showFilePicker() {
       return showFilePicker(this, context);
     }

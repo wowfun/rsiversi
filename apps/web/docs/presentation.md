@@ -814,6 +814,11 @@ commands and `@` offers Agents. Draft and switching composers use a plain prompt
 Conversation headings and underlined tabs separate the transcript from execution
 activity. User messages are compact right-aligned bubbles; assistant output uses
 the shared conversation width with its actions beneath the reply.
+Submitted user images appear 8 px above their message text, including after reopening
+history. A single thumbnail fits within 240 px. Multiple images share a row of
+64 px tiles that wraps to the available width. Visible thumbnails load when the
+transcript scrolls or the window resizes. Opening a thumbnail shows its
+original in the image viewer. An unavailable preview offers a retry.
 
 Workspace rows use the active conversation's workspace to color the folder icon.
 Conversation activity uses an accessible leading status mark: a muted animated

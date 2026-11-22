@@ -170,9 +170,40 @@ export async function verifyImages(page, pane, service, report, name) {
   await rows.first().waitFor({ state: "detached" });
   const request = service.provider.requests.findLast(item => item.prompt.trim() === "Review these ordered images");
   assert.deepEqual(request.images.map(image => [image.width, image.height]), [[120, 80], [80, 60]]);
-  const imageBlock = pane.locator(".message").filter({ has: page.locator(".message-text", { hasText: "80×60" }) }).last();
+  const imageBlock = pane.locator(".message.user").filter({hasText:"Review these ordered images"});
+  const thumbnails = imageBlock.getByRole("button", {name:/^Open Image \d+$/});
+  await thumbnails.nth(1).locator("img").waitFor();
+  const dimensions = await thumbnails.evaluateAll(async buttons => Promise.all(buttons.map(async button => {
+    const image = button.querySelector("img");
+    await image.decode();
+    return [image.naturalWidth, image.naturalHeight, button.offsetWidth, button.offsetHeight];
+  })));
+  assert.deepEqual(dimensions, [[120,80,64,64],[80,60,64,64]]);
+  await thumbnails.nth(1).click();
+  const original = page.getByRole("dialog", {name:"Image preview",exact:true});
+  await original.waitFor();
+  assert.equal(await original.getByRole("img").evaluate(async image => { await image.decode(); return image.naturalWidth; }),80);
+  await page.keyboard.press("Escape");
+  await original.waitFor({state:"detached"});
+  assert(await thumbnails.nth(1).evaluate(button => button === document.activeElement));
+  const viewport = page.viewportSize();
+  try {
+    await page.setViewportSize({width:390,height:844});
+    const thumbnail = thumbnails.nth(1);
+    await thumbnail.scrollIntoViewIfNeeded();
+    await thumbnail.locator('img').waitFor();
+    assert.equal(await thumbnail.locator('img').evaluate(async image => {
+      await image.decode();
+      return image.naturalWidth;
+    }),80);
+  } finally {
+    await page.setViewportSize(viewport);
+  }
   await imageBlock.getByRole("button", { name: "Inspect sources", exact: true }).click();
-  await page.locator(".source-reference").filter({ hasText: "input_image" }).click();
+  const imageSources = page.locator(".source-reference").filter({ hasText: "input_image" });
+  await imageSources.nth(1).waitFor();
+  assert.equal(await imageSources.count(), 2);
+  await imageSources.last().click();
   await page.getByRole("button", { name: "Preview source image", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".image-preview")?.naturalWidth === 80);
   assert.equal(await page.locator(".image-preview").getAttribute("src"), firstUrl, "draft and exact durable source reuse the same canonical object URL");

@@ -4,7 +4,7 @@ import type {
   SessionProjections,
 } from "./projection-types.ts";
 import type { MediaLimits } from "../presentation-types.ts";
-interface Media {
+export interface Media {
   id: string;
   width: number;
   height: number;

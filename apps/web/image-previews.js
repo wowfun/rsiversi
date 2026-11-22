@@ -43,7 +43,10 @@ export class ImagePreviews {
       if (!subscription.live) return;
       subscription.live = false;
       this.#subscriptions.delete(subscription);
-      if (subscription.entry) subscription.entry.refs--;
+      if (subscription.entry) {
+        subscription.entry.refs--;
+        subscription.entry = undefined;
+      }
       const flight = subscription.flight;
       if (flight) {
         flight.subscribers.delete(subscription);
@@ -52,7 +55,7 @@ export class ImagePreviews {
       resolve(undefined);
       this.#pump();
     };
-    const handle = { result, release };
+    const handle = { result, release, get file() { return subscription.entry?.file; } };
     if (this.#closed) { reject(new Error('The image connection is closed')); return handle; }
     if (!Number.isSafeInteger(media.bytes) || media.bytes < 1 || media.bytes > this.#limits.preview_bytes) {
       reject(new Error('Image exceeds the preview budget')); return handle;
@@ -159,7 +162,8 @@ export class ImagePreviews {
         if (this.#converting + bytes.byteLength > this.#limits.preview_bytes) throw new Error('Image conversion is busy');
         this.#converting += bytes.byteLength;
         try {
-          entry = { url: this.#urls.createObjectURL(new Blob([bytes], { type: 'image/png' })), bytes: bytes.byteLength, refs: 0 };
+          const file = new File([bytes], 'image.png', {type:'image/png'});
+          entry = { url: this.#urls.createObjectURL(file), file, bytes: bytes.byteLength, refs: 0 };
           this.#reserved -= flight.media.bytes;
           flight.resolved = true;
           this.#cache.set(flight.key, entry);
@@ -191,6 +195,7 @@ export class ImagePreviews {
     this.#closed = true;
     for (const subscription of this.#subscriptions) {
       subscription.live = false;
+      subscription.entry = undefined;
       subscription.resolve(undefined);
     }
     this.#subscriptions.clear();

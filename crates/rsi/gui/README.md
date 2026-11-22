@@ -386,6 +386,10 @@ Session creation invalid or reuses a historical/durable Session.
 
 Detail previews read through the current exact-source ticket. A restored draft
 thumbnail can read its canonical Media reference with the attached pane generation.
+An entered user message containing images projects its ordered image references
+and text together. Each attachment preview selects the current pane generation,
+retained message block and image ordinal. The GUI resolves the canonical
+reference from that block. Every original content source remains inspectable.
 Replacing the attachment retires its thumbnail reads. Media owns canonical PNG validation and byte identity; arbitrary
 URLs and filenames are never read capabilities. A Media preview or Session file
 image read delivers its bytes or error to the caller without waking the workbench

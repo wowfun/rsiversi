@@ -44,6 +44,24 @@ test('a draft file draws without a Media read and cannot substitute for the cano
   assert.equal(urls.size + fresh.urls.size, 0);
 });
 
+test('a transcript drag borrows the same canonical file until its interest is released', async () => {
+  const {owner, reads} = fixture();
+  const selection = {kind:'transcript',pane:'main',generation:'2',key:'prepared:5:0:0',index:1};
+  const handle = owner.acquire(media('photo', 3), selection);
+  assert.deepEqual(reads[0].selection, selection);
+  reads[0].resolve(Uint8Array.of(1,2,3));
+  await handle.result;
+  const zoom = owner.acquire(media('photo', 3), selection);
+  await zoom.result;
+  assert.equal(handle.file, zoom.file);
+  assert.deepEqual([...new Uint8Array(await zoom.file.arrayBuffer())], [1,2,3]);
+  handle.release();
+  assert.equal(handle.file, undefined);
+  assert.equal(zoom.file.type, 'image/png');
+  owner.dispose();
+  assert.equal(zoom.file, undefined);
+});
+
 test('two exact-ticket reads enter before either reply and a third waits', async () => {
   const {owner, reads, urls} = fixture();
   const a = owner.acquire(media('a'), source('a')), b = owner.acquire(media('b'), source('b'));
