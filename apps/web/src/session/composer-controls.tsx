@@ -4,9 +4,28 @@ import {Modal} from '../presentation.tsx';
 import type {ComposerOwner, ComposerProjection} from './composer-state.ts';
 import {ComposerMenu} from './composer-menu.tsx';
 import css from './composer-menu.module.css';
-import {IconCheckOutlineRegular as Check, IconChevronDownOutlineRegular as Down, IconChevronLeftOutlineRegular as Back, IconChevronRightOutlineRegular as Next, IconCloseOutlineRegular, IconDataOutlineRegular, SHIELD_OUTLINE_PATH} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
+import planCss from '../../vendor/dsh/plan/PlanModeControl.module.css';
+import {IconCheckOutlineRegular as Check, IconChevronDownOutlineRegular as Down, IconChevronLeftOutlineRegular as Back, IconChevronRightOutlineRegular as Next, IconCloseCircleFillRegular, IconCloseOutlineRegular, IconDataOutlineRegular, IconPlanOutlineRegular, SHIELD_OUTLINE_PATH} from '../../vendor/dsh/dockkit-primitives/icons/index.tsx';
 
 const sameModel=(a?:Model,b?:Model)=>!!a&&!!b&&a.deployment===b.deployment&&a.model===b.model;
+export function PlanModeControl({owner, locked}: {owner: ComposerOwner; locked: boolean}) {
+  const [error, setError] = useState('');
+  async function leave() {
+    setError('');
+    try { await owner.action('document_command', {name:'plan', input:'off'}); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  }
+  return <span className={planCss.wrap}>
+    <button type="button" className={planCss.chip} aria-label="Plan mode on, press to turn off"
+      title="Plan mode on — click to turn off (/plan off)" disabled={locked} onClick={leave}>
+      <span className={planCss.glyph} aria-hidden="true">
+        <IconPlanOutlineRegular className={planCss.restGlyph} size={14}/>
+        <IconCloseCircleFillRegular className={planCss.hoverGlyph} size={14}/>
+      </span>Plan
+    </button>
+    {error && <span className={planCss.error} role="status" title={error}>Failed to exit plan mode</span>}
+  </span>;
+}
 const effortLabel=(value?:string|null)=>value?value[0].toUpperCase()+value.slice(1):'Default';
 const Shield=()=> <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d={SHIELD_OUTLINE_PATH}/></svg>;
 const modes=[['read-only','Read Only'],['workspace-write','Workspace Write'],['danger-full-access','Full access']] as const;

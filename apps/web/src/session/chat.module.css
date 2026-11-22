@@ -345,7 +345,8 @@
   margin-left: 0;
   gap: 4px;
 }
-:global(.composer-bar button):where(.scope, .scope *) {
+:global(.composer-bar > div > button):where(.scope, .scope *),
+:global(.composer-bar .actions button):where(.scope, .scope *) {
   font-size: 12px;
   padding: 7px 10px;
   min-height: 32px;

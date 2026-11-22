@@ -720,6 +720,13 @@
       "source_sha256": "0c1c679d067cde61fbc82703beef3000276f351ebe889607300602a88ccabc10",
       "adapted_sha256": "0c1c679d067cde61fbc82703beef3000276f351ebe889607300602a88ccabc10",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "plan/PlanModeControl.module.css",
+      "source": "packages/client/ui-plan/src/client/PlanModeControl.module.css",
+      "source_sha256": "5be8b75680cfef67c8add0c6a2404e9e8e105d4c89793fbb9df4bad13932d72a",
+      "adapted_sha256": "5be8b75680cfef67c8add0c6a2404e9e8e105d4c89793fbb9df4bad13932d72a",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]
 }

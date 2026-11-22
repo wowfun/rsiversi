@@ -1,7 +1,7 @@
 import {DocumentContributions} from "../document-plugins.tsx";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import {run} from "../bridge.ts";
-import {ComposerAccess, ComposerModel} from "./composer-controls.tsx";
+import {ComposerAccess, ComposerModel, PlanModeControl} from "./composer-controls.tsx";
 import {ComposerAdd} from "./composer-add.tsx";
 import css from "./composer-menu.module.css";
 import {observeControlRow} from "../../vendor/dsh/control-row-layout.ts";
@@ -43,6 +43,9 @@ export function Composer({
   useLayoutEffect(() => input.current ? bindImageIntake(input.current, owner, setDragging) : undefined, [owner]);
   useLayoutEffect(() => row.current ? observeControlRow(row.current) : undefined, []);
   const [addChoice, setAddChoice] = useState<number | null>(null);
+  const plan = data?.projections?.entries.find(entry => entry.producer === "rsi.plan-policy.view")?.content;
+  const planValue = plan?.kind === "value" && plan.value;
+  const planEnabled = planValue && typeof planValue === "object" && "enabled" in planValue && planValue.enabled === true;
   // Keep the browser's caret/composition state when the durable editor text is unchanged.
   useLayoutEffect(() => {
     if (input.current) {
@@ -117,7 +120,7 @@ export function Composer({
             : undefined
         }
         placeholder={
-          state?.images.length ? undefined : data
+          state?.images.length ? undefined : planEnabled ? "describe your task to generate plan" : data
             ? state?.completionsAvailable ? "Send a message · / commands · @ agents" : "Send a message"
             : "Describe what you want to build"
         }
@@ -141,6 +144,9 @@ export function Composer({
         <div className={css.tools}>
           <ComposerAdd owner={owner} data={data} empty={empty} id={addListId} choice={addChoice} choose={setAddChoice}/>
           <ComposerAccess owner={owner}/>
+          {planEnabled
+            ? <PlanModeControl key={state?.generation} owner={owner} locked={!state || state.disabled || state.sendBusy || !!state.pending}/>
+            : null}
         </div>
         <div className={css.submission}>
           <ComposerModel owner={owner} data={data}/>

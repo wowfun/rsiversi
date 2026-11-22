@@ -511,6 +511,11 @@ leading trigger; it refuses a trigger following non-whitespace prose.
 Selecting the already entered command keeps its existing prefix and arguments.
 A paired device can browse Session commands. Submitting a registered Host command
 requires the Host owner and leaves the text available to edit when denied.
+While the Session's Plan projection is enabled, its empty text editor prompts
+for the task to plan and shows the Plan control beside the access selector.
+The control remains visible while drafting. Activating it submits the owner command
+`/plan off` and preserves the current message and attachments. The control
+disappears when the projection records that Plan mode is off.
 Selecting a Skill in slash completion places the caret after the separator,
 ready for its arguments. Existing arguments and whitespace remain in the draft.
 A menu capture is consumed by one selection attempt; later explicit selections
