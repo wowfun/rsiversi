@@ -1,4 +1,5 @@
 use super::Sessions;
+use rsi_agent_session_protocol::FrozenAgentSettings;
 use rsi_ai_protocol::ModelRef;
 use rsi_extension::{Error, Result};
 use serde::Deserialize;
@@ -6,7 +7,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
+struct CatalogPage {
     request: String,
     after: Option<ModelRef>,
     #[serde(default)]
@@ -42,7 +43,7 @@ impl Sessions {
     }
 
     pub(super) async fn model_catalog(&self, payload: Value) -> Result<Value> {
-        let input: Request = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
+        let input: CatalogPage = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Remote("request has retired".into()))?;
@@ -76,8 +77,8 @@ impl Sessions {
             };
             rows.push(entry);
         }
-        Ok(
-            json!({"models":rows,"next":next,"default":defaults.as_ref().map(|d|d.default_model()),"effort":defaults.as_ref().and_then(|d|d.default_reasoning_effort())}),
-        )
+        let default = defaults.as_ref().map(FrozenAgentSettings::default_model);
+        let effort = defaults.as_ref().and_then(|d| d.default_reasoning_effort());
+        Ok(json!({"models":rows,"next":next,"default":default,"effort":effort}))
     }
 }

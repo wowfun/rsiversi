@@ -1,6 +1,6 @@
 use super::BoundSessions;
 use futures_util::StreamExt;
-use rsi_ai_protocol::{LanguageRequest, ModelRef};
+use rsi_ai_protocol::{LanguageEvent, LanguageRequest, ModelRef};
 use rsi_extension::{Error, Result, body::Body};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -64,6 +64,7 @@ impl BoundSessions {
                 .await
                 .map_err(|e| Error::Remote(e.to_string()))?
                 .ready_chunks(16);
+            let mut reply = Value::Null;
             while let Some(batch) = batches.next().await {
                 let events = batch
                     .into_iter()
@@ -71,6 +72,13 @@ impl BoundSessions {
                     .map_err(|e| Error::Remote(e.to_string()))?;
                 let bytes = serde_json::to_vec(&events).map_err(|_| Error::Protocol)?;
                 if bytes.len() <= rsi_extension::body::INLINE_BYTES {
+                    if matches!(
+                        events.last(),
+                        Some(LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. })
+                    ) {
+                        reply = json!({"events":events});
+                        continue;
+                    }
                     connection
                         .request(
                             "application.language.events",
@@ -93,7 +101,7 @@ impl BoundSessions {
                     }
                 }
             }
-            Ok(Value::Null)
+            Ok(reply)
         };
         tokio::select! {
             biased;
