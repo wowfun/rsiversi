@@ -463,6 +463,8 @@ restart must retain the cached local editor and require explicit conflict
 resolution before recreation. Corrupt counters must show a storage-unavailable
 notice immediately on connection, before opening a composer. A dropped real dispatch
 reply followed by reload must query the original message without another provider
+request. Three other windows then attach to that conversation. A follow-up from
+the fourth window must appear in all four transcripts with one further provider
 request. Both browsers capture desktop and narrow recovery controls.
 
 The runner freezes and hashes its native executable before starting either

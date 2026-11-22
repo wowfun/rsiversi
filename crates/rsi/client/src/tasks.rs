@@ -1,5 +1,4 @@
 use super::{Arc, BoxFuture, ObservationCursor, Result, SessionController, SessionError};
-use futures_util::StreamExt;
 use rsi_goal::{GoalControl, GoalControlReceipt, GoalLiveState};
 use rsi_session_protocol::{JobsSnapshot, ProjectionSnapshot};
 
@@ -32,7 +31,7 @@ fn rejection_diagnostic(error: &SessionError) -> String {
 }
 
 impl SessionController {
-    fn publish_goal(&self, value: GoalLiveState) {
+    pub(super) fn publish_goal(&self, value: GoalLiveState) {
         self.goal.send_if_modified(|previous| {
             if previous
                 .as_ref()
@@ -56,24 +55,6 @@ impl SessionController {
     /// Observes exact pending identity and known rejection independently of live/projection updates.
     pub fn goal_control_changes(&self) -> tokio::sync::watch::Receiver<GoalControlState> {
         self.goal_control.subscribe()
-    }
-
-    pub(super) fn start_goal(self: &Arc<Self>) {
-        let controller = self.clone();
-        self.execution.spawn(self.tasks.track_future(async move {
-            let observing = async {
-                let mut stream = crate::read_with_capacity_retry(&controller.execution, || controller.handle.observe_goal()).await?;
-                while let Some(value) = stream.next().await {
-                    let value = value?;
-                    controller.publish_goal(value);
-                }
-                Err::<(), _>(SessionError::Backend("Goal observation ended; reconnect to refresh live state".into()))
-            };
-            tokio::select! { biased;
-                () = controller.stop.cancelled() => {},
-                result = observing => { if let Err(error) = result { controller.goal.send_replace(Some(Err(error))); } }
-            }
-        }));
     }
 
     /// Reads one current-Turn page; an absent active Turn has no process-local Jobs.

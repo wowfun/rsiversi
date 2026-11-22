@@ -7,6 +7,8 @@ use rsi_session_protocol::{RecentSessionCursor, SessionError};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const HEADER_REPLY: usize = rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES;
+pub(crate) const MODEL_REPLY: usize = 256 * 1024;
+pub(crate) const GOAL_REPLY: usize = 16 * 1024;
 const DRAFT_REPLY: usize =
     HEADER_REPLY + rsi_agent_session_protocol::MAXIMUM_COMMAND_INPUT_BYTES + 8192;
 pub(crate) const LARGE_REPLY: usize = rsi_api_protocol::MAXIMUM_API_BYTES;
@@ -15,6 +17,17 @@ pub(crate) const OBSERVATION_REPLY: usize =
 pub(crate) const INTERACTION_REPLY: usize = 32 * 1024 * 1024 + 64 * 1024;
 pub(crate) const PROJECTION_REPLY: usize =
     rsi_agent_session_protocol::MAXIMUM_SESSION_PROJECTION_BYTES + 64 * 1024;
+pub(crate) const fn surface_frame_limit(source: rsi_session_protocol::SurfaceSource) -> usize {
+    use rsi_session_protocol::SurfaceSource;
+    let maximum = match source {
+        SurfaceSource::History => OBSERVATION_REPLY,
+        SurfaceSource::Model => MODEL_REPLY,
+        SurfaceSource::Interactions => INTERACTION_REPLY,
+        SurfaceSource::Projections => PROJECTION_REPLY,
+        SurfaceSource::Goal => GOAL_REPLY,
+    };
+    maximum + 256
+}
 pub(crate) const RECENT_READ_LIMIT: usize = (LARGE_REPLY - 64 * 1024) / HEADER_REPLY;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +76,7 @@ pub enum Operation {
     WaitIdle,
     History,
     Observe,
+    SurfaceObserve,
     ModelObserve,
     Interactions,
     Projections,
@@ -87,7 +101,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 65] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -131,6 +145,7 @@ impl Operation {
         Self::WaitIdle,
         Self::History,
         Self::Observe,
+        Self::SurfaceObserve,
         Self::ModelObserve,
         Self::Interactions,
         Self::Projections,
@@ -217,8 +232,18 @@ impl Operation {
             Self::Cancel => ("cancel", Control, Mutation, 128 * 1024, 8192),
             Self::WaitIdle => ("wait-idle", Control, Read, 8192, 8192),
             Self::History => ("history", Data, Read, 8192, LARGE_REPLY),
-            Self::ModelObserve => ("model-observe", Subscription, Read, 8192, 256 * 1024),
+            Self::ModelObserve => ("model-observe", Subscription, Read, 8192, MODEL_REPLY),
             Self::Observe => ("observe", Subscription, Read, 8192, OBSERVATION_REPLY),
+            Self::SurfaceObserve => (
+                "surface-observe",
+                Subscription,
+                Read,
+                8192,
+                INTERACTION_REPLY
+                    .max(OBSERVATION_REPLY)
+                    .max(PROJECTION_REPLY)
+                    + 256,
+            ),
             Self::Interactions => ("interactions", Subscription, Read, 8192, INTERACTION_REPLY),
             Self::Projections => ("projections", Subscription, Read, 8192, PROJECTION_REPLY),
             Self::Resource => (
@@ -234,7 +259,7 @@ impl Operation {
             Self::ReadReference => ("reference-read", Data, Read, 8192, 512 * 1024),
             Self::GoalControl => ("goal-control", Data, Mutation, 32 * 1024, 16 * 1024),
             Self::GoalStatus => ("goal-status", Control, Read, 8192, 16 * 1024),
-            Self::GoalObserve => ("goal-observe", Subscription, Read, 8192, 16 * 1024),
+            Self::GoalObserve => ("goal-observe", Subscription, Read, 8192, GOAL_REPLY),
             Self::Jobs => (
                 "jobs",
                 Data,
@@ -444,63 +469,67 @@ pub(crate) enum Failure {
 pub(crate) fn domain<T>(
     result: rsi_session_protocol::Result<T>,
 ) -> rsi_api_protocol::Result<Result<T, Failure>> {
-    result.map(Ok).or_else(|error| {
-        let invalid = |_| ApiError::Backend("invalid Session error identity".into());
-        Ok(Err(match error {
-            SessionError::MaintenanceOutcomeUnknown { kind, operation_id } => {
-                Failure::MaintenanceOutcomeUnknown { kind, operation_id }
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(error) => failure(error).map(Err),
+    }
+}
+pub(crate) fn failure(error: SessionError) -> rsi_api_protocol::Result<Failure> {
+    let invalid = |_| ApiError::Backend("invalid Session error identity".into());
+    Ok(match error {
+        SessionError::MaintenanceOutcomeUnknown { kind, operation_id } => {
+            Failure::MaintenanceOutcomeUnknown { kind, operation_id }
+        }
+        SessionError::WorkflowUnavailable(reason) => Failure::WorkflowUnavailable { reason },
+        SessionError::WorkflowOutcomeUnknown { session, run } => {
+            Failure::WorkflowOutcomeUnknown { session, run }
+        }
+        SessionError::Terminal(error) => Failure::Terminal { error },
+        SessionError::TerminalKeyRetired => Failure::TerminalKeyRetired {},
+        SessionError::SetupRequired => Failure::SetupRequired {},
+        SessionError::Api(error) => return Err(error),
+        SessionError::Backend(_) => {
+            return Err(ApiError::Backend("Session backend failed".into()));
+        }
+        SessionError::Invalid(mut message) => {
+            let mut end = message.len().min(4096);
+            while !message.is_char_boundary(end) {
+                end -= 1;
             }
-            SessionError::WorkflowUnavailable(reason) => Failure::WorkflowUnavailable { reason },
-            SessionError::WorkflowOutcomeUnknown { session, run } => {
-                Failure::WorkflowOutcomeUnknown { session, run }
-            }
-            SessionError::Terminal(error) => Failure::Terminal { error },
-            SessionError::TerminalKeyRetired => Failure::TerminalKeyRetired {},
-            SessionError::SetupRequired => Failure::SetupRequired {},
-            SessionError::Api(error) => return Err(error),
-            SessionError::Backend(_) => {
-                return Err(ApiError::Backend("Session backend failed".into()));
-            }
-            SessionError::Invalid(mut message) => {
-                let mut end = message.len().min(4096);
-                while !message.is_char_boundary(end) {
-                    end -= 1;
-                }
-                message.truncate(end);
-                Failure::Invalid { message }
-            }
-            SessionError::NotFound(_) => Failure::NotFound {},
-            SessionError::DraftConflict { session } => Failure::DraftConflict {
-                session: SessionId::new(session).map_err(invalid)?,
-            },
-            SessionError::Conflict { session, turn } => Failure::Conflict {
-                session: SessionId::new(session).map_err(invalid)?,
-                turn: TurnId::new(turn).map_err(invalid)?,
-            },
-            SessionError::MessageConflict { session, message } => Failure::MessageConflict {
+            message.truncate(end);
+            Failure::Invalid { message }
+        }
+        SessionError::NotFound(_) => Failure::NotFound {},
+        SessionError::DraftConflict { session } => Failure::DraftConflict {
+            session: SessionId::new(session).map_err(invalid)?,
+        },
+        SessionError::Conflict { session, turn } => Failure::Conflict {
+            session: SessionId::new(session).map_err(invalid)?,
+            turn: TurnId::new(turn).map_err(invalid)?,
+        },
+        SessionError::MessageConflict { session, message } => Failure::MessageConflict {
+            session: SessionId::new(session).map_err(invalid)?,
+            message: MessageId::new(message).map_err(invalid)?,
+        },
+        SessionError::MessageOutcomeUnknown { session, message } => {
+            Failure::MessageOutcomeUnknown {
                 session: SessionId::new(session).map_err(invalid)?,
                 message: MessageId::new(message).map_err(invalid)?,
-            },
-            SessionError::MessageOutcomeUnknown { session, message } => {
-                Failure::MessageOutcomeUnknown {
-                    session: SessionId::new(session).map_err(invalid)?,
-                    message: MessageId::new(message).map_err(invalid)?,
-                }
             }
-            SessionError::QueueOperationConflict => Failure::QueueOperationConflict {},
-            SessionError::QueueOutcomeUnknown { operation_id } => {
-                Failure::QueueOutcomeUnknown { operation_id }
-            }
-            SessionError::Capacity => Failure::Capacity {},
-            SessionError::CommandConflict { request_id } => Failure::CommandConflict { request_id },
-            SessionError::CommandRevisionConflict { expected, actual } => {
-                Failure::CommandRevisionConflict { expected, actual }
-            }
-            SessionError::CommandOutcomeUnknown { request_id } => {
-                Failure::CommandOutcomeUnknown { request_id }
-            }
-            SessionError::ShuttingDown => Failure::ShuttingDown {},
-        }))
+        }
+        SessionError::QueueOperationConflict => Failure::QueueOperationConflict {},
+        SessionError::QueueOutcomeUnknown { operation_id } => {
+            Failure::QueueOutcomeUnknown { operation_id }
+        }
+        SessionError::Capacity => Failure::Capacity {},
+        SessionError::CommandConflict { request_id } => Failure::CommandConflict { request_id },
+        SessionError::CommandRevisionConflict { expected, actual } => {
+            Failure::CommandRevisionConflict { expected, actual }
+        }
+        SessionError::CommandOutcomeUnknown { request_id } => {
+            Failure::CommandOutcomeUnknown { request_id }
+        }
+        SessionError::ShuttingDown => Failure::ShuttingDown {},
     })
 }
 impl Failure {

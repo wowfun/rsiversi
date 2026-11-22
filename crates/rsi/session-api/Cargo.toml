@@ -22,7 +22,7 @@ rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
 rsi-user-questions-protocol = { path = "../../rsi-user-questions/protocol" }
 rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio.workspace = true
 
 [dev-dependencies]

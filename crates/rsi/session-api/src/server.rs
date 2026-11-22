@@ -134,6 +134,7 @@ impl SessionApi {
             Operation::Export,
             Operation::ScheduledTasksObserve,
             Operation::Observe,
+            Operation::SurfaceObserve,
             Operation::ModelObserve,
             Operation::Interactions,
             Operation::Projections,

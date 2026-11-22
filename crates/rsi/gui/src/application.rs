@@ -1439,7 +1439,7 @@ pub(crate) fn surface_program(
         ProfileEntry::new(
             "controller",
             "rsi.client.session-controller",
-            serde_json::json!({"session_id":session}),
+            serde_json::json!({"session_id":session,"defer_observation":true}),
         ),
         ProfileEntry::new("ui-target", "rsi.session.ui-target", ConfigValue::Null),
         ProfileEntry::new(

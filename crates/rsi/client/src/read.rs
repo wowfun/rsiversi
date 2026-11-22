@@ -13,15 +13,24 @@ pub async fn read_with_capacity_retry<T, F: Future<Output = Result<T>>>(
     execution: &Execution,
     mut read: impl FnMut() -> F,
 ) -> Result<T> {
-    let mut delay = Duration::from_millis(50);
-    for attempt in 0..5 {
-        match read().await {
-            Err(SessionError::Capacity | SessionError::Api(ApiError::Capacity)) if attempt < 4 => {
-                execution.sleep(delay).await;
-                delay *= 2;
-            }
-            result => return result,
+    let first = read().await;
+    resume_capacity_read(first, execution, read).await
+}
+
+pub(crate) async fn resume_capacity_read<T, F: Future<Output = Result<T>>>(
+    mut result: Result<T>,
+    execution: &Execution,
+    mut read: impl FnMut() -> F,
+) -> Result<T> {
+    for delay in [50, 100, 200, 400] {
+        if !matches!(
+            result,
+            Err(SessionError::Capacity | SessionError::Api(ApiError::Capacity))
+        ) {
+            break;
         }
+        execution.sleep(Duration::from_millis(delay)).await;
+        result = read().await;
     }
-    unreachable!("the final attempt returns its result")
+    result
 }

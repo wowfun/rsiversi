@@ -55,6 +55,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::History
             | Operation::ModelObserve
             | Operation::Observe
+            | Operation::SurfaceObserve
             | Operation::Interactions
             | Operation::Projections
             | Operation::Resource

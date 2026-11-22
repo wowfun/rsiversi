@@ -4,7 +4,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
-use rsi_agent_turn_protocol::SessionObservation;
 use rsi_api_protocol::{
     ApiContext, ApiError, ApiHandler, ApiMessage, ApiOutput, ApiResponseCapacity, RetainedBytes,
 };
@@ -31,6 +30,9 @@ impl ApiHandler for Handler {
         };
         let service = self.service.scoped(context.origin);
         match self.operation {
+            Operation::SurfaceObserve => {
+                crate::surface::serve(service.as_ref(), input, budget).await
+            }
             Operation::ScheduledTasksObserve => {
                 scheduled_tasks(service.as_ref(), input, budget, maximum).await
             }
@@ -61,10 +63,7 @@ impl ApiHandler for Handler {
                 Ok(ApiOutput::Stream(Box::pin(async_stream::try_stream! {
                     while let Some(update) = source.next().await {
                         let update = match wire::domain(update)? { Ok(update) => update, Err(failure) => Err(ApiError::Domain(budget.encode(&failure, maximum)?))? };
-                        let body = match &update {
-                            SessionObservation::Control { record, fact_cursor, durable_control_seq } => wire::Observation::Control { record: &**record, fact_cursor: *fact_cursor, durable_control_seq: *durable_control_seq },
-                            SessionObservation::Fact { fact, durable_fact_seq } => wire::Observation::Fact { fact: &**fact, durable_fact_seq: *durable_fact_seq },
-                        };
+                        let body = crate::surface::history_body(&update);
                         let json = budget.encode(&HandleReply { target: request.target.clone(), body }, maximum)?;
                         yield ApiMessage { json, binary: None };
                     }
@@ -141,9 +140,8 @@ async fn scheduled_tasks(
     budget: rsi_api_protocol::ByteBudget,
     maximum: usize,
 ) -> rsi_api_protocol::Result<ApiOutput> {
-    serde_json::from_slice::<()>(input.as_bytes()).map_err(|_| {
-        ApiError::Invalid("invalid Schedule catalog observation".into())
-    })?;
+    serde_json::from_slice::<()>(input.as_bytes())
+        .map_err(|_| ApiError::Invalid("invalid Schedule catalog observation".into()))?;
     let mut source = match wire::domain(service.observe_scheduled_tasks().await)? {
         Ok(stream) => stream,
         Err(failure) => {

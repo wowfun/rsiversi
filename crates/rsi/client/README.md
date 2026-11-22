@@ -59,16 +59,17 @@ SessionControllerFactory is an ordinary plugin requiring the Session domain and
 an ObservationSink capability. Its bounded configuration names one SessionId and
 an optional initial cursor. A surface can also start observation at the cursor
 it obtains by inspecting the controller's attached Session after activation.
-A fresh draft starts Fact/interaction observation from origin after
-the first accepted message. A separate projection subscription starts on activation,
-including fresh drafts, and delivers complete replacement snapshots. The factory
+A fresh draft follows projections and live Goal state. Publication opens the
+remaining history, model and interaction sources at the first accepted message.
+Surfaces that inspect before opening can defer both until the inspected cut is
+known, then attach all five sources with one subscription. A logical source that
+fails can reconnect independently while its siblings continue. The factory
 attaches only within its own Context's Session capability.
 Each surface isolates its controller and sink contracts while inheriting its
 connection/domain capabilities. Session-free application compositions omit these
 plugins entirely.
 
-The controller owns at most four non-queued message submissions and one pair of
-Fact/interaction observation tasks and one projection task. Calling submit admits and schedules reconciliation before
+The controller owns at most four non-queued message submissions and one task per active observation feed. Calling submit admits and schedules reconciliation before
 returning a waiter. Dropping the waiter leaves that work owned; controller
 retirement fences submissions, cancels all observations and drains submitted work.
 An application may explicitly supply a reconciliation-stop token with

@@ -76,7 +76,7 @@ impl rsi_meta::LocalContract for ObservationSinkContract {
     type Service = dyn ObservationSink;
 }
 
-struct Retry {
+pub(crate) struct Retry {
     delay: Duration,
     failures: u8,
 }
@@ -89,7 +89,7 @@ impl Default for Retry {
     }
 }
 impl Retry {
-    async fn after(
+    pub(crate) async fn after(
         &mut self,
         error: ObservationFailure,
         kind: ObservationKind,
@@ -112,6 +112,17 @@ impl Retry {
     }
 }
 
+pub(crate) fn delivered_cursor(
+    mut cursor: ObservationCursor,
+    update: &SessionObservation,
+) -> ObservationCursor {
+    match update {
+        SessionObservation::Control { record, .. } => cursor.control_seq = record.seq(),
+        SessionObservation::Fact { fact, .. } => cursor.fact_seq = fact.seq(),
+    }
+    cursor
+}
+
 /// Drives exact-cursor observation until cancellation by its owner or final failure.
 pub async fn observe_session(
     handle: &dyn SessionHandle,
@@ -125,13 +136,7 @@ pub async fn observe_session(
             let mut stream = handle.observe(cursor).await?;
             while let Some(update) = stream.next().await {
                 let update = update?;
-                let mut delivered = cursor;
-                match &update {
-                    SessionObservation::Control { record, .. } => {
-                        delivered.control_seq = record.seq();
-                    }
-                    SessionObservation::Fact { fact, .. } => delivered.fact_seq = fact.seq(),
-                }
+                let delivered = delivered_cursor(cursor, &update);
                 sink.observation(update).await?;
                 cursor = delivered;
                 retry = Retry::default();
@@ -178,25 +183,12 @@ pub async fn observe_projections(
     sink: &dyn ObservationSink,
     execution: &Execution,
 ) -> Result<(), ObservationFailure> {
-    projection_updates(handle, sink, execution, None).await
-}
-
-pub(crate) async fn projection_updates(
-    handle: &dyn SessionHandle,
-    sink: &dyn ObservationSink,
-    execution: &Execution,
-    cache: Option<&tokio::sync::watch::Sender<Option<ProjectionSnapshot>>>,
-) -> Result<(), ObservationFailure> {
     let mut retry = Retry::default();
     loop {
         let result: Result<(), ObservationFailure> = async {
             let mut stream = handle.observe_projections().await?;
             while let Some(snapshot) = stream.next().await {
-                let snapshot = snapshot?;
-                sink.projections(snapshot.clone()).await?;
-                if let Some(cache) = cache {
-                    cache.send_replace(Some(snapshot));
-                }
+                sink.projections(snapshot?).await?;
                 retry = Retry::default();
             }
             Err(ObservationFailure::Ended)

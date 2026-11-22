@@ -993,6 +993,12 @@ impl SessionHandle for Handle {
             has_more: checked.has_more,
         })
     }
+    async fn observe_surface(
+        self: Arc<Self>,
+        view: rsi_session_protocol::SurfaceView,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SurfaceStream> {
+        crate::surface::open(self, view).await
+    }
     async fn observe_models(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::ModelLiveStream> {

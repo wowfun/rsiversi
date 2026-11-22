@@ -9,6 +9,7 @@ mod client_stream;
 mod plugin;
 mod server;
 mod server_stream;
+mod surface;
 mod target;
 mod wire;
 

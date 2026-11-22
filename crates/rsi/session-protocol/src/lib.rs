@@ -42,6 +42,8 @@ pub use reads::{
 
 mod source;
 pub use source::{SessionSource, SessionSourceContract, SessionSourceLease};
+mod surface;
+pub use surface::{SurfaceSource, SurfaceStream, SurfaceUpdate, SurfaceView};
 
 mod interactions;
 mod jobs;
@@ -874,6 +876,10 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<SessionHistoryPage>;
     /// Reconnectably observes durable control records and Facts after exact cursors.
     async fn observe(&self, cursor: ObservationCursor) -> Result<SessionObservationStream>;
+    /// Opens one conversation feed. A draft follows projections and Goal state until publication.
+    async fn observe_surface(self: Arc<Self>, view: SurfaceView) -> Result<SurfaceStream> {
+        Ok(surface::observe(self, view))
+    }
     /// Observes live model prefixes without advancing durable cursors.
     async fn observe_models(&self) -> Result<ModelLiveStream> {
         Err(SessionError::Invalid(

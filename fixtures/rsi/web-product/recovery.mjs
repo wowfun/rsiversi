@@ -1,4 +1,4 @@
-import {disconnect,restoreDrafts} from './controls.mjs';
+import {disconnect,navigationMode,restoreDrafts} from './controls.mjs';
 import {readBrowserCaller} from './browser-fixture.mjs';
 import {workspaceForm} from './controls.mjs';
 import {closeDetails} from "./controls.mjs";
@@ -184,6 +184,27 @@ try {
   assert.equal(service.provider.requests.length,1);
   assert.equal(await input(page).inputValue(),"");
   await page.screenshot({path:join(report,"reconciled-durable.png")});
+  const readers = [page];
+  for (let i = 1; i < 4; i++) {
+    const peer = await context.newPage();
+    readers.push(peer);
+    await connect(peer);
+    if (await sessionId(peer) !== replacement) {
+      await navigationMode(peer, "flat");
+      await peer.locator(`[data-session-id="${replacement}"] [data-testid=conversation-open]`).click();
+    }
+    await pane(peer).locator(".transcript .message.assistant").first().waitFor();
+  }
+  const sender = readers.at(-1);
+  const followup = "Confirm delivery to all four windows";
+  await input(sender).fill(followup);
+  await pane(sender).getByTestId("composer-send").click();
+  await Promise.all(readers.map(tab =>
+    pane(tab).locator(".transcript .message.assistant").getByText(`Reviewed: ${followup}`, {exact:false}).first().waitFor()
+  ));
+  assert.equal(service.provider.requests.length, 2);
+  await sender.screenshot({path:join(report,"fourth-window-reply.png")});
+  await Promise.all(readers.slice(1).map(tab => tab.close()));
   await disconnect(page); await page.locator("#login").waitFor({state:"visible"});
   // Opening corrupt storage must report degradation before any composer is opened.
   await page.evaluate(async () => {
@@ -201,7 +222,7 @@ try {
   }),"storage warning remains visible on narrow screens");
   await page.screenshot({path:join(report,"storage-unavailable-narrow.png"),fullPage:true});
   await disconnect(page); await page.locator("#login").waitFor({state:"visible"});
-  const result={status:"passed",browser:browser.version(),freshReattached:fresh,freshRecreated:replacement,originalMessage:pending.pending.id,providerRequests:1,canonicalImages:1,cases:["reload live Fresh","canonical image restoration","window-local editors and last-saved draft restoration","device cookie fence and namespace isolation","real Service restart expires Fresh","failed-save local input survives expired recovery and explicit conflict resolution","explicit atomic recreation","lost reply reload queries original message without replay","storage failure is visible immediately after connection"]};
+  const result={status:"passed",browser:browser.version(),freshReattached:fresh,freshRecreated:replacement,originalMessage:pending.pending.id,providerRequests:2,canonicalImages:1,cases:["reload live Fresh","canonical image restoration","window-local editors and last-saved draft restoration","device cookie fence and namespace isolation","real Service restart expires Fresh","failed-save local input survives expired recovery and explicit conflict resolution","explicit atomic recreation","lost reply reload queries original message without replay","four windows receive the fourth sender's reply","storage failure is visible immediately after connection"]};
   await writeFile(join(report,"result.json"),JSON.stringify(result,null,2)); console.log(JSON.stringify(result));
 } catch(error) {
   if(page&&!page.isClosed()) { await page.screenshot({path:join(report,"failure.png"),fullPage:true}); await writeFile(join(report,"failure.txt"),`${error.stack}\n${await page.locator("body").innerText()}`); }

@@ -1,7 +1,4 @@
-use crate::{
-    ObservationSink, ObservationSinkContract, observe_interactions, observe_session,
-    submit_with_reconciliation,
-};
+use crate::{ObservationSink, ObservationSinkContract, submit_with_reconciliation};
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use rsi_agent_session_protocol::SessionId;
@@ -21,6 +18,8 @@ pub(super) mod commands;
 pub(super) mod resources;
 #[path = "source.rs"]
 pub(super) mod source;
+#[path = "surface.rs"]
+mod surface;
 #[path = "tasks.rs"]
 mod task_status;
 pub use task_status::GoalControlState;
@@ -31,11 +30,14 @@ struct Configuration {
     session_id: SessionId,
     #[serde(default)]
     cursor: Option<ObservationCursor>,
+    #[serde(default)]
+    defer_observation: bool,
 }
 
 #[derive(Debug, Default)]
 struct Admission {
     observing: bool,
+    state_observing: bool,
 }
 
 /// Surface-local submission and observation owner, created only by its plugin.
@@ -169,54 +171,43 @@ impl SessionController {
             return;
         }
         admission.observing = true;
-        for kind in [
-            crate::ObservationKind::Facts,
-            crate::ObservationKind::Interactions,
-            crate::ObservationKind::Models,
-        ] {
-            let controller = self.clone();
-            drop(self.execution.spawn(self.tasks.track_future(async move {
-                let observing = async {
-                    if kind == crate::ObservationKind::Models {
-                        crate::observation::observe_models(
-                            controller.handle.as_ref(),
-                            controller.sink.as_ref(),
-                            &controller.execution,
-                        )
-                        .await
-                    } else if kind == crate::ObservationKind::Facts {
-                        observe_session(
-                            controller.handle.as_ref(),
-                            cursor,
-                            &super::workflow::Sink {
-                                inner: controller.sink.clone(),
-                                changed: controller.workflow_changed.clone(),
-                            },
-                            &controller.execution,
-                        )
-                        .await
-                    } else {
-                        observe_interactions(
-                            controller.handle.as_ref(),
-                            controller.sink.as_ref(),
-                            &controller.execution,
-                        )
-                        .await
-                    }
-                };
-                tokio::select! { biased;
-                    () = controller.stop.cancelled() => {},
-                    result = observing => {
-                        if let Err(error) = result {
-                            tokio::select! { biased;
-                                () = controller.stop.cancelled() => {},
-                                () = controller.sink.stopped(kind, &error) => {},
-                            }
-                        }
-                    },
-                }
-            })));
+        let view = if admission.state_observing {
+            rsi_session_protocol::SurfaceView::published(cursor)
+        } else {
+            rsi_session_protocol::SurfaceView::attached(cursor)
+        };
+        admission.state_observing = true;
+        self.spawn_feed(view, None);
+    }
+
+    /// Starts Goal and projection observation as soon as the unpublished draft is attached.
+    ///
+    /// # Panics
+    /// Panics if a previous panic poisoned controller admission.
+    pub fn start_draft_observation(self: &Arc<Self>) {
+        let mut admission = self
+            .admission
+            .lock()
+            .expect("controller admission poisoned");
+        if self.stop.is_cancelled() || admission.state_observing {
+            return;
         }
+        admission.state_observing = true;
+        self.spawn_feed(rsi_session_protocol::SurfaceView::draft(), None);
+    }
+
+    fn spawn_feed(
+        self: &Arc<Self>,
+        view: rsi_session_protocol::SurfaceView,
+        failed: Option<(crate::ObservationKind, crate::ObservationFailure)>,
+    ) {
+        let controller = self.clone();
+        drop(self.execution.spawn(self.tasks.track_future(async move {
+            tokio::select! { biased;
+                () = controller.stop.cancelled() => {},
+                () = controller.follow_surface(view, failed) => {},
+            }
+        })));
     }
 
     fn retire(&self) {
@@ -231,23 +222,6 @@ impl SessionController {
             self.submissions.close();
             self.tasks.close();
         }
-    }
-
-    fn start_projections(self: &Arc<Self>) {
-        let controller = self.clone();
-        drop(self.execution.spawn(self.tasks.track_future(async move {
-            tokio::select! { biased;
-                () = controller.stop.cancelled() => {},
-                result = crate::observation::projection_updates(controller.handle.as_ref(), controller.sink.as_ref(), &controller.execution, Some(&controller.projections)) => {
-                    if let Err(error) = result {
-                        tokio::select! { biased;
-                            () = controller.stop.cancelled() => {},
-                            () = controller.sink.stopped(crate::ObservationKind::Projections, &error) => {},
-                        }
-                    }
-                },
-            }
-        })));
     }
 
     async fn close(&self) {
@@ -329,10 +303,10 @@ impl PluginFactory for SessionControllerFactory {
                 })
             }),
         )?;
-        controller.start_projections();
-        controller.start_goal();
         if let Some(cursor) = config.cursor {
             controller.start_observing(cursor);
+        } else if !config.defer_observation {
+            controller.start_draft_observation();
         }
         Ok(())
     }

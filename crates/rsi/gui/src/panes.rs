@@ -1192,6 +1192,8 @@ impl GuiApplication {
         renderer.seed(transcript, before, more);
         if let Some(cursor) = cursor {
             controller.start_observing(cursor);
+        } else {
+            controller.start_draft_observation();
         }
         let attachment = Arc::new(Attachment {
             metrics: Mutex::new(None),

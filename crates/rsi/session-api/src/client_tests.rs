@@ -277,17 +277,65 @@ fn observed_fact(seq: u64, durable: u64) -> Value {
 }
 
 #[tokio::test]
+async fn surface_keeps_history_after_a_source_failure_and_checks_the_selected_view() {
+    use rsi_session_protocol::{SurfaceSource, SurfaceUpdate, SurfaceView};
+    let (remote, _, handle) = fixture().await;
+    let cursor = ObservationCursor {
+        fact_seq: 1,
+        control_seq: 0,
+    };
+    let view = SurfaceView::published(cursor);
+    let mut history = observed_fact(2, 7);
+    history["source"] = json!("history");
+    let mut stopped = envelope(json!({"kind":"backend"}));
+    stopped["source"] = json!("model");
+    stopped["stopped"] = json!(true);
+    let mut interactions = envelope(json!({"approvals":[],"questions":[]}));
+    interactions["source"] = json!("interactions");
+    remote.stream(&[stopped.clone(), history.clone(), interactions, stopped]);
+    let mut stream = handle.clone().observe_surface(view).await.unwrap();
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        SurfaceUpdate::Stopped(SurfaceSource::Model, SessionError::Backend(_))
+    ));
+    assert!(matches!(stream.next().await.unwrap().unwrap(),
+        SurfaceUpdate::History(SessionObservation::Fact { fact, .. }) if fact.seq() == 2));
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        SurfaceUpdate::Interactions(_)
+    ));
+    assert!(stream.next().await.unwrap().is_err());
+    drop(stream);
+    assert_eq!(
+        remote.requests.lock().unwrap().last().unwrap().0,
+        Operation::SurfaceObserve.spec()
+    );
+    remote.stream(&[history.clone()]);
+    let mut draft = handle
+        .clone()
+        .observe_surface(SurfaceView::draft())
+        .await
+        .unwrap();
+    assert!(draft.next().await.unwrap().is_err());
+    history["target"]["header_key"] = json!("b".repeat(64));
+    remote.stream(&[history]);
+    let mut foreign = handle.observe_surface(view).await.unwrap();
+    assert!(foreign.next().await.unwrap().is_err());
+}
+
+#[tokio::test]
 async fn subscription_handlers_admit_actual_delivery_bytes() {
     use rsi_api_protocol::{ApiContext, ApiHandler as _, ApiResponseCapacity, CallOrigin};
     for operation in [
         Operation::Observe,
         Operation::Interactions,
+        Operation::SurfaceObserve,
         Operation::Projections,
     ] {
         let remote = Remote::new();
         let client = SessionClient::new(remote.clone());
         remote.reply(&header());
-        let body = if operation == Operation::Observe {
+        let mut body = if matches!(operation, Operation::Observe | Operation::SurfaceObserve) {
             observed_fact(1, 1)
         } else if operation == Operation::Projections {
             envelope(projections::snapshot(
@@ -296,13 +344,21 @@ async fn subscription_handlers_admit_actual_delivery_bytes() {
         } else {
             envelope(json!({"approvals":[],"questions":[]}))
         };
-        let second = if operation == Operation::Observe {
+        let mut second = if matches!(operation, Operation::Observe | Operation::SurfaceObserve) {
             observed_fact(2, 2)
         } else {
             body.clone()
         };
+        if operation == Operation::SurfaceObserve {
+            body["source"] = json!("history");
+            second["source"] = json!("history");
+        }
         remote.stream(&[body, second]);
-        let input = envelope(if operation == Operation::Observe {
+        let input = envelope(if operation == Operation::SurfaceObserve {
+            json!(rsi_session_protocol::SurfaceView::published(
+                ObservationCursor::default()
+            ))
+        } else if operation == Operation::Observe {
             serde_json::to_value(ObservationCursor::default()).unwrap()
         } else {
             Value::Null

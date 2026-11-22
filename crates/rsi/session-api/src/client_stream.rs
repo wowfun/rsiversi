@@ -11,7 +11,7 @@ use rsi_session_protocol::{InteractionStream, SessionError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeSet, sync::Arc};
 
-async fn open<I: Serialize + Sync>(
+pub(super) async fn open<I: Serialize + Sync>(
     handle: &Handle,
     operation: Operation,
     input: I,
@@ -33,7 +33,7 @@ async fn open<I: Serialize + Sync>(
         Err(error) => Err(stream_error(operation, error)),
     }
 }
-fn stream_error(operation: Operation, error: ApiError) -> SessionError {
+pub(super) fn stream_error(operation: Operation, error: ApiError) -> SessionError {
     match error {
         ApiError::Domain(body) => serde_json::from_slice::<Failure>(body.as_bytes())
             .map_err(|_| client::malformed(operation))
@@ -178,46 +178,106 @@ pub(super) async fn projections(
             let message = message.map_err(|error| stream_error(operation, error))?;
             let reservation = state.projections.reserve_decode()?;
             let snapshot: rsi_agent_session_protocol::SessionProjectionSnapshot = decode(&target, operation, &message)?;
-            if snapshot.session_id() != &target.session_id
-                || snapshot.header_sha256() != target.header_key
-                || cursor.is_some_and(|previous| !snapshot.cursor().can_follow(previous)) {
-                Err(client::malformed(operation))?;
-            }
-            cursor = Some(snapshot.cursor());
-            let retained = reservation.retain(snapshot)?;
+            let retained = retain_projection(reservation, &target, &mut cursor, snapshot)?;
             drop(message);
             yield retained;
         }
     }))
 }
+pub(super) fn retain_projection(
+    reservation: rsi_session_protocol::ProjectionCollection,
+    target: &Target,
+    cursor: &mut Option<rsi_agent_session_protocol::ProjectionCursor>,
+    snapshot: rsi_agent_session_protocol::SessionProjectionSnapshot,
+) -> rsi_session_protocol::Result<rsi_session_protocol::ProjectionSnapshot> {
+    if snapshot.session_id() != &target.session_id
+        || snapshot.header_sha256() != target.header_key
+        || cursor.is_some_and(|previous| !snapshot.cursor().can_follow(previous))
+    {
+        return Err(client::malformed(Operation::Projections));
+    }
+    *cursor = Some(snapshot.cursor());
+    reservation.retain(snapshot)
+}
+
 pub(super) async fn observe(
     handle: &Handle,
     cursor: ObservationCursor,
 ) -> rsi_session_protocol::Result<SessionObservationStream> {
     let (target, mut source) = open(handle, Operation::Observe, cursor).await?;
     let state = handle.state.clone();
-    let mut observed = cursor;
-    let mut durable = cursor;
+    let mut history = History::new(cursor);
     Ok(Box::pin(async_stream::try_stream! {
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(Operation::Observe, error))?;
             let update: wire::Observation<AgentControlRecord, SessionFact> = decode(&target, Operation::Observe, &message)?;
-            let retained = match update {
-                wire::Observation::Control { record, fact_cursor, durable_control_seq } => {
-                    advance(&mut observed.control_seq, &mut durable.control_seq, record.seq(), durable_control_seq)?;
-                    let record = state.observations.retain_controls(vec![Arc::new(record)]).map_err(|error| retention_error(&error))?.pop().expect("one admitted control");
-                    SessionObservation::Control { record, fact_cursor, durable_control_seq }
-                }
-                wire::Observation::Fact { fact, durable_fact_seq } => {
-                    advance(&mut observed.fact_seq, &mut durable.fact_seq, fact.seq(), durable_fact_seq)?;
-                    let fact = state.observations.retain_fact(Arc::new(fact)).map_err(|error| retention_error(&error))?;
-                    SessionObservation::Fact { fact, durable_fact_seq }
-                }
-            };
+            let retained = history.retain(&state, update)?;
             drop(message);
             yield retained;
         }
     }))
+}
+pub(super) struct History {
+    observed: ObservationCursor,
+    durable: ObservationCursor,
+}
+impl History {
+    pub(super) fn new(cursor: ObservationCursor) -> Self {
+        Self {
+            observed: cursor,
+            durable: cursor,
+        }
+    }
+    pub(super) fn retain(
+        &mut self,
+        state: &client::State,
+        update: wire::Observation<AgentControlRecord, SessionFact>,
+    ) -> rsi_session_protocol::Result<SessionObservation> {
+        Ok(match update {
+            wire::Observation::Control {
+                record,
+                fact_cursor,
+                durable_control_seq,
+            } => {
+                advance(
+                    &mut self.observed.control_seq,
+                    &mut self.durable.control_seq,
+                    record.seq(),
+                    durable_control_seq,
+                )?;
+                let record = state
+                    .observations
+                    .retain_controls(vec![Arc::new(record)])
+                    .map_err(|error| retention_error(&error))?
+                    .pop()
+                    .expect("one admitted control");
+                SessionObservation::Control {
+                    record,
+                    fact_cursor,
+                    durable_control_seq,
+                }
+            }
+            wire::Observation::Fact {
+                fact,
+                durable_fact_seq,
+            } => {
+                advance(
+                    &mut self.observed.fact_seq,
+                    &mut self.durable.fact_seq,
+                    fact.seq(),
+                    durable_fact_seq,
+                )?;
+                let fact = state
+                    .observations
+                    .retain_fact(Arc::new(fact))
+                    .map_err(|error| retention_error(&error))?;
+                SessionObservation::Fact {
+                    fact,
+                    durable_fact_seq,
+                }
+            }
+        })
+    }
 }
 fn advance(
     observed: &mut u64,
@@ -235,9 +295,24 @@ fn advance(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Interactions {
+pub(super) struct Interactions {
     approvals: Vec<rsi_approval_protocol::ApprovalRequest>,
     questions: Vec<rsi_user_questions_protocol::QuestionRequest>,
+}
+impl Interactions {
+    pub(super) async fn retain(
+        self,
+        handle: &Handle,
+        verified: &mut BTreeSet<String>,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::InteractionSnapshot> {
+        client::validate_questions(&self.questions, &handle.session_id)?;
+        let retained = handle
+            .state
+            .interactions
+            .retain(self.approvals, self.questions)?;
+        handle.verify_owners(retained.approvals(), verified).await?;
+        Ok(retained)
+    }
 }
 pub(super) async fn interactions(
     handle: &Handle,
@@ -249,10 +324,8 @@ pub(super) async fn interactions(
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(Operation::Interactions, error))?;
             let body: Interactions = decode(&target, Operation::Interactions, &message)?;
-            client::validate_questions(&body.questions, &handle.session_id)?;
-            let retained = handle.state.interactions.retain(body.approvals, body.questions)?;
             drop(message);
-            handle.verify_owners(retained.approvals(), &mut verified).await?;
+            let retained = body.retain(&handle, &mut verified).await?;
             yield retained;
         }
     }))
@@ -286,30 +359,73 @@ pub(super) async fn models(
     let (target, mut source) = open(handle, operation, ()).await?;
     let state = handle.state.clone();
     Ok(Box::pin(async_stream::try_stream! {
-        let mut decoder = rsi_agent_turn_protocol::ModelLiveDecoder::default();
-        let mut reservation = None;
-        let mut last = None;
-        // The decoder shares prefix blocks between revisions; keep their credit alive.
-        let mut retained_prefix = None;
+        let mut model = Models::default();
         while let Some(message) = source.next().await {
             let message = message.map_err(|error| stream_error(operation, error))?;
             let page: rsi_agent_turn_protocol::ModelLivePage = decode(&target, operation, &message)?;
-            if page.session_id != target.session_id { Err(client::malformed(operation))?; }
-            if page.index == 0 {
-                if reservation.is_some() { Err(client::malformed(operation))?; }
-                reservation = Some(state.observations.reserve_model_decode(page.encoded_bytes).map_err(|error| retention_error(&error))?);
-            }
-            if let Some(snapshot) = decoder.push(page).map_err(|_| client::malformed(operation))? {
-                if last.as_ref().is_some_and(|(effect, revision)| effect == &snapshot.effect_id && *revision >= snapshot.revision) {
-                    Err(client::malformed(operation))?;
-                }
-                last = Some((snapshot.effect_id.clone(), snapshot.revision));
-                let snapshot = reservation.take().ok_or_else(|| client::malformed(operation))?.retain(snapshot).map_err(|error| retention_error(&error))?;
-                drop(retained_prefix.replace(snapshot.clone()));
+            if let Some(snapshot) = model.page(&state, &target, page)? {
                 drop(message);
                 yield snapshot;
             }
         }
-        decoder.finish().map_err(|_| client::malformed(operation))?;
+        model.finish()?;
     }))
+}
+
+#[derive(Default)]
+pub(super) struct Models {
+    decoder: rsi_agent_turn_protocol::ModelLiveDecoder,
+    reservation: Option<rsi_agent_turn_protocol::ModelObservationReservation>,
+    last: Option<(rsi_agent_session_protocol::EffectId, u64)>,
+    // Shared prefix blocks remain charged while decoding the next revision.
+    retained_prefix: Option<rsi_agent_turn_protocol::ObservedModel>,
+}
+impl Models {
+    pub(super) fn page(
+        &mut self,
+        state: &client::State,
+        target: &Target,
+        page: rsi_agent_turn_protocol::ModelLivePage,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_turn_protocol::ObservedModel>> {
+        if page.session_id != target.session_id {
+            Err(client::malformed(Operation::ModelObserve))?;
+        }
+        if page.index == 0 {
+            if self.reservation.is_some() {
+                Err(client::malformed(Operation::ModelObserve))?;
+            }
+            self.reservation = Some(
+                state
+                    .observations
+                    .reserve_model_decode(page.encoded_bytes)
+                    .map_err(|error| retention_error(&error))?,
+            );
+        }
+        if let Some(snapshot) = self
+            .decoder
+            .push(page)
+            .map_err(|_| client::malformed(Operation::ModelObserve))?
+        {
+            if self.last.as_ref().is_some_and(|(effect, revision)| {
+                effect == &snapshot.effect_id && *revision >= snapshot.revision
+            }) {
+                Err(client::malformed(Operation::ModelObserve))?;
+            }
+            self.last = Some((snapshot.effect_id.clone(), snapshot.revision));
+            let snapshot = self
+                .reservation
+                .take()
+                .ok_or_else(|| client::malformed(Operation::ModelObserve))?
+                .retain(snapshot)
+                .map_err(|error| retention_error(&error))?;
+            drop(self.retained_prefix.replace(snapshot.clone()));
+            return Ok(Some(snapshot));
+        }
+        Ok(None)
+    }
+    pub(super) fn finish(&self) -> rsi_session_protocol::Result<()> {
+        self.decoder
+            .finish()
+            .map_err(|_| client::malformed(Operation::ModelObserve))
+    }
 }

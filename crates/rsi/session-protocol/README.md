@@ -25,6 +25,13 @@ Each row includes the count of completed turns retained by its immutable
 inherited-history selection. A nonempty inherited conversation is distinct from
 an empty unpublished draft; enumeration reads that count from the Header rather
 than opening the source transcript. A `None` history selection has count zero.
+A surface can follow durable records, model prefixes, interactions, projections
+and live Goal state through one caller-scoped Session attachment. Each item
+identifies its source. Durable replay resumes at the last delivered Fact and
+control cursors. Model prefixes and replacement snapshots start from a fresh
+baseline on reconnect. An unavailable optional source reports its own failure
+while the other sources continue. Closing the attachment releases its observers.
+
 An observation opened at cursor zero on a ready draft waits for publication.
 It then delivers committed controls and Facts from the start. Discard or
 expiry ends the observation and browsing the draft catalog preserves its
