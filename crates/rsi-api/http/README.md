@@ -271,7 +271,7 @@ An authenticated user may open an application document directly from the
 location bar. The read-only navigation carries Fetch Metadata with site
 `none`, mode `navigate` and destination `document`.
 The native listener supplies an opaque request handle alongside the admitted
-device. It resolves to that caller only while the response body or upgraded
+device. Native callbacks can resolve the original credential for Host-owner actions and the shared principal for domain operations. The handle resolves only while the response body or upgraded
 socket is alive. Revocation and process retirement invalidate the handle.
 The connection deadline bounds opening the private socket. Once forwarded,
 an installation can take as long as its application operation permits. Device

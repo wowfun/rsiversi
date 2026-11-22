@@ -76,6 +76,7 @@ impl Invocation {
         };
         let context = ApiContext {
             origin: owner.origin.clone(),
+            credential_id: owner.credential_id.clone(),
             retiring: entry.retiring.clone(),
         };
         let invoke = entry.handler.invoke(context, input, output);

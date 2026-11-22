@@ -177,6 +177,7 @@ impl ApiDispatch for ApiRegistry {
         {
             return Err(ApiError::Unauthorized);
         }
+        let mut credential_id = None;
         let (entry, lane) = {
             let mut state = self
                 .state
@@ -210,7 +211,7 @@ impl ApiDispatch for ApiRegistry {
             if entry.spec.access == rsi_api_protocol::OperationAccess::Authenticated
                 && let (CallOrigin::Device(device), Some(owner)) = (&mut origin, browser_owner)
             {
-                device.id = owner;
+                credential_id = Some(std::mem::replace(&mut device.id, owner));
             }
             if entry.spec.class != OperationClass::Subscription
                 && let CallOrigin::Device(device) = &origin
@@ -233,6 +234,7 @@ impl ApiDispatch for ApiRegistry {
             shared: self.state.clone(),
             entry: entry.clone(),
             origin: origin.clone(),
+            credential_id,
             quota: Arc::new(QuotaOwner {
                 shared: self.state.clone(),
                 origin,
@@ -328,6 +330,7 @@ pub(crate) struct CallOwner {
     shared: Arc<Shared>,
     pub entry: Arc<Entry>,
     pub origin: CallOrigin,
+    pub credential_id: Option<rsi_api_protocol::DeviceId>,
     pub quota: Arc<QuotaOwner>,
 }
 impl Drop for CallOwner {

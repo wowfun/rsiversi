@@ -144,10 +144,14 @@ async fn stalled_applications_release_unclassified_admission() {
 async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers_remain_distinct() {
     let h = Harness::start().await;
     let principal = rsi_api_protocol::json_handler(|ctx, (): ()| async move {
-        let rsi_api_protocol::CallOrigin::Device(actor) = ctx.origin else {
+        let (
+            rsi_api_protocol::CallOrigin::Device(actual),
+            rsi_api_protocol::CallOrigin::Device(actor),
+        ) = (ctx.credential_origin(), ctx.origin)
+        else {
             unreachable!()
         };
-        Ok(Ok::<_, ()>(actor.id))
+        Ok(Ok::<_, ()>((actor.id, actual.id)))
     });
     let registration = h
         .registry
@@ -187,7 +191,7 @@ async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers
         )
         .unwrap();
         assert_eq!(identity["device_id"], id.as_str());
-        let actor: DeviceId = serde_json::from_slice(
+        let (actor, actual_id): (DeviceId, DeviceId) = serde_json::from_slice(
             &cookie("test/principal")
                 .body("null")
                 .send()
@@ -198,11 +202,12 @@ async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers
                 .unwrap(),
         )
         .unwrap();
+        assert_eq!(actual_id, id);
         owners.push(actor);
         let actual = cookie("test/credential").body("null").send().await.unwrap();
         assert_eq!(
-            serde_json::from_slice::<DeviceId>(&actual.bytes().await.unwrap()).unwrap(),
-            id
+            serde_json::from_slice::<(DeviceId, DeviceId)>(&actual.bytes().await.unwrap()).unwrap(),
+            (id.clone(), id.clone())
         );
         let reply = Harness::client()
             .post(format!("{}{}", h.origin, h.path("test/principal")))
@@ -214,8 +219,9 @@ async fn browser_domains_share_an_owner_while_credential_negotiation_and_bearers
             .send()
             .await
             .unwrap();
-        let native: DeviceId = serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap();
-        assert_eq!(native, id);
+        let native: (DeviceId, DeviceId) =
+            serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap();
+        assert_eq!(native, (id.clone(), id));
     }
     assert_eq!(owners[0], owners[1]);
     drop((registration, credential_registration));
@@ -288,7 +294,7 @@ async fn separately_authenticated_browsers_forward_as_one_owner() {
     );
     let worker = tokio::spawn(async move {
         let mut owners = vec![];
-        for _ in 0..2 {
+        for expected in [DeviceId::from_bytes([1; 16]), DeviceId::from_bytes([2; 16])] {
             let (mut socket, _) = target.accept().await.unwrap();
             let mut headers = vec![];
             while !headers.ends_with(b"\r\n\r\n") {
@@ -309,6 +315,11 @@ async fn separately_authenticated_browsers_forward_as_one_owner() {
             let rsi_api_protocol::CallOrigin::Device(actor) = app.caller(key).unwrap() else {
                 panic!("expected browser owner")
             };
+            let rsi_api_protocol::CallOrigin::Device(credential) = app.credential(key).unwrap()
+            else {
+                panic!("expected original credential")
+            };
+            assert_eq!(credential.id, expected);
             owners.push(actor.id);
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")

@@ -375,6 +375,7 @@ async fn subscription_handlers_admit_actual_delivery_bytes() {
         let output = handler
             .invoke(
                 ApiContext {
+                    credential_id: None,
                     origin: CallOrigin::Local,
                     retiring: tokio_util::sync::CancellationToken::new(),
                 },

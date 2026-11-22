@@ -103,8 +103,23 @@ pub enum CallOrigin {
 pub struct ApiContext {
     /// Authenticated caller used for domain-specific ownership policy.
     pub origin: CallOrigin,
+    /// Original credential when browser admission substituted a shared domain principal.
+    pub credential_id: Option<crate::DeviceId>,
     /// Registration retirement signal; mutation ownership is independent of waiter drop.
     pub retiring: CancellationToken,
+}
+
+impl ApiContext {
+    /// Resolves the original authenticated credential for an owner-only action.
+    pub fn credential_origin(&self) -> CallOrigin {
+        match (&self.origin, &self.credential_id) {
+            (CallOrigin::Device(device), Some(id)) => CallOrigin::Device(AuthenticatedDevice {
+                id: id.clone(),
+                revoked: device.revoked.clone(),
+            }),
+            _ => self.origin.clone(),
+        }
+    }
 }
 
 /// Response admission transferred to a handler before finite work begins.

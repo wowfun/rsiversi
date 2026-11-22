@@ -124,3 +124,5 @@ rotation compares the expected principal (or expected absence) under the same
 commit lock as publication. A changed slot fails before token replacement; readers
 and failed grants never revoke the existing credential. These operations are not
 registered on the remote device API.
+
+A handler serving shared browser data receives the domain principal and can recover the original revocable credential for Host-owner actions. The browser cannot supply either identity in the domain request.

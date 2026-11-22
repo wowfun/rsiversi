@@ -34,6 +34,7 @@ async fn typed_handler_rejects_unknown_input_before_entry_and_bounds_encoded_dom
     });
     let budget = ByteBudget::new(128).unwrap();
     let context = || ApiContext {
+        credential_id: None,
         origin: CallOrigin::Local,
         retiring: CancellationToken::new(),
     };

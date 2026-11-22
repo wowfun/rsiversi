@@ -113,6 +113,7 @@ type Requests = Arc<std::sync::Mutex<std::collections::BTreeMap<String, AppReque
 #[derive(Debug)]
 struct AppRequest {
     device: AuthenticatedDevice,
+    domain_id: Option<rsi_api_protocol::DeviceId>,
     resources: std::collections::BTreeMap<String, RequestResource>,
 }
 trait ResourceValue: std::fmt::Debug + Send + Sync + std::any::Any {}
@@ -214,6 +215,13 @@ impl ApplicationUpstream {
     }
     /// Resolves a live native request handle for an application callback.
     pub fn caller(&self, id: &str) -> Result<CallOrigin> {
+        self.request_origin(id, false)
+    }
+    /// Resolves the actual credential behind an admitted application request.
+    pub fn credential(&self, id: &str) -> Result<CallOrigin> {
+        self.request_origin(id, true)
+    }
+    fn request_origin(&self, id: &str, credential: bool) -> Result<CallOrigin> {
         if id.len() != 64 || self.retired.is_cancelled() {
             return Err(ApiError::Unauthorized);
         }
@@ -222,7 +230,13 @@ impl ApplicationUpstream {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .filter(|request| !request.device.revoked.is_cancelled())
-            .map(|request| request.device.clone())
+            .map(|request| {
+                let mut device = request.device.clone();
+                if !credential && let Some(id) = &request.domain_id {
+                    device.id = id.clone();
+                }
+                device
+            })
             .map(CallOrigin::Device)
             .ok_or(ApiError::Unauthorized)
     }
@@ -298,6 +312,13 @@ impl ApplicationUpstream {
     /// Retains an explicitly supplied device principal until the returned guard retires.
     /// The caller owns the principal and its cancellation policy; this grants no local authority.
     pub fn open_callback(&self, device: &AuthenticatedDevice) -> Result<ApplicationCallback> {
+        self.open_browser_callback(device, None)
+    }
+    fn open_browser_callback(
+        &self,
+        device: &AuthenticatedDevice,
+        domain_id: Option<rsi_api_protocol::DeviceId>,
+    ) -> Result<ApplicationCallback> {
         if device.revoked.is_cancelled() || self.retired.is_cancelled() {
             return Err(ApiError::Unauthorized);
         }
@@ -316,6 +337,7 @@ impl ApplicationUpstream {
                 id.clone(),
                 AppRequest {
                     device: device.clone(),
+                    domain_id,
                     resources: std::collections::BTreeMap::new(),
                 },
             );
@@ -444,11 +466,11 @@ impl ApplicationUpstream {
             return Err(ApiError::Unauthorized);
         }
         let safe_read = !upgrade && matches!(*incoming.method(), Method::GET | Method::HEAD);
-        let mut device = state
+        let device = state
             .access
             .application_device(incoming.headers(), safe_read, upgrade)?;
-        device.id = state.browser_principal().await?;
-        let slot = Arc::new(self.open_callback(&device)?);
+        let slot =
+            Arc::new(self.open_browser_callback(&device, Some(state.browser_principal().await?))?);
         delivery.admit(rsi_api_protocol::ApiAdmission::new(slot.clone()));
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut incoming));
         let (mut parts, body) = incoming.into_parts();

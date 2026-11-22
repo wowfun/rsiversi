@@ -227,6 +227,7 @@ async fn follow_wakes_for_visible_changes_and_coalesces_private_and_repeated_eve
     let ApiOutput::Stream(mut updates) = follow
         .invoke(
             ApiContext {
+                credential_id: None,
                 origin: CallOrigin::Local,
                 retiring: retiring.clone(),
             },
