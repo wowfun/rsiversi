@@ -1,13 +1,14 @@
 import { run } from "../bridge.ts";
 import { useRef, useState } from "react";
 
-function InputPreview({text,label,summary}: {text:string;label:string;summary:string}) {
+function InputPreview({text,label,summary,caption}: {text:string;label:string;summary:string;caption?:string}) {
   const [expanded,setExpanded] = useState(false);
   const preview = text.slice(0,4096).replace(/[\uD800-\uDBFF]$/, '');
   return <>
+    {caption && <span>{caption}</span>}
     <textarea readOnly rows={3} value={expanded ? text : preview} aria-label={`${label}: ${summary}`}/>
     {preview.length < text.length && <button type="button" className="quiet"
-      aria-label={`${expanded ? 'Collapse' : 'Show full'} input: ${summary}`}
+      aria-label={`${expanded ? 'Collapse' : 'Show full'} ${caption?.toLowerCase() ?? 'input'}: ${summary}`}
       onClick={()=>setExpanded(!expanded)}>{expanded ? 'Collapse input' : 'Show full input'}</button>}
   </>;
 }
@@ -83,11 +84,13 @@ export function SavedDrafts({ state }: { state?: SavedDraftsState }) {
                   The original Session is no longer available. Your input is
                   available below.
                 </p>
-                <InputPreview text={row.text} label="Expired conversation input" summary={row.summary}/>
                 {row.retireReferences && <button type="button" className="quiet" disabled={state.busy}
                   onClick={event => act(row.retireReferences!, event.currentTarget)}>Remove expired references</button>}
                 </>
               )}
+              {(row.unsaved ? row.unsaved.text !== row.text : row.expired || row.starting || (!row.empty && row.removable)) &&
+                <InputPreview text={row.text} summary={row.summary} caption={row.unsaved && 'Saved input'}
+                  label={row.starting ? 'Saved starting input' : row.expired ? 'Expired conversation input' : 'Saved conversation input'}/>}
               {row.cleanup && (
                 <button type="button" className="quiet" disabled={state.busy}
                   aria-label={`Clean up references: ${row.summary}`}
@@ -108,7 +111,8 @@ export function SavedDrafts({ state }: { state?: SavedDraftsState }) {
               )}
               {row.unsaved && (
                 <>
-                  <InputPreview text={row.unsaved.text} label="Unsaved recovered input" summary={row.summary}/>
+                  <InputPreview text={row.unsaved.text} label="Unsaved recovered input" summary={row.summary}
+                    caption={row.unsaved.text !== row.text ? 'Input in this window' : undefined}/>
                   <p className="draft-error">
                     Input is not saved. {row.unsaved.message}
                   </p>
@@ -144,7 +148,6 @@ export function SavedDrafts({ state }: { state?: SavedDraftsState }) {
                 </button>
               )}
               {(row.starting || (!row.empty && row.removable)) && <>
-                <InputPreview text={row.text} label="Saved starting input" summary={row.summary}/>
                 <button type="button" className="quiet" disabled={state.busy}
                   aria-label={`${row.deleteConfirmed ? 'Confirm delete' : 'Delete'} ${row.starting ? 'starting draft' : 'draft'}: ${row.summary}`}
                   onClick={event=>act(row.remove,event.currentTarget)}>

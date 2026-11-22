@@ -149,6 +149,7 @@ try {
   const expired=await restore(page,fresh,true);
   await expired.getByText(/original Session is no longer available/).waitFor();
   await page.screenshot({path:join(report,"expired-fresh.png")});
+  assert.equal(await expired.getByRole("textbox",{name:/^Expired conversation input:/}).inputValue(),"Saved in the second tab");
   assert.equal(await expired.getByRole("textbox",{name:/^Unsaved recovered input:/}).inputValue(),"Local-only input after a failed save");
   await page.setViewportSize({width:390,height:844});
   const keepLocal=expired.getByRole("button",{name:/^Replace saved text and images:/});

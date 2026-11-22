@@ -42,7 +42,7 @@ export async function restoreDrafts(pane, context) {
     const row = {
       id: JSON.stringify(record.key),
       coordinates: JSON.stringify(record.key),
-      text: local?.text ?? record.text,
+      text: record.text,
       removable: !record.pending && !record.references.length && !record.releases.length && !local?.dirty && !local?.failure,
       cancelDelete: () => { if (active() && !panel.busy) { row.deleteConfirmed=false; pane.invalidate(); } },
       summary: [surface ? conversationTitle(context.view,surface) : navigationTitle(context.view,record.key[3]) || record.key[3], record.pending ? "awaiting confirmation" :

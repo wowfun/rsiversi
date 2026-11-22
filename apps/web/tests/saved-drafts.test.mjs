@@ -148,6 +148,19 @@ test('a failed first save remains discoverable only in its current namespace',as
   } finally {await clearDraftRecords()}
 });
 
+test('recovery presents the saved version and the window edit separately after a failed save',async t=>{
+  const saved={...record,text:'Saved in a peer window'};
+  const {pane}=fixture([saved]);
+  pane.editors.set(JSON.stringify(saved.key),{record:saved,text:'Only in this window',failure:Error('storage refused')});
+  t.mock.method(StartingDraft,'list',async()=>({rows:[]}));
+  await pane.restoreDrafts();
+  const row=pane.recoveryView.rows[0];
+  await row.open();
+  assert.equal(row.expired,true);
+  assert.equal(row.text,saved.text);
+  assert.equal(row.unsaved.text,'Only in this window');
+});
+
 test('removing an empty draft admits only one concurrent action',async()=>{
   const {pane,scope}=fixture(); let finish, calls=0;
   scope.connection.drafts.removeEmpty=()=>{calls++;return new Promise(resolve=>finish=resolve)};

@@ -42,6 +42,22 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
       await page.screenshot({path:join(report,name+'-'+width+'.png'),fullPage:true});
     }
+    await page.evaluate(()=>fixture.recovery({busy:false,rows:[
+      {id:'session',summary:'Session note',text:'Saved text',removable:true},
+      {id:'expired',summary:'Expired note',text:'Keep this text',expired:true,removable:true},
+      {id:'conflict',summary:'Edited note',text:'From storage',expired:true,unsaved:{text:'From this window',message:'Save failed'}},
+    ]}));
+    await panel.getByText('Session note',{exact:true}).waitFor();
+    const previews=await panel.getByRole('textbox').evaluateAll(nodes=>nodes.map(node=>[node.getAttribute('aria-label'),node.value]));
+    assert.deepEqual(previews,[
+      ['Saved conversation input: Session note','Saved text'],
+      ['Expired conversation input: Expired note','Keep this text'],
+      ['Expired conversation input: Edited note','From storage'],
+      ['Unsaved recovered input: Edited note','From this window'],
+    ]);
+    await panel.getByText('Saved input',{exact:true}).waitFor();
+    await panel.getByText('Input in this window',{exact:true}).scrollIntoViewIfNeeded();
+    await page.screenshot({path:join(report,name+'-recovery-choices.png')});
     await page.evaluate(()=>{
       const pane=fixture.runtime.panes.get('main');pane.selectedCommand={name:'plan',composer_input:{kind:'text',hint:'on | off'}};
       pane.edit('/plan retained command arguments');pane.switching=true;pane.renderComposer();

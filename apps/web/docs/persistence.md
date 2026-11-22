@@ -420,7 +420,10 @@ and states that opening a row switches this pane. Starting rows explicitly creat
 a new conversation here. Read-only input previews mount at most 4,096 UTF-16 code
 units without splitting a surrogate pair; expanding a preview is explicit and
 does not truncate persisted or recovered input. Destructive row actions have
-row-specific accessible names, as do the read-only previews. Storage retirement
+row-specific accessible names, as do the read-only previews. A row shows its
+saved text once and identifies whether it belongs to a Session or a starting
+draft. When local text differs from saved input, both versions are labeled for
+the recovery choice. Storage retirement
 and claimed-command changes are announced through continuously mounted status
 regions; the retirement explanation remains visible beside reset recovery actions.
 Recovery storage errors appear before the rows, so partial recovery remains
