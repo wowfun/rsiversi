@@ -2,6 +2,19 @@ use super::*;
 use rsi_tools_protocol::{ToolDecision, ToolGate};
 
 impl Driver {
+    pub(super) async fn is_archived(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+    ) -> rsi_agent_turn_protocol::Result<bool> {
+        match self
+            .scope
+            .lookup_local::<rsi_agent_turn_protocol::SessionArchiveContract>()
+        {
+            Some(archive) => archive.is_archived(header).await,
+            None => Ok(false),
+        }
+    }
+
     pub(super) async fn run_claim(
         &self,
         claim: TurnClaim,
@@ -847,6 +860,13 @@ impl Driver {
             ));
         }
         let _execution = admit_claim_execution(claim).map_err(|failure| *failure)?;
+        if self
+            .is_archived(claim.header())
+            .await
+            .map_err(|error| failed("session.archive", error.to_string()))?
+        {
+            return Err(DriveFailure::Turn(TurnOutcome::Blocked));
+        }
         let capture = evidence::Capture::new(&request, profile)?;
         let prepared_result = tokio::select! { biased;
             () = stop.cancelled() => return Err(DriveFailure::Stopped),

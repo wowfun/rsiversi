@@ -242,6 +242,50 @@ pub enum ArchiveOutcome {
         ids: Vec<SessionId>,
     },
 }
+#[async_trait]
+impl rsi_agent_turn_protocol::SessionArchive for Navigation {
+    async fn is_archived(
+        &self,
+        header: &rsi_agent_session_protocol::SessionHeader,
+    ) -> rsi_agent_turn_protocol::Result<bool> {
+        let archived = self.archived_sessions();
+        if archived.contains(header.session_id()) {
+            return Ok(true);
+        }
+        let Some(origin) = header.fork_origin() else {
+            return Ok(false);
+        };
+        if archived.contains(&origin.root_session_id) {
+            return Ok(true);
+        }
+        let mut parent = &origin.history.parent_session_id;
+        if archived.contains(parent) {
+            return Ok(true);
+        }
+        if origin.path.depth() <= 2 || !archived.0.records.values().any(|row| row.archived) {
+            return Ok(false);
+        }
+        let mut ancestor;
+        for _ in 2..origin.path.depth() {
+            ancestor = match self.store.header(parent).await {
+                Ok(header) => header,
+                Err(rsi_agent_store_protocol::StoreError::NotFound(_)) => break,
+                Err(error) => {
+                    return Err(rsi_agent_turn_protocol::TurnError::Store(error.to_string()));
+                }
+            };
+            let Some(lineage) = ancestor.fork_origin() else {
+                break;
+            };
+            parent = &lineage.history.parent_session_id;
+            if archived.contains(parent) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// One Host's navigation owner; it never owns Session execution.
 #[derive(Debug)]
 pub struct Navigation {
@@ -1060,6 +1104,9 @@ impl PluginFactory for NavigationFactory {
         let supply = plan
             .context()
             .provide_local::<NavigationContract>(owner.clone())?;
+        let archive = plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::SessionArchiveContract>(owner.clone())?;
         let cleanup = plan
             .context()
             .provide_local::<rsi_session_protocol::SessionPurgeCleanupContract>(Arc::new(
@@ -1070,6 +1117,7 @@ impl PluginFactory for NavigationFactory {
             Box::new(move || {
                 Box::pin(async move {
                     drop(supply);
+                    drop(archive);
                     drop(cleanup);
                     futures_util::join!(
                         owner.close(),

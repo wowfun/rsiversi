@@ -644,6 +644,60 @@ async fn idle_manual_summary_holds_later_prompt_and_replay_preserves_turn_count(
         .root()
         .lookup_local::<ManualCompactorContract>()
         .unwrap();
+    #[derive(Debug)]
+    struct Archived;
+    #[async_trait::async_trait]
+    impl rsi_agent_turn_protocol::SessionArchive for Archived {
+        async fn is_archived(&self, _: &SessionHeader) -> rsi_agent_turn_protocol::Result<bool> {
+            Ok(true)
+        }
+    }
+    #[async_trait]
+    impl PluginFactory for Archived {
+        fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+            Ok(PreparedActivation::new(desired.clone()))
+        }
+
+        async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+            let archive = plan
+                .context()
+                .provide_local::<rsi_agent_turn_protocol::SessionArchiveContract>(Arc::new(Self))?;
+            plan.defer(
+                "withdraw archive fixture",
+                Box::new(move || {
+                    Box::pin(async move {
+                        drop(archive);
+                        Ok(())
+                    })
+                }),
+            )
+        }
+    }
+    let archive = activate_fixture(
+        &stack.runtime,
+        "fixture.archive",
+        "test",
+        Arc::new(Archived),
+    )
+    .await;
+    let blocked = DomainRequestId::new("archived-summary").unwrap();
+    let ManualCompactionAdmission::Idle(lease) =
+        turns.reserve_manual_compaction(id, &blocked).await.unwrap()
+    else {
+        panic!("expected idle admission");
+    };
+    assert!(matches!(compactor.compact(lease, model.clone()).await,
+        Err(rsi_agent_turn_protocol::TurnError::Invalid(message)) if message.contains("archived")));
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    assert!(
+        stack
+            .store
+            .manual_compaction_fact(id, &blocked)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(archive.dispose().await.is_clean());
     let failed = DomainRequestId::new("failed-start-prefix").unwrap();
     let ManualCompactionAdmission::Idle(lease) =
         turns.reserve_manual_compaction(id, &failed).await.unwrap()

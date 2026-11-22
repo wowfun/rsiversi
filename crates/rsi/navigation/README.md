@@ -95,9 +95,12 @@ global expected-revision CAS and holds the accepted operation through durable
 commit and publication if its caller disappears. Retirement closes admission
 before draining. Authenticated devices can edit navigation without a configuration
 grant. Archiving hides the Session and suspends future scheduled deliveries to
-it. Already admitted work keeps its identity. Local scheduling observes the same
-committed membership that the navigation list displays. Restoring the Session
-makes its outstanding reminder eligible again.
+it. The executor checks this committed membership before each new model attempt,
+including retries, compaction, manual sends and background wakeups. Subagents
+inherit the archive state of their ancestors. Independent conversation forks
+retain their own archive state. Already admitted work keeps its identity.
+Restoring the Session permits subsequent attempts and makes its outstanding
+reminder eligible again. Profiles without navigation admit requests normally.
 
 The metadata records retain the pinned field and bounds owned by the
 [wire contract](../navigation-api/README.md). Missing activity may remain explicit when the Header still authorizes the read;

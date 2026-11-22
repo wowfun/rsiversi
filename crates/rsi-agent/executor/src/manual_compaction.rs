@@ -69,6 +69,11 @@ impl ManualCompactor for Driver {
         else {
             return Ok(CompactionOutcome::NoChange);
         };
+        if self.is_archived(fold.header()).await? {
+            return Err(invalid(
+                "Restore the archived Session before compacting its history.",
+            ));
+        }
         let capture = evidence::Capture::new(&planned.request, &profile).map_err(drive_error)?;
         let prepared = tokio::select! { biased;
             () = cancel.cancelled() => return Ok(CompactionOutcome::Interrupted),

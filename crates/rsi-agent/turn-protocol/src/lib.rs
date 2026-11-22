@@ -793,6 +793,21 @@ impl CompactionOutcome {
     }
 }
 
+/// Optional Host archive membership shared by every model route.
+#[async_trait]
+pub trait SessionArchive: fmt::Debug + Send + Sync {
+    /// Whether the Session or an ancestor in its subagent lineage is archived.
+    async fn is_archived(&self, header: &SessionHeader) -> Result<bool>;
+}
+
+/// Archive owner consulted before opening a model attempt.
+#[derive(Debug)]
+pub struct SessionArchiveContract;
+impl LocalContract for SessionArchiveContract {
+    const KEY: &'static str = "rsi.agent.session-archive";
+    type Service = dyn SessionArchive;
+}
+
 /// Executor-selected language route, context limits and summary dispatch.
 #[async_trait]
 pub trait ManualCompactor: fmt::Debug + Send + Sync {

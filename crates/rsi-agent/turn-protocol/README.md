@@ -1,5 +1,9 @@
 # rsi-agent-turn-protocol
 
+The optional Session archive service supplies committed membership to the
+executor at model admission. The navigation owner resolves subagent ancestry.
+A blocked Turn records its terminal outcome before creating a model intent.
+
 Message feedback uses Session submission admission to compare and append one
 operator rating without loading a cold Agent or starting a model turn. A
 version conflict returns the current rating to the caller.

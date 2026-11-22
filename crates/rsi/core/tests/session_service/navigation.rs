@@ -35,6 +35,98 @@ async fn query(running: &RunningRsi, origin: CallOrigin, archived: bool) -> Navi
     )
     .unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn archive_blocks_model_requests_from_other_handles_until_restored() {
+    use rsi_agent_session_protocol::{ForkPoint, ForkTurnSelection, TurnOutcome};
+
+    let (endpoint, requests, provider) = capturing_provider().await;
+    let fixture = fixture(&endpoint);
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let workspace = running
+        .workspace_registry()
+        .unwrap()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    let service = running.session_service().unwrap();
+    let session = SessionId::new("archive-model").unwrap();
+    let create = CreateSession {
+        session_id: session.clone(),
+        workspace_id: workspace.id,
+        agent_preset_id: None,
+        fork: None,
+    };
+    let original = service.create(create.clone()).await.unwrap();
+    run_message_to_terminal(&original, "before-archive").await;
+    let second = service.attach(&session).await.unwrap();
+    let before = original.history_before(None, 128).await.unwrap();
+    let first = before
+        .facts
+        .iter()
+        .find_map(|fact| match fact.body() {
+            SessionFactBody::TurnTerminal {
+                turn_id,
+                outcome: TurnOutcome::Completed,
+                ..
+            } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let fork = service
+        .create(CreateSession {
+            session_id: SessionId::new("independent-conversation").unwrap(),
+            fork: Some(rsi_session_protocol::ForkDraft {
+                source_session_id: session.clone(),
+                point: ForkPoint::through(first),
+                turns: ForkTurnSelection::All,
+            }),
+            ..create
+        })
+        .await
+        .unwrap();
+    let change = |archived: bool, revision: &'static str| {
+        wire(
+            &running,
+            CallOrigin::Local,
+            NavigationOperation::Replace,
+            json!({"session":session,"expected_revision":revision,"metadata":SessionMetadata { archived, ..Default::default() }}),
+        )
+    };
+    change(true, "0").await.unwrap();
+    let admitted = requests.lock().unwrap().len();
+    assert!(admitted > 0);
+    run_message_to_terminal(&second, "from-open-window").await;
+    assert_eq!(requests.lock().unwrap().len(), admitted);
+    let after = second.history_before(None, 128).await.unwrap();
+    let added = after
+        .facts
+        .iter()
+        .filter(|fact| fact.seq() > before.facts.last().unwrap().seq());
+    assert!(added.clone().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::TurnTerminal {
+            outcome: TurnOutcome::Blocked,
+            ..
+        }
+    )));
+    assert!(
+        !added
+            .clone()
+            .any(|fact| matches!(fact.body(), SessionFactBody::ModelIntent { .. }))
+    );
+    run_message_to_terminal(&fork, "send-in-independent-fork").await;
+    assert_eq!(requests.lock().unwrap().len(), admitted + 1);
+    change(false, "1").await.unwrap();
+    run_message_to_terminal(&second, "after-restore").await;
+    assert_eq!(requests.lock().unwrap().len(), admitted + 2);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,

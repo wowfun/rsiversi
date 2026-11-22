@@ -11,6 +11,93 @@ mod workspace_account;
 mod persistence;
 
 #[tokio::test]
+async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_forks() {
+    use rsi_agent_session_protocol::{
+        AgentPath, ForkOrigin, ForkPoint, ForkTurnSelection, HistoryOrigin, ModelSelection,
+    };
+    use rsi_agent_turn_protocol::SessionArchive;
+    let owner = owner().await;
+    let root_id = SessionId::new("row-001").unwrap();
+    let root = owner.store.header(&root_id).await.unwrap();
+    let history = |parent: &SessionHeader| HistoryOrigin {
+        parent_session_id: parent.session_id().clone(),
+        parent_header_fingerprint: parent.fingerprint().unwrap(),
+        point: ForkPoint::before(&TurnId::new("turn").unwrap()),
+        resolved_after_seq: 0,
+        resolved_terminal_seq: 0,
+        terminal_prefix_sha256: hex::encode(rsi_agent_session_protocol::EMPTY_FACT_PREFIX_DIGEST),
+        resolved_terminal_control_seq: 0,
+        terminal_control_prefix_sha256: hex::encode(
+            rsi_agent_session_protocol::EMPTY_CONTROL_PREFIX_DIGEST,
+        ),
+        requested_turns: ForkTurnSelection::None,
+        effective_turns: 0,
+    };
+    let child = |parent: &SessionHeader, name: &str, depth| {
+        parent
+            .forked_child(
+                SessionId::new(name).unwrap(),
+                1000,
+                ForkOrigin {
+                    history: history(parent),
+                    root_session_id: root_id.clone(),
+                    path: AgentPath::new(vec![1; depth]).unwrap(),
+                    task_name: name.into(),
+                },
+                ModelSelection::baseline(parent.settings()),
+            )
+            .unwrap()
+    };
+    let first = child(&root, "first", 1);
+    let middle = child(&first, "middle", 2);
+    let leaf = child(&middle, "leaf", 3);
+    let independent = first
+        .forked_independent(SessionId::new("separate").unwrap(), 1001, history(&first))
+        .unwrap();
+    let first_fact = |header: &SessionHeader| AppendBatch {
+        session_id: header.session_id().clone(),
+        expected_seq: 0,
+        header: Some(header.clone()),
+        facts: vec![Arc::new(
+            SessionFact::new(
+                1,
+                1000,
+                SessionFactBody::TurnAccepted {
+                    turn_id: TurnId::new("turn").unwrap(),
+                    text: "hello".into(),
+                    model: None,
+                    reasoning_effort: None,
+                    sandbox: rsi_sandbox::SandboxMode::WorkspaceWrite,
+                    require_approval: false,
+                },
+            )
+            .unwrap(),
+        )],
+    };
+    owner.store.append(first_fact(&first)).await.unwrap();
+    owner.store.append(first_fact(&middle)).await.unwrap();
+    let change = |id: &SessionId, intent| {
+        owner
+            .archive_intent(CallOrigin::Local, id.clone(), intent)
+            .unwrap()
+    };
+    change(first.session_id(), ArchiveIntent::Archive)
+        .await
+        .unwrap();
+    assert!(owner.is_archived(&leaf).await.unwrap());
+    assert!(!owner.is_archived(&root).await.unwrap());
+    assert!(!owner.is_archived(&independent).await.unwrap());
+    change(first.session_id(), ArchiveIntent::Restore)
+        .await
+        .unwrap();
+    assert!(!owner.is_archived(&leaf).await.unwrap());
+    change(&root_id, ArchiveIntent::Archive).await.unwrap();
+    assert!(owner.is_archived(&first).await.unwrap());
+    assert!(owner.is_archived(&leaf).await.unwrap());
+    assert!(!owner.is_archived(&independent).await.unwrap());
+}
+
+#[tokio::test]
 async fn archive_selection_includes_both_partitions_only_when_requested() {
     let owner = owner().await;
     owner.state.lock().unwrap().document = Arc::new(Document {
