@@ -43,6 +43,10 @@ export async function verifyWorkerLifecycle(browser, root) {
     export async function import_image() {}
     export async function read_image() {}
     export async function automation_artifact() {}
+    export async function archive_session() {}
+    export async function background_job() {}
+    export async function background_output() {}
+    export async function message_feedback() {}
     export async function terminal() {}
   `;
   const server = createServer((request, response) => {
