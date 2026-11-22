@@ -118,9 +118,11 @@ export function createResourceDetails(context) {
     }
     if (next.source_detail) {
       const detail = next.source_detail;
+      const {field, seq} = detail.source;
+      const evidence = {model_tool_summary: "Tools", model_tool_schemas: "Schemas"}[field.kind];
       show(
         JSON.stringify([detail, next.source_media]),
-        "Exact source",
+        evidence ? `${seq} · ${evidence}` : "Exact source",
         {kind:"source",data:{
           ...detail,
           owner: connection,

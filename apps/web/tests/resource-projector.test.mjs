@@ -17,10 +17,15 @@ test('unchanged resource entries retain models while renderer slots are collecte
   frame.panels=[{...entry}];render(frame);assert.equal(published,2,'entry replacement rebuilds the model');
   frame.has_media=true;render(frame);assert.equal(published,3,'media capability replacement rebuilds the model');
   details.connection={};render(frame);assert.equal(published,4,'new connection cannot retain old command authority');
-  frame.panels=[{view:'1',source_detail:{ticket:'2',text:'x'.repeat(65536)}}];render(frame);
+  const sourceDetail={ticket:'2',source:{seq:'18',field:{kind:'model_tool_summary'}},
+    window:{start:0,end:65536,more:false,text:'x'.repeat(65536)}};
+  frame.panels=[{view:'1',source_detail:sourceDetail}];render(frame);
   const source=hosts.get('1').model;
   for(let i=0;i<100;i++)render(frame);
   assert.equal(hosts.get('1').model,source,'unchanged source page retains its exact model');
+  assert.equal(hosts.get('1').title,'18 · Tools');
+  frame.panels=[{view:'1',source_detail:{...sourceDetail,source:{seq:'28',field:{kind:'model_tool_schemas'}}}}];render(frame);
+  assert.equal(hosts.get('1').title,'28 · Schemas');
 });
 
 test('an empty resource frame can render before a connection exists',()=>{

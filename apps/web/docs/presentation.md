@@ -487,6 +487,8 @@ lanes. Dragging a range filters the ledger, clicking a span selects its event,
 and double-clicking clears the range. Recorded-time mode uses only observed
 timestamps and leaves missing timings unknown. The details
 show the projected record and expose the existing source selectors on demand.
+A tool summary or schema tab identifies its recorded request by intent sequence,
+so several requests can stay open for comparison.
 Search, selection and fold state belong to the current conversation view.
 Chat's column resize handles and return-to-latest control apply only to Chat.
 A completed turn's fork action sits beside Copy and usage on its final assistant

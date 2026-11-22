@@ -1113,3 +1113,10 @@ the fixture's path, using the development key file under that root.
 Set `RSI_CHECK_IMAGE_DRAG=1` to drag the workspace thumbnail into the composer,
 reload the draft, and remove the restored attachment. The same run imports
 eight images at 390 px, checks paging and wheel input, and resizes the composer.
+
+With `RSI_WEB_BINARY`, `RSI_WEB_ASSETS` and a fresh `RSI_WEB_REPORT`,
+`node fixtures/rsi/web-product/request-tool-history.mjs` compares the tool
+names, schemas and changes in the released Trajectory UI with three requests
+received by the loopback provider. It starts with an empty ACP endpoint
+catalog, disables the external-agent contribution in the same preset between
+Host generations, and reopens the session before reading its recorded requests.
