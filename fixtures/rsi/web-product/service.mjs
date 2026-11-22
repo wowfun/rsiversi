@@ -280,12 +280,19 @@ export async function startService({ binary, assets, report, configure, registra
       await writeFile(join(devices, 'application.profile.toml'), `format = 1\n[[steps]]\nkind = "plugin"\nid = "connection"\nplugin = "rsi.application.connection"\nconfig = { host_profile = "fixture" }\n[[steps]]\nkind = "plugin"\nid = "application"\nplugin = "rsi.application.devices"\n`);
       if(registrationLabel !== undefined) registration = register(registrationLabel);
     }
-    const certificate = join(temporary, "certificate.pem"); const key = join(temporary, "key.pem");
-    if (!developmentHttp) boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
-    const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-    const address = `127.0.0.1:${reservation.address().port}`;
-    let origin = `${developmentHttp?'http':'https'}://${address}`, launchUrl;
-    await new Promise(resolve => reservation.close(resolve));
+    const localLauncher = watchAssets || localWeb;
+    let origin, launchUrl, argumentsValue;
+    if (localLauncher) {
+      argumentsValue = [...(watchAssets ? ["--watch"] : []), "web", "--port", "0", "--no-open", ...(watchAssets ? [] : ["--assets",assets])];
+    } else {
+      const certificate = join(temporary, "certificate.pem"), key = join(temporary, "key.pem");
+      if (!developmentHttp) boundedRun("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost", "-keyout", key, "-out", certificate]);
+      const reservation = net.createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
+      const address = `127.0.0.1:${reservation.address().port}`;
+      origin = `${developmentHttp?'http':'https'}://${address}`;
+      await new Promise(resolve => reservation.close(resolve));
+      argumentsValue = [embedded ? "--profile" : "run", "browser-fixture", ...(embedded ? [] : ["--assets", assets]), "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
+    }
     if (watchAssets) {
       const directory = dirname(assets), output = join(directory, "web-package");
       const inputs = ['standard.js','file-preview.js','ui-renderers.json'].map(name => `${basename(assets)}/${name}`);
@@ -301,15 +308,12 @@ export async function startService({ binary, assets, report, configure, registra
         return run(['host','status']).stdout.startsWith('running\t');
       }, 'fixture foreground Host readiness');
     }
-    const argumentsValue = watchAssets || localWeb
-      ? [...(watchAssets ? ["--watch"] : []), "web", "--port", "0", "--no-open", ...(watchAssets ? [] : ["--assets",assets])]
-      : [embedded ? "--profile" : "run", "browser-fixture", ...(embedded ? [] : ["--assets", assets]), "--bind", address, "--origin", origin, ...(developmentHttp ? ['--dev-http'] : ["--tls-certificate", certificate, "--tls-key", key])];
     child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");
     child.stderr.on("data", chunk => { stderr += chunk.toString(); if (stderr.length > 1024 * 1024) { stderr = stderr.slice(0, 1024 * 1024); child.kill("SIGTERM"); } });
     const lines = createInterface({ input: child.stdout });
     const [ready] = await deadline(Promise.race([once(lines, "line"), stopped.then(() => { throw new Error(`Service exited before readiness: ${stderr}`); })]), "service readiness", 210_000);
-    if (watchAssets || localWeb) {
+    if (localLauncher) {
       assert(ready.startsWith("rsi web: "));
       launchUrl = ready.slice("rsi web: ".length);
       origin = new URL(launchUrl).origin;

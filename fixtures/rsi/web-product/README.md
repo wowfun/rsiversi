@@ -94,7 +94,8 @@ Chat Completions at the DeepSeek endpoint. Live DeepSeek profiles bind the
 request's default output cap to the explicitly supplied default output reserve,
 so a provider default cannot silently exceed the fixture's declared capacity.
 Manual inspection can explicitly select the fixture's loopback development HTTP
-mode; TLS remains the automated default. Windows fixture process teardown uses
+mode. Remote Serve fixtures use TLS by default. Local and watched Web fixtures
+use the launcher's own loopback listener and port selection. Windows fixture process teardown uses
 Node's TerminateProcess, records that limitation, then independently stops the
 isolated Host through its normal command. It is not graceful application-exit
 evidence; document disconnect and Host drain have their own assertions.

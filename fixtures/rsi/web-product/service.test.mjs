@@ -130,7 +130,10 @@ test("renderer watch uses ordinary Web launch and a disjoint relative package re
   try {
     const assets = join(directory, 'assets');
     await mkdir(assets);
-    t.mock.method(cp, 'spawnSync', () => ({status:0, stdout:'stopped\n', stderr:''}));
+    t.mock.method(cp, 'spawnSync', program => {
+      assert.notEqual(program, 'openssl', 'the local Web launcher owns its loopback listener');
+      return {status:0, stdout:'stopped\n', stderr:''};
+    });
     let port = 43210;
     t.mock.method(cp, 'spawn', (_program, args) => {
       assert.deepEqual(args, ['--watch','web','--port','0','--no-open']);
