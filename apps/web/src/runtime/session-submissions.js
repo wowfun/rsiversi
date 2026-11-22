@@ -60,7 +60,7 @@ export async function submit(pane, context, choice = "primary") {
         throw new Error(
           "Wait for the sending options to refresh. Your draft is retained.",
         );
-      const captured = editor.record;
+      const captured = editor.savedInput;
       const references = pane.referenceState(editor);
       references.preparing = captured.references.map(reference => ({target: reference.metadata.target, snapshot: reference.snapshot}));
       try {
@@ -160,13 +160,13 @@ export async function executePending(
       };
     }
   }
-  await editor.update(() => editor.store.settle(expected, result));
+  await editor.settle(expected, result);
   if (result.status === "unknown" && expected.pending.kind === "message" && pane.editor === editor) {
     editor.deliveryDetail = {id: expected.pending.id, error: result.error};
     return;
   }
   if (editor.deliveryDetail?.id === expected.pending.id) editor.deliveryDetail = undefined;
-  if (result.status === "complete" && pane.editor === editor && !editor.record.text)
+  if (result.status === "complete" && pane.editor === editor && !editor.text)
     pane.closeCompletions();
   if (result.notice) context.notify(result.notice);
   if (result.status !== "complete")
@@ -267,7 +267,7 @@ export async function executeDocumentCommand(pane, context, name, input = '', co
   try {
     await editor.flush();
     if (revision !== undefined && revision !== editor.revision) throw new Error('The input changed; select the command again');
-    const captured = editor.record;
+    const captured = editor.savedInput;
     const prepared = JSON.parse(await context.call('prepare_submission', JSON.stringify({
       pane: pane.index, generation, text: `/${name} ${input}`, images: [], references: [],
     })));

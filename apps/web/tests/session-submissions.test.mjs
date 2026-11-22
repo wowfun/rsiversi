@@ -7,11 +7,12 @@ import {submit,reconcile,executePending,executeDocumentCommand} from '../src/run
 function fixture() {
   const events=[], connection={closing:false}, saved={revision:1,text:"input",images:[],references:[]}, referenceState={};
   const editor={record:saved,text:'input',images:[],references:[],
+    get savedInput(){return this.record},
     async update(change){this.record=await change(this.record)},
+    async settle(record,result){assert.equal(record,this.record);events.push(result.status);this.record={...record,result}},
     store:{
       async startDispatch(record,prepared){assert.equal(record,saved);events.push('claim');return {...record,pending:{...prepared,phase:'dispatching'}}},
       async claimPrepared(record){events.push('claim saved');return {...record,pending:{...record.pending,phase:'dispatching'}}},
-      async settle(record,result){assert.equal(record,editor.record);events.push(result.status);return {...record,result}},
     }};
   const context={connection,notify:assert.fail,async call(method){events.push(method);return JSON.stringify(method==='prepare_submission'?{opaque:'prepared',kind:'message',phase:'prepared'}:{status:'complete'})}};
   const pane={index:'main',generation:'1',editor,referenceState:()=>referenceState,composerView:{access:'workspace-write'},composerActions:{revision:'7',primary:{id:'send'}},renderComposer(){},async drainReferenceReleases(){},async flush(){events.push('flush')},executePending:(...args)=>executePending(pane,context,...args)};

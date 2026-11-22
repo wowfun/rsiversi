@@ -157,6 +157,17 @@ function conflict(saved) {
 function sameIncarnation(expected, saved) {
   if (!saved || saved.incarnation !== expected.incarnation) throw conflict(saved);
 }
+function requireRetainedReferences(expected, saved, references) {
+  if (!references.length) return;
+  const previous = owners(expected), retained = owners(saved);
+  for (const reference of references) {
+    const capture = captureOf(reference);
+    if (previous.some(owner => sameCapture(owner, capture)) &&
+        !retained.some(owner => sameCapture(owner, capture))) {
+      throw new Error("A reference was removed in another tab; use the saved input and capture it again");
+    }
+  }
+}
 function samePending(expected, saved) {
   sameIncarnation(expected, saved);
   if (saved.pendingRevision !== expected.pendingRevision) throw conflict(saved);
@@ -165,6 +176,21 @@ function samePending(expected, saved) {
   const {opaque: stored, ...storedFields} = saved.pending;
   const {opaque: wanted, ...wantedFields} = expected.pending;
   if (stored !== wanted || !equal(storedFields, wantedFields)) throw conflict(saved);
+}
+
+function editableFields({text, images, references, editRevision}) {
+  return {text, images, references, editRevision};
+}
+function consumeSubmittedInput(input, pending) {
+  if (input.editRevision !== pending.editRevision) return false;
+  if (pending.consume) {
+    const {start,end} = pending.consume;
+    input.text = input.text.slice(0,start) + input.text.slice(end);
+  } else if (!pending.preserve_editor && pending.kind !== "queue") {
+    input.text = ""; input.images = []; input.references = [];
+  } else return false;
+  input.editRevision = bump(input.editRevision);
+  return true;
 }
 
 // IndexedDB orders these four components lexicographically for pane-scoped cursors.
@@ -370,8 +396,8 @@ export class DraftStore {
   edit(expected, text, images, references = expected.references) {
     validateEditor(text, images, references);
     return this.mutateInitial(expected, saved => {
-      sameIncarnation(expected, saved);
-      if (saved.editRevision !== expected.editRevision) throw conflict(saved);
+      if (!this.ephemeral.has(expected) || expected.header !== saved.header) sameIncarnation(expected, saved);
+      if (saved.editRevision !== expected.editRevision) requireRetainedReferences(expected, saved, references);
       saved.text = text; saved.images = clone(images); saved.references = clone(references); saved.editRevision = bump(saved.editRevision);
       return saved;
     });
@@ -415,25 +441,22 @@ export class DraftStore {
     });
   }
   async settle(expected, settlement) {
+    return (await this.settleRequest(expected, settlement)).record;
+  }
+  async settleRequest(expected, settlement) {
     const observedPhase = settlement.status === "not_admitted" ? "prepared" : settlement.status === "unknown" ? "unknown" : undefined;
     if (observedPhase && expected.pending?.phase === observedPhase) {
       require(equal(expected.key.slice(0, 2), this.namespace));
       const saved = await this.get(expected.key[2], expected.key[3]);
       samePending(expected, saved);
-      return saved;
+      return {record:saved, consumed:false};
     }
-    return this.mutate(expected.key, saved => {
+    let consumed = false;
+    const record = await this.mutate(expected.key, saved => {
       samePending(expected, saved);
       require(saved.pending && ["complete", "rejected", "not_admitted", "unknown"].includes(settlement.status));
       if (settlement.status === "complete") {
-        if (saved.pending.consume && saved.editRevision === saved.pending.editRevision) {
-          const {start,end} = saved.pending.consume;
-          saved.text = saved.text.slice(0,start) + saved.text.slice(end);
-          saved.editRevision = bump(saved.editRevision);
-        }
-        if (!saved.pending.preserve_editor && saved.pending.kind !== "queue" && saved.editRevision === saved.pending.editRevision) {
-          saved.text = ""; saved.images = []; saved.references = []; saved.editRevision = bump(saved.editRevision);
-        }
+        consumed = consumeSubmittedInput(saved, saved.pending);
         saved.pending = null;
       } else if (settlement.status === "rejected") {
         require(saved.pending.kind === "queue", "Only a queue conflict can retire a rejected intent");
@@ -442,6 +465,7 @@ export class DraftStore {
       saved.pendingRevision = bump(saved.pendingRevision);
       return saved;
     });
+    return {record, consumed};
   }
   cancelPrepared(expected) {
     return this.mutate(expected.key, saved => {
@@ -520,6 +544,9 @@ export class DraftEditor {
     this.changed = changed; this.revision = 0; this.dirty = false; this.work = Promise.resolve();
   }
   get text() { return this.localText; }
+  // A metadata-only transaction may observe a peer's later editor snapshot.
+  // Keep only our editable fields when the two diverge, including the revision used to freeze a send.
+  get savedInput() { return this.windowInput ? {...this.record, ...this.windowInput} : this.record; }
   set text(value) { this.localText = value; this.localTextBytes = bytes(value); }
   get references() { return this.localReferences; }
   set references(value) { this.localReferences = value; this.localReferenceBytes = referenceBytes(value); this.localPreviewBytes = value.reduce((total, reference) => total + bytes(reference.preview), 0); }
@@ -555,7 +582,8 @@ export class DraftEditor {
       while (this.dirty && !this.failure) {
         const revision = this.revision;
         try {
-          this.record = await this.store.edit(this.record, this.text, this.images, this.references);
+          this.record = await this.store.edit(this.savedInput, this.text, this.images, this.references);
+          this.windowInput = undefined;
           if (this.revision === revision) this.dirty = false;
         } catch (error) { this.failure = error; }
       }
@@ -567,16 +595,35 @@ export class DraftEditor {
     if (this.dirty) throw new Error("Draft is not saved; sending is blocked");
   }
   update(operation) {
+    return this.transition(async record => ({record:await operation(record)}));
+  }
+  settle(expected, result) {
+    return this.transition(() => this.store.settleRequest(expected, result),
+      result.status === "complete" ? expected.pending : undefined);
+  }
+  transition(operation, completed) {
     if (this.transferring) return Promise.reject(new Error("This draft is moving to another conversation"));
     if (this.resolving) return Promise.reject(new Error("Wait for this draft's current conflict resolution"));
     return this.enqueue(async () => {
       const revision = this.revision;
       try {
-        this.record = await operation(this.record);
-        if (!this.dirty && revision === this.revision) {
-          if (this.text !== this.record.text) this.revision = bump(this.revision);
-          this.text = this.record.text; this.images = clone(this.record.images); this.references = clone(this.record.references);
+        const before = this.savedInput;
+        const {record, consumed} = await operation(this.record);
+        if (!this.windowInput && record.editRevision !== before.editRevision) this.windowInput = editableFields(before);
+        if (completed && before.editRevision === completed.editRevision) {
+          const local = editableFields(before);
+          if (consumeSubmittedInput(local, completed)) {
+            // A newer restored draft can survive while this window clears its own submitted input.
+            local.editRevision = before.editRevision;
+            this.windowInput = consumed ? undefined : local;
+            const shown = this.windowInput ?? record;
+            if (!this.dirty && revision === this.revision) {
+              if (this.text !== shown.text) this.revision = bump(this.revision);
+              this.text = shown.text; this.images = clone(shown.images); this.references = clone(shown.references);
+            }
+          }
         }
+        this.record = record;
         this.changed(); return this.record;
       } catch (error) { this.failure = error; this.changed(); throw error; }
     });
@@ -592,13 +639,12 @@ export class DraftEditor {
       saved ??= await this.store.ensure(this.record.key[2], this.record.key[3], this.record.header,
         this.record.everDispatched ? null : this.record.creation);
       if (!useSaved) {
-        const previous = new Set(owners(this.record).map(captureKey));
-        const current = new Set(owners(saved).map(captureKey));
-        require(this.references.every(reference => !previous.has(captureKey(captureOf(reference))) || current.has(captureKey(captureOf(reference)))), "A reference was removed in another tab; use the saved input and capture it again");
+        requireRetainedReferences(this.savedInput, saved, this.references);
       } else {
         saved = await this.store.retireUnowned(saved, this.references.map(captureOf));
       }
       this.record = saved;
+      this.windowInput = undefined;
       if (useSaved) { if (this.text !== saved.text) this.revision = bump(this.revision); this.text = saved.text; this.images = clone(saved.images); this.references = clone(saved.references); this.dirty = false; }
       else { this.dirty = true; }
       this.failure = undefined; this.pump(); this.changed();

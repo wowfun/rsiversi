@@ -441,7 +441,7 @@ unknown retries, frozen request boundaries, detail/application cancellation, and
 read-slot/byte admission retained through the final returned byte clone or slice.
 
 Persistent composer checks use real IndexedDB transactions in two documents,
-including revision conflicts, record reincarnation, origin quotas, opaque u64
+including last-saved editor text, pending-request conflicts, record reincarnation, origin quotas, opaque u64
 requests, Host-only confirmed receipts, terminal queue-conflict retirement without draft loss,
 transaction aborts and malformed durable metadata.
 Document composer tests gate saves before repeated Send/reconcile input and
@@ -456,7 +456,7 @@ request recovery retain visible controls.
 These use the shipped document methods with a controlled Worker reply, not a
 live Session or provider. `recovery.mjs` owns
 a separately leased publication and Service, restores a live Fresh Session and its
-canonical image, checks cross-tab conflict controls and device-cookie fencing,
+canonical image, checks independent window input, third-window restoration and device-cookie fencing,
 then restarts the actual Service to expire the Fresh Session. Explicit recreation
 moves the saved input only after the replacement opens. An aborted save before
 restart must retain the cached local editor and require explicit conflict

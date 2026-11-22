@@ -140,17 +140,60 @@ function reference(id) {
     capture:{kind:'suffix',interval:{through_seq:'1',scanned_after_seq:'0',retained_after_seq:'0',retained_through_seq:'1',fact_prefix_sha256:header,scanned_bytes:9,omissions:[]}},text_bytes:9}};
 }
 
-test('opening more than 128 Sessions uses no draft quota; concurrent first writes conflict',async()=>{
+test('empty visits use no quota and concurrent editors restore the last save',async()=>{
   const store=await open();
   for(let index=0;index<140;index++) await store.ensure('main',`visit-${index}`,header);
   assert.equal((await store.list('main')).length,0);
   const first=await store.ensure('main','session',header),second=await store.ensure('main','session',header);
-  let persisted=await store.edit(first,'first',[]);
-  await assert.rejects(store.edit(second,'second',[]),{code:'conflict'});
-  assert.equal((await store.get('main','session')).text,'first');
-  persisted=await store.edit(persisted,'',[]); await store.removeEmpty(persisted);
+  const left=new DraftEditor(store,first),right=new DraftEditor(store,second);
+  left.edit('first');await left.flush();
+  right.edit('second');await right.flush();
+  assert.equal(left.text,'first');assert.equal(right.text,'second');
+  assert.equal((await store.ensure('main','session',header)).text,'second');
+  left.edit('third');await left.flush();
+  assert.equal(right.text,'second');
+  const persisted=await store.get('main','session');
+  assert.equal(persisted.text,'third');assert.equal(persisted.editRevision,3);
+  await store.removeEmpty(await store.edit(persisted,'',[]));
   await assert.rejects(store.edit(first,'stale',[]),{code:'conflict'});
   await store.verify();
+});
+
+test('a later editor save preserves the frozen request and cannot revive a released reference',async()=>{
+  const store=await open(), initial=await store.ensure('main','session',header);
+  const ref=reference('shared');
+  const left=await store.edit(initial,'before',[],[ref]);
+  const request={kind:'message',id:'original',opaque:'{"seq":18446744073709551615}',text_bytes:6,images:0,captures:[captureOf(ref)]};
+  const frozen=await store.startDispatch(left,request);
+  const right=await store.edit(left,'new unsent text',[],[]);
+  assert.deepEqual(right.pending,frozen.pending);
+  const settled=await store.settle(frozen,{status:'complete'});
+  assert.equal(settled.text,'new unsent text');
+  assert.deepEqual(settled.releases,[captureOf(ref)]);
+  await store.acknowledgeRelease(settled,captureOf(ref));
+  await assert.rejects(store.edit(left,'stale reference',[],[ref]),/removed|retired/);
+  assert.equal((await store.get('main','session')).text,'new unsent text');
+  await store.verify();
+});
+
+test('sending from one window consumes its own text and preserves a later saved peer draft',async()=>{
+  const store=await open();
+  const left=new DraftEditor(store,await store.ensure('main','session',header));
+  const right=new DraftEditor(store,await store.ensure('main','session',header));
+  left.edit('send mine');await left.flush();
+  right.edit('keep mine');await right.flush();
+  const input=left.savedInput;
+  assert.equal(input.text,'send mine');
+  await left.update(()=>store.startDispatch(input,{kind:'message',id:'one',opaque:'send mine',text_bytes:9,images:0,captures:[]}));
+  assert.equal(left.text,'send mine');assert.equal(left.savedInput.text,'send mine');
+  await left.settle(left.record,{status:'unknown'});
+  assert.equal(left.savedInput.text,'send mine');
+  assert.equal(left.record.pending.opaque,'send mine');
+  await left.settle(left.record,{status:'complete'});
+  assert.equal(left.text,'');assert.equal(right.text,'keep mine');
+  assert.equal((await store.get('main','session')).text,'keep mine');
+  left.edit('next');await left.flush();
+  assert.equal((await store.get('main','session')).text,'next');
 });
 
 test('real draft transactions retire all owners at the 16-identity limit and roll back overflow',async()=>{

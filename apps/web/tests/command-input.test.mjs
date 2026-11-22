@@ -153,7 +153,7 @@ test('confirmed token consumption retires command selections captured before its
   Object.assign(pane,{generation:'one',editor,input:{value:editor.text,selectionStart:0,selectionEnd:5}});
   pane.captureCommandSelection();
   await editor.update(record=>store.startDispatch(record,{kind:'command',id:'help-request',opaque:'request',text_bytes:0,images:0,captures:[]},true,{start:0,end:5}));
-  await editor.update(record=>store.settle(record,{status:'complete',receipt:'done'}));
+  await editor.settle(editor.record,{status:'complete',receipt:'done'});
   assert.equal(editor.text,' retained text');pane.input.value=editor.text;
   await assert.rejects(pane.selectCommand(plan),/input changed/);
   assert.equal((await store.get('main','session')).text,' retained text');

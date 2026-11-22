@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {DraftStore,validateEditor} from '../drafts.js';
 
-test('fallback blank saves after a transient read failure without overwriting a concurrent draft', async () => {
+test('first saves after a failed read share only the same Header', async () => {
   const store = new DraftStore(undefined, 'a'.repeat(32), 'local');
   await assert.rejects(store.ensure('main','session','b'.repeat(64)), /unavailable/);
   const blank = store.blank('main','session','b'.repeat(64));
@@ -11,8 +11,9 @@ test('fallback blank saves after a transient read failure without overwriting a 
   const saved = await store.edit(blank,'Recovered input',[]);
   assert.equal(saved.text,'Recovered input');
   const concurrent = store.blank('main','session','b'.repeat(64));
-  await assert.rejects(store.edit(concurrent,'Overwrite',[]), /another editor/);
-  assert.equal(persisted.text,'Recovered input');
+  assert.equal((await store.edit(concurrent,'Later edit',[])).incarnation,saved.incarnation);
+  await assert.rejects(store.edit(store.blank('main','session','c'.repeat(64)),'Other Header',[]), /another editor/);
+  assert.equal(persisted.text,'Later edit');
 });
 test('unavailable storage preserves a usable blank editor and explains failed operations', async () => {
   const store = new DraftStore(undefined, 'a'.repeat(32), 'local');

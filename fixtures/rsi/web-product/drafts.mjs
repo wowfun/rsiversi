@@ -20,10 +20,8 @@ export async function verifyDrafts(browser, root) {
     });
     await other.evaluate(async () => { window.stale = await store.get("main", "first"); });
     await page.evaluate(async () => { record = await store.edit(record, "new saved text", []); });
-    assert.equal(await other.evaluate(async () => {
-      try { await store.edit(stale, "stale overwrite", []); return "overwritten"; }
-      catch (error) { return error.code; }
-    }), "conflict");
+    await other.evaluate(() => store.edit(stale, "last window edit", []));
+    assert.equal(await page.evaluate(async () => (await store.get("main","first")).text), "last window edit");
     const outcomes = await page.evaluate(async () => {
       const captured = record;
       // A u64 larger than JS's safe integer stays an opaque Rust string.
@@ -44,7 +42,7 @@ export async function verifyDrafts(browser, root) {
       if (committed.pending.phase !== "dispatching") throw new Error("begin resolved before commit");
       const editor = new DraftEditor(store, dispatched);
       editor.edit("typed during execution"); await editor.flush();
-      await editor.update(() => store.settle(dispatched, { status: "complete" }));
+      await editor.settle(dispatched, {status:"complete"});
       window.record = editor.record;
       return { text: editor.text, pending: editor.record.pending, opaque: dispatched.pending.opaque,
         hasReceipt: Object.hasOwn(await store.get("main","first"),"receipt") };

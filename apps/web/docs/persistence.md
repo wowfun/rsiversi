@@ -40,17 +40,16 @@ copies and fences older writers. Other schemas are refused without rewriting
 their records, ledgers or version. Refusal explains that the saved drafts remain on this device;
 validation failures during asynchronous upgrade reads retain their specific reason
 and abort the whole upgrade, including earlier cursor updates. Explicit discard
-permanently deletes them. A blank editor created after a failed
-read has the same first-save ownership as one created after an empty read, and
-still refuses to overwrite a concurrently persisted record. Rust still
+permanently deletes them. After a failed read, the window retains its input
+and exposes recovery. Rust
 checks every pending operation and immutable Header binding before reconciliation.
 The origin-wide allowance is: 128 records, 4 MiB
 editable text, 4 MiB pending text and 32 MiB opaque pending requests. Creating
 another surface or connecting another principal does not increase that allowance.
 Opening a Session reads its record without creating an empty durable draft. A
 blank editor is materialized atomically on its first edit, freeze or cleanup
-obligation. Concurrent first writes use the same incarnation conflict rules as
-existing drafts. When admitting a record at the count limit, the same transaction
+obligation. Concurrent first edits for the same Header share the record
+created by the first writer. When admitting a record at the count limit, the same transaction
 reclaims empty dispatched records in the current endpoint/principal namespace.
 It never removes unsent Fresh intent, pending requests, references or cleanup
 obligations. A stale editor still fails its incarnation check and keeps local
@@ -138,9 +137,12 @@ warns that pending requests may already have run, and does not undo execution.
 Opening storage verifies records and aggregate counters in one bounded read
 transaction; malformed or inconsistent storage fails closed without rewriting it.
 
-Edits use incarnation/revision CAS. Conflicts keep the bounded local editor and
-block sending until the user chooses the saved editor or explicitly replaces only
-saved text/images. Neither choice alters the frozen request. Empty records can be
+Each window keeps its own Session editor. The latest committed edit supplies
+the text, images and conversation references restored by a newly opened window.
+Saving replaces those editable fields in the latest record. An established
+editor cannot recreate a deleted record, change a replacement Header or restore a
+capture retired by a peer. Frozen requests retain their identity and independent
+revision across edits. Empty records can be
 removed only with matching revisions and no pending request. Storage failures keep
 local input with an explicit unsaved notice; failed pending persistence blocks
 execution. There is no cross-tab execution lease or automatic owner takeover.
@@ -163,6 +165,9 @@ NotFound. Commands remain query-only after dispatch, including absent receipts.
 A lost bridge response is unknown. Definitive pre-admission rejection returns to
 prepared; settlement clears only the matching pending incarnation and identity,
 and clears editable input only if its captured edit revision still matches.
+The submitting window consumes its own captured input. A later save in another
+window keeps its place as the restored draft. Reading pending or cleanup metadata
+leaves the current window's visible input alone.
 The composer shows an unconfirmed message beside its recovery actions. Delivery
 details expose the saved identity and the current failure, and disappear when
 the message is confirmed. The failure text stays with the current editor.
