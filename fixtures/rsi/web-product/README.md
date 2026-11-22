@@ -652,6 +652,7 @@ UI transition. Chromium reports the failed download directly.
 Worker, Host and a deterministic provider. With explicit `RSI_WEB_REPORT` and
 the paired publication selected as above, it checks literal plan rendering, three explicit choices,
 feedback, narrow containment, the next provider request after atomic approval,
+the warning and retained image on an invalid exit in fresh and saved conversations,
 and the exact Plan input when quoting part of the resulting reply directly
 or selecting a verified range from another conversation's history
 in Chromium and Firefox. It retains the executable hash, screenshots and exact

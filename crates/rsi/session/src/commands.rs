@@ -524,7 +524,12 @@ fn draft_error(error: DraftCommandError) -> SessionError {
         }
         DraftCommandError::Capacity => SessionError::Capacity,
         other => {
-            let mut message = other.to_string();
+            let mut message = match other {
+                DraftCommandError::Contribution(
+                    rsi_agent_composition_protocol::ContributionError::Invalid(message),
+                ) => message,
+                other => other.to_string(),
+            };
             let mut end = message.len().min(4096);
             while !message.is_char_boundary(end) {
                 end -= 1;

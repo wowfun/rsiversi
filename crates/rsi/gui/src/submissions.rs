@@ -759,10 +759,10 @@ impl GuiApplication {
                     attached.controller.reconcile_command(invocation).await
                 };
                 if mode == Mode::Dispatch
-                    && let Err(reason @ SessionError::Invalid(_)) = &result
+                    && let Err(SessionError::Invalid(reason)) = &result
                 {
                     return Settlement::Rejected {
-                        error: error(reason),
+                        error: reason.clone(),
                     };
                 }
                 result.map(|receipt| {

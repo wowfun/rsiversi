@@ -39,7 +39,9 @@ export function observable<T>(initial: T) {
   return { getSnapshot: () => value, subscribe(fn: () => void) { listeners.add(fn); return () => {listeners.delete(fn)} }, set(next: T) { if (Object.is(value, next)) return; value = next; for (const fn of listeners) fn() } }
 }
 export const source = observable<View | undefined>(undefined)
-export const notices = observable({transient: '', storage: ''})
+type CommandWarning = {id: string; text: string; anchor: HTMLElement}
+export const notices = observable<{transient:string; storage:string; warning?:CommandWarning}>({transient:'',storage:''})
+export const setCommandWarning = (warning?: CommandWarning) => notices.set({...notices.getSnapshot(), warning})
 export const setNotice = (message: string) => notices.set(updateNotice(notices.getSnapshot(), 'transient', message))
 export const setStorageNotice = (message: string) => notices.set(updateNotice(notices.getSnapshot(), 'storage', message))
 export const selection = observable('main')

@@ -356,11 +356,11 @@ impl AgentKernel {
             .execute(&context, &invocation.arguments, cancellation)
             .await
             .map_err(|error| {
-                TurnError::Invalid(format!(
-                    "command {}: {}",
-                    invocation.command,
-                    bounded_diagnostic(&error.to_string())
-                ))
+                let message = match error {
+                    rsi_agent_composition_protocol::ContributionError::Invalid(message) => message,
+                    other => format!("command {}: {other}", invocation.command),
+                };
+                TurnError::Invalid(bounded_diagnostic(&message))
             })?;
         self.stage_command_output(session, invocation, authorization, output, outcome)
             .await

@@ -524,6 +524,10 @@ Selecting visible text within one user message or a settled assistant reply or r
 conversation. It inserts the selected excerpt at the end of the composer's current
 selection. The draft and the submitted command carry a Markdown blockquote, with
 `> ` before each line. Quoting a selection reads only the visible message text.
+
+When the Host rejects the submitted command arguments, the composer keeps its
+editable contents and shows the reason in a warning toast above the conversation.
+The toast uses the same hold and fade as other transient workbench feedback.
 Selecting a Skill in slash completion places the caret after the separator,
 ready for its arguments. Existing arguments and whitespace remain in the draft.
 A menu capture is consumed by one selection attempt; later explicit selections

@@ -17,7 +17,7 @@ import { downloadSession } from "../../session-export.js";
 import { DocumentConnection } from "../../document-connection.js";
 import {installDisclosures} from '../../disclosure.js';
 import { StartingDraft } from "../../starting-draft.js";
-import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice } from "../bridge.ts";
+import { settingsPanel, publish, installActions, selectSurface,connectionStatus,setNotice,setStorageNotice,setCommandWarning } from "../bridge.ts";
 import { createDocumentTransport } from "../native.ts";
 import { isDesktop, desktopCall } from "../../desktop-bridge.js";
 import { MountTable, writeClipboard, setClipboardWriter } from "/mounts.js";
@@ -219,7 +219,7 @@ const disconnectDocument=closer.disconnectDocument;
 listen(window, "rsi-native-close", event => { if (!nativeDocument || !Number.isSafeInteger(event.detail)) return; closer.attempt = event.detail; perform(disconnectDocument); });
 if(nativeDocument)setClipboardWriter(text=>nativeCall({kind:"clipboard",text}));
 
-const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, location, notify, perform, previews, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
+const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftEditor, DraftStore, TranscriptVisibility, boundCall, call, command, completionToken, get connection() {return connection}, downloadSession, location, notify, setCommandWarning, perform, previews, referenceInterval, referenceOrigin, get rendererSlots() {return rendererSlots}, select, get view() {return view}});
 const panes = new Map();
 listen(window, "rsi:detail-mode",()=>{for(const pane of panes.values())if(pane.lastTranscript)pane.renderTranscript(pane.lastTranscript,false);});
 const ExternalPane = externalPaneClass({command,perform});

@@ -11,6 +11,7 @@ import {join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
 import {startService} from './service.mjs';
 import {assertNoNotices} from './task-checks.mjs';
+import {png} from './png.mjs';
 const report=process.env.RSI_WEB_REPORT,assets=process.env.RSI_WEB_ASSETS;
 assert(report && assets,'explicit report and built assets required');
 await mkdir(report,{recursive:false});
@@ -18,6 +19,27 @@ const binary=process.env.RSI_WEB_BINARY;
 await writeFile(join(report,'binary.json'),JSON.stringify({sha256:paired.sha256}));
 const results=[];
 const historyTask = 'Consider\n\n> SETTLED';
+
+async function rejectAttachedExit(page, pane, screenshot) {
+  await pane.locator('input[type=file]').setInputFiles({name:'plan.png', mimeType:'image/png', buffer:png(24,18,[36,147,196,255])});
+  const remove = pane.getByRole('button',{name:'Remove image',exact:true});
+  await remove.waitFor();
+  const input = pane.getByRole('textbox',{name:/Main (message|command arguments)/});
+  await input.fill('/plan off');
+  await pane.getByTestId('composer-send').click();
+  const message = 'Attachments cannot accompany /plan off.';
+  const toast = page.getByRole('alert').filter({hasText:message});
+  await toast.waitFor();
+  assert.equal(await toast.innerText(),message);
+  assert.equal(await toast.evaluate(node=>getComputedStyle(node).position),'fixed');
+  assert.equal(await input.inputValue(),'/plan off');
+  assert(await input.isEditable());
+  assert(await pane.getByRole('button',{name:'Plan mode on, press to turn off',exact:true}).isVisible());
+  await toast.evaluate(node => Promise.all(node.getAnimations()
+    .filter(animation => animation.effect.getTiming().delay === 0).map(animation => animation.finished)));
+  await page.screenshot({path:screenshot});
+  await remove.click();
+}
 
 async function submitHistoryExcerpt(page, pane) {
   const source = await pane.getAttribute('data-session-id');
@@ -80,6 +102,8 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await input.fill('/plan');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
     const planChip=pane.getByRole('button',{name:'Plan mode on, press to turn off',exact:true});
     await planChip.waitFor();
+    await rejectAttachedExit(page, pane, join(path,'plan-warning-fresh.png'));
+    await pane.getByRole('textbox',{name:/Main (message|command arguments)/}).fill('');
     assert.equal(await input.getAttribute('placeholder'),'describe your task to generate plan');
     assert.equal(await planChip.evaluate(button=>button.getBoundingClientRect().height),28);
     const visibleGlyph=()=>planChip.locator('svg:visible use').evaluate(use=>use.getBBox().width);
@@ -140,10 +164,11 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await pane.getByText('REVIEW_SETTLED',{exact:true}).nth(1).waitFor();
     const quoted = requests.at(-1).messages.filter(message => message.role === 'user').at(-1).content;
     assert.deepEqual(typeof quoted === 'string' ? quoted : quoted.map(part=>part.text).join(''), '> SETTLED');
+    await rejectAttachedExit(page, pane, join(path,'plan-warning-saved.png'));
     await submitHistoryExcerpt(page, pane);
     assert.equal(requests.length,5);
     assert.deepEqual(errors,[]);
-    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,quoted_plan_input:true,selected_history_task:true,ok:true});
+    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,quoted_plan_input:true,selected_history_task:true,attached_exit_warning_fresh_and_saved:true,ok:true});
     await writeFile(join(path,'requests.json'),JSON.stringify(requests,null,2));
   }catch(error){if(page)await page.screenshot({path:join(path,'failure.png')}).catch(()=>{});results.push({browser:name,ok:false,error:String(error),page_errors:errors});throw error;}
   finally {await cleanupAll(() => browser?.close(), () => service?.close(), () => new Promise(resolve=>provider.close(resolve)), () => writeFile(join(report,'results.json'),JSON.stringify(results,null,2)));}

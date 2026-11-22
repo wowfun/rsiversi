@@ -169,6 +169,10 @@ export async function executePending(
   if (result.status === "complete" && pane.editor === editor && !editor.text)
     pane.closeCompletions();
   if (result.notice) context.notify(result.notice);
+  if (result.status === "rejected" && expected.pending.kind === "command") {
+    context.setCommandWarning({id: expected.pending.id, text: result.error, anchor: pane.node});
+    return;
+  }
   if (result.status !== "complete")
     throw new Error(
       result.error ?? "The original submission still needs confirmation",
