@@ -116,7 +116,7 @@ async fn daemon_join_failure_drains_reload_diagnostics_and_presets_before_return
 
 #[cfg(any(target_os = "linux", windows))]
 #[test]
-fn service_host_diagnostics_format_has_stable_explicit_fields() {
+fn service_host_diagnostics_include_activity_and_nonzero_anomalies() {
     let formatted = format_service_host_diagnostics(
         ServiceHostDiagnosticsSnapshot {
             accepted_connections: 2,
@@ -131,7 +131,7 @@ fn service_host_diagnostics_format_has_stable_explicit_fields() {
 
     assert_eq!(
         formatted,
-        "Service Host diagnostics final=true accepted_connections=2 accept_errors=0 peer_credential_errors=0 foreign_uid_rejections=0 capacity_rejections=0 service_failures=0 api_rejected_requests=1 api_failed_requests=0 api_connection_failures=0 api_tls_failures=0 connection_task_panics=0 drain_aborted_connections=0"
+        "Service Host diagnostics final=true accepted_connections=2 api_rejected_requests=1"
     );
 }
 

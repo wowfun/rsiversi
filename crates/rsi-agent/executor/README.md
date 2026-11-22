@@ -245,7 +245,8 @@ later failures. It is process-generation evidence, not durable health state.
 Queue depth and in-flight fields sample the scheduler at admission or maintenance
 completion (at interruption, the last sample); they are not a live activity gauge.
 Structured stderr summaries are event-triggered at most once per 30 seconds,
-with an immediate transition into degradation and a final writer summary.
+with an immediate transition into degradation. A writer that observed at least
+one checkpoint event emits a final summary on shutdown.
 Scheduling and routine declines do not change health; a successful write or
 recovery rearms the degradation edge. A rebuild alone does not clear a failed
 write. Each line is at

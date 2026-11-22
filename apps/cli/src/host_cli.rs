@@ -378,21 +378,29 @@ pub(super) fn format_service_host_diagnostics(
     delta: ServiceHostDiagnosticsSnapshot,
     final_delta: bool,
 ) -> String {
-    format!(
-        "Service Host diagnostics final={final_delta} accepted_connections={} accept_errors={} peer_credential_errors={} foreign_uid_rejections={} capacity_rejections={} service_failures={} api_rejected_requests={} api_failed_requests={} api_connection_failures={} api_tls_failures={} connection_task_panics={} drain_aborted_connections={}",
-        delta.accepted_connections,
-        delta.accept_errors,
-        delta.peer_credential_errors,
-        delta.foreign_uid_rejections,
-        delta.capacity_rejections,
-        delta.service_failures,
-        delta.api.rejected_requests,
-        delta.api.failed_requests,
-        delta.api.connection_failures,
-        delta.api.tls_failures,
-        delta.connection_task_panics,
-        delta.drain_aborted_connections,
-    )
+    use std::fmt::Write as _;
+    let mut line = format!(
+        "Service Host diagnostics final={final_delta} accepted_connections={}",
+        delta.accepted_connections
+    );
+    for (name, count) in [
+        ("accept_errors", delta.accept_errors),
+        ("peer_credential_errors", delta.peer_credential_errors),
+        ("foreign_uid_rejections", delta.foreign_uid_rejections),
+        ("capacity_rejections", delta.capacity_rejections),
+        ("service_failures", delta.service_failures),
+        ("api_rejected_requests", delta.api.rejected_requests),
+        ("api_failed_requests", delta.api.failed_requests),
+        ("api_connection_failures", delta.api.connection_failures),
+        ("api_tls_failures", delta.api.tls_failures),
+        ("connection_task_panics", delta.connection_task_panics),
+        ("drain_aborted_connections", delta.drain_aborted_connections),
+    ] {
+        if count != 0 {
+            let _ = write!(line, " {name}={count}");
+        }
+    }
+    line
 }
 
 #[cfg(any(target_os = "linux", windows))]

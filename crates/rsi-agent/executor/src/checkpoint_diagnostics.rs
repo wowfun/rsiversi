@@ -155,14 +155,16 @@ impl Diagnostics {
         let _ = std::io::stderr().lock().write_all(line);
     }
     pub fn finish(&self) {
-        let line = Self::line(
-            &mut self
+        let line = {
+            let mut state = self
                 .0
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            Instant::now(),
-            true,
-        );
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.recent.is_none() {
+                return;
+            }
+            Self::line(&mut state, Instant::now(), true)
+        };
         Self::write(&line);
     }
     #[cfg(test)]

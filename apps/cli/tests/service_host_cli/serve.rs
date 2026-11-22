@@ -30,9 +30,13 @@ async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_di
             .unwrap();
         // Final diagnostics report the delta since the periodic tick. A healthy
         // connection can already belong to an earlier, unlogged zero-anomaly tick.
-        assert!(line.contains("accept_errors=0"), "{line}");
-        assert!(line.contains("connection_task_panics=0"), "{line}");
+        assert!(!line.contains("accept_errors="), "{line}");
+        assert!(!line.contains("connection_task_panics="), "{line}");
     }
+    assert!(
+        !stderr.contains(r#""event":"executor_checkpoint""#),
+        "{stderr}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
