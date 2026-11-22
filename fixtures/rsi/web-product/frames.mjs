@@ -26,6 +26,7 @@ export async function verifyFrameDom(page, report, browser) {
     await present({kind:'snapshot',frame_id:'105',view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}});
     const replaced=second!==message('main',1);
     replacement.active='displayed-turn';
+    replacement.can_stop_work=true;
     await present({kind:'snapshot',frame_id:'106',view:{...snapshot,surfaces:{main:replacement,compare:pane(1)}}});
     const acknowledgedStop=structuredClone(panes.get('main').stopBinding);
     const connection=runtime.connection,originalRender=connection.render.bind(connection);let release,entered;

@@ -1062,7 +1062,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       );
       assert.equal(
         await page.locator(".turn-summary").getAttribute("aria-expanded"),
-        "true",
+        null,
       );
       await page.evaluate(() => {
         const select = document.querySelector('[aria-label="Detail level"]');
@@ -1119,8 +1119,8 @@ export async function verifyFrameCommit(browser, url, report, name) {
           text: "Draft remains stable",
         },
       );
-      await page.setViewportSize({width:800,height:900});
-      await page.getByRole('button',{name:'Expand navigation',exact:true}).click();
+      await page.setViewportSize({width:390,height:844});
+      await page.getByRole('button',{name:'Toggle navigation',exact:true}).click();
       const drawer=page.getByRole('dialog',{name:'Workspace navigation',exact:true});
       await drawer.getByRole('button',{name:'Collapse navigation',exact:true}).click();
       await drawer.waitFor({state:'hidden'});
