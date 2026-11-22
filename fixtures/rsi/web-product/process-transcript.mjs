@@ -208,7 +208,15 @@ try {
     return node===document.querySelector('.message.reasoning');
    });
    assert(nodeRetained);assert.equal(await titles.first().getAttribute('aria-expanded'),'true');
-   await titles.first().press('Enter');assert.equal(await rows.first().locator('.message-text').isVisible(),false);
+   for(const [index,open] of [[0,false],[1,true],[1,false]]) {
+     const title=titles.nth(index);
+     await title.focus();
+     await page.keyboard.down('Space');
+     assert.equal(await title.getAttribute('aria-expanded'),String(open),'Space changes the body on keydown');
+     assert.equal(await rows.nth(index).locator('.message-text').isVisible(),open);
+     await page.keyboard.up('Space');
+     assert.equal(await title.getAttribute('aria-expanded'),String(open),'Space release keeps the chosen state');
+   }
    const more=page.getByLabel('More',{exact:true});await more.press('Enter');
    await page.getByRole('button',{name:'Settings',exact:true}).waitFor();
    await page.screenshot({path:join(report,name+'-more.png')});

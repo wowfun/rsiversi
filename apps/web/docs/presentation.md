@@ -456,6 +456,8 @@ and a single-line preview. Tool names, argument previews and failure badges come
 from the typed Tool state; raw arguments and output remain in the expanded body.
 Closed process rows retain their disclosure and exact source binding. Their
 full text, Markdown and inspection controls mount when the body is opened.
+Pressing Enter or Space on a focused Think or tool heading toggles its body
+on keydown. Releasing the key keeps the resulting state.
 While reasoning streams, the collapsed Think row previews the first complete
 line of the latest paragraph. At settlement it previews the first line when
 the selected detail mode shows reasoning previews. Opening the body removes

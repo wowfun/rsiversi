@@ -35,7 +35,13 @@ export function ProcessTitle({block, open, flat, preview:showPreview, running, t
     : typeof phase === 'object' && phase.settled !== 'completed' ? 'Failed' : '';
   const Title = flat ? 'div' : 'button';
   return <Title type={flat ? undefined : 'button'} className="message-title summary-toggle" aria-expanded={flat ? undefined : open}
-    title={block.title} onClick={flat ? undefined : toggle}>
+    title={block.title} onClick={flat ? undefined : toggle}
+    onKeyDown={flat ? undefined : event => {
+      if (event.key === ' ') {
+        event.preventDefault();
+        toggle();
+      }
+    }}>
     <span className="process-leading" aria-hidden="true"><Icon size={14}/>{!flat && <IconChevronRightOutlineRegular className="process-chevron" size={14}/>}</span>
     <span className="process-label">{label}</span>
     {!!preview && (reasoning || showPreview) && <><span className="process-separator" aria-hidden="true"/><span className="process-preview">{preview}</span></>}
