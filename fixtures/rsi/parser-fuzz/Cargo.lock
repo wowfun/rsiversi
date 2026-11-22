@@ -1137,6 +1137,7 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-execution",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-meta-scope",
@@ -1199,6 +1200,7 @@ dependencies = [
  "base64",
  "futures-util",
  "rsi-agent-composition-protocol",
+ "rsi-agent-context",
  "rsi-agent-session-protocol",
  "rsi-ai-protocol",
  "rsi-api-protocol",
@@ -1356,6 +1358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "tokio-util",
 ]
 
@@ -1486,6 +1489,7 @@ dependencies = [
  "rsi-spill",
  "serde",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

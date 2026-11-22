@@ -1,4 +1,4 @@
-export type ComposerCommandInput = {kind:'none'} | {kind:'text';hint:string};
+export type ComposerCommandInput = {kind:'none'} | {kind:'text';hint:string;attachments?:boolean};
 export interface ComposerCommand {name:string; composer_input:ComposerCommandInput|null; description?:string; draft_safe?:boolean}
 export interface CompletionEntry {
   name: string;

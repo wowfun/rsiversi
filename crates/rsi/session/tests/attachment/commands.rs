@@ -178,6 +178,7 @@ impl Fixture {
                             "Toggle draft state",
                             true,
                             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                                attachments: false,
                                 hint: "Arguments".into(),
                             }),
                         )

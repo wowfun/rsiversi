@@ -41,6 +41,13 @@ extends this owner with a second domain and an atomic human decision.
 
 ## Consequences
 
+Plan accepts files and images through the same attachment readers used for
+held context. A command that consumes a passage selected from saved history
+resolves it through the receiving Session before freezing the request. This
+retains the source owner's access check and gives retries the exact quotation
+originally submitted. Only direct human messages retain structured reference
+identity in history.
+
 The plugin is removable or configurable by an Agent preset; it owns no global
 registry, Store writer or UI state. Changing a preset's domain catalog still uses
 strict cold-generation support checks, without a compatibility shim. Tests use a

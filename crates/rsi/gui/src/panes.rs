@@ -791,7 +791,7 @@ impl GuiApplication {
                         .map_err(error)?;
                     entries.push(rsi_client::InputCompletion {
                         group: rsi_client::CompletionGroup::Command,
-                        composer_input: Some(rsi_agent_session_protocol::ComposerCommandInput::Text { hint: "Filename and export options".into() }),
+                        composer_input: Some(rsi_agent_session_protocol::ComposerCommandInput::Text { attachments: false, hint: "Filename and export options".into() }),
                         name: "export".into(), replacement: "/export".into(),
                         description: "Export Session: [filename] [-f markdown|md|json] [-i h,m,r,pie,lpr,last-provider-response]".into(),
                         resource: None,

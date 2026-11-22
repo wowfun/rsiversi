@@ -18,6 +18,7 @@ pub(super) fn registration(
         "Original Plan",
         true,
         Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            attachments: false,
             hint: "Arguments".into(),
         }),
     )

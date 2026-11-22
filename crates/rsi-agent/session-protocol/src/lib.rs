@@ -28,13 +28,13 @@ pub use step_input::{
     InputClaimRef, MAXIMUM_PREPARED_INPUT_BYTES, PreparedInput, PreparedInputMessage,
     PreparedInputRole, StepInputDecision,
 };
-mod history;
 mod feedback;
+mod history;
+pub use application_tools::{ApplicationToolBinding, ApplicationToolView};
 pub use feedback::{
     FeedbackCategory, FeedbackDecision, FeedbackNote, FeedbackRating, MessageFeedback,
     MessageFeedbackChange, MessageFeedbackOutcome, SavedMessageFeedback,
 };
-pub use application_tools::{ApplicationToolBinding, ApplicationToolView};
 use history::SessionOrigin;
 pub use history::{ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
 mod model_attempt;
@@ -81,10 +81,11 @@ pub use contribution::{
 };
 mod command;
 pub use command::{
-    CommandArguments, CommandMessage, CommandMessageSource, CommandOutcome, CommandRevision,
-    ComposerCommandInput, MAXIMUM_COMMAND_ARGUMENT_BYTES, MAXIMUM_COMMAND_INPUT_BYTES,
-    MAXIMUM_COMMAND_INPUTS, MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor,
-    SessionCommandInvocation, SessionCommandReceipt, SessionCommandsView,
+    AttachedCommandArguments, CommandArguments, CommandAttachment, CommandMessage,
+    CommandMessageSource, CommandOutcome, CommandRevision, ComposerCommandInput,
+    MAXIMUM_COMMAND_ARGUMENT_BYTES, MAXIMUM_COMMAND_INPUT_BYTES, MAXIMUM_COMMAND_INPUTS,
+    MAXIMUM_SESSION_COMMANDS, SessionCommandDescriptor, SessionCommandInvocation,
+    SessionCommandReceipt, SessionCommandsView,
 };
 mod domain;
 mod generation;

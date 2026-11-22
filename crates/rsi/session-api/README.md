@@ -178,6 +178,9 @@ and direct image submission. Workflow outcome uncertainty belongs only to
 cancellation; clients reject these failures on unrelated operations.
 
 Command discovery, execution and receipt lookup use authenticated Data operations.
+The command catalog identifies text commands that accept file and image
+arguments. Clients freeze the selected contribution and its ordered attachments
+in the same invocation.
 The adapter validates the request identity, command identity and complete invocation
 digest on execution replies; uncertain or mismatched mutation replies preserve the
 original request identity as `CommandOutcomeUnknown`. Lookup validates its exact

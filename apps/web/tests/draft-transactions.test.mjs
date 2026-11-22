@@ -18,6 +18,16 @@ test('primary key prefix returns only this endpoint, principal and pane in Sessi
   assert.deepEqual((await local.list('main')).rows.map(record=>record.text),['abc','工作']);
 });
 
+test('definitive command rejection releases the intent and preserves its editable draft', async () => {
+  const store = await open();
+  const draft = await store.edit(await store.ensure('main','session',header),'/plan off',[]);
+  const frozen = await store.startDispatch(draft,{kind:'command',id:'invalid',opaque:'original',text_bytes:0,images:0,captures:[]});
+  const saved = await store.settle(frozen,{status:'rejected',error:'Attachments cannot accompany /plan off.'});
+  assert.equal(saved.pending,null);
+  assert.equal(saved.text,'/plan off');
+  assert.equal((await store.edit(saved,'/plan describe',[])).text,'/plan describe');
+});
+
 test('editing charges UTF-8 bytes and keeps the original frozen request and its caller-owned record', async () => {
   const store = await open();
   const opaque = 'request 中文 \ud800';

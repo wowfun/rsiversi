@@ -486,7 +486,7 @@ export class DraftStore {
         consumed = consumeSubmittedInput(saved, saved.pending);
         saved.pending = null;
       } else if (settlement.status === "rejected") {
-        require(saved.pending.kind === "queue", "Only a queue conflict can retire a rejected intent");
+        require(saved.pending.kind === "queue" || saved.pending.kind === "command", "Expected a rejected command or queue intent");
         saved.pending = null;
       } else { saved.pending.phase = observedPhase; }
       saved.pendingRevision = bump(saved.pendingRevision);

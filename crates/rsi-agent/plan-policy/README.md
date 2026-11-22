@@ -20,7 +20,10 @@ approval or sandbox constraints.
 
 Bare `/plan` enables the mode, including when it is already enabled. The exact
 trimmed argument `off` disables it. Every other nonempty argument is a user
-task. The command publishes that text once together with the enabled state.
+task. The command accepts ordered image and file attachments, including an
+attachment-only task. It publishes the verified attachments followed by any
+task text, once together with the enabled state. An attached `off` is rejected
+before the mode changes.
 It steers a running conversation or starts work in an idle or new one. Before each model
 retry series, the plugin supplies the current mode through the existing
 [`StepPrepared` instruction slot](../context/README.md). Each preparation replaces

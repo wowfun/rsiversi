@@ -214,6 +214,43 @@ impl SessionCommandInvocation {
     }
 }
 
+/// Arguments emitted when a text command accepts attached objects.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachedCommandArguments<'a> {
+    /// Text following the command token.
+    pub text: &'a str,
+    /// Ordered external objects accompanying the text.
+    pub attachments: Vec<CommandAttachment>,
+}
+
+/// A command can receive a file or image, with the same object identity as direct input.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommandAttachment {
+    /// Imported raster image.
+    Image {
+        /// Canonical Media object.
+        media: rsi_media_protocol::MediaRef,
+    },
+    /// Verbatim file.
+    File {
+        /// Canonical file object.
+        file: rsi_media_protocol::FileRef,
+    },
+}
+impl From<CommandAttachment> for crate::AgentMessageContent {
+    fn from(attachment: CommandAttachment) -> Self {
+        match attachment {
+            CommandAttachment::Image { media } => Self::Image {
+                media,
+                presentation: None,
+            },
+            CommandAttachment::File { file } => Self::File { file },
+        }
+    }
+}
+
 /// Composer input declaration, independent of structured execution arguments.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -224,6 +261,9 @@ pub enum ComposerCommandInput {
     Text {
         /// Bounded presentation hint; the command still validates its arguments.
         hint: String,
+        /// Accept ordered file and image blocks alongside the argument text.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        attachments: bool,
     },
 }
 
@@ -260,7 +300,7 @@ impl SessionCommandDescriptor {
             ));
         }
         crate::validate_safe_diagnostic("command description", &description)?;
-        if let Some(ComposerCommandInput::Text { hint }) = &composer_input {
+        if let Some(ComposerCommandInput::Text { hint, .. }) = &composer_input {
             crate::validate_safe_diagnostic("command input hint", hint)?;
             if hint.len() > 256 {
                 return Err(SessionError::Invalid(

@@ -290,6 +290,40 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
         assert_eq!(view(&draft).await["enabled"], expected);
     }
     let before = draft.revision();
+    let image = serde_json::json!({"type":"image","media":{
+        "id":"a".repeat(64),"mime":"image/png","bytes":32,"width":1,"height":1}});
+    for (text, attachments, reason) in [
+        (
+            "off",
+            serde_json::json!([image]),
+            "Attachments cannot accompany /plan off.",
+        ),
+        (
+            "",
+            serde_json::json!([image]),
+            "Image reader is unavailable",
+        ),
+        (
+            "describe",
+            serde_json::json!([{"type":"text","text":"forged attachment"}]),
+            "unknown variant",
+        ),
+    ] {
+        let mut request = invocation(&draft, "invalid-envelope", text);
+        request.arguments =
+            CommandArguments::new(serde_json::json!({"text":text,"attachments":attachments}))
+                .unwrap();
+        let DraftCommandPreparation::Run(prepared) = draft.prepare_command(request).unwrap() else {
+            panic!("new request")
+        };
+        let failure = prepared
+            .execute(CancellationToken::new())
+            .await
+            .err()
+            .expect("invalid attachments");
+        assert!(failure.to_string().contains(reason), "{failure}");
+        assert_eq!(draft.revision(), before);
+    }
     for task in ["on", "toggle", "sketch the layout"] {
         let original = invocation(&draft, "plan-task", &format!(" {task} "));
         let DraftCommandPreparation::Run(prepared) =

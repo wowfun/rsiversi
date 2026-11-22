@@ -95,7 +95,7 @@ async fn cmd(app: &Arc<rsi_gui::GuiApplication>, value: Value) {
 #[tokio::test]
 async fn ordered_images_and_image_only_retry_freeze_complete_content() {
     for resolution in [1, 2] {
-        let (runtime, backend, app) = sources::fixture().await;
+        let (runtime, backend, app, _) = admission::fixture_with(None, true).await;
         let pane = view(&app)["surfaces"]["main"].clone();
         let generation = pane["generation"].as_str().unwrap();
         assert!(
@@ -174,19 +174,25 @@ async fn ordered_images_and_image_only_retry_freeze_complete_content() {
             &app,
             generation,
             "/plan on",
-            vec![first.clone(), third],
+            vec![first.clone(), third.clone()],
             false,
         )
         .await;
+        assert_eq!(next["kind"], "command");
+        assert_eq!(next["images"], 2);
         assert_eq!(
             dispatch(&app, generation, &next, "dispatch").await["status"],
-            "complete"
+            "unknown"
         );
-        assert!(
-            backend.commands.lock().unwrap().is_empty(),
-            "images prevent text-only slash dispatch"
+        assert_eq!(
+            backend.commands.lock().unwrap()[0].arguments.value(),
+            &json!({"text":"on","attachments":[{"type":"image","media":first},{"type":"image","media":third}]})
         );
         assert_eq!(backend.media.objects.lock().unwrap().len(), 3);
+        assert_eq!(
+            prepare(&app, generation, "/unknown task", vec![first.clone()], false).await["kind"],
+            "message"
+        );
         let nine = json!({"pane":"main","generation":generation,"text":"","images":vec![first;9],"steer":false});
         assert!(app.prepare_submission(&nine.to_string()).await.is_err());
         assert!(runtime.shutdown().await.is_clean());

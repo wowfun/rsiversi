@@ -50,42 +50,14 @@ impl SessionCommand for ContextInput {
         }
         let arguments: Arguments = serde::Deserialize::deserialize(arguments.value())
             .map_err(|error| ContributionError::Invalid(error.to_string()))?;
-        let mut files = std::collections::HashSet::new();
-        for block in &arguments.content {
-            if cancellation.is_cancelled() {
-                return Err(ContributionError::Closed);
-            }
-            match block {
-                AgentMessageContent::File { file } if files.insert(file) => self
-                    .0
-                    .lookup_local::<rsi_media_protocol::FileReadContract>()
-                    .ok_or_else(|| {
-                        ContributionError::Invalid("File attachment reader is unavailable".into())
-                    })?
-                    .verify(file)
-                    .await
-                    .map_err(|error| ContributionError::Invalid(error.to_string()))?,
-                AgentMessageContent::Image { media, .. } => {
-                    self.0
-                        .lookup_local::<rsi_media_protocol::MediaContract>()
-                        .ok_or_else(|| {
-                            ContributionError::Invalid("Image reader is unavailable".into())
-                        })?
-                        .read(media)
-                        .await
-                        .map_err(|error| ContributionError::Invalid(error.to_string()))?;
-                }
-                AgentMessageContent::File { .. }
-                | AgentMessageContent::Text { .. }
-                | AgentMessageContent::Reference { .. } => {}
-            }
-        }
+        let input = CommandInput {
+            delivery: MessageDelivery::NextStep,
+            content: arguments.content,
+            attribution: arguments.attribution,
+        };
+        input.verify_attachments(&self.0, &cancellation).await?;
         Ok(SessionCommandOutput {
-            inputs: vec![CommandInput {
-                delivery: MessageDelivery::NextStep,
-                content: arguments.content,
-                attribution: arguments.attribution,
-            }],
+            inputs: vec![input],
             ..SessionCommandOutput::default()
         })
     }

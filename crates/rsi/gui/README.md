@@ -349,6 +349,14 @@ capability. One non-queued upload is admitted per application, at most
 one canonical reference to the captured document record; it is durable independently
 of submission and is never automatically replayed after reply loss.
 
+An entered slash command resolves against the attached Session's catalog even
+when the draft has images. A text command declares whether it accepts attachments.
+Selecting a passage through history adds its exact owner-verified bytes as a
+Markdown blockquote to a text command. Whole-conversation captures remain
+structured human-message inputs. A command that cannot consume the draft
+reports the reason and leaves its contents ready for editing. Unknown command
+names follow ordinary message delivery.
+
 Fresh Sessions created by Web use the staged Agent preset when one was selected.
 Their saved creation intent records the explicit identity, or `agent_preset_id: null`
 when creation used the deployment default. The document validates this producer contract

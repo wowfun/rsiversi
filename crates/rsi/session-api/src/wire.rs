@@ -335,7 +335,8 @@ impl Operation {
             | Self::Projections
             | Self::ScheduledTasks
             | Self::ScheduledTasksObserve => 3,
-            Self::ModelObserve
+            Self::Commands
+            | Self::ModelObserve
             | Self::Purge
             | Self::PurgeStatus
             | Self::CancelWorkflow

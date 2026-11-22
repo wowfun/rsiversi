@@ -149,6 +149,7 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
         "Plan mode",
         true,
         Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            attachments: false,
             hint: "Arguments".into(),
         }),
     )
@@ -159,6 +160,7 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
         "Another plan",
         false,
         Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+            attachments: false,
             hint: "Arguments".into(),
         }),
     )
@@ -180,6 +182,7 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
             "x".repeat(4097),
             true,
             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                attachments: false,
                 hint: "Arguments".into()
             }),
         )
@@ -192,6 +195,7 @@ fn discovery_decode_rejects_duplicate_names_and_unbounded_metadata() {
             "Plan mode",
             true,
             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                attachments: false,
                 hint: "Arguments".into()
             }),
         )
@@ -206,6 +210,11 @@ fn composer_discovery_is_explicit_and_bounds_text_hints() {
         None,
         Some(ComposerCommandInput::None),
         Some(ComposerCommandInput::Text {
+            attachments: true,
+            hint: "Task and attachments".into(),
+        }),
+        Some(ComposerCommandInput::Text {
+            attachments: false,
             hint: "Arguments".into(),
         }),
     ] {
@@ -233,6 +242,7 @@ fn composer_discovery_is_explicit_and_bounds_text_hints() {
             "Command",
             true,
             Some(ComposerCommandInput::Text {
+                attachments: false,
                 hint: "x".repeat(257)
             })
         )

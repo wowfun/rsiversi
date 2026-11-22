@@ -2,8 +2,9 @@ use super::{Attachment, GuiApplication};
 use crate::application::{Result, error};
 use futures_util::future::BoxFuture;
 use rsi_agent_session_protocol::{
-    CommandArguments, DomainRequestId, MessageDelivery, MessageId, SessionCommandInvocation,
-    SessionId,
+    AttachedCommandArguments, CommandArguments, CommandAttachment, ComposerCommandInput,
+    DomainRequestId, FrozenReference, MessageDelivery, MessageId, ReferenceCapture,
+    SessionCommandInvocation, SessionId,
 };
 use rsi_media_protocol::MediaRef;
 use rsi_session_protocol::{SessionError, SessionInput, SubmitInput};
@@ -15,6 +16,79 @@ const MAXIMUM_COMMAND: usize = 32 * 1024;
 
 fn capture_identity(reference: &rsi_agent_session_protocol::FrozenReference) -> serde_json::Value {
     serde_json::json!({"target": reference.metadata.target, "snapshot": reference.snapshot})
+}
+
+async fn composer_command_arguments(
+    attached: &Attachment,
+    descriptor: &rsi_agent_session_protocol::SessionCommandDescriptor,
+    arguments: &str,
+    images: &mut Vec<MediaRef>,
+    references: &[FrozenReference],
+) -> Result<CommandArguments> {
+    if images.is_empty() && references.is_empty() {
+        return CommandArguments::new(arguments.into()).map_err(error);
+    }
+    let Some(ComposerCommandInput::Text { attachments, .. }) = descriptor.composer_input() else {
+        return Err(format!(
+            "/{} does not accept attachments",
+            descriptor.name()
+        ));
+    };
+    if !images.is_empty() && !attachments {
+        return Err(format!(
+            "/{} does not accept attachments",
+            descriptor.name()
+        ));
+    }
+    let mut text = arguments.to_owned();
+    for reference in references {
+        if !matches!(
+            reference.metadata.capture,
+            ReferenceCapture::Selected { .. }
+        ) {
+            return Err("Quote a passage to use it in a command. Whole conversations can be attached to messages.".into());
+        }
+        if text.len().saturating_add(reference.metadata.text_bytes) > MAXIMUM_COMMAND {
+            return Err("Quoted command exceeds 32 KiB".into());
+        }
+        // One validated page covers any excerpt that fits this command's journal envelope.
+        let page = attached
+            .handle
+            .preview_reference(reference.clone(), 0, MAXIMUM_COMMAND)
+            .await
+            .map_err(error)?;
+        if page.has_more {
+            return Err("Quoted command exceeds 32 KiB".into());
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        let normalized = if page.text.contains("\r\n") {
+            page.text.replace("\r\n", "\n")
+        } else {
+            page.text
+        };
+        for (index, line) in normalized.split(['\r', '\n']).enumerate() {
+            if index != 0 {
+                text.push('\n');
+            }
+            text.push_str("> ");
+            text.push_str(line);
+        }
+    }
+    let value = if images.is_empty() {
+        text.into()
+    } else {
+        serde_json::to_value(AttachedCommandArguments {
+            text: &text,
+            attachments: images
+                .drain(..)
+                .map(|media| CommandAttachment::Image { media })
+                .collect(),
+        })
+        .map_err(error)?
+    };
+    CommandArguments::new(value).map_err(error)
 }
 
 #[derive(Deserialize)]
@@ -256,7 +330,7 @@ impl GuiApplication {
             }
             Ok(input)
         })();
-        let input = match input {
+        let mut input = match input {
             Ok(input) => input,
             Err(error) => return Box::pin(async { Err(error) }),
         };
@@ -267,6 +341,7 @@ impl GuiApplication {
             }
 
             let header = attached.handle.header().await.map_err(error)?.fingerprint().map_err(error)?;
+            let image_count = input.images.len();
             let mut command = None;
             if let Some((name, arguments)) = rsi_client::slash_command(&input.text) {
                 if name == "compact" {
@@ -275,12 +350,13 @@ impl GuiApplication {
                     }
                     let id = DomainRequestId::new(rsi_ui::fresh_identity("compact")?).map_err(error)?;
                     command = Some((id.to_string(), Request::Compact { id }));
-                } else if input.images.is_empty() && input.references.is_empty() {
+                } else {
                     let commands = attached.controller.commands().await.map_err(error)?;
-                    if commands.commands().iter().any(|command| command.name() == name) {
+                    if let Some(descriptor) = commands.commands().iter().find(|command| command.name() == name) {
+                        let arguments = composer_command_arguments(&attached, descriptor, arguments, &mut input.images, &input.references).await?;
                         let id = DomainRequestId::new(rsi_ui::fresh_identity("command")?).map_err(error)?;
                         let invocation = rsi_client::command_invocation(&commands, name,
-                            CommandArguments::new(arguments.into()).map_err(error)?, id.clone()).map_err(error)?;
+                            arguments, id.clone()).map_err(error)?;
                         command = Some((id.to_string(), Request::Command { invocation }));
                     }
                 }
@@ -299,7 +375,7 @@ impl GuiApplication {
                 }
                 let mut content = Vec::with_capacity(input.images.len() + 1);
                 if !input.text.is_empty() { content.push(SessionInput::Text { text: input.text.clone() }); }
-                content.extend(input.images.iter().cloned().map(|media| SessionInput::Image { presentation: None, media }));
+                content.extend(input.images.into_iter().map(|media| SessionInput::Image { presentation: None, media }));
                 content.extend(input.references.iter().cloned().map(|reference| SessionInput::Reference { reference: Box::new(reference) }));
                 let id = MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error)?;
                 let request = SubmitInput {
@@ -317,7 +393,7 @@ impl GuiApplication {
             let opaque = serde_json::to_string(&frozen).map_err(error)?;
             if opaque.len() > maximum { return Err("Frozen submission exceeds its encoded limit".into()); }
             serde_json::to_string(&serde_json::json!({ "kind":kind, "id":id, "opaque":opaque,
-                "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":input.images.len(), "captures":input.references.iter().map(capture_identity).collect::<Vec<_>>() })).map_err(error)
+                "text_bytes":if kind == "message" { input.text.len() + input.references.iter().map(|reference| reference.preview.len()).sum::<usize>() } else { 0 }, "images":image_count, "captures":input.references.iter().map(capture_identity).collect::<Vec<_>>() })).map_err(error)
         })
     }
 
@@ -682,6 +758,13 @@ impl GuiApplication {
                 } else {
                     attached.controller.reconcile_command(invocation).await
                 };
+                if mode == Mode::Dispatch
+                    && let Err(reason @ SessionError::Invalid(_)) = &result
+                {
+                    return Settlement::Rejected {
+                        error: error(reason),
+                    };
+                }
                 result.map(|receipt| {
                     if matches!(
                         receipt.outcome(),

@@ -17,6 +17,36 @@ await mkdir(report,{recursive:false});
 const binary=process.env.RSI_WEB_BINARY;
 await writeFile(join(report,'binary.json'),JSON.stringify({sha256:paired.sha256}));
 const results=[];
+const historyTask = 'Consider\n\n> SETTLED';
+
+async function submitHistoryExcerpt(page, pane) {
+  const source = await pane.getAttribute('data-session-id');
+  await page.getByRole('button',{name:'New session',exact:true}).click();
+  const input = pane.getByRole('textbox',{name:/Main (message|command arguments)/});
+  await input.fill('/plan');
+  await pane.getByTestId('composer-send').click();
+  await pane.getByRole('button',{name:'Plan mode on, press to turn off',exact:true}).waitFor();
+  assert.notEqual(await pane.getAttribute('data-session-id'), source);
+  await pane.getByRole('button',{name:'Add files or run commands'}).click();
+  await page.getByRole('option',{name:'Search history',exact:true}).click();
+  const dialog = page.getByRole('dialog',{name:'Search conversation text',exact:true});
+  const query = dialog.getByLabel('History text query');
+  await query.fill('REVIEW_SETTLED');
+  await dialog.getByRole('button',{name:'Search text',exact:true}).click();
+  await dialog.getByRole('button',{name:'Open original',exact:true}).first().click();
+  await dialog.getByLabel('Verified original text').evaluate(input => {
+    const start = input.value.indexOf('REVIEW_SETTLED');
+    if (start < 0) throw new Error('Assistant reply missing from verified history');
+    input.focus();
+    input.setSelectionRange(start+'REVIEW_'.length,start+'REVIEW_SETTLED'.length);
+  });
+  await dialog.getByRole('button',{name:'Freeze selected fragment',exact:true}).click();
+  await dialog.getByRole('button',{name:'Add selected reference to draft',exact:true}).click();
+  await pane.locator('.draft-references').filter({hasText:source}).waitFor();
+  await input.fill('/plan Consider');
+  await pane.getByTestId('composer-send').click();
+  await pane.getByText('REVIEW_SETTLED',{exact:true}).waitFor();
+}
 function response(call) {
   const delta=call?{role:'assistant',tool_calls:[{index:0,id:call.id,type:'function',function:{name:call.name,arguments:JSON.stringify(call.arguments)}}]}:{role:'assistant',content:'REVIEW_SETTLED'};
   return `data: ${JSON.stringify({choices:[{delta,finish_reason:null}]})}\n\ndata: ${JSON.stringify({choices:[{delta:{},finish_reason:call?'tool_calls':'stop'}],usage:{prompt_tokens:20,completion_tokens:10}})}\n\ndata: [DONE]\n\n`;
@@ -29,7 +59,8 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
       const chunks=[];for await(const chunk of req)chunks.push(chunk);const body=JSON.parse(Buffer.concat(chunks));requests.push(body);
       const messages=body.messages;const reviewed=messages.find(m=>m.tool_call_id==='review');
       const saved=messages.find(m=>m.tool_call_id==='save');
-      const call=reviewed?null:saved?{id:'review',name:'request_plan_execution',arguments:{plan_ref:JSON.parse(saved.content).plan_ref}}:{id:'save',name:'plan_write',arguments:{title:'Review exact plan · 中文',body:'Read the isolated source, verify the result, then report.\n\n<em>Literal plan text</em>\nNo external changes.'}};
+      const history = messages.some(m=>m.role==='user' && (m.content===historyTask || Array.isArray(m.content) && m.content.some(b=>b.text===historyTask)));
+      const call=reviewed||history?null:saved?{id:'review',name:'request_plan_execution',arguments:{plan_ref:JSON.parse(saved.content).plan_ref}}:{id:'save',name:'plan_write',arguments:{title:'Review exact plan · 中文',body:'Read the isolated source, verify the result, then report.\n\n<em>Literal plan text</em>\nNo external changes.'}};
       res.writeHead(200,{'content-type':'text/event-stream'});res.end(response(call));
     }catch(error){res.writeHead(500).end(String(error));}
   });
@@ -109,8 +140,10 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await pane.getByText('REVIEW_SETTLED',{exact:true}).nth(1).waitFor();
     const quoted = requests.at(-1).messages.filter(message => message.role === 'user').at(-1).content;
     assert.deepEqual(typeof quoted === 'string' ? quoted : quoted.map(part=>part.text).join(''), '> SETTLED');
+    await submitHistoryExcerpt(page, pane);
+    assert.equal(requests.length,5);
     assert.deepEqual(errors,[]);
-    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,quoted_plan_input:true,ok:true});
+    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,quoted_plan_input:true,selected_history_task:true,ok:true});
     await writeFile(join(path,'requests.json'),JSON.stringify(requests,null,2));
   }catch(error){if(page)await page.screenshot({path:join(path,'failure.png')}).catch(()=>{});results.push({browser:name,ok:false,error:String(error),page_errors:errors});throw error;}
   finally {await cleanupAll(() => browser?.close(), () => service?.close(), () => new Promise(resolve=>provider.close(resolve)), () => writeFile(join(report,'results.json'),JSON.stringify(results,null,2)));}

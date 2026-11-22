@@ -611,6 +611,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
                     "Plan on or off",
                     true,
                     Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        attachments: false,
                         hint: "Arguments".into(),
                     }),
                 )

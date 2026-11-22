@@ -266,6 +266,7 @@ impl Fixture {
             "Toggle the fixture state",
             true,
             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                attachments: false,
                 hint: "Arguments".into(),
             }),
         )
@@ -315,6 +316,7 @@ impl Fixture {
                 "Internal fixture command",
                 false,
                 Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                    attachments: false,
                     hint: "Arguments".into(),
                 }),
             )

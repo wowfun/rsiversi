@@ -164,8 +164,9 @@ Reloaded prepared input may explicitly execute with a fresh CAS claim or
 cancel; dispatching or unknown input first queries its original identity. An
 explicit message retry can resend the exact envelope only after authoritative
 NotFound. Commands remain query-only after dispatch, including absent receipts.
-A lost bridge response is unknown. Definitive pre-admission rejection returns to
-prepared; settlement clears only the matching pending incarnation and identity,
+A lost bridge response is unknown. A command whose arguments the Host definitively
+rejects leaves its draft editable and retires its failed intent. Other definitive
+pre-admission failures return to prepared. Settlement clears only the matching pending incarnation and identity,
 and clears editable input only if its captured edit revision still matches.
 The submitting window consumes its own captured input. A later save in another
 window keeps its place as the restored draft. Reading pending or cleanup metadata

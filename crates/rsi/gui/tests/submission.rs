@@ -364,6 +364,7 @@ impl SessionHandle for Backend {
                     "Plan on or off",
                     true,
                     Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        attachments: true,
                         hint: "Arguments".into(),
                     }),
                 )

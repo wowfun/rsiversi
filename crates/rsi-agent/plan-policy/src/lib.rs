@@ -89,6 +89,7 @@ pub struct PlanPolicyFactory;
 
 #[derive(Debug)]
 struct PlanPolicy {
+    scope: rsi_meta::Context,
     state: DomainHandle<bool>,
     review: DomainHandle<ReviewState>,
     allowed: Vec<String>,
@@ -128,22 +129,38 @@ impl SessionCommand for PlanPolicy {
             return Err(ContributionError::Closed);
         }
         let (view, enabled) = self.current(&context.domains)?;
-        let task = arguments
-            .value()
-            .as_str()
-            .ok_or_else(|| ContributionError::Invalid("usage: /plan [off|message]".into()))?
-            .trim();
+        let value = arguments.value();
+        let (task, attachments) = match value.as_str() {
+            Some(text) => (text.trim(), Vec::new()),
+            None => {
+                let args = rsi_agent_session_protocol::AttachedCommandArguments::deserialize(value)
+                    .map_err(invalid)?;
+                (args.text.trim(), args.attachments)
+            }
+        };
         let enter = task != "off";
+        if !enter && !attachments.is_empty() {
+            return Err(ContributionError::Invalid(
+                "Attachments cannot accompany /plan off.".into(),
+            ));
+        }
         let mut output = rsi_agent_composition_protocol::SessionCommandOutput::default();
-        if enter && !task.is_empty() {
-            output.start_draft = true;
-            output.inputs.push(CommandInput {
-                delivery: MessageDelivery::Steer,
-                content: vec![AgentMessageContent::Text {
+        if enter && (!task.is_empty() || !attachments.is_empty()) {
+            let mut content = Vec::with_capacity(attachments.len() + usize::from(!task.is_empty()));
+            content.extend(attachments.into_iter().map(AgentMessageContent::from));
+            if !task.is_empty() {
+                content.push(AgentMessageContent::Text {
                     text: task.to_owned(),
-                }],
+                });
+            }
+            output.start_draft = true;
+            let input = CommandInput {
+                delivery: MessageDelivery::Steer,
+                content,
                 attribution: None,
-            });
+            };
+            input.verify_attachments(&self.scope, &cancellation).await?;
+            output.inputs.push(input);
         }
         if enabled != enter || output.inputs.is_empty() {
             output
@@ -278,6 +295,7 @@ impl PluginFactory for PlanPolicyFactory {
         .register(plan.local::<DomainRegistrarContract>()?.as_ref(), &context)
         .map_err(|e| MetaError::Activation(e.to_string()))?;
         let callback = Arc::new(PlanPolicy {
+            scope: plan.context().clone(),
             state,
             review,
             allowed: config.allow_tools,
@@ -291,6 +309,7 @@ impl PluginFactory for PlanPolicyFactory {
             "Enter or leave plan mode",
             true,
             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                attachments: true,
                 hint: "[off|message]".into(),
             }),
         )

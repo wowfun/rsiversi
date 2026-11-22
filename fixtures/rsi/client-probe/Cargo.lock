@@ -1318,6 +1318,7 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-execution",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-meta-scope",
@@ -1690,6 +1691,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "tokio-util",
 ]
 
@@ -1785,6 +1787,7 @@ dependencies = [
  "rsi-spill",
  "serde",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1840,6 +1843,7 @@ dependencies = [
 name = "rsi-session-protocol"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "futures-util",
  "hex",
@@ -1854,6 +1858,7 @@ dependencies = [
  "rsi-conversation",
  "rsi-execution",
  "rsi-goal",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-pty-protocol",

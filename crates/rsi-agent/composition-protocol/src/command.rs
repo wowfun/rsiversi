@@ -1,6 +1,6 @@
 //! Effect-free command callbacks frozen in one Agent composition generation.
 
-use crate::{ContributionResult, Publication, ValidatedDomainProposal};
+use crate::{ContributionError, ContributionResult, Publication, ValidatedDomainProposal};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     AgentMessage, AgentMessageContent, AgentMessageSource, CommandArguments, CommandMessage,
@@ -71,6 +71,46 @@ pub struct CommandInput {
     /// Optional original presentation identity and source.
     pub attribution: Option<MessageAttribution>,
 }
+impl CommandInput {
+    /// Verify referenced files and images with the composing Scope before publication.
+    pub async fn verify_attachments(
+        &self,
+        context: &rsi_meta::Context,
+        cancellation: &CancellationToken,
+    ) -> ContributionResult<()> {
+        let mut files = std::collections::HashSet::new();
+        for block in &self.content {
+            if cancellation.is_cancelled() {
+                return Err(ContributionError::Closed);
+            }
+            match block {
+                AgentMessageContent::File { file } if files.insert(file) => context
+                    .lookup_local::<rsi_media_protocol::FileReadContract>()
+                    .ok_or_else(|| {
+                        ContributionError::Invalid("File attachment reader is unavailable".into())
+                    })?
+                    .verify(file)
+                    .await
+                    .map_err(|error| ContributionError::Invalid(error.to_string()))?,
+                AgentMessageContent::Image { media, .. } => {
+                    context
+                        .lookup_local::<rsi_media_protocol::MediaContract>()
+                        .ok_or_else(|| {
+                            ContributionError::Invalid("Image reader is unavailable".into())
+                        })?
+                        .read(media)
+                        .await
+                        .map_err(|error| ContributionError::Invalid(error.to_string()))?;
+                }
+                AgentMessageContent::File { .. }
+                | AgentMessageContent::Text { .. }
+                | AgentMessageContent::Reference { .. } => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Validated immutable input retained through draft or durable publication.
 #[derive(Clone, Debug)]
 pub struct PreparedCommandInput {

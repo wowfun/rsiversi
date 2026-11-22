@@ -957,6 +957,7 @@ async fn concurrent_command_drops_stale_post_tool_batch_without_failing_or_repla
                         "Pause report",
                         true,
                         Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                            attachments: false,
                             hint: "Arguments".into(),
                         }),
                     )
@@ -1245,6 +1246,7 @@ async fn nondispatched_retry_keeps_selection_and_does_not_claim_new_step_input()
                     "Set selection",
                     true,
                     Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
+                        attachments: false,
                         hint: "Arguments".into(),
                     }),
                 )

@@ -902,15 +902,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getopts"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
-dependencies = [
- "unicode-width",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2116,11 +2107,8 @@ dependencies = [
 [[package]]
 name = "pulldown-cmark"
 version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.2",
- "getopts",
  "memchr",
  "pulldown-cmark-escape",
  "unicase",
@@ -2762,6 +2750,7 @@ dependencies = [
  "rsi-ai-protocol",
  "rsi-api-protocol",
  "rsi-execution",
+ "rsi-media-protocol",
  "rsi-meta",
  "rsi-meta-contract",
  "rsi-meta-scope",
@@ -2801,7 +2790,6 @@ dependencies = [
  "async-trait",
  "rsi-agent-composition-protocol",
  "rsi-agent-session-protocol",
- "rsi-media-protocol",
  "rsi-meta",
  "serde",
  "serde_json",
@@ -4175,6 +4163,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "tokio-util",
 ]
 
@@ -4499,6 +4488,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-conversation",
  "rsi-execution",
+ "rsi-jobs",
  "rsi-meta",
  "rsi-navigation-api",
  "rsi-session-protocol",
@@ -4556,6 +4546,7 @@ dependencies = [
  "rsi-spill",
  "serde",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -4761,6 +4752,7 @@ dependencies = [
  "rsi-conversation",
  "rsi-execution",
  "rsi-goal",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-navigation",
@@ -4853,6 +4845,7 @@ dependencies = [
 name = "rsi-session-protocol"
 version = "0.0.1"
 dependencies = [
+ "async-stream",
  "async-trait",
  "futures-util",
  "hex",
@@ -4867,6 +4860,7 @@ dependencies = [
  "rsi-conversation",
  "rsi-execution",
  "rsi-goal",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-pty-protocol",
