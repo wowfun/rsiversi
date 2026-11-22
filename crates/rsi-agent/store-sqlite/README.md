@@ -1,5 +1,9 @@
 # rsi-agent-store-sqlite
 
+Atomic Session appends check retirement once in the writer transaction. One
+indexed Session read supplies both expected-sequence comparisons and the two
+prefix digests. A newly admitted Header starts with the empty stream digests.
+
 Domain reads batch the distinct canonical control positions in one bounded SQL
 query, decoding each control once and retaining only selected snapshots. Both
 current and historical reads preserve domain ordering and reject missing,

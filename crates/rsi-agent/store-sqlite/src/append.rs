@@ -68,29 +68,28 @@ pub(super) fn validate_sqlite_quiescence_guard(
     Ok(None)
 }
 
-#[allow(clippy::too_many_lines)] // The complete per-Session compare-and-append transaction must remain one audit unit.
-pub(super) fn apply_atomic_sqlite_append(
+fn atomic_append_prefixes(
     transaction: &Transaction<'_>,
-    append: AtomicSessionAppend,
-) -> Result<StoreSessionWatermarks> {
-    super::reference_index::available(transaction, &append.session_id)?;
-    let existing = transaction
-        .query_row(
-            "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
-            [append.session_id.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    append: &AtomicSessionAppend,
+    references: &super::reference_index::Writer<'_>,
+) -> Result<([u8; 32], [u8; 32])> {
+    let mut statement = transaction
+        .prepare_cached(
+            "SELECT durable_seq, control_seq, fact_prefix_sha256, control_prefix_sha256
+             FROM sessions WHERE session_id = ?1",
         )
-        .optional()
         .map_err(sql_error)?;
-    let (actual_fact, actual_control) = existing
-        .map(|(fact, control)| {
-            Ok((
-                decode_u64("durable sequence", fact)?,
-                decode_u64("control sequence", control)?,
-            ))
-        })
-        .transpose()?
-        .unwrap_or((0, 0));
+    let mut rows = statement
+        .query([append.session_id.as_str()])
+        .map_err(sql_error)?;
+    let existing = rows.next().map_err(sql_error)?;
+    let (actual_fact, actual_control) = match existing {
+        Some(row) => (
+            decode_u64("durable sequence", row.get(0).map_err(sql_error)?)?,
+            decode_u64("control sequence", row.get(1).map_err(sql_error)?)?,
+        ),
+        None => (0, 0),
+    };
     if actual_fact != append.expected_fact_seq {
         return Err(StoreError::Conflict {
             expected: append.expected_fact_seq,
@@ -104,48 +103,41 @@ pub(super) fn apply_atomic_sqlite_append(
             actual: actual_control,
         });
     }
-    let references = super::reference_index::Writer::new(transaction, &append.session_id)?;
     match (existing, append.header.as_ref()) {
         (None, Some(header)) => {
-            transaction
-                .execute(
-                    "INSERT INTO sessions
-                        (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
-                         control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
-                     VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
-                    params![
-                        append.session_id.as_str(),
-                        sqlite_u64("session creation timestamp", header.created_at_ms())?,
-                        references.header(header)?,
-                        hex::encode(EMPTY_FACT_PREFIX_DIGEST),
-                        hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
-                        super::activity::coordinates_key(header.coordinates())?,
-                    ],
-                )
-                .map_err(sql_error)?;
-            insert_agent_node(transaction, header)?;
+            insert_session(transaction, header, references)?;
+            Ok((EMPTY_FACT_PREFIX_DIGEST, EMPTY_CONTROL_PREFIX_DIGEST))
         }
-        (None, None) => return Err(StoreError::NotFound(append.session_id.to_string())),
-        (Some(_), Some(_)) => {
-            return Err(StoreError::Invalid(
-                "existing session cannot replace its immutable Header".into(),
-            ));
-        }
-        (Some(_), None) => {}
+        (None, None) => Err(StoreError::NotFound(append.session_id.to_string())),
+        (Some(_), Some(_)) => Err(StoreError::Invalid(
+            "existing session cannot replace its immutable Header".into(),
+        )),
+        (Some(row), None) => Ok((
+            decode_sha256(
+                "Fact-prefix digest",
+                super::text::borrowed_text(row, 2, 64).map_err(sql_error)?,
+            )?,
+            decode_sha256(
+                "control-prefix digest",
+                super::text::borrowed_text(row, 3, 64).map_err(sql_error)?,
+            )?,
+        )),
     }
+}
 
-    let mut fact_digest = transaction
-        .query_row(
-            "SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1",
-            [append.session_id.as_str()],
-            |row| bounded_text(row, 0, 64),
-        )
-        .map_err(sql_error)
-        .and_then(|digest| decode_sha256("Fact-prefix digest", &digest))?;
+#[allow(clippy::too_many_lines)] // Publish all affected streams and indexes in the same transaction.
+pub(super) fn apply_atomic_sqlite_append(
+    transaction: &Transaction<'_>,
+    append: AtomicSessionAppend,
+) -> Result<StoreSessionWatermarks> {
+    let references = super::reference_index::Writer::new(transaction, &append.session_id)?;
+    let (mut fact_digest, mut control_digest) =
+        atomic_append_prefixes(transaction, &append, &references)?;
     let suffix = append.fact_suffix()?;
-    let durable_fact_seq = suffix
-        .last()
-        .map_or(actual_fact, rsi_agent_store_protocol::StoreFactAppend::seq);
+    let durable_fact_seq = suffix.last().map_or(
+        append.expected_fact_seq,
+        rsi_agent_store_protocol::StoreFactAppend::seq,
+    );
     let mut resolved_claims = std::collections::BTreeMap::new();
     let mut domain_facts = if append.has_referenced_claims() {
         rsi_agent_store_protocol::StoreDomainFactCheck::new(&append.controls)
@@ -223,14 +215,6 @@ pub(super) fn apply_atomic_sqlite_append(
         .checked_add(1)
         .ok_or_else(|| StoreError::Invalid("Fact sequence is exhausted".into()))?;
 
-    let mut control_digest = transaction
-        .query_row(
-            "SELECT control_prefix_sha256 FROM sessions WHERE session_id = ?1",
-            [append.session_id.as_str()],
-            |row| bounded_text(row, 0, 64),
-        )
-        .map_err(sql_error)
-        .and_then(|digest| decode_sha256("control-prefix digest", &digest))?;
     let mut claimed_acceptances = Vec::new();
     for (index, record) in append.controls.iter().enumerate() {
         if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
@@ -311,7 +295,7 @@ pub(super) fn apply_atomic_sqlite_append(
     let durable_control_seq = append
         .controls
         .last()
-        .map_or(actual_control, AgentControlRecord::seq);
+        .map_or(append.expected_control_seq, AgentControlRecord::seq);
     let changed = transaction
         .execute(
             "UPDATE sessions
@@ -1188,41 +1172,36 @@ pub(super) fn admit_append(
         });
     }
     match (existing, batch.header.as_ref()) {
-        (None, Some(header)) => transaction
-            .execute(
-                "INSERT INTO sessions
-                    (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
-                     control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
-                 VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
-                params![
-                    batch.session_id.as_str(),
-                    sqlite_u64("session creation timestamp", header.created_at_ms())?,
-                    references.header(header)?,
-                    hex::encode(EMPTY_FACT_PREFIX_DIGEST),
-                    hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
-                    super::activity::coordinates_key(header.coordinates())?,
-                ],
-            )
-            .map(|_| ())
-            .map_err(sql_error),
+        (None, Some(header)) => insert_session(transaction, header, references),
         (None, None) => Err(StoreError::NotFound(batch.session_id.as_str().into())),
         (Some(_), Some(_)) => Err(StoreError::Invalid(
             "existing session cannot replace its immutable header".into(),
         )),
         (Some(_), None) => Ok(()),
-    }?;
-    if existing.is_none()
-        && let Some(header) = &batch.header
-    {
-        insert_agent_node(transaction, header)?;
     }
-    Ok(())
 }
 
-pub(super) fn insert_agent_node(
+fn insert_session(
     transaction: &Transaction<'_>,
     header: &SessionHeader,
+    references: &super::reference_index::Writer<'_>,
 ) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT INTO sessions
+                (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
+                 control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
+             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
+            params![
+                header.session_id().as_str(),
+                sqlite_u64("session creation timestamp", header.created_at_ms())?,
+                references.header(header)?,
+                hex::encode(EMPTY_FACT_PREFIX_DIGEST),
+                hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
+                super::activity::coordinates_key(header.coordinates())?,
+            ],
+        )
+        .map_err(sql_error)?;
     let Some(origin) = header.fork_origin() else {
         return Ok(());
     };

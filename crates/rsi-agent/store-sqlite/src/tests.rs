@@ -3659,6 +3659,57 @@ async fn cas_process_crash_reopens_without_admitting_unconfirmed_metadata() {
 
 #[tokio::test]
 #[cfg(any(unix, windows))]
+async fn atomic_append_reads_retirement_and_session_head_once() {
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    thread_local! {
+        static READS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+    }
+    fn trace(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event {
+            let sql = statement.sql();
+            if sql.trim_start().starts_with("SELECT") {
+                let mut reads = READS.get();
+                reads[0] += usize::from(sql.contains("FROM session_tombstones"));
+                reads[1] += usize::from(sql.contains("FROM sessions "));
+                READS.set(reads);
+            }
+        }
+    }
+    let root = private_tempdir();
+    let _store = SqliteStore::open(root.path()).unwrap();
+    let mut connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+    configure_writer(&connection).unwrap();
+    connection
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(trace))
+        .unwrap();
+    let header = test_header("head-reads");
+    let mut reads = Vec::new();
+    for seq in [1, 2] {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        READS.set([0; 2]);
+        let result = apply_atomic_sqlite_append(
+            &transaction,
+            AtomicSessionAppend {
+                session_id: header.session_id().clone(),
+                expected_fact_seq: seq - 1,
+                expected_control_seq: 0,
+                header: (seq == 1).then(|| header.clone()),
+                facts: vec![test_fact(seq).into()],
+                controls: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.durable_fact_seq, seq);
+        reads.push(READS.get());
+        transaction.commit().unwrap();
+    }
+    assert_eq!(reads, [[1, 1], [1, 1]]);
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
 async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_control() {
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     thread_local! {
