@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const GLOBAL_CALLS: [usize; 3] = [16, 16, 64];
-const DEVICE_CALLS: [usize; 3] = [4, 4, 16];
+const DEVICE_FINITE_CALLS: usize = 4;
 
 /// One registry generation with explicit task execution and bounded resource lanes.
 #[derive(Clone, Debug)]
@@ -36,7 +36,7 @@ struct State {
     closed: bool,
     operations: BTreeMap<OperationId, Arc<Entry>>,
     calls: [usize; 3],
-    devices: BTreeMap<DeviceId, [usize; 3]>,
+    devices: BTreeMap<DeviceId, [usize; 2]>,
 }
 
 #[derive(Debug)]
@@ -212,11 +212,13 @@ impl ApiDispatch for ApiRegistry {
             {
                 device.id = owner;
             }
-            if let CallOrigin::Device(device) = &origin {
+            if entry.spec.class != OperationClass::Subscription
+                && let CallOrigin::Device(device) = &origin
+            {
                 if state
                     .devices
                     .get(&device.id)
-                    .is_some_and(|calls| calls[lane] >= DEVICE_CALLS[lane])
+                    .is_some_and(|calls| calls[lane] >= DEVICE_FINITE_CALLS)
                 {
                     return Err(ApiError::Capacity);
                 }
@@ -364,13 +366,15 @@ impl Drop for QuotaOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lane = self.class.lane();
         state.calls[lane] -= 1;
-        if let CallOrigin::Device(device) = &self.origin {
+        if self.class != OperationClass::Subscription
+            && let CallOrigin::Device(device) = &self.origin
+        {
             let calls = state
                 .devices
                 .get_mut(&device.id)
                 .expect("active device owns its counter");
             calls[lane] -= 1;
-            if *calls == [0; 3] {
+            if *calls == [0; 2] {
                 state.devices.remove(&device.id);
             }
         }

@@ -443,13 +443,13 @@ async fn dropping_read_waiter_releases_admission_without_running_its_write_tail(
 }
 
 #[tokio::test]
-async fn caller_cannot_override_lane_or_effect_and_devices_have_independent_quotas() {
+async fn device_finite_quotas_and_shared_subscription_slots_preserve_independent_lanes() {
     let registry = registry();
     let gate = Gate::new();
     for (class, global, device) in [
         (OperationClass::Control, 16, 4),
         (OperationClass::Data, 16, 4),
-        (OperationClass::Subscription, 64, 16),
+        (OperationClass::Subscription, 64, 64),
     ] {
         let operation = spec("quota", class, OperationEffect::Read);
         let registration = registry.register(operation.clone(), gate.clone()).unwrap();
@@ -469,6 +469,13 @@ async fn caller_cannot_override_lane_or_effect_and_devices_have_independent_quot
             id: DeviceId::parse("b".repeat(32)).unwrap(),
             revoked: tokio_util::sync::CancellationToken::new(),
         });
+        if class == OperationClass::Subscription {
+            assert!(matches!(
+                registry.admit(&operation.call(), other.clone()),
+                Err(ApiError::Capacity)
+            ));
+            admitted.pop();
+        }
         admitted.push(registry.admit(&operation.call(), other).unwrap());
         for _ in admitted.len()..global {
             admitted.push(

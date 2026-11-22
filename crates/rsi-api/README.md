@@ -56,9 +56,10 @@ even if its response future is never polled. A request still being received has
 not started mutation work and must be cancelled when its registration retires.
 
 Global admission has independent limits of 16 controls, 16 data calls and 64
-subscriptions. An authenticated device can occupy at most 4, 4 and 16 respectively;
-trusted local calls still obey global limits. Device counters exist only while
-calls are admitted. The registry holds at most 2,048 operation registrations,
+subscriptions. Each authenticated device can occupy four control and four data
+slots. Subscriptions share available Host slots across callers. Releasing a
+subscription makes its slot available to any authorized caller. All callers
+obey the global limits. Device counters exist only during finite calls. The registry holds at most 2,048 operation registrations,
 including retired registrations that still own work. There is no waiting queue.
 Input and output each have separate retention pools: 2 MiB for controls and
 64 MiB for each data/subscription lane. Finite
