@@ -22,10 +22,14 @@ curated-result bounds without Node. Native Node tests require explicit `RSI_TEST
 and are opt-in locally; the Linux Agent CI job supplies pinned Node and runs them; they join cancelled RPC handlers and verify direct-process reaping.
 Live browser probes and provider usage belong to the standard product fixtures;
 deterministic suites do not resolve developer credentials or call live providers.
-The manually dispatched `extension-generations` workflow accepts an immutable
-rsiversi-dsh commit, builds the original Todo/Plan cohort from its pinned upstream
-revision, and runs the two process-generation tests with `RSI_EXTENSION_NODE` and
-`RSI_DSH_INSTALLED_COHORT`. It records package receipts and test logs. Dispatch
+The manually dispatched [extension-generations workflow](../../../.github/workflows/extension-generations.yml)
+accepts an immutable rsiversi-dsh commit. Its upstream checkout uses the same
+DSH source revision as the Web comparison. It builds the original Todo/Plan
+packages and runs the process-generation and peer-capacity tests
+with `RSI_EXTENSION_NODE` and `RSI_DSH_INSTALLED_COHORT`. The replacement
+probe observes the committed events delivered to each process. It uses the
+installed bridge's request-body reader for both inline and paged loads.
+The workflow records package receipts and test logs. Dispatch
 requires a published bridge commit containing the tested protocol; a dirty local
 bridge checkout is local acceptance evidence, not proof of a runnable CI revision.
 The native-sized Tool body publication/reload acceptance uses a two-worker Tokio

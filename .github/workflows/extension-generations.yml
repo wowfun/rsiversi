@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: e8f7b93a344964de3dca1ace9e72b6e4d6de87cb
+          ref: 2e39e70496aa02986ca6a820c5d497e816b69d7e
           path: .local/extension-ci/upstream
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
