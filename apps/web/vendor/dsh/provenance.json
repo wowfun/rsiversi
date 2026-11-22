@@ -347,7 +347,7 @@
       "path": "dockkit-tokens.css",
       "source": "packages/client/ui-theme/src/styles/design-platform.css",
       "source_sha256": "3234f318769ea5065013793d58d98b235948486789d69ea16e850bd3713babcc",
-      "adapted_sha256": "ef9f3bd5cedd4de74c2e32ba9069dee480c9327bc1c0f885d3d9081448ae838c",
+      "adapted_sha256": "8db4b32f83850898b67c3dbcdd779159d9ab07c4fe2ddcab23353c868ae28ede",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     },
     {

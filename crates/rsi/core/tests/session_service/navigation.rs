@@ -207,6 +207,18 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].workspace, Some(workspace.id.clone()));
     assert!(!page.can_archive);
+    for action in ["archive", "stop_and_archive", "restore"] {
+        assert!(matches!(
+            wire(
+                &running,
+                origin.clone(),
+                NavigationOperation::Archive,
+                json!({"session":session,"action":action})
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
+    }
     for stop_activity in [false, true] {
         assert!(matches!(wire(&running, origin.clone(), NavigationOperation::Replace,
             json!({"session":session, "expected_revision":"0","metadata":metadata,"stop_activity":stop_activity})).await, Err(ApiError::Unauthorized)));
@@ -345,6 +357,34 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         query(&running, CallOrigin::Local, true).await.entries[0].metadata,
         metadata
     );
+    // A second window renames the archived row before the first window clicks Undo.
+    let renamed = SessionMetadata {
+        title: Some("Renamed elsewhere".into()),
+        ..metadata.clone()
+    };
+    wire(
+        &running,
+        CallOrigin::Local,
+        NavigationOperation::Replace,
+        json!({
+            "session":session,"expected_revision":"3","metadata":renamed
+        }),
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let restored = wire(
+            &running,
+            CallOrigin::Local,
+            NavigationOperation::Archive,
+            json!({"session":session,"action":"restore"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored["metadata"]["title"], "Renamed elsewhere");
+        assert_eq!(restored["metadata"]["archived"], false);
+        assert_eq!(restored["revision"], "5");
+    }
     drop(database);
     drop(handle);
     assert!(running.shutdown().await.is_clean());

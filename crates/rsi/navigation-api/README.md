@@ -39,7 +39,10 @@ returns the newest activity key from the same read snapshot.
 Grouping resolves the current WorkspaceId through an exact coordinate-key registry
 lookup; equal paths on different machines remain distinct. Missing registrations remain unregistered; reads never create
 workspaces. Metadata replacement uses an exact global revision and one complete
-title/archive record. Clients do not replay writes after unknown outcomes.
+title/archive record. Setting archive membership identifies the Session and the
+desired action. The Host returns the resulting metadata and revision, or the work
+that needs confirmation. Other Sessions' edits do not invalidate the action.
+Clients do not replay writes after unknown outcomes.
 
 The archive filter is tri-state: false selects active conversations, true selects
 archived conversations, and null selects both. Default queries remain active-only;

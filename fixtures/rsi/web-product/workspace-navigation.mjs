@@ -40,11 +40,12 @@ fixture.setReply('command',async text=>{
 });
 fixture.archiveCalls=[];
 fixture.setReply('archive_session',async text=>{
- const {command,stop_activity}=JSON.parse(text), nav=fixture.view.navigation;
- fixture.archiveCalls.push({session:command.session,stop_activity});
- if(command.session==='active' && !stop_activity)return JSON.stringify([{kind:'job',items:[{id:'j1',label:'Compile preview'}]},{kind:'turn'}]);
- (command.session==='archived'?archivedRow:activeRow).metadata=command.metadata;
- nav.entries=nav.entries.filter(row=>nav.filter.archived===null||row.metadata.archived===nav.filter.archived);
+ const {session,action}=JSON.parse(text), nav=fixture.view.navigation;
+ fixture.archiveCalls.push({session,action});
+ if(session==='active' && action==='archive')return JSON.stringify([{kind:'job',items:[{id:'j1',label:'Compile preview'}]},{kind:'turn'}]);
+ const row=session==='archived'?archivedRow:activeRow;
+ row.metadata={...row.metadata,archived:action!=='restore',pinned:false};
+ nav.entries=[activeRow,archivedRow].filter(row=>(nav.filter.archived===null||row.metadata.archived===nav.filter.archived)&&row.metadata.title.toLowerCase().includes(nav.filter.query.toLowerCase()));
  await fixture.frame();
  return 'null';
 });
@@ -189,7 +190,28 @@ try {
    assert(await confirmArchive.getByRole('button',{name:'Cancel'}).evaluate(node=>node===document.activeElement));
    await page.screenshot({path:join(report,name+'-archive-confirm.png')});
    await confirmArchive.getByRole('button',{name:'Cancel'}).click();
-   assert.deepEqual(await page.evaluate(()=>fixture.archiveCalls.filter(row=>row.session==='active')),[{session:'active',stop_activity:false}]);
+   assert.deepEqual(await page.evaluate(()=>fixture.archiveCalls.filter(row=>row.session==='active')),[{session:'active',action:'archive'}]);
+   const stopAndArchive=async()=>{
+     await sessionOpen.click({button:'right'});
+     await page.getByRole('menuitem',{name:'Archive session',exact:true}).click();
+     await confirmArchive.getByRole('button',{name:'Stop and archive',exact:true}).click();
+     await confirmArchive.waitFor({state:'hidden'});
+   };
+   const archivedToast=page.getByRole('alert').filter({hasText:'Session stopped and archived.'});
+   await stopAndArchive();
+   const undoAction=archivedToast.getByRole('button',{name:'undo',exact:true});
+   await undoAction.waitFor();
+   assert.equal(await undoAction.evaluate(node=>getComputedStyle(node).color),'rgb(122, 170, 255)');
+   assert.notEqual(await archivedToast.evaluate(node=>getComputedStyle(node).boxShadow),'none');
+   await page.screenshot({path:join(report,name+'-archive-undo.png')});
+   await archivedToast.getByRole('button',{name:'undo',exact:true}).click();
+   await sessionOpen.waitFor();
+   await stopAndArchive();
+   await archivedToast.getByRole('button',{name:'filter archived sessions',exact:true}).click();
+   await sessionOpen.waitFor();
+   await sessionOpen.click({button:'right'});
+   await page.getByRole('menuitem',{name:'Unarchive session',exact:true}).click();
+   await page.waitForFunction(()=>fixture.archiveCalls.at(-1)?.action==='restore');
    await page.evaluate(async()=>{fixture.view.navigation.can_archive=false;await fixture.frame()});
    await sessionOpen.click({button:'right'});
    await page.getByRole('menuitem',{name:'Rename',exact:true}).waitFor();

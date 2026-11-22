@@ -51,7 +51,7 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
             if(command.action==='new_conversation')window.paneResets++;
             if(command.action==='navigate'&&command.command.kind==='query')this.queries.add(data.id);
           }
-          if(data.kind==='call'&&data.method==='archive_session'&&window.holdArchive&&JSON.parse(data.payload).command.metadata.archived){
+          if(data.kind==='call'&&data.method==='archive_session'&&window.holdArchive&&JSON.parse(data.payload).action==='archive'){
             this.archive=data.id;window.holdArchive=false;
           }
           super.postMessage(data,...rest);
@@ -107,18 +107,19 @@ for(const [name,engine] of Object.entries({chromium,firefox})) {
     await page.locator('.pane.selected[data-session-id=""]').waitFor();
     assert.equal(await input.inputValue(),'');
     await page.screenshot({path:join(directory,'archived-current.png')});
-    await navigationFilter(page,'all');
+    const archivedNotice=page.getByRole('alert').filter({hasText:'Session archived. You can'});
+    await archivedNotice.getByRole('button',{name:'filter archived sessions',exact:true}).click();
     await row.locator('strong').filter({hasText:'First milestone'}).waitFor();
     assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+    await row.getByRole('button',{name:/^Session actions for /}).click();
+    await page.getByRole('menuitem',{name:'Unarchive session',exact:true}).click();
+    await navigationFilter(page,'active');await row.waitFor();
     await row.getByTestId('conversation-open').click();
     await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]')?.value==='Unsent before archiving the current conversation');
     await page.locator('.conversation-menu>summary').click();await page.locator('#add-surface').click();await page.locator('.conversation-menu>summary').click();
     await page.locator('#pane-tab-compare').waitFor({state:'attached'});
     await row.getByTestId('conversation-open').click();
     await page.getByLabel('Compare message',{exact:true}).fill('Separate saved compare draft');
-    await row.getByRole('button',{name:/^Session actions for /}).click();
-    await page.getByRole('menuitem',{name:'Unarchive session',exact:true}).click();
-    await navigationFilter(page,'active');await row.waitFor();
     const resets=await page.evaluate(()=>{window.holdArchive=true;return window.paneResets;});
     await row.getByRole('button',{name:/^Session actions for /}).click();
     await page.getByRole('menuitem',{name:'Archive session',exact:true}).click();

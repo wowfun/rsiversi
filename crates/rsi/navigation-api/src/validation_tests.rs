@@ -48,6 +48,10 @@ fn operation_envelopes_admit_maximal_identifiers_and_escaped_small_requests() {
         ),
         (NavigationOperation::Pinned, json!(filter)),
         (
+            NavigationOperation::Archive,
+            json!({"session":session,"action":"stop_and_archive"}),
+        ),
+        (
             NavigationOperation::Replace,
             json!({"session":session,"expected_revision":u64::MAX.to_string(),"metadata":metadata}),
         ),

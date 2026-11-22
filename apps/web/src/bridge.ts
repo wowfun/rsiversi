@@ -120,10 +120,11 @@ export type BackgroundOutput = {stdout:string; stderr:string; truncated:boolean}
 interface Actions { captureSetupBinding():import('./runtime/setup-binding.ts').SetupBinding; disconnect():Promise<unknown>; restoreDrafts():Promise<void>; dismissSettings():void; resources():ResourceOwner|undefined; command(command: Command): Promise<unknown>; open(command: Command, startingText?: string): Promise<unknown>; select(key: string): void; closeSurface(key: string): Promise<void>; addSurface(key: string): Promise<void>; call(method: string, payload: unknown, transfer?:Transferable[]): Promise<unknown> }
 let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
+export type ArchiveAction = 'archive' | 'stop_and_archive' | 'restore';
 export const input = {
-  async archive(command: Command, stop_activity: boolean): Promise<ArchiveActivity[]|null> {
+  async archive(session: string, action: ArchiveAction): Promise<ArchiveActivity[]|null> {
     if (!actions) throw new Error('Application is starting');
-    return JSON.parse(await actions.call("archive_session", JSON.stringify({command,stop_activity})) as string);
+    return JSON.parse(await actions.call("archive_session", JSON.stringify({session,action})) as string);
   },
   transcriptFile(pane:string,generation:string,kind:"image"|"document",path:string):Promise<[string,Uint8Array<ArrayBuffer>]> {
     if (!actions) return Promise.reject(new Error('Application is starting'));

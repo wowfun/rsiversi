@@ -133,9 +133,9 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
   const [menu, setMenu] = useState<SessionMenuTarget>();
   const [edit, setEdit] = useState<SessionMenuTarget>();
   const [confirmation, setConfirmation] = useState<{title:string; activity:ArchiveActivity[]; confirm():Promise<void>}>();
-  const [feedback, setFeedback] = useState<{sequence: number; text: string; success: boolean}>();
-  const notify = (text: string, success = false) =>
-    setFeedback(previous => ({sequence: (previous?.sequence ?? 0) + 1, text, success}));
+  const [feedback, setFeedback] = useState<{sequence: number; text: string; success: boolean; undo?:()=>Promise<void>}>();
+  const notify = (text: string, success = false, undo?:()=>Promise<void>) =>
+    setFeedback(previous => ({sequence: (previous?.sequence ?? 0) + 1, text, success, undo}));
   const copySessionId = async (session: string) => {
     try {
       await writeClipboard(session);
@@ -200,24 +200,31 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       action: "navigate",
       command: { kind: "replace", ticket: nav?.ticket, session, metadata, metadata_revision: revision },
     });
-  const archive = async (entry: NavigationEntry, revision = nav?.metadata_revision) => {
+  const selectFilter = async (value: ConversationFilter) => {
+    if (value !== "attention") await search({...filter, archived:value === "all" ? null : value === "archived"});
+    setMode(value);
+  };
+  const archive = async (entry: NavigationEntry) => {
     const identity = presentationIdentity.getSnapshot(), pane = selection.getSnapshot();
     const current = () => {
       const surface = source.getSnapshot()?.surfaces[pane];
       return surface?.kind === "native" && surface.session === entry.session ? surface.generation : undefined;
     };
     const generation = current(), archived = !entry.metadata.archived;
-    const command = {kind:"replace", ticket:nav?.ticket, session:entry.session, metadata_revision:revision,
-      metadata:{...entry.metadata, archived, pinned:false}};
+    const restore = async () => {
+      if (identity === presentationIdentity.getSnapshot()) await device.archive(entry.session, "restore");
+    };
+    if (!archived) return restore();
     const apply = async (stop: boolean) => {
       if (identity !== presentationIdentity.getSnapshot()) throw new Error("Connection changed before archive.");
-      const activity = await device.archive(command, stop);
+      const activity = await device.archive(entry.session, stop ? 'stop_and_archive' : 'archive');
       if (identity !== presentationIdentity.getSnapshot()) return;
       if (activity) {
         setConfirmation({title: entry.metadata.title || titles.get(entry.session) || entry.session,
           activity, confirm:() => apply(true)});
-      } else if (archived && generation && pane === selection.getSnapshot() && generation === current()) {
-        await input.open({action:"new_conversation"});
+      } else {
+        notify(stop ? "Session stopped and archived. You can " : "Session archived. You can ", true, restore);
+        if (generation && pane === selection.getSnapshot() && generation === current()) await input.open({action:"new_conversation"});
       }
     };
     await apply(false);
@@ -294,7 +301,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
           <h2 data-testid="workspace-heading">Workspaces</h2>
           <div className="navigation-actions">
             <NavigationSearchButton open={()=>setSearchOpen(true)}/>
-            <NavigationOptions device={device} filter={mode} onFilter={async value=>{if(value!=='attention')await search({...filter,archived:value==='all'?null:value==='archived'});setMode(value)}} refresh={async()=>{await input.command({action:'refresh'});await search()}}/>
+            <NavigationOptions device={device} filter={mode} onFilter={selectFilter} refresh={async()=>{await input.command({action:'refresh'});await search()}}/>
             <Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}><IconProjectAddOutlineRegular size={16}/></Button>
           </div>
         </>}
@@ -463,9 +470,14 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       <ExternalNavigation />
       {feedback && <Toast key={feedback.sequence} text={feedback.text}
         tone={feedback.success ? "success" : undefined} icon={<IconWarningOutlineRegular/>}
+        holdMs={feedback.undo ? 6000 : undefined}
+        actions={feedback.undo ? [
+          {label:"undo", onClick:() => {setFeedback(undefined);void run(feedback.undo!);}},
+          ...(mode === "active" || mode === "attention" ? [{prefix:" or ",label:"filter archived sessions",onClick:() => {setFeedback(undefined);void run(() => selectFilter("all"));}}] : []),
+        ] : undefined}
         onDone={() => setFeedback(undefined)}/>}
       {menu && <SessionMenu key={menu.entry.session} target={menu} device={device} reading={attention.get(menu.entry.session)} epoch={nav?.attention_notice ? undefined : nav?.attention?.host_epoch} close={() => setMenu(undefined)}
-        archive={nav?.can_archive ? () => archive(menu.entry, menu.revision) : undefined}
+        archive={nav?.can_archive ? () => archive(menu.entry) : undefined}
         copy={() => void copySessionId(menu.entry.session)} rename={() => setEdit(menu)} mutate={metadata => mutate(menu.entry.session, metadata, menu.revision)}/>}
       {confirmation && <ConfirmArchive {...confirmation} close={() => setConfirmation(undefined)}/>}
       {edit && <RenameSession title={edit.entry.metadata.title ?? titles.get(edit.entry.session) ?? ""}

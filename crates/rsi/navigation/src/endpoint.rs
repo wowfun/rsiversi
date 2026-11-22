@@ -82,6 +82,16 @@ pub(super) fn register(
             }
         }),
     )?;
+    let archive_owner = owner.clone();
+    let archive = registrar.register(
+        NavigationOperation::Archive.spec(),
+        json_handler(
+            move |context, request: rsi_navigation_api::ArchiveRequest| {
+                let owner = archive_owner.clone();
+                async move { owner.archive_record(context.origin, request)?.await }
+            },
+        ),
+    )?;
     let replace = registrar.register(
         NavigationOperation::Replace.spec(),
         json_handler(move |context, input: Replace| {
@@ -101,5 +111,5 @@ pub(super) fn register(
             }
         }),
     )?;
-    Ok(vec![query, pinned, seed, summaries, replace])
+    Ok(vec![query, pinned, seed, summaries, replace, archive])
 }

@@ -17,6 +17,12 @@ fn active_subagents(
         .filter(|child| running(&child.status) && tree.activation_owns(child))
 }
 
+pub(super) enum ArchiveUpdate {
+    Unknown(Arc<super::Document>),
+    Active(Vec<ArchiveActivity>),
+    Applied(Arc<super::Document>, bool),
+}
+
 impl Navigation {
     pub(super) fn can_archive(&self, origin: &CallOrigin) -> Result<bool> {
         if matches!(origin, CallOrigin::Local) {
@@ -105,6 +111,89 @@ impl Navigation {
             activity.push(ArchiveActivity::Turn);
         }
         Ok(activity)
+    }
+
+    pub(super) fn archive_record(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        request: rsi_navigation_api::ArchiveRequest,
+    ) -> Result<super::BoxFuture<'static, Result<rsi_navigation_api::MetadataEditResult>>> {
+        self.require_archive_owner(&origin)?;
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                match owner
+                    .apply_archive(&origin, &request.session, request.action)
+                    .await?
+                {
+                    ArchiveUpdate::Applied(document, _) => {
+                        let metadata = document
+                            .records
+                            .get(&request.session)
+                            .map(|row| row.metadata.clone())
+                            .unwrap_or_default();
+                        Ok(Ok(rsi_navigation_api::MetadataReceipt {
+                            revision: document.revision.to_string(),
+                            session: request.session,
+                            metadata,
+                        }))
+                    }
+                    ArchiveUpdate::Active(activity) => Ok(Err(activity)),
+                    ArchiveUpdate::Unknown(_) => {
+                        Err(ApiError::Invalid("Session is not available".into()))
+                    }
+                }
+            })
+        })
+    }
+
+    pub(super) async fn apply_archive(
+        &self,
+        origin: &CallOrigin,
+        session: &SessionId,
+        action: rsi_navigation_api::ArchiveAction,
+    ) -> Result<ArchiveUpdate> {
+        let _permit = self
+            .writer
+            .acquire()
+            .await
+            .map_err(|_| ApiError::ShuttingDown)?;
+        let current = self.document();
+        let previous = current.records.get(session);
+        let archived = previous.is_some_and(|row| row.archived);
+        let restore = action == rsi_navigation_api::ArchiveAction::Restore;
+        let header = self.metadata_header(session).await?;
+        let _admission = match &header {
+            Some(header) => Some(self.admit_metadata(header, origin)?),
+            None if restore && archived && matches!(origin, CallOrigin::Local) => None,
+            None if restore && archived => {
+                return Err(ApiError::Invalid("Session is not available".into()));
+            }
+            None => return Ok(ArchiveUpdate::Unknown(current)),
+        };
+        let desired = !restore;
+        if archived == desired {
+            Ok(ArchiveUpdate::Applied(current, false))
+        } else {
+            let mut metadata = previous.map(|row| row.metadata.clone()).unwrap_or_default();
+            metadata.archived = desired;
+            metadata.pinned = false;
+            drop(current);
+            let document = match self
+                .commit_edit(
+                    origin,
+                    session,
+                    header.as_ref(),
+                    archived,
+                    &metadata,
+                    action == rsi_navigation_api::ArchiveAction::StopAndArchive,
+                )
+                .await?
+            {
+                Ok(document) => document,
+                Err(activity) => return Ok(ArchiveUpdate::Active(activity)),
+            };
+            Ok(ArchiveUpdate::Applied(document, true))
+        }
     }
 
     /// Runs under the navigation writer so restoration cannot race the stop.

@@ -607,7 +607,7 @@ Escape clears and closes search. Clicking outside an empty search closes it.
 Search rows show the workspace below the session title so identically named
 conversations can be distinguished before opening them. Selecting an active
 result closes search and reveals the session in its workspace. Archived search
-results describe how to reopen them. The Host owner can restore them on the row or in the menu. The composer shows Stop for an active, writable Session only to the Host owner. Other devices can follow the reply and submit messages. The owner's archive action opens a confirmation listing any running turn, jobs and subagents. Cancel leaves the Session running. Stop and archive commits the archive and requests cancellation.
+results describe how to reopen them. The Host owner can restore them on the row or in the menu. The composer shows Stop for an active, writable Session only to the Host owner. Other devices can follow the reply and submit messages. The owner's archive action opens a confirmation listing any running turn, jobs and subagents. Cancel leaves the Session running. Stop and archive commits the archive and requests cancellation. A successful archive shows a six-second notice with Undo. Its blue actions remain distinguishable on the dark toast surface in either theme. When archived conversations are hidden, the notice also offers the All conversations filter. Undo restores the named Session and preserves intervening title and pin edits.
 Selecting one shows a temporary warning above the workspace and keeps the query.
 Copy Session ID reports success or failure in the same temporary notification.
 Archiving the selected idle conversation returns that pane to its starting

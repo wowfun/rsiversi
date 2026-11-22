@@ -187,6 +187,26 @@ pub struct PinnedPage {
     /// Available rows in pin order, then missing IDs descending.
     pub entries: Vec<PinnedEntry>,
 }
+/// Changes one Session's archive membership, preserving its current title.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveAction {
+    /// Archive an idle Session, or report its active work.
+    Archive,
+    /// Archive and stop work after user confirmation.
+    StopAndArchive,
+    /// Restore the Session to active navigation.
+    Restore,
+}
+/// One identity-bound archive action.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRequest {
+    /// Exact Session selected by the owner.
+    pub session: SessionId,
+    /// Intended change.
+    pub action: ArchiveAction,
+}
 /// A running job or subagent presented for archive confirmation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveItem {
@@ -246,6 +266,8 @@ pub enum NavigationOperation {
     Summaries,
     /// Replace one title/archive record against the global revision.
     Replace,
+    /// Apply an archive action to one Session's current metadata.
+    Archive,
 }
 impl NavigationOperation {
     /// Exact authenticated operation descriptor.
@@ -263,21 +285,26 @@ impl NavigationOperation {
                     Self::OrderSeed => "order_seed",
                     Self::Summaries => "summaries",
                     Self::Replace => "replace",
+                    Self::Archive => "archive",
                 },
-                4,
+                if matches!(self, Self::Archive) { 1 } else { 4 },
             )
             .expect("static navigation operation"),
-            access: OperationAccess::Authenticated,
+            access: if matches!(self, Self::Archive) {
+                OperationAccess::Credential
+            } else {
+                OperationAccess::Authenticated
+            },
             class: OperationClass::Data,
             effect: match self {
                 Self::Query | Self::Pinned | Self::OrderSeed | Self::Summaries => {
                     OperationEffect::Read
                 }
-                Self::Replace => OperationEffect::Mutation,
+                Self::Replace | Self::Archive => OperationEffect::Mutation,
             },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: match self {
-                Self::Query | Self::Pinned | Self::Replace => 4096,
+                Self::Query | Self::Pinned | Self::Replace | Self::Archive => 4096,
                 Self::Summaries => 32 * 1024,
                 Self::OrderSeed => 128 * 1024,
             },
@@ -345,6 +372,29 @@ impl NavigationClient {
         };
         validation::pins(&page, &filter)?;
         Ok(page)
+    }
+    /// Applies a field-specific archive action without reading or replacing another device's title.
+    pub async fn archive(&self, request: &ArchiveRequest) -> Result<MetadataEditResult> {
+        let result = call_json::<_, MetadataReceipt, Vec<ArchiveActivity>>(
+            self.api.as_ref(),
+            &NavigationOperation::Archive.spec(),
+            request,
+        )
+        .await?;
+        match &result {
+            Ok(receipt)
+                if receipt.session == request.session
+                    && receipt.metadata.archived == (request.action != ArchiveAction::Restore)
+                    && receipt.metadata.validate().is_ok()
+                    && revision(&receipt.revision).is_ok() =>
+            {
+                Ok(result)
+            }
+            Err(activity) if !activity.is_empty() && request.action == ArchiveAction::Archive => {
+                Ok(result)
+            }
+            _ => Err(ApiError::OutcomeUnknown),
+        }
     }
     /// Edits title/archive metadata once against the observed global revision.
     pub async fn replace(

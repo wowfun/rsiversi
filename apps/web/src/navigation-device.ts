@@ -76,7 +76,7 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
   const command=(value:Record<string,unknown>,current?:()=>boolean)=>enqueue(async()=> {
     if(!current || current())return input.command(value)
   })
-  const archive=(value:Record<string,unknown>,stop:boolean)=>enqueue(()=>input.archive(value,stop))
+  const archive=(session:string,action:import('./bridge.ts').ArchiveAction)=>enqueue(()=>input.archive(session,action))
   const seed=async()=>{
     const latest=source.getSnapshot()?.navigation
     const previous=latest?.order?.ticket

@@ -10,6 +10,7 @@
   --rsi-text-warning:#8a5b22;
   --dsw-menu-backdrop-filter:blur(40px) saturate(150%);
   --dsw-elevation-stroke-color:var(--dsw-alias-border-l4);
+  --dsw-shadow-lv3: 0 0 1px 0 rgba(0, 0, 0, 0.2), 0 0 4px 0 rgba(0, 0, 0, 0.02), 0 12px 32px 0 rgba(0, 0, 0, 0.08);
   --mist:var(--dsw-specific-sidebar-fill);
   --paper:var(--dsw-alias-bg-base);
   --ink:var(--dsw-alias-label-primary);

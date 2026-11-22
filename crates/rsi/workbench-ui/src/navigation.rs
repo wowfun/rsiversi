@@ -56,6 +56,8 @@ pub enum NavigationCommand {
         /// Current view ticket.
         ticket: String,
     },
+    /// Change only the archive membership of the named Session.
+    Archive(rsi_navigation_api::ArchiveRequest),
     /// Edit one durable Session's navigation against the displayed metadata revision.
     Replace {
         /// Current view ticket.
@@ -134,7 +136,13 @@ struct State {
 }
 impl View {
     fn apply_metadata_receipt(&mut self, receipt: MetadataReceipt) -> Result<bool> {
-        if !self.filter.query.is_empty()
+        let next = self
+            .metadata_revision
+            .parse::<u64>()
+            .ok()
+            .and_then(|revision| revision.checked_add(1));
+        if next != receipt.revision.parse::<u64>().ok()
+            || !self.filter.query.is_empty()
             || self.order.is_some()
             || self.continued
             || self.more
@@ -250,7 +258,7 @@ impl NavigationFeature {
             changed = async {
                 let continued = self.state.lock().expect("navigation state").view.continued;
                 if refresh && !continued {
-                    let _ = self.execute(NavigationCommand::Query { filter }, false).await;
+                    let _ = self.execute(NavigationCommand::Query { filter }).await;
                     true
                 } else { self.observe_head(filter).await }
             } => Some(refresh || changed),
@@ -284,7 +292,7 @@ impl NavigationFeature {
     /// # Panics
     /// Panics if an earlier panic poisoned this owner's state lock.
     pub fn command(self: &Arc<Self>, command: NavigationCommand) -> BoxFuture<'static, Result<()>> {
-        let reply = self.command_reply(command, false);
+        let reply = self.command_reply(command);
         Box::pin(async move {
             match reply.await? {
                 None => Ok(()),
@@ -300,7 +308,6 @@ impl NavigationFeature {
     pub fn command_reply(
         self: &Arc<Self>,
         command: NavigationCommand,
-        stop_activity: bool,
     ) -> BoxFuture<'static, Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>>> {
         let owner = self.clone();
         self.work.run(async move {
@@ -313,13 +320,12 @@ impl NavigationFeature {
                 read.cancel();
             }
             let _serial = owner.serial.lock().await;
-            owner.execute(command, stop_activity).await
+            owner.execute(command).await
         })
     }
     async fn execute(
         &self,
         command: NavigationCommand,
-        stop_activity: bool,
     ) -> Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>> {
         {
             let mut state = self.state.lock().expect("navigation view poisoned");
@@ -328,7 +334,7 @@ impl NavigationFeature {
             }
         }
         let mut saved = false;
-        let result = self.execute_inner(command, &mut saved, stop_activity).await;
+        let result = self.execute_inner(command, &mut saved).await;
         if let Err(message) = &result {
             let mut state = self.state.lock().expect("navigation view poisoned");
             if saved {
@@ -524,58 +530,56 @@ impl NavigationFeature {
         &self,
         command: NavigationCommand,
         saved: &mut bool,
-        stop_activity: bool,
     ) -> Result<Option<Vec<rsi_navigation_api::ArchiveActivity>>> {
-        if let NavigationCommand::OrderSeed { scope } = command {
-            let seed = self.client.order_seed(scope).await.map_err(error)?;
-            let ticket = rsi_ui::fresh_identity("order")?;
-            self.state.lock().expect("navigation state").view.order = Some(OrderView {
-                ticket,
-                seed,
-                requested: Vec::new(),
-                entries: Vec::new(),
-            });
-            return Ok(None);
-        }
-        if let NavigationCommand::OrderSummaries { ticket, sessions } = command {
-            return self.order_summaries(&ticket, sessions).await.map(|()| None);
-        }
-        let continued = matches!(&command, NavigationCommand::Next { .. });
-        if let NavigationCommand::Group { workspace, ticket } = command {
-            return self.group(workspace, ticket).await.map(|()| None);
-        }
-        if let NavigationCommand::CloseGroup { workspace } = command {
-            self.state
-                .lock()
-                .expect("navigation view poisoned")
-                .view
-                .groups
-                .remove(&group_key(&workspace)?);
-            return Ok(None);
-        }
-        if let NavigationCommand::Mark { request } = command {
-            self.attention.mark(request).await.map_err(error)?;
-            return Ok(None);
-        }
-        let (filter, after) = match command {
-            NavigationCommand::OrderSeed { .. }
-            | NavigationCommand::OrderSummaries { .. }
-            | NavigationCommand::Mark { .. }
-            | NavigationCommand::Group { .. }
-            | NavigationCommand::CloseGroup { .. } => unreachable!("handled above"),
+        let result = match command {
+            NavigationCommand::OrderSeed { scope } => {
+                let seed = self.client.order_seed(scope).await.map_err(error)?;
+                self.state.lock().expect("navigation state").view.order = Some(OrderView {
+                    ticket: rsi_ui::fresh_identity("order")?,
+                    seed,
+                    requested: Vec::new(),
+                    entries: Vec::new(),
+                });
+                return Ok(None);
+            }
+            NavigationCommand::OrderSummaries { ticket, sessions } => {
+                return self.order_summaries(&ticket, sessions).await.map(|()| None);
+            }
+            NavigationCommand::Group { workspace, ticket } => {
+                return self.group(workspace, ticket).await.map(|()| None);
+            }
+            NavigationCommand::CloseGroup { workspace } => {
+                self.state
+                    .lock()
+                    .expect("navigation view poisoned")
+                    .view
+                    .groups
+                    .remove(&group_key(&workspace)?);
+                return Ok(None);
+            }
+            NavigationCommand::Mark { request } => {
+                self.attention.mark(request).await.map_err(error)?;
+                return Ok(None);
+            }
             NavigationCommand::Query { filter } => {
                 filter.validate().map_err(error)?;
-                (filter, None)
+                return self.load_view_page(filter, None).await.map(|()| None);
             }
             NavigationCommand::Next { ticket } => {
-                let state = self.state.lock().expect("navigation view poisoned");
-                if state.view.ticket.is_empty() || state.view.ticket != ticket {
-                    return Err("Navigation changed; use the current controls".into());
-                }
-                if state.after.is_none() {
-                    return Ok(None);
-                }
-                (state.view.filter.clone(), state.after.clone())
+                let (filter, after) = {
+                    let state = self.state.lock().expect("navigation view poisoned");
+                    if state.view.ticket.is_empty() || state.view.ticket != ticket {
+                        return Err("Navigation changed; use the current controls".into());
+                    }
+                    let Some(after) = state.after.clone() else {
+                        return Ok(None);
+                    };
+                    (state.view.filter.clone(), after)
+                };
+                return self
+                    .load_view_page(filter, Some(after))
+                    .await
+                    .map(|()| None);
             }
             NavigationCommand::Replace {
                 ticket,
@@ -592,28 +596,39 @@ impl NavigationFeature {
                         return Err("Navigation changed; refresh before editing".into());
                     }
                 }
-                let receipt = self
-                    .client
-                    .replace(session, &metadata_revision, metadata, stop_activity)
+                self.client
+                    .replace(session, &metadata_revision, metadata, false)
                     .await
-                    .map_err(error)?;
-                let receipt = match receipt {
-                    Ok(receipt) => receipt,
-                    Err(activity) => return Ok(Some(activity)),
-                };
-                *saved = true;
-                let mut state = self.state.lock().expect("navigation view poisoned");
-                if state.view.apply_metadata_receipt(receipt)? {
-                    return Ok(None);
-                }
-                (state.view.filter.clone(), None)
             }
+            NavigationCommand::Archive(request) => self.client.archive(&request).await,
+        }
+        .map_err(error)?;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(activity) => return Ok(Some(activity)),
         };
-        let (page, scanned) = self.page(filter.clone(), after).await?;
-        self.install_page(filter, page, scanned, continued)
-            .await
-            .map(|()| None)
+        *saved = true;
+        let filter = {
+            let mut state = self.state.lock().expect("navigation view poisoned");
+            if state.view.apply_metadata_receipt(receipt)? {
+                return Ok(None);
+            }
+            state.view.filter.clone()
+        };
+        self.load_view_page(filter, None).await?;
+        Ok(None)
     }
+
+    async fn load_view_page(
+        &self,
+        filter: NavigationFilter,
+        after: Option<NavigationCursor>,
+    ) -> Result<()> {
+        let continued = after.is_some();
+        let (page, scanned) = self.page(filter.clone(), after).await?;
+        self.install_page(filter, page, scanned, continued).await
+    }
+
     async fn install_page(
         &self,
         filter: NavigationFilter,
@@ -1290,6 +1305,7 @@ mod group_tests {
         let session = row.session.clone();
         let mut view = View {
             entries: vec![row],
+            metadata_revision: "1".into(),
             filter: NavigationFilter {
                 archived: None,
                 ..NavigationFilter::default()
@@ -1318,6 +1334,11 @@ mod group_tests {
         assert!(
             !view
                 .apply_metadata_receipt(receipt("4", false, true))
+                .unwrap()
+        );
+        assert!(
+            !view
+                .apply_metadata_receipt(receipt("5", true, false))
                 .unwrap()
         );
         assert_eq!(view.metadata_revision, "3");

@@ -13,8 +13,9 @@ use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
 use rsi_navigation_api::{
-    MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter, NavigationPage,
-    PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query, revision,
+    ArchiveAction, MetadataReceipt, NavigationCursor, NavigationEntry, NavigationFilter,
+    NavigationPage, PinnedEntry, PinnedPage, SessionMetadata, WorkspaceFilter, matches_query,
+    revision,
 };
 use rsi_session_protocol::SessionError;
 use rsi_storage::{RecordObjectSize, encoded_entry_bytes};
@@ -817,83 +818,54 @@ impl Navigation {
         intent: ArchiveIntent,
     ) -> Result<BoxFuture<'static, Result<ArchiveOutcome>>> {
         self.require_archive_owner(&origin)?;
-        if intent == ArchiveIntent::Inspect {
-            return self.run_read(move |owner| {
-                Box::pin(async move {
-                    let Some(header) = owner.metadata_header(&session).await? else {
-                        return Ok(ArchiveOutcome::Unknown);
-                    };
-                    let _admission = owner.admit_metadata(&header, &origin)?;
-                    let current = owner.document();
-                    if !current
-                        .records
-                        .get(&session)
-                        .is_some_and(|row| row.archived)
-                    {
-                        return Ok(ArchiveOutcome::Ready(
-                            owner.archive_activity(&header).await?,
-                        ));
-                    }
-                    let visibility = owner.resolver.visibility(&origin)?;
-                    let ids = owner
-                        .visible_archives(&current, &origin, visibility)
-                        .await?;
-                    Ok(ArchiveOutcome::Applied {
-                        changed: false,
-                        ids,
+        let action = match intent {
+            ArchiveIntent::Archive => ArchiveAction::Archive,
+            ArchiveIntent::Restore => ArchiveAction::Restore,
+            ArchiveIntent::StopAndArchive => ArchiveAction::StopAndArchive,
+            ArchiveIntent::Inspect => {
+                return self.run_read(move |owner| {
+                    Box::pin(async move {
+                        let Some(header) = owner.metadata_header(&session).await? else {
+                            return Ok(ArchiveOutcome::Unknown);
+                        };
+                        let _admission = owner.admit_metadata(&header, &origin)?;
+                        let current = owner.document();
+                        if !current
+                            .records
+                            .get(&session)
+                            .is_some_and(|row| row.archived)
+                        {
+                            return Ok(ArchiveOutcome::Ready(
+                                owner.archive_activity(&header).await?,
+                            ));
+                        }
+                        let visibility = owner.resolver.visibility(&origin)?;
+                        let ids = owner
+                            .visible_archives(&current, &origin, visibility)
+                            .await?;
+                        Ok(ArchiveOutcome::Applied {
+                            changed: false,
+                            ids,
+                        })
                     })
-                })
-            });
-        }
+                });
+            }
+        };
         self.run_mutation(move |owner| {
             Box::pin(async move {
                 let visibility = owner.resolver.visibility(&origin)?;
-                let (document, changed) = {
-                    let _permit = owner
-                        .writer
-                        .acquire()
-                        .await
-                        .map_err(|_| ApiError::ShuttingDown)?;
-                    let current = owner.document();
-                    let previous = current.records.get(&session);
-                    let archived = previous.is_some_and(|row| row.archived);
-                    let restore = intent == ArchiveIntent::Restore;
-                    let header = if archived || !restore {
-                        owner.metadata_header(&session).await?
-                    } else {
-                        None
-                    };
-                    let _admission = match &header {
-                        Some(header) => Some(owner.admit_metadata(header, &origin)?),
-                        None if !restore => return Ok(ArchiveOutcome::Unknown),
-                        None if !archived || matches!(origin, CallOrigin::Local) => None,
-                        None => return Err(ApiError::Invalid("Session is not available".into())),
-                    };
-                    let desired = !restore;
-                    if archived == desired {
+                let (document, changed) = match owner
+                    .apply_archive(&origin, &session, action)
+                    .await?
+                {
+                    archive::ArchiveUpdate::Unknown(current)
+                        if action == ArchiveAction::Restore =>
+                    {
                         (current, false)
-                    } else {
-                        let mut metadata =
-                            previous.map(|row| row.metadata.clone()).unwrap_or_default();
-                        metadata.archived = desired;
-                        metadata.pinned = false;
-                        drop(current);
-                        let document = match owner
-                            .commit_edit(
-                                &origin,
-                                &session,
-                                header.as_ref(),
-                                archived,
-                                &metadata,
-                                intent == ArchiveIntent::StopAndArchive,
-                            )
-                            .await?
-                        {
-                            Ok(document) => document,
-                            Err(activity) => return Ok(ArchiveOutcome::Ready(activity)),
-                        };
-                        (document, true)
                     }
+                    archive::ArchiveUpdate::Unknown(_) => return Ok(ArchiveOutcome::Unknown),
+                    archive::ArchiveUpdate::Active(work) => return Ok(ArchiveOutcome::Ready(work)),
+                    archive::ArchiveUpdate::Applied(document, changed) => (document, changed),
                 };
                 let ids = owner
                     .visible_archives(&document, &origin, visibility)
