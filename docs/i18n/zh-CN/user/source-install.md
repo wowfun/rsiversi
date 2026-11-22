@@ -160,6 +160,16 @@ Windows 和 Linux 上的 TUI 与 Web 共享常驻 Host。关闭 UI 只断开附�
 `rsi web stop` 停止浏览器 listener，`rsi host stop` 停止共享服务。
 接下来可阅读[第一次对话](first-conversation.md)。
 
+### 在 Web 工作台中使用 DSH 插件
+
+可选桥接 rsiversi-dsh 在指定的 RSIversi Host 中运行 DSH 插件管理器。使用所需的
+DSH 运行时构建桥接，在独立 Home 中准备市场配置，再启动配对的 Web 工作台。
+具体步骤见桥接仓库的[市场工作台说明](https://github.com/wowfun/rsiversi-dsh#market-workbench)。
+
+以 Host 所有者身份打开 **Plugins → Add plugin**，输入 npm 包名和版本，依次选择
+**Install** 和 **Enable now**。下次打开同一 Home 时会恢复已安装的插件。
+配置中提供了插件依赖的公开 DSH 包和服务时，插件可以直接运行。
+
 ## 升级与导入已有数据
 
 安装器只负责首次安装，重复运行不会升级核心。从本地源码升级时，先使用现有

@@ -177,6 +177,18 @@ TUI and Web share the same resident Host on Windows and Linux. Closing a UI
 detaches it. `rsi web stop` stops the browser listener, while `rsi host stop`
 stops the shared service. Continue with [your first conversation](first-conversation.md).
 
+### Use DSH plugins in the Web workbench
+
+The optional rsiversi-dsh bridge runs the DSH Plugin Manager inside a selected
+RSIversi Host. Build the bridge against the desired DSH runtime, stage its market
+profile in a dedicated Home, and launch its paired Web document. The bridge
+repository supplies the [market workbench instructions](https://github.com/wowfun/rsiversi-dsh#market-workbench).
+
+As the Host owner, open **Plugins → Add plugin**, enter the npm package name
+and version, then choose **Install** and **Enable now**. Reopen that Home to
+use the same installed selection. A plugin can run unchanged when its public
+DSH dependencies and services are available in that profile.
+
 ## Upgrade and transfer existing data
 
 The installer is for first installation only; running it again does not upgrade
