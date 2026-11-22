@@ -411,7 +411,9 @@ releases all retained renderer snapshots and projections, even if another owner
 still holds the renderer handle; late deliveries cannot reacquire that retention.
 
 Each conversation exposes its discovered Session commands and saved command
-receipt. Registered slash names execute through the shared controller; unknown
+receipt. Only the Host owner can submit a registered Host command, including
+manual compaction. Ordinary devices can list those commands and use the separate
+model picker. Unknown
 names remain Human input for workspace skills. The document retains an unresolved opaque invocation across Worker replacement;
 Rust owns command preparation, exact receipt matching and execution admission.
 The Host retains confirmed submission receipts. Rust checks their identities and

@@ -509,6 +509,8 @@ Choosing an argument-taking command from the menu preserves the entire current
 draft as its arguments, regardless of selection. Completion replaces only its
 leading trigger; it refuses a trigger following non-whitespace prose.
 Selecting the already entered command keeps its existing prefix and arguments.
+A paired device can browse Session commands. Submitting a registered Host command
+requires the Host owner and leaves the text available to edit when denied.
 Selecting a Skill in slash completion places the caret after the separator,
 ready for its arguments. Existing arguments and whitespace remain in the draft.
 A menu capture is consumed by one selection attempt; later explicit selections

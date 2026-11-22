@@ -12,7 +12,6 @@ struct Request {
 }
 impl Sessions {
     pub(super) async fn select_model(&self, payload: Value) -> Result<Value> {
-        use rsi_agent_session_protocol::{CommandArguments, SessionCommandInvocation};
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
@@ -29,19 +28,11 @@ impl Sessions {
             .commands()
             .await
             .map_err(|error| Error::Remote(error.to_string()))?;
-        let command = catalog
-            .commands()
-            .iter()
-            .find(|command| command.id().as_str() == rsi_agent_model_selection::COMMAND)
-            .ok_or_else(|| Error::Remote("Session model selection unavailable".into()))?;
-        let arguments =
-            CommandArguments::new(json!(input.selection)).map_err(|_| Error::Protocol)?;
         let receipt = handle
-            .execute_command(SessionCommandInvocation {
-                command: command.id().clone(),
+            .select_model(rsi_session_protocol::SelectSessionModel {
                 request_id: input.request_id,
                 expected_revision: catalog.revision(),
-                arguments,
+                selection: input.selection.clone(),
             })
             .await
             .map_err(|error| Error::Remote(error.to_string()))?;

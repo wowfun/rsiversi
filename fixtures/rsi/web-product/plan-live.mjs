@@ -1,4 +1,4 @@
-import {openBrowserPage, connectWorkbench, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectHostOwner, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Explicit live plan handoff and structured delegation; never a default test.
 import assert from 'node:assert/strict';
@@ -7,14 +7,14 @@ import {join} from 'node:path';
 import {chromium} from 'playwright';
 import {liveFixture} from './live-fixture.mjs';
 import {assertNoNotices} from './task-checks.mjs';
-const fixture=await liveFixture();
+const fixture=await liveFixture({localWeb:true});
 const {report,model,service}=fixture;
 let page,browser;const errors=[],started=Date.now();let approvals=0;
 try {
   ({browser, page} = await openBrowserPage(chromium, errors));
   const registration=service.register('live plan and structured delegation');
   await registerFixtureWorkspace(page.request,service,registration);
-  await connectWorkbench(page,service,registration);
+  await connectHostOwner(page,service);
   await openWorkspace(page, service);
   const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
   await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();

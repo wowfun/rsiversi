@@ -1467,13 +1467,13 @@ impl SessionHandle for LocalSessionHandle {
             }
         }))
     }
-    async fn can_stop_work(&self) -> Result<bool> {
+    async fn is_host_owner(&self) -> Result<bool> {
         let _admission = self.admit()?;
-        self.owns_work_control()
+        self.credential_is_host_owner()
     }
     async fn stop_background_job(&self, job: rsi_session_protocol::BackgroundJobId) -> Result<()> {
         let _admission = self.admit_mutation()?;
-        self.require_work_control()?;
+        self.require_host_owner()?;
         let (jobs, scope) = self.background_scope().await?;
         jobs.request_stop(&scope, &job.id, job.origin.as_str())
             .map_err(background_job_error)
@@ -1567,7 +1567,7 @@ impl SessionHandle for LocalSessionHandle {
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
         if matches!(request.action, rsi_agent_goal::GoalAction::Cancel { .. }) {
-            self.require_work_control()?;
+            self.require_host_owner()?;
         }
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
@@ -1693,6 +1693,7 @@ impl SessionHandle for LocalSessionHandle {
         command: rsi_agent_session_protocol::DomainRequestId,
     ) -> Result<rsi_agent_turn_protocol::CompactionOutcome> {
         use rsi_agent_turn_protocol::{CompactionOutcome, ManualCompactionAdmission};
+        self.require_host_owner()?;
         let _operation = self.admit_mutation()?;
         let (_activity, _draft) = self.begin_activity()?;
         self.reconcile_fresh_read().await?;
@@ -1734,8 +1735,16 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        self.require_host_owner()?;
         let _admission = self.admit_mutation()?;
         self.dispatch_command(invocation).await
+    }
+    async fn select_model(
+        &self,
+        request: rsi_session_protocol::SelectSessionModel,
+    ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        let _admission = self.admit_mutation()?;
+        self.dispatch_command(request.invocation()?).await
     }
     async fn command_status(
         &self,
@@ -2069,7 +2078,7 @@ impl SessionHandle for LocalSessionHandle {
                 });
             }
         }
-        self.require_work_control()?;
+        self.require_host_owner()?;
         self.turns
             .cancel_target(self.session_id(), target, reason)
             .await
@@ -2337,7 +2346,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         run: &rsi_agent_session_protocol::ProgramRunId,
     ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
-        self.require_work_control()?;
+        self.require_host_owner()?;
         self.draft_commands.cancel_workflow(self, run.clone()).await
     }
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {

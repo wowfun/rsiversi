@@ -286,6 +286,9 @@ impl GuiApplication {
                 }
             }
             let (kind, id, request, maximum) = if let Some((id, request)) = command {
+                if !attached.controller.is_host_owner().await.map_err(error)? {
+                    return Err("Only the Host owner can run Session commands".into());
+                }
                 ("command", id, request, MAXIMUM_COMMAND)
             } else {
                 let delivery = app.composer_delivery(input.pane, &input.generation,

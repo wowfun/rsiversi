@@ -14,6 +14,9 @@ pub struct ModelSelection {
     pub reasoning_effort: Option<ReasoningEffortId>,
 }
 impl ModelSelection {
+    /// Pinned contribution identity for changing this selection in a Session.
+    pub const COMMAND: &'static str = "rsi.model-selection.command";
+
     /// Revalidates the complete route; effort is constructor/decode validated.
     pub fn validate(&self) -> Result<()> {
         self.model

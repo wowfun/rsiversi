@@ -195,7 +195,7 @@ async fn read(
                 Ok(detail) => {
                     let can_cancel = detail.run.outcome.is_none()
                         && !detail.run.orphaned
-                        && controller.can_stop_work().await.unwrap_or(false);
+                        && controller.is_host_owner().await.unwrap_or(false);
                     detail_elements(&mut elements, detail, can_cancel);
                 }
                 Err(error) => elements.push(field("Detail unavailable", diagnostic(error))),

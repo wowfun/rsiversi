@@ -23,6 +23,7 @@ impl Scratch {
         let maximum = match operation {
             Operation::Jobs => 8 * 1024 * 1024,
             Operation::Commands
+            | Operation::SelectModel
             | Operation::ExecuteCommand
             | Operation::CommandStatus
             | Operation::GoalControl
@@ -414,8 +415,8 @@ fn handle_operations(
                 owner.read_resource(request).await
             }
         ),
-        add!(CanStopWork, |owner, (): ()| async move {
-            owner.can_stop_work().await
+        add!(IsHostOwner, |owner, (): ()| async move {
+            owner.is_host_owner().await
         }),
         add!(
             StopBackgroundJob,
@@ -509,6 +510,12 @@ fn handle_operations(
         add!(Compact, |owner, command: DomainRequestId| async move {
             owner.compact(command).await
         }),
+        add!(
+            SelectModel,
+            |owner, request: rsi_session_protocol::SelectSessionModel| async move {
+                owner.select_model(request).await
+            }
+        ),
         add!(
             ExecuteCommand,
             |owner, invocation: SessionCommandInvocation| async move {
@@ -775,6 +782,7 @@ mod tests {
         );
         for operation in [
             Operation::Commands,
+            Operation::SelectModel,
             Operation::ExecuteCommand,
             Operation::CommandStatus,
         ] {

@@ -1,6 +1,6 @@
 use super::{Attachment, GuiApplication};
 use crate::application::{Result, error};
-use rsi_agent_session_protocol::{CommandArguments, DomainRequestId, ModelSelection};
+use rsi_agent_session_protocol::{DomainRequestId, ModelSelection};
 
 impl Attachment {
     pub(super) fn selection(
@@ -43,17 +43,10 @@ impl GuiApplication {
         self.pane(pane)?.attachment(generation)?;
         let id = DomainRequestId::new(rsi_ui::fresh_identity("model-selection").map_err(error)?)
             .map_err(error)?;
-        let arguments = CommandArguments::new(serde_json::to_value(&selection).map_err(error)?)
-            .map_err(error)?;
         let result = attached
             .submission
             .model_command
-            .execute(
-                &attached.controller,
-                rsi_agent_model_selection::COMMAND_NAME,
-                arguments,
-                id,
-            )
+            .select_model(&attached.controller, selection.clone(), id)
             .await;
         if result.is_ok() {
             if let Some(setup) = &self.setup {

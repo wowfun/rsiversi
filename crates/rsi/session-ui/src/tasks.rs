@@ -155,7 +155,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         .goal
         .as_ref()
         .is_some_and(|goal| goal.phase != GoalPhase::Completed)
-        && controller.can_stop_work().await.unwrap_or(false);
+        && controller.is_host_owner().await.unwrap_or(false);
     elements.extend(goal_controls(&state, revision, can_cancel)?);
     Ok(view("Goal", elements))
 }

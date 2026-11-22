@@ -79,6 +79,8 @@ Serve owns connection negotiation and Web asset operations for its entire
 generation. Closing or retiring a local registration reports that owner's state;
 it never redirects those operations to a colliding parent service registration.
 
+Host command execution uses the original request credential. Command discovery and receipt lookup use the interactive Session caller. The model picker delegates a typed model selection.
+
 ## Resident product listeners
 
 Opening an application may restore multiple installed package leases. The

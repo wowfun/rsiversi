@@ -76,15 +76,14 @@ impl CommandSubmission {
             .clone()
     }
 
-    /// Discovers and freezes a new explicit invocation before sending it once.
+    /// Freezes a typed picker selection against the current Session revision.
     ///
     /// # Panics
     /// Panics if an earlier panic poisoned the saved command state.
-    pub async fn execute(
+    pub async fn select_model(
         &self,
         controller: &Arc<SessionController>,
-        name: &str,
-        arguments: CommandArguments,
+        selection: rsi_agent_session_protocol::ModelSelection,
         request_id: DomainRequestId,
     ) -> Result<SessionCommandReceipt> {
         let _work = self
@@ -96,13 +95,17 @@ impl CommandSubmission {
                 request_id: pending.request_id,
             });
         }
-        let invocation =
-            command_invocation(&controller.commands().await?, name, arguments, request_id)?;
+        let request = rsi_session_protocol::SelectSessionModel {
+            request_id,
+            expected_revision: controller.commands().await?.revision(),
+            selection,
+        };
+        let invocation = request.invocation()?;
         self.view
             .lock()
             .expect("command submission poisoned")
             .pending = Some(invocation.clone());
-        let result = controller.execute_command(invocation).await;
+        let result = controller.select_model(request, invocation).await;
         self.record(&result);
         result
     }

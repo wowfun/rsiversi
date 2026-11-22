@@ -25,9 +25,13 @@ struct Input {
 impl Sessions {
     pub(super) async fn command(&self, payload: Value) -> Result<Value> {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let handle = self
-            .interactive_handle(&input.request, &input.session_id)
-            .await?;
+        let handle = if matches!(input.operation, Operation::Execute { .. }) {
+            self.interactive_credential_handle(&input.request, &input.session_id)
+                .await?
+        } else {
+            self.interactive_handle(&input.request, &input.session_id)
+                .await?
+        };
         let reply = match input.operation {
             Operation::List => serde_json::to_value(handle.commands().await.map_err(remote)?),
             Operation::Execute { invocation } => {

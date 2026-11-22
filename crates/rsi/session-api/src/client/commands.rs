@@ -70,7 +70,9 @@ impl Handle {
 
     pub(super) async fn execute_checked_command(
         &self,
-        invocation: SessionCommandInvocation,
+        invocation: &SessionCommandInvocation,
+        operation: Operation,
+        input: &(impl serde::Serialize + Sync),
     ) -> rsi_session_protocol::Result<SessionCommandReceipt> {
         let digest = invocation
             .digest()
@@ -88,7 +90,7 @@ impl Handle {
             request_id: invocation.request_id.clone(),
         };
         let result: rsi_session_protocol::Result<SessionCommandReceipt> =
-            self.call(Operation::ExecuteCommand, &invocation).await;
+            self.call(operation, input).await;
         match result {
             Ok(receipt)
                 if receipt.request_id() == &invocation.request_id

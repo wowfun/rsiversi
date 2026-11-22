@@ -73,3 +73,32 @@ impl ModelSelectionRead {
         }
     }
 }
+
+/// Model picker input bound to the displayed Session revision.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectSessionModel {
+    /// Client-generated immutable operation identity.
+    pub request_id: rsi_agent_session_protocol::DomainRequestId,
+    /// Predecessor captured by the caller.
+    pub expected_revision: rsi_agent_session_protocol::CommandRevision,
+    /// Complete model and reasoning choice.
+    pub selection: ModelSelection,
+}
+impl SelectSessionModel {
+    /// Uses the same durable command identity as the model contribution.
+    pub fn invocation(&self) -> Result<rsi_agent_session_protocol::SessionCommandInvocation> {
+        use rsi_agent_session_protocol::{
+            CommandArguments, ContributionId, SessionCommandInvocation,
+        };
+        let value = serde_json::to_value(&self.selection)
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+        Ok(SessionCommandInvocation {
+            command: ContributionId::new(ModelSelection::COMMAND).expect("model command identity"),
+            request_id: self.request_id.clone(),
+            expected_revision: self.expected_revision,
+            arguments: CommandArguments::new(value)
+                .map_err(|error| SessionError::Invalid(error.to_string()))?,
+        })
+    }
+}

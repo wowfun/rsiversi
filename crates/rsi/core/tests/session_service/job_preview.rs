@@ -300,12 +300,12 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         .await
         .unwrap();
     let owner = rsi_api_protocol::CallOrigin::Device(auth.authenticate(&owner.token).unwrap());
-    use rsi_session_api::Operation::{CanStopWork, StopBackgroundJob};
+    use rsi_session_api::Operation::{IsHostOwner, StopBackgroundJob};
     for (origin, allowed) in [(viewer.clone(), false), (owner, true)] {
         let reply = session_wire(
             &daemon.running,
             origin,
-            CanStopWork,
+            IsHostOwner,
             &target,
             serde_json::Value::Null,
         )

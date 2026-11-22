@@ -77,7 +77,7 @@ async fn manual_fork_binds_source_generation_and_passes_the_exact_cut_to_creatio
 }
 #[tokio::test]
 async fn slash_commands_do_not_require_message_delivery_authority() {
-    let (runtime, backend, app, generation) = admission::fixture().await;
+    let (runtime, backend, app, generation) = admission::fixture_with(None, true).await;
     for action in [
         json!({}),
         json!({"action":"queue","action_revision":"obsolete"}),
@@ -93,6 +93,23 @@ async fn slash_commands_do_not_require_message_delivery_authority() {
         assert_eq!(prepared["kind"], "command");
         input["text"] = json!("ordinary message");
         assert!(app.prepare_submission(&input.to_string()).await.is_err());
+    }
+    assert!(backend.commands.lock().unwrap().is_empty());
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn paired_device_cannot_prepare_host_commands() {
+    let (runtime, backend, app, generation) = admission::fixture().await;
+    for text in ["/plan on", "/compact"] {
+        let input = json!({"pane":"main","generation":generation,"text":text});
+        assert_eq!(
+            app.prepare_submission(&input.to_string())
+                .await
+                .unwrap_err(),
+            "Only the Host owner can run Session commands"
+        );
     }
     assert!(backend.commands.lock().unwrap().is_empty());
     assert!(backend.requests.lock().unwrap().is_empty());
@@ -126,6 +143,9 @@ async fn command_discovery_unknown_result_and_replaced_pane_preserve_original_in
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());
+    backend
+        .host_owner
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     for (id, factory) in [
         (
             "providers",

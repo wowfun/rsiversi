@@ -245,7 +245,10 @@ enum Update {
     Message(rsi_agent_session_protocol::AgentMessage),
     Output(rsi_spill::SpillPage),
     Notice(String),
-    Compaction(rsi_agent_session_protocol::DomainRequestId, rsi_agent_turn_protocol::CompactionOutcome),
+    Compaction(
+        rsi_agent_session_protocol::DomainRequestId,
+        rsi_agent_turn_protocol::CompactionOutcome,
+    ),
     Approval(Option<rsi_approval_protocol::ApprovalRequest>),
     ApprovalDecided(
         rsi_approval_protocol::ApprovalRequest,
@@ -1081,17 +1084,8 @@ impl Client {
                 rsi_ui::fresh_identity("model-selection").map_err(error)?,
             )
             .map_err(error)?;
-            let arguments = rsi_agent_session_protocol::CommandArguments::new(
-                serde_json::to_value(&selection).map_err(error)?,
-            )
-            .map_err(error)?;
             command
-                .execute(
-                    &controller,
-                    rsi_agent_model_selection::COMMAND_NAME,
-                    arguments,
-                    id,
-                )
+                .select_model(&controller, selection.clone(), id)
                 .await
                 .map_err(error)?;
             Ok(Update::ModelSelected(selection))

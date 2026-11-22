@@ -151,6 +151,18 @@ impl Sessions {
         self.interactive_handle_for(request, id, origin).await
     }
 
+    pub(super) async fn interactive_credential_handle(
+        &self,
+        request: &str,
+        session: &rsi_agent_session_protocol::SessionId,
+    ) -> Result<Arc<dyn rsi_session_protocol::SessionHandle>> {
+        let origin = self
+            .routes
+            .credential(request)
+            .map_err(|_| Error::Cancelled)?;
+        self.interactive_handle_for(request, session, origin).await
+    }
+
     async fn interactive_handle_for(
         &self,
         request: &str,
@@ -188,12 +200,8 @@ impl Sessions {
             inbox_only: bool,
         }
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let origin = self
-            .routes
-            .credential(&input.request)
-            .map_err(|_| Error::Cancelled)?;
         let handle = self
-            .interactive_handle_for(&input.request, &input.session_id, origin)
+            .interactive_credential_handle(&input.request, &input.session_id)
             .await?;
         let receipt = handle
             .cancel(

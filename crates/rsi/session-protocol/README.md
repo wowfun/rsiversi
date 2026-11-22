@@ -205,6 +205,12 @@ cancellation, direct image generation, and approval operations.
 Session handles expose command discovery, invocation and receipt lookup through
 the Agent-owned bounded command DTOs. Fresh handles use the actual draft payload;
 durable handles obtain Kernel-issued command authority only for that operation.
+The Host owner executes catalogued slash commands and manual compaction in
+drafts and published Sessions. Paired devices can discover the command catalog
+and read existing receipts. Model selection has a separate typed request that
+uses the model contribution's canonical command receipt. Goal controls and
+other dedicated operations retain their own authority.
+
 Draft commands and first publication share mutation admission. Concurrent exact
 draft requests join one service-owned callback, with a 30-second deadline and
 64 distinct in-flight mutations, shared with preset preparation, per Session

@@ -1,6 +1,6 @@
 import {navigationFilter} from './controls.mjs';
 import {paired} from './paired-env.mjs';
-import {openBrowserPage, connectWorkbench, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectHostOwner, openWorkspace, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Real document/Worker/Host closed-review acceptance; provider is deterministic.
 import assert from 'node:assert/strict';
@@ -36,14 +36,14 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   let service,browser,page;const errors=[];
   try {
   provider.listen(0,'127.0.0.1');await once(provider,'listening');
-  service=await startService({binary,assets,report:path,configure:async({config})=>{
+  service=await startService({binary,assets,report:path,localWeb:true,configure:async({config})=>{
     const file=join(config,'host-profiles/fixture/host.profile.toml');
     await writeFile(file,(await readFile(file,'utf8')).replace(/endpoint = "[^"]+"/,`endpoint = "http://127.0.0.1:${provider.address().port}"`));
   }});
   ({browser, page} = await openBrowserPage(engine, errors));
   const registration=service.register('closed plan review');
   await registerFixtureWorkspace(page.request,service,registration);
-  await connectWorkbench(page,service,registration);
+  await connectHostOwner(page,service);
   await openWorkspace(page, service);
     const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
     await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);

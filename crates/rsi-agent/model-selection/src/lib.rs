@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 /// Durable domain identity; absence uses the Header baseline.
 pub const DOMAIN: &str = "rsi.model-selection";
 /// Ordinary command contribution identity used by application model pickers.
-pub const COMMAND: &str = "rsi.model-selection.command";
+pub const COMMAND: &str = ModelSelection::COMMAND;
 /// Command name advertised to application model pickers.
 pub const COMMAND_NAME: &str = "model-selection";
 /// Projection producer identity.

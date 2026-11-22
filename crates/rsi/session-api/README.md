@@ -188,6 +188,11 @@ resolving a compact receipt or command catalog can still load Headers, canonical
 controls and complete domain snapshots. Its wire response remains independently
 bounded (512 KiB for discovery, 8 KiB for receipts).
 
+The `execute-command` and `compact` mutations preserve the original credential
+for Host owner admission. Catalog and receipt reads accept the usual Session
+caller. The authenticated `select-model` mutation accepts an exact model
+selection, predecessor and request ID and returns its canonical command receipt.
+
 `goal-control` v2 preserves the original credential for the Session to authorize
 its action. It is an owned Data mutation carrying the immutable Goal request and
 expected command revision. It reserves the command materialization ceiling and

@@ -35,7 +35,7 @@ pub use lifecycle::{SessionClosing, SessionEpoch, SessionLifecycle, SessionLifec
 pub mod terminal;
 pub use evidence::{EvidencePage, EvidencePageContent, EvidenceRead, ToolComparison};
 mod model_selection;
-pub use model_selection::{ModelAvailability, ModelSelectionRead};
+pub use model_selection::{ModelAvailability, ModelSelectionRead, SelectSessionModel};
 pub use reads::{
     SessionReadContract, SessionReadFence, SessionReadLease, SessionReads, SessionTarget,
 };
@@ -788,8 +788,8 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<BackgroundOutputStream> {
         Err(SessionError::NotFound("background job".into()))
     }
-    /// Checks whether the caller can stop published Session work.
-    async fn can_stop_work(&self) -> Result<bool> {
+    /// Checks whether this caller is the Host owner for Session controls.
+    async fn is_host_owner(&self) -> Result<bool> {
         Ok(false)
     }
     /// Requests a human stop and leaves delivery of the terminal notice to the Session.
@@ -855,6 +855,13 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
         &self,
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt>;
+    /// Applies a typed model-picker selection to this Session.
+    async fn select_model(
+        &self,
+        request: SelectSessionModel,
+    ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        self.execute_command(request.invocation()?).await
+    }
     /// Queries the original compact receipt in the current draft lease or durable Session.
     async fn command_status(
         &self,

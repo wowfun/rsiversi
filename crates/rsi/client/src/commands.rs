@@ -62,12 +62,20 @@ pub async fn execute_command_once(
     handle: &dyn SessionHandle,
     invocation: SessionCommandInvocation,
 ) -> Result<SessionCommandReceipt> {
-    match handle.execute_command(invocation.clone()).await {
-        Ok(receipt) => matching_receipt(&invocation, receipt),
+    let result = handle.execute_command(invocation.clone()).await;
+    settle_command(handle, &invocation, result).await
+}
+async fn settle_command(
+    handle: &dyn SessionHandle,
+    invocation: &SessionCommandInvocation,
+    result: Result<SessionCommandReceipt>,
+) -> Result<SessionCommandReceipt> {
+    match result {
+        Ok(receipt) => matching_receipt(invocation, receipt),
         Err(
             SessionError::CommandOutcomeUnknown { .. }
             | SessionError::Api(rsi_api_protocol::ApiError::OutcomeUnknown),
-        ) => query_command_result(handle, &invocation).await,
+        ) => query_command_result(handle, invocation).await,
         Err(error) => Err(error),
     }
 }
@@ -116,19 +124,39 @@ impl SessionController {
         self: &Arc<Self>,
         invocation: SessionCommandInvocation,
     ) -> BoxFuture<'static, Result<SessionCommandReceipt>> {
-        self.command_work(invocation, false)
+        let unresolved = unknown(&invocation);
+        let handle = self.handle.clone();
+        self.command_work(unresolved, async move {
+            execute_command_once(handle.as_ref(), invocation).await
+        })
+    }
+    pub(crate) fn select_model(
+        self: &Arc<Self>,
+        request: rsi_session_protocol::SelectSessionModel,
+        invocation: SessionCommandInvocation,
+    ) -> BoxFuture<'static, Result<SessionCommandReceipt>> {
+        let unresolved = unknown(&invocation);
+        let handle = self.handle.clone();
+        self.command_work(unresolved, async move {
+            let result = handle.select_model(request).await;
+            settle_command(handle.as_ref(), &invocation, result).await
+        })
     }
     /// Refreshes an unresolved receipt without another mutation or a replacement identity.
     pub fn reconcile_command(
         self: &Arc<Self>,
         invocation: SessionCommandInvocation,
     ) -> BoxFuture<'static, Result<SessionCommandReceipt>> {
-        self.command_work(invocation, true)
+        let unresolved = unknown(&invocation);
+        let handle = self.handle.clone();
+        self.command_work(unresolved, async move {
+            query_command_result(handle.as_ref(), &invocation).await
+        })
     }
     fn command_work(
         self: &Arc<Self>,
-        invocation: SessionCommandInvocation,
-        query: bool,
+        unresolved: SessionError,
+        work: impl std::future::Future<Output = Result<SessionCommandReceipt>> + Send + 'static,
     ) -> BoxFuture<'static, Result<SessionCommandReceipt>> {
         let admission = self
             .admission
@@ -140,17 +168,13 @@ impl SessionController {
         let Ok(permit) = self.submissions.clone().try_acquire_owned() else {
             return Box::pin(async { Err(SessionError::Capacity) });
         };
-        let unresolved = unknown(&invocation);
         let fallback = unresolved.clone();
         let controller = self.clone();
         let task = self.execution.spawn(self.tasks.track_future(async move {
             let _permit = permit;
             tokio::select! { biased;
                 () = controller.stop.cancelled() => Err(unresolved),
-                result = async {
-                    if query { query_command_result(controller.handle.as_ref(), &invocation).await }
-                    else { execute_command_once(controller.handle.as_ref(), invocation).await }
-                } => result,
+                result = work => result,
             }
         }));
         drop(admission);

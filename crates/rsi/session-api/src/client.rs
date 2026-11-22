@@ -157,16 +157,22 @@ pub(super) fn failure(
         }
         Failure::CommandConflict { .. } => matches!(
             operation,
-            Operation::ExecuteCommand | Operation::CommandStatus | Operation::GoalControl
+            Operation::SelectModel
+                | Operation::ExecuteCommand
+                | Operation::CommandStatus
+                | Operation::GoalControl
         ),
         Failure::CommandOutcomeUnknown { .. } => matches!(
             operation,
-            Operation::ExecuteCommand | Operation::GoalControl
+            Operation::SelectModel | Operation::ExecuteCommand | Operation::GoalControl
         ),
         Failure::CommandRevisionConflict { expected, actual } => {
             matches!(
                 operation,
-                Operation::ExecuteCommand | Operation::SelectPreset | Operation::GoalControl
+                Operation::SelectModel
+                    | Operation::ExecuteCommand
+                    | Operation::SelectPreset
+                    | Operation::GoalControl
             ) && expected != actual
         }
         Failure::WorkflowUnavailable { .. } => matches!(
@@ -691,8 +697,8 @@ impl SessionHandle for Handle {
             }
         }))
     }
-    async fn can_stop_work(&self) -> rsi_session_protocol::Result<bool> {
-        self.frozen().call(Operation::CanStopWork, &()).await
+    async fn is_host_owner(&self) -> rsi_session_protocol::Result<bool> {
+        self.frozen().call(Operation::IsHostOwner, &()).await
     }
     async fn observe_background_output(
         &self,
@@ -832,7 +838,15 @@ impl SessionHandle for Handle {
         &self,
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
-        self.execute_checked_command(invocation).await
+        self.execute_checked_command(&invocation, Operation::ExecuteCommand, &invocation)
+            .await
+    }
+    async fn select_model(
+        &self,
+        request: rsi_session_protocol::SelectSessionModel,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
+        self.execute_checked_command(&request.invocation()?, Operation::SelectModel, &request)
+            .await
     }
     async fn command_status(
         &self,

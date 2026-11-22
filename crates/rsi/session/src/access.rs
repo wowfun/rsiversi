@@ -93,7 +93,7 @@ impl LocalSessionService {
     }
 }
 impl LocalSessionHandle {
-    pub(super) fn owns_work_control(&self) -> Result<bool> {
+    pub(super) fn credential_is_host_owner(&self) -> Result<bool> {
         if matches!(self.origin, rsi_api_protocol::CallOrigin::Local) {
             return Ok(true);
         }
@@ -107,8 +107,8 @@ impl LocalSessionHandle {
             .map_err(SessionError::Api)
     }
 
-    pub(super) fn require_work_control(&self) -> Result<()> {
-        if self.owns_work_control()? {
+    pub(super) fn require_host_owner(&self) -> Result<()> {
+        if self.credential_is_host_owner()? {
             Ok(())
         } else {
             Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))

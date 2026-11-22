@@ -50,7 +50,7 @@ pub struct SessionController {
     pub(super) workflow_changed: tokio::sync::watch::Sender<u64>,
     session_id: SessionId,
     pub(super) handle: Arc<dyn SessionHandle>,
-    can_stop_work: tokio::sync::OnceCell<bool>,
+    is_host_owner: tokio::sync::OnceCell<bool>,
     sink: Arc<dyn ObservationSink>,
     execution: Execution,
     stop: CancellationToken,
@@ -67,9 +67,9 @@ impl SessionController {
 
     /// Reads the presentation permission once for this attached credential.
     /// The Host authorizes each stop against its current owner.
-    pub async fn can_stop_work(&self) -> Result<bool> {
-        self.can_stop_work
-            .get_or_try_init(|| self.handle.can_stop_work())
+    pub async fn is_host_owner(&self) -> Result<bool> {
+        self.is_host_owner
+            .get_or_try_init(|| self.handle.is_host_owner())
             .await
             .copied()
     }
@@ -288,7 +288,7 @@ impl PluginFactory for SessionControllerFactory {
             workflow_selection: Mutex::new(super::workflow::WorkflowSelection::Latest),
             workflow_changed: tokio::sync::watch::channel(0).0,
             session_id: config.session_id,
-            can_stop_work: tokio::sync::OnceCell::new(),
+            is_host_owner: tokio::sync::OnceCell::new(),
             handle,
             sink: plan.local::<ObservationSinkContract>()?,
             execution: plan.context().runtime().execution().clone(),

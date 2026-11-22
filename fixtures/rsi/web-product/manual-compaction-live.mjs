@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { startService, waitUntil } from './service.mjs';
-import { chooseStartingWorkspace, connectWorkbench, registerFixtureWorkspace } from './browser-fixture.mjs';
+import { chooseStartingWorkspace, connectHostOwner, registerFixtureWorkspace } from './browser-fixture.mjs';
 import { attemptEvents } from './model-attempt.mjs';
 import { deepseekProfile, liveLimits, readDeepseekKey } from './live-limits.mjs';
 
@@ -18,7 +18,7 @@ let browser, page, service;
 const checks = [];
 const errors = [];
 try {
-  service = await startService({ binary, assets, report, developmentHttp: true, foregroundHost: process.platform === 'win32', deepseekKey: key,
+  service = await startService({ binary, assets, report, localWeb: true, developmentHttp: true, foregroundHost: process.platform === 'win32', deepseekKey: key,
     configure: async ({config}) => {
       await writeFile(join(config, 'settings.json'), JSON.stringify({'rsi.agent': {default_model: {deployment: 'live', model}}}));
       await writeFile(join(config, 'host-profiles/fixture/host.profile.toml'), deepseekProfile(model, liveLimits()));
@@ -28,7 +28,7 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   const registration = service.register('manual summary verification');
   await registerFixtureWorkspace(page.request, service, registration);
-  await connectWorkbench(page, service, registration);
+  await connectHostOwner(page, service);
   await chooseStartingWorkspace(page, service);
   const editor = page.getByRole('textbox', {name: 'Main message', exact: true});
   const send = async text => {
@@ -103,8 +103,6 @@ try {
   await page.screenshot({path: join(report, 'request-tools.png')});
   checks.push('selected actual request shows its tool names');
   await page.reload();
-  await page.locator('#dev-http').check();
-  await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
   await page.locator('#workbench').waitFor({state:'visible'});
   await page.getByRole('tab',{name:'Trajectory',selected:true}).waitFor();
   await page.getByRole('tab',{name:'Chat',exact:true}).click();

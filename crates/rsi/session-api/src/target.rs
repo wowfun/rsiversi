@@ -39,6 +39,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::ChangeMessageFeedback
             | Operation::Compact
             | Operation::CompactStatus
+            | Operation::SelectModel
             | Operation::ExecuteCommand
             | Operation::CommandStatus
             | Operation::DraftSnapshot
@@ -67,7 +68,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::GoalStatus
             | Operation::GoalObserve
             | Operation::Jobs
-            | Operation::CanStopWork
+            | Operation::IsHostOwner
             | Operation::ObserveBackgroundOutput
             | Operation::StopBackgroundJob
             | Operation::PeekJob

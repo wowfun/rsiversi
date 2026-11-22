@@ -89,6 +89,7 @@ fn missing<T>() -> rsi_session_protocol::Result<T> {
 }
 #[derive(Debug, Default)]
 struct Backend {
+    host_owner: std::sync::atomic::AtomicBool,
     creations: Mutex<Vec<CreateSession>>,
     attaches: std::sync::atomic::AtomicUsize,
     registration_name: Mutex<Option<rsi_workspace_protocol::WorkspaceName>>,
@@ -203,6 +204,9 @@ impl SessionService for Service {
 }
 #[async_trait]
 impl SessionHandle for Backend {
+    async fn is_host_owner(&self) -> rsi_session_protocol::Result<bool> {
+        Ok(self.host_owner.load(std::sync::atomic::Ordering::SeqCst))
+    }
     async fn release_reference(
         &self,
         snapshot: ReferenceSnapshotRef,
@@ -365,7 +369,7 @@ impl SessionHandle for Backend {
                 )
                 .unwrap(),
                 SessionCommandDescriptor::new(
-                    ContributionId::new("fixture.model-selection").unwrap(),
+                    ContributionId::new(ModelSelection::COMMAND).unwrap(),
                     "model-selection",
                     "Select model and effort",
                     true,
@@ -391,7 +395,7 @@ impl SessionHandle for Backend {
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandReceipt> {
         self.commands.lock().unwrap().push(invocation.clone());
-        if invocation.command.as_str() == "fixture.model-selection"
+        if invocation.command.as_str() == ModelSelection::COMMAND
             && !self
                 .model_outcome_unknown
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -1069,7 +1073,7 @@ async fn verify_retry(resolution: usize, query_in_place: bool) {
         let commands = backend.commands.lock().unwrap();
         let selection = commands
             .iter()
-            .find(|command| command.command.as_str() == "fixture.model-selection")
+            .find(|command| command.command.as_str() == ModelSelection::COMMAND)
             .unwrap();
         assert_eq!(
             selection.arguments.value()["model"],

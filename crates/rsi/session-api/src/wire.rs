@@ -59,6 +59,8 @@ pub enum Operation {
     Submit,
     Commands,
     ExecuteCommand,
+    /// Change a Session model through its independent picker.
+    SelectModel,
     MessageFeedback,
     ChangeMessageFeedback,
     Compact,
@@ -91,7 +93,7 @@ pub enum Operation {
     GoalObserve,
     Jobs,
     PeekJob,
-    CanStopWork,
+    IsHostOwner,
     ObserveBackgroundOutput,
     StopBackgroundJob,
     Inspect,
@@ -105,7 +107,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 69] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -131,6 +133,7 @@ impl Operation {
         Self::Submit,
         Self::Commands,
         Self::ExecuteCommand,
+        Self::SelectModel,
         Self::MessageFeedback,
         Self::ChangeMessageFeedback,
         Self::Compact,
@@ -163,7 +166,7 @@ impl Operation {
         Self::GoalObserve,
         Self::Jobs,
         Self::PeekJob,
-        Self::CanStopWork,
+        Self::IsHostOwner,
         Self::ObserveBackgroundOutput,
         Self::StopBackgroundJob,
         Self::Inspect,
@@ -220,6 +223,7 @@ impl Operation {
             Self::CompactStatus => ("compact-status", Data, Read, 8192, 8192),
             Self::Compact => ("compact", Data, Mutation, 8192, 8192),
             Self::ExecuteCommand => ("execute-command", Data, Mutation, 128 * 1024, 8192),
+            Self::SelectModel => ("select-model", Data, Mutation, 8192, 8192),
             Self::DiscardDraftInputs => (
                 "discard-draft-inputs",
                 Data,
@@ -276,7 +280,7 @@ impl Operation {
             ),
             Self::Metrics => ("metrics", Data, Read, 8192, 64 * 1024),
             Self::TreeMetrics => ("tree-metrics", Data, Read, 8192, 256 * 1024),
-            Self::CanStopWork => ("can-stop-work", Control, Read, 8192, 4096),
+            Self::IsHostOwner => ("is-host-owner", Control, Read, 8192, 4096),
             Self::ObserveBackgroundOutput => {
                 ("background-job-output", Subscription, Read, 8192, 32768)
             }
@@ -300,7 +304,9 @@ impl Operation {
                     | Self::CancelWorkflow
                     | Self::GoalControl
                     | Self::StopBackgroundJob
-                    | Self::CanStopWork
+                    | Self::IsHostOwner
+                    | Self::ExecuteCommand
+                    | Self::Compact
             ) {
                 rsi_api_protocol::OperationAccess::Credential
             } else {
@@ -320,7 +326,8 @@ impl Operation {
             Self::Recent => 11,
             Self::Inspect | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 10,
             Self::Submit | Self::History | Self::ReadMessage => 7,
-            Self::MessageStatus
+            Self::ExecuteCommand
+            | Self::MessageStatus
             | Self::Terminal
             | Self::TerminalOutput
             | Self::Jobs
@@ -338,7 +345,7 @@ impl Operation {
             | Self::Questions
             | Self::AnswerQuestion
             | Self::DiscardDraftInputs
-            | Self::ExecuteCommand => 2,
+            | Self::Compact => 2,
             Self::Attach => 9,
             _ => 1,
         }
@@ -618,6 +625,8 @@ mod setup_tests {
             Operation::Cancel,
             Operation::GoalControl,
             Operation::CancelWorkflow,
+            Operation::ExecuteCommand,
+            Operation::Compact,
         ] {
             assert_eq!(
                 operation.spec().access,

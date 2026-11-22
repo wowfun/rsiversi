@@ -10,14 +10,16 @@ pub(super) struct HeaderGate {
 }
 
 pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
-    fixture_with_active(None).await
+    fixture_with(None, false).await
 }
-async fn fixture_with_active(
+pub(super) async fn fixture_with(
     active: Option<TurnId>,
+    host_owner: bool,
 ) -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplication>, String) {
     let runtime = Runtime::default();
     let root = runtime.root();
     let backend = Arc::new(Backend::default());
+    backend.host_owner.store(host_owner, Ordering::SeqCst);
     backend
         .unpublished
         .store(active.is_none(), Ordering::SeqCst);
@@ -261,7 +263,7 @@ async fn stop_targets_displayed_turn_and_preserves_an_unknown_submission() {
 
 #[tokio::test]
 async fn mismatched_command_receipts_never_become_authoritative() {
-    let (runtime, backend, app, generation) = fixture().await;
+    let (runtime, backend, app, generation) = fixture_with(None, true).await;
     let prepared = prepare(&app, &generation, "/plan on", vec![], false).await;
     let frozen: serde_json::Value =
         serde_json::from_str(prepared["opaque"].as_str().unwrap()).unwrap();
@@ -559,7 +561,7 @@ async fn terminal_close_allows_late_detach_without_restoring_authority() {
 #[tokio::test]
 async fn stop_requires_an_acknowledged_exact_active_turn() {
     let turn = TurnId::new("visible-turn").unwrap();
-    let (runtime, backend, app, _) = fixture_with_active(Some(turn.clone())).await;
+    let (runtime, backend, app, _) = fixture_with(Some(turn.clone()), false).await;
     let session = backend
         .header
         .lock()

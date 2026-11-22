@@ -58,6 +58,79 @@ async fn standard_plan_policy_denies_bash_before_intent_start_or_filesystem_effe
         })
         .await
         .unwrap();
+    let header = handle.header().await.unwrap();
+    let target = serde_json::json!({"session_id":header.session_id(),"header_key":header.fingerprint().unwrap()});
+    let paired = running
+        .device_administration()
+        .unwrap()
+        .register("Plan viewer")
+        .await
+        .unwrap();
+    let viewer = rsi_api_protocol::CallOrigin::Device(
+        running
+            .device_authentication()
+            .unwrap()
+            .authenticate(&paired.token)
+            .unwrap(),
+    );
+    use rsi_session_api::Operation;
+    let listed = session_wire(
+        &running,
+        viewer.clone(),
+        Operation::Commands,
+        &target,
+        serde_json::Value::Null,
+    )
+    .await
+    .unwrap();
+    let catalog: rsi_agent_session_protocol::SessionCommandsView =
+        serde_json::from_value(listed["body"].clone()).unwrap();
+    let request = SessionCommandInvocation {
+        command: catalog
+            .commands()
+            .iter()
+            .find(|entry| entry.name() == "plan")
+            .unwrap()
+            .id()
+            .clone(),
+        request_id: DomainRequestId::new("viewer-plan").unwrap(),
+        expected_revision: catalog.revision(),
+        arguments: CommandArguments::new("on".into()).unwrap(),
+    };
+    for (operation, input) in [
+        (Operation::ExecuteCommand, serde_json::json!(request)),
+        (Operation::Compact, serde_json::json!("viewer-compact")),
+    ] {
+        assert!(matches!(
+            session_wire(&running, viewer.clone(), operation, &target, input).await,
+            Err(rsi_api_protocol::ApiError::Unauthorized)
+        ));
+    }
+    assert!(
+        handle
+            .command_status(&request.request_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let selection = rsi_session_protocol::SelectSessionModel {
+        request_id: DomainRequestId::new("viewer-model").unwrap(),
+        expected_revision: catalog.revision(),
+        selection: rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+    };
+    let receipt = session_wire(
+        &running,
+        viewer,
+        Operation::SelectModel,
+        &target,
+        serde_json::json!(selection),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        receipt["body"]["invocation_sha256"],
+        selection.invocation().unwrap().digest().unwrap()
+    );
     let commands = handle.commands().await.unwrap();
     handle
         .execute_command(SessionCommandInvocation {
