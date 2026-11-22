@@ -176,7 +176,7 @@ impl ToolExecutor for JobOutputTool {
                 outcome = &mut waiting => outcome,
             };
             match outcome {
-                Ok(Ok(read)) => return job_read_result(&read, false),
+                Ok(Ok(read)) => return job_read_result(read, false),
                 Ok(Err(error)) => return jobs_error_result(&error),
                 Err(_) => {}
             }
@@ -184,7 +184,7 @@ impl ToolExecutor for JobOutputTool {
         match self.jobs.read(&scope, &arguments.job_id, 0, 0) {
             Ok(read) => {
                 let wait_timed_out = arguments.wait && read.job.terminal.is_none();
-                job_read_result(&read, wait_timed_out)
+                job_read_result(read, wait_timed_out)
             }
             Err(error) => jobs_error_result(&error),
         }
@@ -276,7 +276,7 @@ impl ToolExecutor for JobKillTool {
             outcome = &mut killing => outcome,
         };
         match outcome {
-            Ok(read) => job_read_result(&read, false),
+            Ok(read) => job_read_result(read, false),
             Err(error) => jobs_error_result(&error),
         }
     }
@@ -308,12 +308,12 @@ where
     })
 }
 
-fn job_read_result(read: &JobRead, wait_timed_out: bool) -> rsi_tools_protocol::Result<ToolResult> {
+fn job_read_result(read: JobRead, wait_timed_out: bool) -> rsi_tools_protocol::Result<ToolResult> {
     if read.job.status == rsi_jobs::JobStatus::OutcomeUnknown {
         return Err(ToolError::OutcomeUnknown);
     }
-    let stdout = project_stream(&read.stdout);
-    let stderr = project_stream(&read.stderr);
+    let stdout = project_stream(read.stdout);
+    let stderr = project_stream(read.stderr);
     let value = json!({
         "id":read.job.id,
         "name":read.job.name,
@@ -356,28 +356,21 @@ fn job_read_result(read: &JobRead, wait_timed_out: bool) -> rsi_tools_protocol::
     );
     let mut result = result_with_text(value, text, false)?;
     result.spills.extend(
-        [stdout.full_output.clone(), stderr.full_output.clone()]
+        [stdout.full_output, stderr.full_output]
             .into_iter()
             .flatten(),
     );
     Ok(result)
 }
 
-fn project_stream(read: &JobOutputRead) -> JobOutputRead {
+fn project_stream(mut read: JobOutputRead) -> JobOutputRead {
     let start = read.bytes.len().saturating_sub(MAXIMUM_MODEL_STREAM_BYTES);
-    let bytes = read.bytes[start..].to_vec();
-    let projection_truncated = start != 0;
-    JobOutputRead {
-        full_output: read.full_output.clone(),
-        oldest_offset: if projection_truncated {
-            read.next_offset.saturating_sub(bytes.len() as u64)
-        } else {
-            read.oldest_offset
-        },
-        next_offset: read.next_offset,
-        lossy: read.lossy || projection_truncated,
-        bytes,
+    if start > 0 {
+        read.bytes.drain(..start);
+        read.oldest_offset = read.next_offset.saturating_sub(read.bytes.len() as u64);
+        read.lossy = true;
     }
+    read
 }
 
 fn job_stream_value(read: &JobOutputRead) -> Value {
@@ -394,10 +387,8 @@ fn job_stream_value(read: &JobOutputRead) -> Value {
 }
 
 fn render_stream_text(stdout: &JobOutputRead, stderr: &JobOutputRead, fallback: &str) -> String {
-    let stdout_text = rsi_tools_protocol::safe_tool_text(&stdout.bytes);
-    let stderr_text = rsi_tools_protocol::safe_tool_text(&stderr.bytes);
-    let stdout = render_one_stream("stdout", stdout, &stdout_text);
-    let stderr = render_one_stream("stderr", stderr, &stderr_text);
+    let stdout = render_one_stream("stdout", stdout);
+    let stderr = render_one_stream("stderr", stderr);
     match (stdout.is_empty(), stderr.is_empty()) {
         (false, true) => stdout,
         (true, false) => format!("[stderr]\n{stderr}"),
@@ -406,7 +397,8 @@ fn render_stream_text(stdout: &JobOutputRead, stderr: &JobOutputRead, fallback: 
     }
 }
 
-fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
+fn render_one_stream(kind: &str, read: &JobOutputRead) -> String {
+    let text = rsi_tools_protocol::safe_tool_text(&read.bytes);
     if read.lossy {
         format!(
             "[{kind} truncated; showing bytes {}..{}]\n{text}\n[full {kind}: {}]",
@@ -417,7 +409,7 @@ fn render_one_stream(kind: &str, read: &JobOutputRead, text: &str) -> String {
                 .map_or("unavailable", |reference| reference.locator.as_str())
         )
     } else {
-        text.to_owned()
+        text
     }
 }
 

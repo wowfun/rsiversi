@@ -516,8 +516,9 @@ async fn terminal_output_projection_is_bounded_before_the_job_is_reported() {
     for stream in ["stdout", "stderr"] {
         assert_eq!(output.value[stream]["next_offset"], capture_bytes as u64);
         assert_eq!(output.value[stream]["truncated"], true);
-        assert!(output.value[stream]["oldest_offset"].as_u64().unwrap() > 0);
-        assert!(output.value[stream]["text"].as_str().unwrap().len() < capture_bytes);
+        let retained_bytes = output.value[stream]["text"].as_str().unwrap().len();
+        assert_eq!(retained_bytes, 128 * 1024);
+        assert_eq!(output.value[stream]["oldest_offset"], (capture_bytes - retained_bytes) as u64);
     }
     output.validate().unwrap();
     fixture.shutdown().await;
