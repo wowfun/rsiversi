@@ -131,6 +131,9 @@ impl DraftCommandMutation {
     }
 
     /// Notifies observers after the first mailbox publication has been confirmed.
+    ///
+    /// # Errors
+    /// Returns the first observer notification failure. The mailbox publication is already durable.
     pub async fn committed(
         mut self,
         receipt: &crate::PublicationReceipt<'_>,
@@ -188,6 +191,10 @@ impl AppliedDraftCommand {
 
 impl AgentSessionDraft {
     /// Stages the successor independently, so refused first-turn admission leaves the lease intact.
+    ///
+    /// # Errors
+    /// Rejects a different or stale draft, an invalid domain update, or an input
+    /// batch that cannot start the first Turn.
     pub fn prepare_first_command_task(
         &self,
         mutation: &mut DraftCommandMutation,

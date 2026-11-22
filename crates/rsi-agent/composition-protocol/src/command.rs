@@ -73,6 +73,9 @@ pub struct CommandInput {
 }
 impl CommandInput {
     /// Verify referenced files and images with the composing Scope before publication.
+    ///
+    /// # Errors
+    /// Returns an error on cancellation, an unavailable reader, or an unreadable attachment.
     pub async fn verify_attachments(
         &self,
         context: &rsi_meta::Context,

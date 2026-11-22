@@ -512,6 +512,9 @@ impl PreparedFreshSession {
         &self.inner.command_inputs
     }
     /// Command-owned first turn submitted with this baseline, if present.
+    ///
+    /// # Panics
+    /// Panics if the internal prepared session has lost its required final steering input.
     pub fn first_command_task(&self) -> Option<&rsi_agent_session_protocol::AgentMessage> {
         self.inner.start_draft.then(|| {
             self.inner
