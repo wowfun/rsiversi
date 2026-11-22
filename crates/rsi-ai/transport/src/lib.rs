@@ -982,9 +982,9 @@ fn validate_url(url: &reqwest::Url) -> Result<(), TransportError> {
         ));
     }
     let host = url.host_str().unwrap_or_default();
-    let local = host == "localhost"
+    let local = matches!(host, "localhost" | "[::1]")
         || host
-            .parse::<std::net::IpAddr>()
+            .parse::<std::net::Ipv4Addr>()
             .is_ok_and(|address| address.is_loopback());
     if url.scheme() != "https" && !(url.scheme() == "http" && local) {
         return Err(TransportError::new(

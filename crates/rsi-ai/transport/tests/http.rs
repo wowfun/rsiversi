@@ -11,6 +11,28 @@ use rsi_credentials_protocol::SecretValue;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn cleartext_provider_endpoints_accept_ipv4_and_ipv6_loopback() {
+    for url in [
+        "http://localhost",
+        "http://127.0.0.2",
+        "http://[::1]:8080",
+        "http://[0:0:0:0:0:0:0:1]",
+    ] {
+        HttpRequest::new(Method::GET, url).expect(url);
+    }
+    for url in [
+        "http://example.com",
+        "http://192.0.2.1",
+        "http://[2001:db8::1]",
+    ] {
+        assert_eq!(
+            HttpRequest::new(Method::GET, url).unwrap_err().code(),
+            "http.insecure_url"
+        );
+    }
+}
+
 async fn stalled_body_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

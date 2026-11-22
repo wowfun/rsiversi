@@ -6,6 +6,9 @@ request encoding, and bounded extraction of large JSON string fields or object
 array items. Provider semantic translation remains in the owning provider
 package.
 
+Cleartext HTTP provider endpoints are permitted on localhost and IPv4 or
+IPv6 loopback addresses. Other provider endpoints require HTTPS.
+
 Failures while delivering response bytes remain transport errors. Once a
 provider returned a successful response, exceeding a configured body, JSON
 envelope, item, or nesting bound is output validation; malformed JSON shape or
