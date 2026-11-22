@@ -70,8 +70,16 @@ impl Sessions {
         for route in page.models {
             let entry = match models.describe_model(&route).await {
                 Ok(description) => {
-                    let efforts = description.profile().reasoning_efforts();
-                    json!({"route":route,"efforts":efforts.supported(),"default_effort":efforts.default_effort()})
+                    let profile = description.profile();
+                    let efforts = profile.reasoning_efforts();
+                    let mut row = json!({"route":route,"efforts":efforts.supported(),"default_effort":efforts.default_effort()});
+                    if input.optional_default {
+                        row["context_window"] = profile.context_window_tokens().into();
+                        if let Some(cap) = profile.default_output_tokens() {
+                            row["default_output_tokens"] = cap.into();
+                        }
+                    }
+                    row
                 }
                 Err(error) => json!({"route":route,"failure":error.to_string()}),
             };

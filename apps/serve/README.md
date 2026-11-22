@@ -334,7 +334,10 @@ Reconnecting does not require publishing the fork or reading its transcript.
 An authenticated application request can page the committed
 Language model catalog through `application.models`. Each page reports
 the configured creation default, the deployment and model identifiers,
-and reasoning efforts actually supported by each route. An unavailable
+and reasoning efforts actually supported by each route. The standalone
+adapter requests this catalog with `optional_default` and receives the exact
+route's context window and effective output token default when present.
+The session model picker uses the smaller list. An unavailable
 catalog or missing default reports its native failure.
 The selected application process may also invoke the Host Language router
 directly on behalf of an enabled, trusted plugin. Its private
