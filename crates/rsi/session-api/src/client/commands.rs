@@ -86,6 +86,8 @@ impl Handle {
                 .map(|control_seq| CommandRevision::Durable { control_seq }),
         }
         .ok_or_else(|| SessionError::Invalid("command revision cannot advance".into()))?;
+        let can_publish_draft = operation == Operation::ExecuteCommand
+            && matches!(invocation.expected_revision, CommandRevision::Draft { .. });
         let unknown = || SessionError::CommandOutcomeUnknown {
             request_id: invocation.request_id.clone(),
         };
@@ -96,7 +98,10 @@ impl Handle {
                 if receipt.request_id() == &invocation.request_id
                     && receipt.command() == &invocation.command
                     && receipt.invocation_sha256() == digest
-                    && receipt.revision() == successor =>
+                    && (receipt.revision() == successor
+                        || (can_publish_draft
+                            && receipt.revision()
+                                == (CommandRevision::Durable { control_seq: 1 }))) =>
             {
                 Ok(receipt)
             }

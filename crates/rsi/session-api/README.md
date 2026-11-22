@@ -183,6 +183,9 @@ digest on execution replies; uncertain or mismatched mutation replies preserve t
 original request identity as `CommandOutcomeUnknown`. Lookup validates its exact
 request identity and never repeats execution. Command revision conflicts echo the
 caller's expected revision. Compact receipts do not contain domain state values.
+An execution receipt advances the supplied revision in its current class, or
+publishes a draft's first command task at durable control 1. Model selection
+and Goal control advance only their current revision class.
 Each command operation reserves the full Data scratch ceiling before attachment:
 resolving a compact receipt or command catalog can still load Headers, canonical
 controls and complete domain snapshots. Its wire response remains independently

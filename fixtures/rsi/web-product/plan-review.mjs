@@ -61,6 +61,8 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     assert.notEqual(await input.getAttribute('placeholder'),'describe your task to generate plan');
     assert.equal(await input.inputValue(),'Keep this draft while leaving Plan');
     assert.equal(requests.length,0);
+    let receiptLookups=0;
+    page.on('request',request=>{if(new URL(request.url()).pathname.includes('/session/command-status/'))receiptLookups++;});
     await input.fill('/plan Review the exact saved plan.');await pane.getByTestId('composer-send').click();
     await planChip.waitFor();
     await pane.getByText('Review the exact saved plan.',{exact:true}).waitFor();
@@ -77,6 +79,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});
     assert.equal(requests.length,3);assert(JSON.stringify(requests[2].messages).includes('Plan mode is disabled'));
     await pane.getByText('REVIEW_SETTLED',{exact:true}).waitFor();
+    assert.equal(receiptLookups,0,'a confirmed first-turn command receipt is final');
     assert(JSON.stringify(requests[2].messages).includes('Verified in the actual browser.'));
     await page.setViewportSize({width:1440,height:980});await page.screenshot({path:join(path,'approved.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);
     results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,ok:true});

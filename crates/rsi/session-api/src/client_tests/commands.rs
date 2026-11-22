@@ -120,6 +120,16 @@ async fn execution_rejects_wrong_identity_digest_and_successor_without_replaying
             Err(SessionError::CommandOutcomeUnknown { request_id }) if request_id == invocation.request_id));
         assert_eq!(remote.calls.load(Ordering::SeqCst), before + 1);
     }
+    let mut first = valid.clone();
+    first["outcome"] = json!({"kind":"committed","control_seq":1});
+    remote.reply(&envelope(first));
+    let before = remote.calls.load(Ordering::SeqCst);
+    let published = handle.execute_command(invocation.clone()).await.unwrap();
+    assert_eq!(
+        published.revision(),
+        CommandRevision::Durable { control_seq: 1 }
+    );
+    assert_eq!(remote.calls.load(Ordering::SeqCst), before + 1);
     remote.reply(&envelope(valid.clone()));
     assert_eq!(
         handle.execute_command(invocation.clone()).await.unwrap(),
@@ -138,6 +148,23 @@ async fn execution_rejects_wrong_identity_digest_and_successor_without_replaying
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn draft_model_selection_cannot_publish_the_first_turn() {
+    let (remote, _, handle) = fixture().await;
+    let request = rsi_session_protocol::SelectSessionModel {
+        request_id: DomainRequestId::new("select-model").unwrap(),
+        expected_revision: CommandRevision::Draft { revision: 0 },
+        selection: rsi_agent_session_protocol::ModelSelection::baseline(header().settings()),
+    };
+    let invocation = request.invocation().unwrap();
+    let mut reply =
+        json!(SessionCommandReceipt::draft_changed(&invocation, "a".repeat(64)).unwrap());
+    reply["outcome"] = json!({"kind":"committed","control_seq":1});
+    remote.reply(&envelope(reply));
+    assert!(matches!(handle.select_model(request).await,
+        Err(SessionError::CommandOutcomeUnknown { request_id }) if request_id == invocation.request_id));
 }
 
 #[tokio::test]
