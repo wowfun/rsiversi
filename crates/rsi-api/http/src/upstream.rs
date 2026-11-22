@@ -394,6 +394,7 @@ impl ApplicationUpstream {
         parts: &mut http::request::Parts,
         state: &State,
         upgrade: bool,
+        peer: Option<SocketAddr>,
     ) -> Result<()> {
         let path = parts
             .uri
@@ -430,6 +431,17 @@ impl ApplicationUpstream {
         );
         if let crate::access::Access::Remote { policy, .. } = &state.access {
             parts.headers.insert(
+                "x-rsi-upstream-origin",
+                policy.origin.parse().map_err(|_| ApiError::Unavailable)?,
+            );
+            let peer = peer.ok_or(ApiError::Unavailable)?;
+            parts.headers.insert(
+                "x-rsi-upstream-peer",
+                peer.to_string()
+                    .parse()
+                    .map_err(|_| ApiError::Unavailable)?,
+            );
+            parts.headers.insert(
                 "host",
                 policy
                     .authority
@@ -452,6 +464,7 @@ impl ApplicationUpstream {
         state: &State,
         mut incoming: Request<Incoming>,
         delivery: &crate::delivery::Delivery,
+        peer: Option<SocketAddr>,
     ) -> Result<Response<Body>> {
         if self.retired.is_cancelled() {
             return Err(ApiError::ShuttingDown);
@@ -474,7 +487,7 @@ impl ApplicationUpstream {
         delivery.admit(rsi_api_protocol::ApiAdmission::new(slot.clone()));
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut incoming));
         let (mut parts, body) = incoming.into_parts();
-        self.prepare_request(&mut parts, state, upgrade)?;
+        self.prepare_request(&mut parts, state, upgrade, peer)?;
         parts.headers.insert(
             "x-rsi-upstream-request",
             slot.id.parse().map_err(|_| ApiError::Unavailable)?,

@@ -384,6 +384,7 @@ async fn authorized_chunk_streams_without_device_credential_or_frame_limit() {
         assert_eq!(request.send().await.unwrap().status(), 401);
     }
     let retained = routes.clone();
+    let public_origin = h.origin.clone();
     let server = tokio::spawn(async move {
         let (mut peer, _) = listener.accept().await.unwrap();
         let mut bytes = Vec::new();
@@ -405,6 +406,14 @@ async fn authorized_chunk_streams_without_device_credential_or_frame_limit() {
         ));
         assert!(head.starts_with("get /sidebar/bundle/editor.js "));
         assert!(head.contains(&format!("x-rsi-upstream-key: {KEY}\r\n")));
+        assert!(head.contains(&format!("x-rsi-upstream-origin: {public_origin}\r\n")));
+        let public_peer: std::net::SocketAddr = head
+            .lines()
+            .find_map(|line| line.strip_prefix("x-rsi-upstream-peer: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(public_peer.ip().is_loopback() && public_peer.port() != 0);
         assert!(!head.contains("cookie:") && !head.contains(TOKEN) && !head.contains("spoof"));
         let size = 2 * 1024 * 1024;
         peer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nETag: \"original\"\r\nContent-Type: text/javascript; charset=utf-8\r\nCache-Control: immutable, public, max-age=100\r\nSet-Cookie: spoof=1\r\n\r\n").as_bytes()).await.unwrap();

@@ -85,6 +85,7 @@ impl LocalHttpService {
             self.state.clone(),
             stop,
             Delivery::new(handshake, None),
+            None,
         )
         .await;
         Ok(())

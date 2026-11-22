@@ -214,7 +214,7 @@ impl HttpServer {
                     if let Some(deadline) = &retry_at { deadline.wait().await; }
                     self.listener.accept().await
                 } => {
-                    let Ok((socket, _)) = accepted else {
+                    let Ok((socket, peer)) = accepted else {
                         shared.diagnostics.connection_failure();
                         retry_at = Some(shared.execution.deadline_after(Duration::from_millis(100)));
                         continue;
@@ -234,12 +234,12 @@ impl HttpServer {
                             if let Ok(Ok(mut stream)) = accepted {
                                 stream.get_mut().1.set_buffer_limit(Some(16 * 1024));
                                 if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-                                    serve_h2(stream, state, stop, handshake).await;
+                                    serve_h2(stream, state, stop, handshake, peer).await;
                                 } else {
-                                    serve_connection(stream, state, stop, Delivery::new(handshake, None)).await;
+                                    serve_connection(stream, state, stop, Delivery::new(handshake, None), Some(peer)).await;
                                 }
                             } else { state.diagnostics.tls_failure(); }
-                        } else { serve_connection(socket, state, stop, Delivery::new(handshake, None)).await; }
+                        } else { serve_connection(socket, state, stop, Delivery::new(handshake, None), Some(peer)).await; }
                     }));
                 }
             }
@@ -263,6 +263,7 @@ pub(crate) async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 
     state: Arc<State>,
     stop: CancellationToken,
     connection: Arc<Delivery>,
+    peer: Option<SocketAddr>,
 ) {
     let diagnostics = state.diagnostics.clone();
     let socket = crate::bounded_io::WriteBound::new(socket, state.execution.clone());
@@ -290,7 +291,7 @@ pub(crate) async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin + Send + 
                     Err(error) => state.decorate(failure(error), http::Version::HTTP_11),
                 }
             } else {
-                state.response(request, &connection).await
+                state.response(request, &connection, peer).await
             };
             // Permit the upgrade handshake; ordinary HTTP/1 exchanges still
             // own exactly one connection and never enter an idle keepalive pool.
@@ -329,6 +330,7 @@ async fn serve_h2<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     state: Arc<State>,
     stop: CancellationToken,
     idle_permit: tokio::sync::OwnedSemaphorePermit,
+    peer: SocketAddr,
 ) {
     let diagnostics = state.diagnostics.clone();
     let flush = Arc::new(Flush::default());
@@ -345,7 +347,7 @@ async fn serve_h2<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         let delivery = Delivery::for_h2(&requests, flush.clone());
         async move {
             let response = if let Some(delivery) = delivery {
-                let response = state.response(request, &delivery).await;
+                let response = state.response(request, &delivery, Some(peer)).await;
                 delivery.begin_body(
                     response
                         .headers()
@@ -385,9 +387,14 @@ async fn serve_h2<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 }
 
 impl State {
-    async fn response(&self, request: Request<Incoming>, connection: &Delivery) -> Response<Body> {
+    async fn response(
+        &self,
+        request: Request<Incoming>,
+        connection: &Delivery,
+        peer: Option<SocketAddr>,
+    ) -> Response<Body> {
         let version = request.version();
-        let response = match self.handle(request, connection).await {
+        let response = match self.handle(request, connection, peer).await {
             Ok(response) => response,
             Err(error) => failure(error),
         };
@@ -436,12 +443,13 @@ impl State {
         &self,
         request: Request<Incoming>,
         connection: &Delivery,
+        peer: Option<SocketAddr>,
     ) -> Result<Response<Body>> {
         self.access.fence(&request)?;
         if let Some(upstream) = self.upstream.as_ref().map(|routes| routes.current())
             && upstream.owns(request.uri().path())
         {
-            return upstream.forward(self, request, connection).await;
+            return upstream.forward(self, request, connection, peer).await;
         }
         if request.method() == http::Method::GET
             && let Some(assets) = &self.assets
