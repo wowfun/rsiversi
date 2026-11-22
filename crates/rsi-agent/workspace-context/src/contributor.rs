@@ -111,25 +111,44 @@ impl ContextContributor for Contributor {
                 ],
             });
         }
-        let next = State {
-            instructions_sha256: Some(snapshot.instructions_sha256.clone()),
-            skill_catalog_sha256: Some(snapshot.skill_catalog_sha256.clone()),
-            scanned_session: Some(context.header.session_id().clone()),
-            scanned_turn: Some(context.turn_id.clone()),
-            through_fact_seq: context.horizon.fact_seq,
-            incomplete_reported: false,
-        };
-        let inputs = entered_inputs(&previous, snapshot);
-        let domains = if next == previous {
-            Vec::new()
-        } else {
-            vec![
+        let consumed = !requests.names().is_empty();
+        let inherited_cursor = previous
+            .scanned_session
+            .as_ref()
+            .is_some_and(|id| id != context.header.session_id());
+        let (inputs, instructions, catalog) = entered_inputs(&previous, snapshot);
+        let changed = consumed
+            || inherited_cursor
+            || previous.incomplete_reported
+            || previous.instructions_sha256.as_deref() != Some(&instructions)
+            || previous.skill_catalog_sha256.as_deref() != Some(&catalog);
+        if !changed {
+            return Ok(ContributionOutput {
+                inputs,
+                domains: Vec::new(),
+            });
+        }
+        let mut next = previous;
+        next.instructions_sha256 = Some(instructions);
+        next.skill_catalog_sha256 = Some(catalog);
+        next.incomplete_reported = false;
+        if consumed {
+            next.scanned_session = Some(context.header.session_id().clone());
+            next.scanned_turn = Some(context.turn_id.clone());
+            next.through_fact_seq = context.horizon.fact_seq;
+        } else if inherited_cursor {
+            next.scanned_session = None;
+            next.scanned_turn = None;
+            next.through_fact_seq = 0;
+        }
+        Ok(ContributionOutput {
+            inputs,
+            domains: vec![
                 self.state
                     .propose(view.revision, &next)
                     .map_err(contribution_error)?,
-            ]
-        };
-        Ok(ContributionOutput { inputs, domains })
+            ],
+        })
     }
 }
 
@@ -150,15 +169,24 @@ async fn pending_requests(
         ));
     }
     let mut requests = WorkspaceSkillRequests::default();
-    while cursor < context.horizon.fact_seq {
-        let page = context.facts.read(cursor, 128).await?;
+    let through = if state.incomplete_reported {
+        context.horizon.fact_seq
+    } else if let Some(range) = &context.pending_input_range {
+        cursor = cursor.max(range.start().saturating_sub(1));
+        *range.end()
+    } else {
+        return Ok(requests);
+    };
+    while cursor < through {
+        let limit = (through - cursor).min(128) as usize;
+        let page = context.facts.read(cursor, limit).await?;
         if page.through_seq <= cursor || page.through_seq > context.horizon.fact_seq {
             return Err(ContributionError::Invalid(
                 "workspace history reader did not advance within its horizon".into(),
             ));
         }
         for fact in page.facts {
-            if fact.body().turn_id() != Some(&context.turn_id) {
+            if fact.seq() > through || fact.body().turn_id() != Some(&context.turn_id) {
                 continue;
             }
             match fact.body() {
@@ -180,13 +208,16 @@ async fn pending_requests(
     Ok(requests)
 }
 
-fn entered_inputs(current: &State, snapshot: WorkspaceContextSnapshot) -> Vec<ContributionInput> {
+fn entered_inputs(
+    current: &State,
+    snapshot: WorkspaceContextSnapshot,
+) -> (Vec<ContributionInput>, String, String) {
     let mut inputs = Vec::new();
     if current.instructions_sha256.as_deref() != Some(&snapshot.instructions_sha256)
         && (snapshot.instructions.is_some() || current.instructions_sha256.is_some())
     {
         inputs.push(ContributionInput::sourced(InputMessageSource::AgentInstructions {
-            source: "workspace-baseline".into(), sha256: snapshot.instructions_sha256,
+            source: "workspace-baseline".into(), sha256: snapshot.instructions_sha256.clone(),
             replacement: true, tombstone: snapshot.instructions.is_none(),
         }, snapshot.instructions.unwrap_or_else(||
             "The complete workspace instruction baseline is empty; earlier workspace instructions no longer apply.".into())));
@@ -194,7 +225,7 @@ fn entered_inputs(current: &State, snapshot: WorkspaceContextSnapshot) -> Vec<Co
     if current.skill_catalog_sha256.as_deref() != Some(&snapshot.skill_catalog_sha256)
         && (snapshot.skill_catalog.is_some() || current.skill_catalog_sha256.is_some())
     {
-        inputs.push(ContributionInput::sourced(InputMessageSource::SkillCatalog { sha256: snapshot.skill_catalog_sha256 },
+        inputs.push(ContributionInput::sourced(InputMessageSource::SkillCatalog { sha256: snapshot.skill_catalog_sha256.clone() },
             snapshot.skill_catalog.unwrap_or_else(||
                 "<available_skills>\n</available_skills>\nThis complete catalog replaces earlier skill names; no skills are currently available.".into())));
     }
@@ -207,7 +238,11 @@ fn entered_inputs(current: &State, snapshot: WorkspaceContextSnapshot) -> Vec<Co
             invocation.text,
         )
     }));
-    inputs
+    (
+        inputs,
+        snapshot.instructions_sha256,
+        snapshot.skill_catalog_sha256,
+    )
 }
 
 fn workspace_error(error: WorkspaceContextError) -> ContributionError {

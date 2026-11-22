@@ -556,6 +556,7 @@ mod tests {
             header: Arc::new(header),
             turn_id: TurnId::new("turn").unwrap(),
             accepted_fact_seq: 1,
+            pending_input_range: Some(1..=1),
             step_id: StepId::new("step").unwrap(),
             horizon: rsi_agent_composition_protocol::ContributionHorizon {
                 fact_seq: 2,
@@ -713,6 +714,7 @@ mod tests {
             header: Arc::new(header.clone()),
             turn_id: rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
             accepted_fact_seq: 1,
+            pending_input_range: Some(1..=1),
             step_id: rsi_agent_session_protocol::StepId::new("step").unwrap(),
             horizon: rsi_agent_composition_protocol::ContributionHorizon {
                 fact_seq: 1,

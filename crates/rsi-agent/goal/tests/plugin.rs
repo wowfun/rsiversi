@@ -512,6 +512,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
             header: Arc::new(draft.header().clone()),
             turn_id: turn.clone(),
             accepted_fact_seq: 1,
+            pending_input_range: Some(1..=1),
             step_id: step.clone(),
             horizon: ContributionHorizon {
                 fact_seq: 3,

@@ -58,6 +58,7 @@ impl Fixture {
                 header: Arc::new(header("session")),
                 turn_id: TurnId::new("turn").unwrap(),
                 accepted_fact_seq: 1,
+                pending_input_range: Some(1..=1),
                 step_id: StepId::new("step").unwrap(),
                 horizon: ContributionHorizon {
                     fact_seq: 0,

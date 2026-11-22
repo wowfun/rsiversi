@@ -599,6 +599,67 @@ async fn cold_sqlite_resume_uses_new_codec_generation_without_replaying_workspac
 }
 
 #[tokio::test]
+async fn incomplete_workspace_retries_a_skill_after_the_input_was_prepared() {
+    let mut offline = snapshot(false);
+    offline.complete = false;
+    let fixture = Fixture::new(offline).await;
+    let store = Arc::new(SqliteStore::open(fixture.temp.path().join("store")).unwrap());
+    let kernel = AgentKernel::recover(store, fixture.service.clone())
+        .await
+        .unwrap();
+    let workers = kernel.start_workers();
+    let lease = kernel.register("fixture".into()).unwrap();
+    let claim = fixture
+        .submit(&kernel, "retry", "turn", "/later", false)
+        .await;
+    assert_eq!(enter(&kernel, &claim, "offline").await, 1);
+    let (step_id, _) = kernel
+        .request_step(&claim, None, vec![], CancellationToken::new())
+        .await
+        .unwrap();
+    let decision = rsi_agent_session_protocol::StepInputDecision::enter(vec![
+        rsi_agent_session_protocol::PreparedInput::Claimed {
+            claim: rsi_agent_session_protocol::InputClaimRef::new(claim.accepted_seq(), 0).unwrap(),
+        },
+    ])
+    .unwrap();
+    let prepared = kernel
+        .publish(
+            &claim,
+            vec![SessionFactBody::StepInputsPrepared {
+                turn_id: claim.turn_id().clone(),
+                step_id,
+                decision,
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        prepared,
+        rsi_agent_turn_protocol::PublishAttempt::Published(_)
+    ));
+    let context = kernel
+        .contribution_context(&claim, vec![], CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(context.pending_input_range.is_none());
+    *fixture.source.snapshot.lock().unwrap() = snapshot(false);
+    assert_eq!(enter(&kernel, &claim, "online").await, 1);
+    assert_eq!(enter(&kernel, &claim, "again").await, 0);
+    assert_eq!(
+        *fixture.source.requests.lock().unwrap(),
+        [vec!["later".to_owned()], vec!["later".to_owned()], vec![]]
+    );
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(lease);
+    kernel.shutdown(workers).await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
     let fixture = Fixture::new(snapshot(false)).await;
     let store = Arc::new(SqliteStore::open(fixture.temp.path().join("store")).unwrap());
@@ -616,6 +677,19 @@ async fn initial_empty_workspace_does_not_emit_replacement_or_tombstone() {
     assert_eq!(
         kernel.domain_states(claim.session_id()).await.unwrap(),
         before
+    );
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    let claim = fixture
+        .submit(&kernel, "empty", "second", "more work", true)
+        .await;
+    assert_eq!(enter(&kernel, &claim, "next-turn").await, 0);
+    assert_eq!(
+        kernel.domain_states(claim.session_id()).await.unwrap(),
+        before,
+        "ordinary input in another Turn must not create a workspace revision"
     );
     kernel
         .finish_turn(&claim, &TurnOutcome::Completed)
@@ -677,7 +751,7 @@ async fn fork_rebinds_the_inherited_cursor_and_only_new_human_input_invokes_skil
                 message_id: MessageId::new("parent-task").unwrap(),
                 source: AgentMessageSource::Human { attribution: None },
                 content: vec![AgentMessageContent::Text {
-                    text: "parent work".into(),
+                    text: "/parent".into(),
                 }],
                 options: MessageOptions::default(),
             },

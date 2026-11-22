@@ -91,6 +91,8 @@ pub struct ContributionContext {
     pub turn_id: TurnId,
     /// Exact acceptance Fact sequence; later queued acceptances may precede this Step.
     pub accepted_fact_seq: u64,
+    /// Inclusive Fact range containing the Turn's claimed inputs awaiting preparation.
+    pub pending_input_range: Option<std::ops::RangeInclusive<u64>>,
     /// Current open Step.
     pub step_id: StepId,
     /// Watermarks captured with these domain states.

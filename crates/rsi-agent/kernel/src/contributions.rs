@@ -15,6 +15,13 @@ struct CapturedFacts {
     cancellation: CancellationToken,
 }
 
+struct StepSnapshot {
+    _admission: SubmissionAdmissionLease,
+    through: u64,
+    step_id: StepId,
+    pending_input_range: Option<std::ops::RangeInclusive<u64>>,
+}
+
 #[async_trait]
 impl ContributionFactReader for CapturedFacts {
     async fn read(&self, after_seq: u64, limit: usize) -> ContributionResult<ContributionFactPage> {
@@ -53,26 +60,29 @@ impl AgentKernel {
         cancellation: CancellationToken,
         program: Option<&EffectId>,
     ) -> TurnResult<ContributionContext> {
-        let (_admission, live, step_id) = self
+        let snapshot = self
             .open_step_snapshot(claim, pending, &cancellation, program)
             .await?;
-        let page = self.read_step_domains(claim, live, None).await?;
+        let page = self
+            .read_step_domains(claim, snapshot.through, None)
+            .await?;
         self.finish_step_snapshot(claim, &cancellation, program)?;
         Ok(ContributionContext {
             header: Arc::new(claim.header().clone()),
             execution: claim.execution().cloned(),
             turn_id: claim.turn_id().clone(),
             accepted_fact_seq: claim.accepted_seq(),
-            step_id,
+            step_id: snapshot.step_id,
+            pending_input_range: snapshot.pending_input_range,
             horizon: ContributionHorizon {
-                fact_seq: live,
+                fact_seq: snapshot.through,
                 control_seq: page.durable_control_seq,
             },
             domains: page.states.into_iter().map(domain_view).collect(),
             facts: Arc::new(CapturedFacts {
                 kernel: self.clone(),
                 claim: claim.clone(),
-                through: live,
+                through: snapshot.through,
                 cancellation,
             }),
         })
@@ -85,12 +95,12 @@ impl AgentKernel {
         pending: Vec<SettledToolContext>,
         cancellation: CancellationToken,
     ) -> TurnResult<(StepId, Option<DomainStateView>)> {
-        let (_admission, live, step_id) = self
+        let snapshot = self
             .open_step_snapshot(claim, pending, &cancellation, None)
             .await?;
         let selection = match domain {
             Some(id) => self
-                .read_step_domains(claim, live, Some(id))
+                .read_step_domains(claim, snapshot.through, Some(id))
                 .await?
                 .states
                 .pop()
@@ -98,7 +108,7 @@ impl AgentKernel {
             None => None,
         };
         self.finish_step_snapshot(claim, &cancellation, None)?;
-        Ok((step_id, selection))
+        Ok((snapshot.step_id, selection))
     }
 
     async fn open_step_snapshot(
@@ -107,7 +117,7 @@ impl AgentKernel {
         pending: Vec<SettledToolContext>,
         cancellation: &CancellationToken,
         program: Option<&EffectId>,
-    ) -> TurnResult<(SubmissionAdmissionLease, u64, StepId)> {
+    ) -> TurnResult<StepSnapshot> {
         if cancellation.is_cancelled() {
             return Err(TurnError::Invalid(
                 "contribution capture was cancelled".into(),
@@ -121,21 +131,27 @@ impl AgentKernel {
             .submission_admission
             .acquire(claim.session_id())
             .await?;
-        let (live, step_id) = {
+        let snapshot = {
             let state = lock_state(&self.inner);
             let turn = self.validate_contribution_claim(&state, claim, program)?;
             let step_id = turn.current_step.clone().ok_or_else(|| {
                 TurnError::Invalid("contribution capture requires an open Step".into())
             })?;
-            (
-                state.sessions[claim.session_id()]
+            let mut inputs = turn.pending_inputs.keys();
+            let pending_input_range = inputs
+                .next()
+                .map(|first| *first..=*inputs.next_back().unwrap_or(first));
+            StepSnapshot {
+                _admission: admission,
+                through: state.sessions[claim.session_id()]
                     .live_seq()
                     .map_err(turn_kernel_error)?,
                 step_id,
-            )
+                pending_input_range,
+            }
         };
-        self.flush(claim, live).await?;
-        Ok((admission, live, step_id))
+        self.flush(claim, snapshot.through).await?;
+        Ok(snapshot)
     }
 
     async fn read_step_domains(

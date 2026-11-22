@@ -84,6 +84,11 @@ before publication. Capture and preparation share the BeforeStep deadline, and
 provider retries reuse the published decision. One native Step can contain several
 request series; a retained application capture belongs to only one such series.
 The same owner remains alive even when its Tool selection is empty.
+The contribution context includes the inclusive Fact range spanned by the
+Turn's currently unprepared inputs, captured with its Fact horizon. The range
+is empty after input preparation until another input is claimed. Contributors
+that interpret direct-user gestures can limit their reads to this range and
+filter each Fact by Turn and source.
 
 An unpublished draft can clear all held command inputs in one revision without
 enumerating removal requests. It retains domain state and command retry receipts,

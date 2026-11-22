@@ -57,15 +57,15 @@ buffers are bounded separately from local snapshot accounting. JSON decoding and
 merged structures allocate outside that accounting; there is no enforced 64 MiB
 per-remote-observation or 256 MiB process memory limit.
 
-The state carries a Session-and-Turn-bound Fact cursor. A complete snapshot advances the
-cursor and digests atomically with its inputs; an incomplete snapshot advances
-neither. Each new Turn starts at its exact acceptance, so a claim-filtered scan
-cannot skip a previously queued acceptance when its Turn later executes. A fork
-likewise starts from the child's acceptance and retains only inherited digests.
-History is paged at the captured horizon and only the current Turn's Human
-entered content or direct Turn acceptance can
-request skills. The filesystem source receives bounded selected invocation
-names and never receives a Store writer.
+Skill discovery examines the current Turn's pending input Facts. Only direct
+Turn acceptance and entered Human content can request skills. A complete
+observation that sees a candidate records a Session-and-Turn-bound cursor
+atomically with its inputs, including when the candidate is unknown. Ordinary
+input with unchanged digests needs no new domain revision. After an incomplete
+observation, discovery retries from the last consumed candidate or the Turn's
+acceptance, including inputs prepared while the source was unavailable.
+A fork starts at the child's own input and inherits the baseline digests.
+The filesystem source receives only bounded selected invocation names.
 
 Domain version 2 also records whether an incomplete observation has been reported.
 An incomplete observation enters one bounded diagnostic per failure episode,
