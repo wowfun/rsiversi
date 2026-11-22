@@ -162,7 +162,8 @@ export class ImagePreviews {
         if (this.#converting + bytes.byteLength > this.#limits.preview_bytes) throw new Error('Image conversion is busy');
         this.#converting += bytes.byteLength;
         try {
-          const file = new File([bytes], 'image.png', {type:'image/png'});
+          const mime = flight.media.mime;
+          const file = new File([bytes], 'image.' + mime.slice('image/'.length), {type:mime});
           entry = { url: this.#urls.createObjectURL(file), file, bytes: bytes.byteLength, refs: 0 };
           this.#reserved -= flight.media.bytes;
           flight.resolved = true;

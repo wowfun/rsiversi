@@ -390,8 +390,9 @@ An entered user message containing images projects its ordered image references
 and text together. Each attachment preview selects the current pane generation,
 retained message block and image ordinal. The GUI resolves the canonical
 reference from that block. Every original content source remains inspectable.
-Replacing the attachment retires its thumbnail reads. Media owns canonical PNG validation and byte identity; arbitrary
-URLs and filenames are never read capabilities. A Media preview or Session file
+Replacing the attachment retires its thumbnail reads. Media verifies the encoded
+bytes and their raster type. The document uses that type for the preview and
+the file dragged from it. URLs and filenames carry no read authority. A Media preview or Session file
 image read delivers its bytes or error to the caller without waking the workbench
 frame publisher. Binary input and output travel separately from JSON views.
 Source bytes are bounded before copying into WASM;

@@ -77,6 +77,19 @@ test('two exact-ticket reads enter before either reply and a third waits', async
   assert.equal(urls.size, 3); owner.dispose(); assert.equal(urls.size, 0);
 });
 
+test('published raster previews and dragged files preserve the encoded media type', async () => {
+  const {owner, reads} = fixture({preview_bytes: 128});
+  const bytes = Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+  const image = {...media('external',bytes.length), mime:'image/gif'};
+  const handle = owner.acquire(image, source('published'));
+  reads[0].resolve(Uint8Array.from(bytes));
+  await handle.result;
+  assert.equal(handle.file.type,'image/gif');
+  assert.equal(handle.file.name,'image.gif');
+  assert.deepEqual(Buffer.from(await handle.file.arrayBuffer()),bytes);
+  owner.dispose();
+});
+
 test('only identical pending tickets share a read; racing tickets retain one canonical URL', async () => {
   const {owner, reads, urls} = fixture();
   const a = owner.acquire(media('same'), source('first')), same = owner.acquire(media('same'), source('first'));
