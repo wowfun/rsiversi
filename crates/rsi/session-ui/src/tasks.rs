@@ -72,7 +72,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
             "Goal control rejected. Request {request_id}: {diagnostic}"
         )));
     }
-    let available = match live {
+    let armed = match live {
         Some(Ok(live)) => {
             elements.push(field(
                 "Current driving",
@@ -82,15 +82,15 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
             if let Some(detail) = live.detail {
                 elements.push(text(detail));
             }
-            live.available
+            live.available.then_some(live.armed)
         }
         Some(Err(error)) => {
             elements.push(text(format!("Live Goal state unavailable: {error}")));
-            false
+            None
         }
         None => {
             elements.push(text("Loading live Goal state…"));
-            false
+            None
         }
     };
     let Some(cache) = cache else {
@@ -148,53 +148,13 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         elements.push(goal_button("Check control result", GoalInput::Reconcile));
         return Ok(view("Goal", elements));
     }
-    if !available {
+    let Some(armed) = armed else {
         return Ok(view("Goal", elements));
-    }
-    let can_cancel = state
-        .goal
-        .as_ref()
-        .is_some_and(|goal| goal.phase != GoalPhase::Completed)
-        && controller.is_host_owner().await.unwrap_or(false);
-    elements.extend(goal_controls(&state, revision, can_cancel)?);
-    Ok(view("Goal", elements))
-}
-
-fn goal_controls(
-    state: &GoalState,
-    revision: CommandRevision,
-    can_cancel: bool,
-) -> Result<Vec<UiElement>> {
-    let mut elements = Vec::new();
-    if let Some(goal) = &state.goal {
-        for (label, action) in [
-            (
-                "Pause after current round",
-                Control::Pause {
-                    id: goal.id.clone(),
-                },
-            ),
-            (
-                "Cancel automatic round",
-                Control::Cancel {
-                    id: goal.id.clone(),
-                },
-            ),
-            (
-                "Resume Goal",
-                Control::Resume {
-                    id: goal.id.clone(),
-                },
-            ),
-        ] {
-            if goal.phase == GoalPhase::Completed
-                || (matches!(action, Control::Cancel { .. }) && !can_cancel)
-                || (matches!(action, Control::Resume { .. })
-                    && goal.allocated_rounds == goal.max_rounds
-                    && !goal.unsettled())
-            {
-                continue;
-            }
+    };
+    if let Some(goal) = &state.goal
+        && goal.phase != GoalPhase::Completed
+    {
+        let mut control = |label: &str, action| -> Result<()> {
             elements.push(goal_button(
                 label,
                 GoalInput::Control {
@@ -205,6 +165,30 @@ fn goal_controls(
                     },
                 },
             ));
+            Ok(())
+        };
+        if goal.phase == GoalPhase::Active && armed {
+            control(
+                "Pause after current round",
+                Control::Pause {
+                    id: goal.id.clone(),
+                },
+            )?;
+        } else if goal.allocated_rounds < goal.max_rounds || goal.unsettled() {
+            control(
+                "Resume Goal",
+                Control::Resume {
+                    id: goal.id.clone(),
+                },
+            )?;
+        }
+        if controller.is_host_owner().await.unwrap_or(false) {
+            control(
+                "Cancel automatic round",
+                Control::Cancel {
+                    id: goal.id.clone(),
+                },
+            )?;
         }
     }
     if state
@@ -234,7 +218,7 @@ fn goal_controls(
             },
         ));
     }
-    Ok(elements)
+    Ok(view("Goal", elements))
 }
 
 #[derive(Debug)]

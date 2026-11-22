@@ -145,7 +145,9 @@ async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying(
     assert!(model.contains("Durable phase") && model.contains("Active"));
     assert!(model.contains("Allocated rounds") && model.contains("0 / 3"));
     assert!(
-        model.contains("Pause after current round") && !model.contains("Cancel automatic round")
+        model.contains("Pause after current round")
+            && !model.contains("Resume Goal")
+            && !model.contains("Cancel automatic round")
     );
     backend.task_panels.unknown.store(false, Ordering::SeqCst);
     app.command(&open(&app, "goal")).await.unwrap();
@@ -155,6 +157,12 @@ async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying(
     until(|| detail(&app).to_string().contains("Paused")).await;
     assert!(detail(&app).to_string().contains("Disarmed"));
     assert!(detail(&app).to_string().contains("0 / 3"));
+    assert!(detail(&app).to_string().contains("Resume Goal"));
+    assert!(
+        !detail(&app)
+            .to_string()
+            .contains("Pause after current round")
+    );
     assert!(backend.cancel.lock().unwrap().is_empty());
     assert!(runtime.shutdown().await.is_clean());
     assert_eq!(
