@@ -540,9 +540,17 @@
   margin-block: 2px;
 }
 :global(.transcript-flow):where(.scope *) {
+  position: relative;
   max-width: var(--text-width);
   margin-inline: auto;
   display: flow-root;
+}
+.quoteAction {
+  position: absolute;
+  z-index: 6;
+  visibility: hidden;
+  margin: 0;
+  width: max-content;
 }
 :global(.transcript-flow .message.assistant .md-table-wide):where(.scope *) {
   --table-spare: max(0px, calc((100cqw - var(--text-width)) / 2));

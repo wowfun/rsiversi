@@ -519,6 +519,11 @@ disappears when the projection records that Plan mode is off.
 When a command publishes the first user task, the current pane switches to
 the conversation and observes the task and reply from the beginning. Recovering
 its committed receipt after a disconnect has the same effect.
+
+Selecting visible text within one user message or a settled assistant reply or reasoning block offers **Quote text** in a writable
+conversation. It inserts the selected excerpt at the end of the composer's current
+selection. The draft and the submitted command carry a Markdown blockquote, with
+`> ` before each line. Quoting a selection reads only the visible message text.
 Selecting a Skill in slash completion places the caret after the separator,
 ready for its arguments. Existing arguments and whitespace remain in the draft.
 A menu capture is consumed by one selection attempt; later explicit selections

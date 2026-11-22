@@ -18,7 +18,8 @@
     "typography.css keeps the font shorthands used by the Web components and the code font size adjustment.",
     "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included.",
     "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls.",
-    "Background job rows use the upstream section styles and terminal block. Terminal copy uses the document clipboard bridge."
+    "Background job rows use the upstream section styles and terminal block. Terminal copy uses the document clipboard bridge.",
+    "Quote selection uses the upstream DOM text projection, gesture placement, button styles and Markdown formatter. Its hook includes only the upstream interaction types it consumes."
   ],
   "files": [
     {
@@ -726,6 +727,34 @@
       "source": "packages/client/ui-plan/src/client/PlanModeControl.module.css",
       "source_sha256": "5be8b75680cfef67c8add0c6a2404e9e8e105d4c89793fbb9df4bad13932d72a",
       "adapted_sha256": "5be8b75680cfef67c8add0c6a2404e9e8e105d4c89793fbb9df4bad13932d72a",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "quote/text-selection.ts",
+      "source": "packages/client/ui-chat/src/client/chat/text-selection.ts",
+      "source_sha256": "b739f3f8b4d96929bab81ecc8ea5755ea569c434fa3ca7b32fa4276a7e5266ab",
+      "adapted_sha256": "b739f3f8b4d96929bab81ecc8ea5755ea569c434fa3ca7b32fa4276a7e5266ab",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "quote/text-interaction.ts",
+      "source": "packages/client/ui-chat/src/client/chat/text-interaction.ts",
+      "source_sha256": "52902fde520b79e6e7d7baeef75356411b0e07bac7f577f80600c0eaa9c2b103",
+      "adapted_sha256": "9427e4e4f387d593af43115957cd93a63d587b06c17bc3672ab1978e98d59ca9",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "quote/format-quote.ts",
+      "source": "packages/client/ui-primitives/src/markdown/quote-text.ts",
+      "source_sha256": "f268a92670488325c2718efea904747d54be243c9425751e1c88e8a466858900",
+      "adapted_sha256": "f268a92670488325c2718efea904747d54be243c9425751e1c88e8a466858900",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "quote/QuoteSelection.module.css",
+      "source": "packages/session/message-quotes/src/client/QuoteSelection.module.css",
+      "source_sha256": "7c9e6e0725c620ee1ccd6dada0d21afcd14a96b6e1cd6f639c14d702cdb83c9a",
+      "adapted_sha256": "7c9e6e0725c620ee1ccd6dada0d21afcd14a96b6e1cd6f639c14d702cdb83c9a",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]

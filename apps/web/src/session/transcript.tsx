@@ -2,6 +2,7 @@ import {DocumentContributions, DocumentTranscript} from "../document-plugins.tsx
 import {IconApiOutlineRegular, IconClockOutlineRegular, IconContextInjectionOutlineRegular, IconChevronDownOutlineRegular, IconChevronRightOutlineRegular, IconGoalOutlineRegular, IconPaperPlaneOutlineRegular, IconUsersOutlineRegular} from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import {MessageFeedback} from './message-feedback.tsx';
 import {CopyButton} from "./copy-button.tsx";
+import {TranscriptFlow} from './quote-action.tsx';
 import {messageClock, turnDurationLabel} from '../../message-metrics.js';
 import {TurnUsage} from './metrics.tsx';
 import {ProcessTitle, RunningStatus} from './process-row.tsx';
@@ -41,6 +42,7 @@ export interface TranscriptOwner {
   blocks: Map<string, MessageHost>;
   readingSummary?: boolean;
   setReadingSummary(value: boolean): void;
+  insertQuote?(text: string): boolean;
   action(action: string, fields?: Record<string, unknown>): Promise<unknown>;
   renderTranscript?(transcript: TranscriptView): void;
 }
@@ -244,6 +246,7 @@ const Message = memo(function Message({
       ) : !context && <p className="message-title">{block.title}</p>}
       {showBody && <div
         className={`message-text${block.markdown ? " markdown" : ""}`}
+        data-text-interaction-source={block.role === 'user' || (!streaming && (block.role === 'assistant' || block.role === 'reasoning')) ? '' : undefined}
       >
         {block.markdown ? <Markdown events={block.markdown} streaming={streaming} /> : block.text}
       </div>}</DocumentTranscript>}
@@ -491,7 +494,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
         aria-label="Conversation transcript"
         tabIndex={0}
       >
-        <div className="transcript-flow">{nodes}</div>
+        <TranscriptFlow insert={this.props.pane ? owner.insertQuote : undefined}>{nodes}</TranscriptFlow>
       </div>
     );
   }

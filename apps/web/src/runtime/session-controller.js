@@ -1,6 +1,7 @@
 import {bindStarting, startingWorkspace, startConversation, prepareComposer} from './starting-conversation.js';
 import {assertDraftStorageActive, draftStorageRetired} from '../../draft-databases.js';
 import {commandSelection, claimedCommand, commandToken} from '../../command-input.js';
+import {formatQuoteText} from '../../vendor/dsh/quote/format-quote.ts';
 import {accessKey, readAccess, saveAccess} from '../../composer-access.js';
 import {captureOf, captureKey, canCaptureReference} from '../../drafts.js';
 import {
@@ -70,6 +71,18 @@ export function createPaneClass(context) {
     focusInput() {
       this.input.focus();
     }
+    insertQuote = text => {
+      const input = this.input;
+      if (!this.editor || this.composing || this.switching || input.disabled || input.readOnly) return false;
+      const retained = this.retainedSelection;
+      const end = retained?.editor === this.editor ? retained.end : input.value.length;
+      const length = input.value.length;
+      const quote = formatQuoteText(text) + ' ';
+      input.focus({preventScroll: true});
+      input.setSelectionRange(end, end);
+      // Native insertion joins typing history and uses the ordinary draft input handler.
+      return input.ownerDocument.execCommand('insertText', false, quote) && input.value.length === length + quote.length;
+    };
     captureCommandSelection() {
       this.commandSelection = {editor:this.editor,generation:this.generation,revision:this.editor?.revision,
         start:this.input.selectionStart ?? 0,end:this.input.selectionEnd ?? 0};

@@ -651,7 +651,8 @@ UI transition. Chromium reports the failed download directly.
 `plan-review.mjs` runs in the default verifier and is also a targeted closed-review probe using the actual document,
 Worker, Host and a deterministic provider. With explicit `RSI_WEB_REPORT` and
 the paired publication selected as above, it checks literal plan rendering, three explicit choices,
-feedback, narrow containment and the next provider request after atomic approval
+feedback, narrow containment, the next provider request after atomic approval,
+and the exact Plan input when quoting part of the resulting reply
 in Chromium and Firefox. It retains the executable hash, screenshots and exact
 mock requests; this does not establish live model or native Desktop behavior.
 

@@ -82,7 +82,35 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     assert.equal(receiptLookups,0,'a confirmed first-turn command receipt is final');
     assert(JSON.stringify(requests[2].messages).includes('Verified in the actual browser.'));
     await page.setViewportSize({width:1440,height:980});await page.screenshot({path:join(path,'approved.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);
-    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,ok:true});
+    const composer = pane.getByRole('textbox',{name:/Main (message|command arguments)/});
+    assert.equal(await pane.locator('.message.tool [data-text-interaction-source]').count(), 0);
+    await composer.fill('/plan ');
+    const reply = pane.getByText('REVIEW_SETTLED',{exact:true});
+    await reply.evaluate(node => {
+      const text = node.firstChild;
+      const range = node.ownerDocument.createRange();
+      range.setStart(text, 'REVIEW_'.length);
+      range.setEnd(text, text.length);
+      const selection = node.ownerDocument.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    const quote = pane.getByRole('button',{name:'Quote text',exact:true});
+    await quote.waitFor();
+    await page.screenshot({path:join(path,'quote-selection.png')});
+    await quote.click();
+    assert.equal(await composer.inputValue(), '/plan > SETTLED ');
+    await composer.press('Control+z');
+    assert.equal(await composer.inputValue(), '/plan ');
+    await composer.press('Control+Shift+z');
+    assert.equal(await composer.inputValue(), '/plan > SETTLED ');
+    await pane.getByTestId('composer-send').click();
+    await pane.locator('.message.user').filter({hasText:'SETTLED'}).waitFor();
+    await pane.getByText('REVIEW_SETTLED',{exact:true}).nth(1).waitFor();
+    const quoted = requests.at(-1).messages.filter(message => message.role === 'user').at(-1).content;
+    assert.deepEqual(typeof quoted === 'string' ? quoted : quoted.map(part=>part.text).join(''), '> SETTLED');
+    assert.deepEqual(errors,[]);
+    results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,quoted_plan_input:true,ok:true});
     await writeFile(join(path,'requests.json'),JSON.stringify(requests,null,2));
   }catch(error){if(page)await page.screenshot({path:join(path,'failure.png')}).catch(()=>{});results.push({browser:name,ok:false,error:String(error),page_errors:errors});throw error;}
   finally {await cleanupAll(() => browser?.close(), () => service?.close(), () => new Promise(resolve=>provider.close(resolve)), () => writeFile(join(report,'results.json'),JSON.stringify(results,null,2)));}

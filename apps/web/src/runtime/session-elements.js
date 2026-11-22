@@ -59,7 +59,12 @@ export function mount(pane, context, elements) {
     pane.composing = false;
     pane.updateCompletions();
   });
+  const retainSelection = () => {
+    pane.retainedSelection = {editor: pane.editor, end: pane.input.selectionEnd};
+  };
+  listen(pane.input, "selectionchange", retainSelection);
   listen(pane.input, "input", () => {
+    retainSelection();
     try {
       pane.edit(pane.input.value);
       pane.updateCompletions();
