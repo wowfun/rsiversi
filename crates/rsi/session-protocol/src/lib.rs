@@ -47,7 +47,10 @@ pub use surface::{SurfaceSource, SurfaceStream, SurfaceUpdate, SurfaceView};
 
 mod interactions;
 mod jobs;
-pub use jobs::{JobsCollection, JobsRetention, JobsSnapshot};
+pub use jobs::{
+    BackgroundJobId, BackgroundJobsStream, JobsCollection, JobsRetention, JobsSnapshot,
+};
+pub use rsi_jobs::{JobRosterRow, MAXIMUM_JOBS_PER_LIST as MAXIMUM_BACKGROUND_JOBS};
 mod projections;
 mod resources;
 pub use interactions::{
@@ -772,6 +775,25 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<ResourceSnapshot> {
         let _ = request;
         Err(SessionError::NotFound("Session resources".into()))
+    }
+    /// Observes the current and subsequent Session background job rosters.
+    async fn observe_background_jobs(&self) -> Result<BackgroundJobsStream> {
+        Err(SessionError::NotFound("background jobs".into()))
+    }
+    /// Peeks a background job's retained output without consuming it.
+    async fn peek_background_job(
+        &self,
+        _job: BackgroundJobId,
+    ) -> Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+        Err(SessionError::NotFound("background job".into()))
+    }
+    /// Checks the original caller's authority to stop a Session job.
+    async fn background_job_control(&self) -> Result<bool> {
+        Ok(false)
+    }
+    /// Requests a human stop and leaves delivery of the terminal notice to the Session.
+    async fn stop_background_job(&self, _job: BackgroundJobId) -> Result<()> {
+        Err(SessionError::NotFound("background job".into()))
     }
     /// Peeks one bounded current-claim process tail without consuming results.
     async fn peek_job(

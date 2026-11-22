@@ -7,6 +7,8 @@ import {IconCopyOutlineRegular, IconEllipsisOutlineRegular, IconFlatListOutlineR
 import {run, setNotice} from '../bridge.ts';
 import {rowContextMenu} from '../row-context-menu.ts';
 import {directory, hostDesktop} from '../directory-input.ts';
+import type {BackgroundJob} from '../presentation-types.ts';
+import {BackgroundJobs, liveJob, useJobFolds} from './background-jobs.tsx';
 import css from './session-panel.module.css';
 
 const hiddenDock = 'rsi.session-panel.hidden';
@@ -64,7 +66,12 @@ function WorkingFolder({path, local}: {path:string; local:boolean}) {
   </div>;
 }
 
-export const SessionPanel = memo(function SessionPanel({titleActions, path, local, chat}: {titleActions:HTMLElement | null; path:string; local:boolean; chat:boolean}) {
+export const SessionPanel = memo(function SessionPanel({titleActions, path, local, chat, pane, generation, jobs, jobNotice}: {
+  titleActions:HTMLElement | null; path:string; local:boolean; chat:boolean; pane:string; generation:string;
+  jobs?:BackgroundJob[]|null; jobNotice?:string|null;
+}) {
+  const folds = useJobFolds();
+  const running = jobs?.filter(liveJob).length ?? 0;
   const [fits, setFits] = useState(false), [pinned, setPinned] = useState(dockVisible);
   const [overlay, setOverlay] = useState(false);
   const probe = useRef<HTMLSpanElement>(null), trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLElement>(null);
@@ -111,12 +118,16 @@ export const SessionPanel = memo(function SessionPanel({titleActions, path, loca
   }
   return <div className={css.root}>
     {titleActions && createPortal(<Tooltip portal label={chat ? 'Session panel' : 'Session panel is available in Chat'} side="bottom" delayMs={500}>
-      <button ref={trigger} type="button" className={css.trigger} disabled={!chat} aria-label="Session panel"
-        aria-expanded={shown} aria-controls={shown ? id : undefined} onClick={toggle}><IconFlatListOutlineRegular size={16} aria-hidden/></button>
+      <button ref={trigger} type="button" className={css.trigger} disabled={!chat}
+        aria-label={chat && !shown && running > 0 ? `Session panel Background jobs running: ${running}` : 'Session panel'}
+        aria-expanded={shown} aria-controls={shown ? id : undefined} onClick={toggle}><IconFlatListOutlineRegular size={16} aria-hidden/>
+        {chat && !shown && running > 0 && <span className={css.running} aria-hidden/>}</button>
     </Tooltip>, titleActions)}
     {chat && <span ref={probe} className={css.probe} aria-hidden/>}
     {shown && <aside ref={panel} id={id} className={css.panel} data-presentation={fits ? 'docked' : 'overlay'} aria-label="Session panel">
-      <h2>Environment</h2><WorkingFolder path={path} local={local}/>
+      <section><h2>Environment</h2><WorkingFolder path={path} local={local}/></section>
+      {!!jobs?.length && <BackgroundJobs key={generation} pane={pane} generation={generation} rows={jobs} folds={folds}/>}
+      {jobNotice && <p role="status">{jobNotice}</p>}
     </aside>}
   </div>;
 });

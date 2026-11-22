@@ -40,6 +40,8 @@ pub enum ObservationKind {
     Interactions,
     /// Pure extension-state replacement snapshots, including fresh drafts.
     Projections,
+    /// Live Session background job roster.
+    BackgroundJobs,
 }
 
 /// One explicit delivery boundary. Returning success acknowledges the exact item.
@@ -51,6 +53,17 @@ pub trait ObservationSink: std::fmt::Debug + Send + Sync {
     async fn model(
         &self,
         _snapshot: rsi_agent_turn_protocol::ObservedModel,
+    ) -> Result<(), ObservationFailure> {
+        Ok(())
+    }
+    /// Requests background job changes in this sink's existing conversation feed.
+    fn wants_background_jobs(&self) -> bool {
+        false
+    }
+    /// Delivers the current Session roster to interested sinks.
+    async fn background_jobs(
+        &self,
+        _rows: Vec<rsi_session_protocol::JobRosterRow>,
     ) -> Result<(), ObservationFailure> {
         Ok(())
     }

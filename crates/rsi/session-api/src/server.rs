@@ -413,6 +413,21 @@ fn handle_operations(
                 owner.read_resource(request).await
             }
         ),
+        add!(BackgroundJobControl, |owner, (): ()| async move {
+            owner.background_job_control().await
+        }),
+        add!(
+            PeekBackgroundJob,
+            |owner, job: rsi_session_protocol::BackgroundJobId| async move {
+                owner.peek_background_job(job).await
+            }
+        ),
+        add!(
+            StopBackgroundJob,
+            |owner, job: rsi_session_protocol::BackgroundJobId| async move {
+                owner.stop_background_job(job).await
+            }
+        ),
         add!(
             PeekJob,
             |owner, request: rsi_agent_turn_protocol::JobPreviewRequest| async move {

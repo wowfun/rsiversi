@@ -1,8 +1,170 @@
-//! Weak current-claim status relay, with no Jobs authority construction.
+//! Session-owned background settlements and current-claim status reads.
 use super::*;
 use rsi_agent_turn_protocol::{
     MAXIMUM_TURN_JOBS_BYTES, TurnJobStatusSource, TurnJobs, TurnJobsPage, TurnJobsRequest,
 };
+
+#[derive(Debug)]
+struct SessionJobOwner {
+    kernel: Weak<KernelInner>,
+    session: SessionId,
+    header: String,
+    execution: Option<rsi_execution::ExecutionLease>,
+}
+
+impl AgentKernel {
+    pub(super) fn background_jobs(
+        &self,
+        claim: &TurnClaim,
+        header: &str,
+    ) -> TurnResult<rsi_jobs::BackgroundJobs> {
+        let scope = rsi_agent_turn_protocol::session_job_scope(header)
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        Ok(rsi_jobs::BackgroundJobs {
+            scope,
+            completion: Arc::new(SessionJobOwner {
+                kernel: Arc::downgrade(&self.inner),
+                session: claim.session_id().clone(),
+                header: header.into(),
+                execution: claim.execution().cloned(),
+            }),
+        })
+    }
+}
+
+impl SessionJobOwner {
+    async fn deliver(
+        &self,
+        kernel: &AgentKernel,
+        job: rsi_jobs::JobSummary,
+        output_bytes: u64,
+        jobs: &dyn rsi_jobs::Jobs,
+        scope: &rsi_jobs::JobScopeAuthority,
+    ) -> TurnResult<()> {
+        let admission = kernel
+            .inner
+            .submission_admission
+            .acquire(&self.session)
+            .await?;
+        let mut prepared = kernel.prepare_resume(&self.session).await?;
+        if prepared
+            .header()
+            .fingerprint()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?
+            != self.header
+        {
+            return Err(TurnError::StaleClaim);
+        }
+        if let Some(execution) = &self.execution {
+            prepared = prepared.with_execution(execution.clone())?;
+        }
+        let origin = job.origin.as_deref().ok_or_else(|| {
+            TurnError::Invariant("background job lacks its originating effect".into())
+        })?;
+        let id = format!("job-notice-{:x}", Sha256::digest(origin.as_bytes()));
+        let status = match job.status {
+            rsi_jobs::JobStatus::Completed => "completed",
+            rsi_jobs::JobStatus::Failed => "failed",
+            rsi_jobs::JobStatus::Cancelled => "cancelled",
+            rsi_jobs::JobStatus::OutcomeUnknown => "outcome unknown",
+            _ => {
+                return Err(TurnError::Invariant(
+                    "background completion requires a terminal status".into(),
+                ));
+            }
+        };
+        let summary = format!("Background job {} ({}) {status}", job.id, job.name);
+        let text = if output_bytes == 0 {
+            summary.clone()
+        } else {
+            let preview = if output_bytes <= 2048 {
+                jobs.peek(scope, &job.id, origin, [2048; 2])
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?
+            } else {
+                None
+            };
+            completion_text(&summary, preview)
+        };
+        let message = AgentMessage {
+            message_id: MessageId::new(id.clone())
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            source: AgentMessageSource::Application {
+                attribution: Some(rsi_agent_session_protocol::MessageAttribution {
+                    id,
+                    source: serde_json::json!({"kind":"tool-jobs","form":"notice","summary":summary}),
+                }),
+            },
+            content: vec![AgentMessageContent::Text { text }],
+            options: MessageOptions::default(),
+        };
+        kernel
+            .submit_message_admitted(
+                SubmitMessage {
+                    session: SubmitSession::Resume(prepared),
+                    message,
+                    delivery: rsi_agent_session_protocol::MessageDelivery::Steer,
+                },
+                crate::turn_service::MessageAdmission::BackgroundJob,
+                admission,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+fn completion_text(summary: &str, preview: Option<rsi_jobs::JobRead>) -> String {
+    if let Some(preview) = preview
+        && !preview.stdout.lossy
+        && !preview.stderr.lossy
+        && preview.stdout.oldest_offset == 0
+        && preview.stderr.oldest_offset == 0
+        && preview.stdout.bytes.len() + preview.stderr.bytes.len() <= 2048
+    {
+        let mut text = summary.to_owned();
+        for (label, bytes) in [
+            ("stdout", preview.stdout.bytes),
+            ("stderr", preview.stderr.bytes),
+        ] {
+            if !bytes.is_empty() {
+                text.push_str(&format!("\n{label}\n"));
+                text.extend(String::from_utf8_lossy(&bytes).chars().map(|c| {
+                    if c.is_control() && !matches!(c, '\n' | '\t') {
+                        '�'
+                    } else {
+                        c
+                    }
+                }));
+            }
+        }
+        if text.len() <= 2048 {
+            return text;
+        }
+    }
+    format!("{summary}. Read retained output with job_output.")
+}
+
+#[async_trait]
+impl rsi_jobs::JobCompletion for SessionJobOwner {
+    async fn settled(
+        &self,
+        job: rsi_jobs::JobSummary,
+        output_bytes: u64,
+        jobs: &dyn rsi_jobs::Jobs,
+        scope: &rsi_jobs::JobScopeAuthority,
+    ) -> bool {
+        let Some(inner) = self.kernel.upgrade() else {
+            return false;
+        };
+        let kernel = AgentKernel { inner };
+        match self.deliver(&kernel, job, output_bytes, jobs, scope).await {
+            Ok(()) => true,
+            Err(error) => {
+                kernel.record_ready_failure(&error);
+                false
+            }
+        }
+    }
+}
 
 impl AgentKernel {
     fn job_source(

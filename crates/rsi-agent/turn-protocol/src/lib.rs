@@ -1165,6 +1165,11 @@ impl LocalContract for TurnServiceContract {
     type Service = dyn TurnService;
 }
 
+/// Process-local scope for explicit background Jobs of an immutable Session Header.
+pub fn session_job_scope(header_sha256: &str) -> rsi_jobs::Result<rsi_jobs::JobScopeId> {
+    rsi_jobs::JobScopeId::new("rsi.agent.session", [header_sha256])
+}
+
 /// Exact executor claim over one oldest nonterminal turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnClaim {
@@ -1637,6 +1642,15 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         Err(TurnError::Invalid(
             "this executor does not expose Tool caller authority".into(),
         ))
+    }
+    /// Supplies the authenticated Tool caller and its optional Session background owner.
+    fn tool_start_authorities(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+    ) -> Result<(AgentCallerAuthority, Option<Arc<rsi_jobs::BackgroundJobs>>)> {
+        self.tool_caller(claim, effect_id)
+            .map(|caller| (caller, None))
     }
     /// Authenticates and retains the inherited intervals for one reconstruction.
     async fn open_fork_history(&self, claim: &TurnClaim) -> Result<Arc<dyn ForkHistoryReader>>;

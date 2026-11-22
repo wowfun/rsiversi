@@ -71,3 +71,17 @@ impl JobsCollection {
         })))
     }
 }
+
+/// Coalesced, process-local job rosters for one authorized Session.
+pub type BackgroundJobsStream =
+    futures_util::stream::BoxStream<'static, Result<Vec<rsi_jobs::JobRosterRow>>>;
+
+/// An observed job and the exact Tool invocation that started it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundJobId {
+    /// Process-local job identity.
+    pub id: String,
+    /// Durable originating Tool effect.
+    pub origin: rsi_agent_session_protocol::EffectId,
+}

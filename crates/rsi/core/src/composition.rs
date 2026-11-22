@@ -1800,7 +1800,7 @@ fn register_factories(
         builder,
         SESSION_FACTORY,
         UpdateMode::RestartRequired,
-        rsi_session::SessionFactory,
+        rsi_session::SessionFactory::new(crate::application_services::LOCAL_WEB_SLOT),
     )?;
     register(
         builder,

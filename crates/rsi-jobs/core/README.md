@@ -1,6 +1,6 @@
 # rsi-jobs
 
-Producer `JobControl::read`, `peek` and `cancel` are prompt synchronous operations
+Producer `JobControl::read`, `stream_end`, `peek` and `cancel` are prompt synchronous operations
 over retained in-memory state. They must not perform blocking I/O or wait for
 terminal completion; cancellation only signals the producer. Completion and
 reaping belong to asynchronous `wait`. Registry locks are released before
@@ -11,6 +11,17 @@ waiting, cancellation or scope acquisition. It requires the exact opaque scope,
 job ID and originating invocation ID. Missing/compacted output returns `None`.
 Producers can decline preview; a preview never falls back to consuming `read`.
 `JobOrigin` is a trusted in-process Tool extension, independent of Agent types.
+
+An explicit background submission can bind its settlement to a live owner.
+The producer's existing waiter delivers completion after publishing terminal
+status and releasing the registry lock. Scope and producer teardown suppress
+delivery. Foreground work and independent workflow scopes keep their own
+finalization and reporting rules.
+
+A live scope can observe changes to its job roster. Publication, stopping,
+settlement and changes in retained output invalidate that scope's snapshot.
+A human stop requests cancellation and leaves the terminal output and
+completion notice available to the Session.
 
 `JobSummary::validate` checks the bounded identifiers, terminal/status agreement
 and reporting invariants before a summary crosses an external read boundary.
@@ -67,6 +78,12 @@ that work, including child-process readiness, do not establish Jobs publication.
 Only successful `submit` establishes an identifier visible to list/read. Consumers
 without that receipt must observe the Jobs registry independently. Reservations
 keep unpublished work owned if publication fails.
+
+A submission selects its settlement owner. Foreground work requires a reporting
+read before its scope finishes. Automatic work releases on settlement. Session
+background work notifies its owner when uncollected and never holds the
+launching Turn open. A model's reporting read releases producer control; the
+panel can still read a bounded terminal tail until the registry evicts the row.
 
 Producer start and Jobs submit are asynchronous. After capacity admission, the
 provider owns start, publication and any unpublished reaping in a retained task.

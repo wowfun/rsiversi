@@ -287,11 +287,16 @@ impl Sessions {
                 if !subagents.is_empty() {
                     activity.push(json!({"kind":"subagent","items":subagents}));
                 }
-                if tree.session.has_open_turn {
-                    let jobs = self.jobs.active_jobs(&session).map_err(remote)?;
-                    if !jobs.is_empty() {
-                        activity.push(json!({"kind":"job","items":jobs}));
-                    }
+                let mut active = if tree.session.has_open_turn {
+                    self.jobs.active_jobs(&session).map_err(remote)?
+                } else {
+                    Vec::new()
+                };
+                if let Some((jobs, scope)) = self.archive_background_scope(&session).await? {
+                    active.extend(jobs.active(&scope).map_err(remote)?);
+                }
+                if !active.is_empty() {
+                    activity.push(json!({"kind":"job","items":active}));
                 }
                 if running(&tree.session) {
                     activity.push(json!({"kind":"turn"}));
@@ -302,6 +307,26 @@ impl Sessions {
                 Ok(json!({"status":"applied","changed":changed,"archivedSessionIds":ids}))
             }
         }
+    }
+
+    async fn archive_background_scope(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<(&dyn rsi_jobs::Jobs, rsi_jobs::JobScopeAuthority)>> {
+        let Some(registry) = &self.background_jobs else {
+            return Ok(None);
+        };
+        let fingerprint = self
+            .store
+            .header(session)
+            .await
+            .map_err(remote)?
+            .fingerprint()
+            .map_err(remote)?;
+        let id = rsi_agent_turn_protocol::session_job_scope(&fingerprint).map_err(remote)?;
+        Ok(registry
+            .find_scope(&id)
+            .map(|scope| (registry.as_ref(), scope)))
     }
 
     async fn stop_archive_activity(
@@ -323,6 +348,23 @@ impl Sessions {
         if stop_root && running(&tree.session) {
             result = root.cancel(STOP, None).await.map(|_| ()).map_err(remote);
         }
+        let stop_jobs = async {
+            let Some((jobs, scope)) = self.archive_background_scope(session).await? else {
+                return Ok(());
+            };
+            let mut result = Ok(());
+            for row in jobs.roster(&scope).map_err(remote)? {
+                if !row.status.is_terminal()
+                    && let Some(origin) = row.origin
+                {
+                    result =
+                        result.and(jobs.request_stop(&scope, &row.id, &origin).map_err(remote));
+                }
+            }
+            result
+        }
+        .await;
+        result = result.and(stop_jobs);
         for child in active_subagents(&tree) {
             let stop = async {
                 let handle = service.attach(&child.status.session_id).await?;

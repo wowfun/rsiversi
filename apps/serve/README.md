@@ -315,9 +315,10 @@ Navigation writer. Its receipt lists the owner's visible pins in pin order.
 Archive admission reads the root and its activation-owned descendants at one
 durable cut. It reports open, parked or waking work, including a pending
 approval, and identifies running subagents by Session ID and task name.
-The inspection returns activity families. The root's running and stopping
-background Jobs contribute their IDs and labels from the current executor.
-Cancelling that Turn reaps its Jobs through the original executor scope.
+The inspection returns activity families. Running and stopping Jobs contribute
+their IDs and labels from the root's current executor and its Session background
+scope. A finished Turn can still have live Session commands. Confirming the
+archive stops those commands and reaps the active Turn's work.
 Independent forks and detached program branches have their own lifetimes.
 On confirmation the archive is durable before cancellation. Serve stops the
 active subagents and handles the root when its live Agent did not take the

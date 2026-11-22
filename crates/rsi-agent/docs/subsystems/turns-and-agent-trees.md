@@ -72,7 +72,16 @@ validated finalization deadline to the complete call. Deadline expiry becomes
 the turn's durable finalization failure; it releases the executor waiter but
 does not claim that arbitrary third-party work was forcibly stopped. The
 standard Session composition installs a Jobs finalizer whose own contract
-cancels and boundedly joins unfinished process-local work.
+cancels and boundedly joins unfinished Turn-owned work.
+
+An explicit background shell command belongs to the originating Session and
+immutable Header. Finishing the launching Turn or closing a client leaves the
+command running. Its uncollected completion supplies one application notice to
+the same Session. A running Turn can consume it at its next Step, and an idle
+Session can start a new Turn. The notice carries the job identity and completion
+status. Job output remains available through the Jobs owner. Host shutdown or
+producer withdrawal cancels the underlying work. Jobs and their observers are
+process-local.
 
 The Turn service is the single application seam. Product input first returns a
 durable mailbox receipt with its exact acceptance control sequence and indexed

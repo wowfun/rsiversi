@@ -775,6 +775,15 @@ pub async fn scheduled_tasks(action: String, id: u32) -> Result<Option<String>, 
     updates.try_next().await.map_err(failure)
 }
 
+/// Samples or stops a Session-owned background job through the bound pane.
+#[wasm_bindgen]
+pub async fn background_job(source: String) -> Result<String, JsValue> {
+    application()?
+        .background_job(&source)
+        .await
+        .map_err(failure)
+}
+
 /// Reads or changes feedback on a finalized assistant answer in the attached pane.
 #[wasm_bindgen]
 pub async fn message_feedback(source: String) -> Result<String, JsValue> {

@@ -177,7 +177,14 @@ impl SessionController {
             rsi_session_protocol::SurfaceView::attached(cursor)
         };
         admission.state_observing = true;
-        self.spawn_feed(view, None);
+        self.spawn_feed(
+            if self.sink.wants_background_jobs() {
+                view.with_background_jobs()
+            } else {
+                view
+            },
+            None,
+        );
     }
 
     /// Starts Goal and projection observation as soon as the unpublished draft is attached.

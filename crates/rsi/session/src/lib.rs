@@ -88,6 +88,7 @@ pub struct LocalSessionService {
     preview_workers: Arc<tokio::sync::Semaphore>,
     export_workers: Arc<tokio::sync::Semaphore>,
     plugin_context: Option<rsi_meta::Context>,
+    browser_slot: Option<&'static str>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -272,6 +273,7 @@ impl LocalSessionService {
             references: None,
             resource_retention: rsi_session_protocol::ResourceRetention::default(),
             plugin_context: None,
+            browser_slot: None,
             goals: None,
             jobs: None,
             jobs_retention: rsi_session_protocol::JobsRetention::default(),
@@ -372,10 +374,12 @@ impl LocalSessionService {
             resources: self.resources.clone(),
             resource_retention: self.resource_retention.clone(),
             plugin_context: self.plugin_context.clone(),
+            browser_slot: self.browser_slot,
             goals: self.goals.clone(),
             continuations: self.continuations.clone(),
             jobs: self.jobs.clone(),
             jobs_retention: self.jobs_retention.clone(),
+            background_scope_id: std::sync::OnceLock::new(),
             preview_workers: self.preview_workers.clone(),
             export_workers: self.export_workers.clone(),
             projection_service: self.projection_service.clone(),
@@ -904,9 +908,11 @@ struct LocalSessionHandle {
     resource_retention: rsi_session_protocol::ResourceRetention,
     jobs: Option<Arc<dyn rsi_agent_turn_protocol::TurnJobs>>,
     jobs_retention: rsi_session_protocol::JobsRetention,
+    background_scope_id: std::sync::OnceLock<rsi_jobs::JobScopeId>,
     preview_workers: Arc<tokio::sync::Semaphore>,
     export_workers: Arc<tokio::sync::Semaphore>,
     plugin_context: Option<rsi_meta::Context>,
+    browser_slot: Option<&'static str>,
     goals: Option<Arc<dyn rsi_goal::GoalController>>,
     continuations: Option<Arc<dyn rsi_agent_turn_protocol::SessionContinuations>>,
     projection_service: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
@@ -943,7 +949,45 @@ impl fmt::Debug for LocalSessionHandle {
     }
 }
 
+fn background_job_error(error: rsi_jobs::JobsError) -> SessionError {
+    match error {
+        rsi_jobs::JobsError::UnknownJob(_) | rsi_jobs::JobsError::ScopeClosed => {
+            SessionError::NotFound("background job".into())
+        }
+        rsi_jobs::JobsError::Capacity => SessionError::Capacity,
+        other => SessionError::Backend(other.to_string()),
+    }
+}
+
 impl LocalSessionHandle {
+    async fn background_scope(
+        &self,
+    ) -> Result<(Arc<dyn rsi_jobs::Jobs>, rsi_jobs::JobScopeAuthority)> {
+        let _admission = self.admit()?;
+        let jobs = self
+            .plugin_context
+            .as_ref()
+            .and_then(rsi_meta::Context::lookup_local::<rsi_jobs::JobsContract>)
+            .ok_or_else(|| SessionError::NotFound("background jobs".into()))?;
+        let id = match self.background_scope_id.get() {
+            Some(id) => id.clone(),
+            None => {
+                let state = self.state.lock().await;
+                let HandleState::Attached(header) = &*state else {
+                    return Err(SessionError::NotFound("published session".into()));
+                };
+                let hash = header
+                    .fingerprint()
+                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                let id = rsi_agent_turn_protocol::session_job_scope(&hash)
+                    .map_err(background_job_error)?;
+                self.background_scope_id.get_or_init(|| id).clone()
+            }
+        };
+        let scope = jobs.acquire_scope(id).map_err(background_job_error)?;
+        Ok((jobs, scope))
+    }
+
     fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -1337,6 +1381,67 @@ impl SessionHandle for LocalSessionHandle {
     ) -> Result<rsi_session_protocol::ResourceSnapshot> {
         let _admission = self.admit()?;
         self.resource_read(request).await
+    }
+    async fn observe_background_jobs(&self) -> Result<rsi_session_protocol::BackgroundJobsStream> {
+        let (jobs, scope) = self.background_scope().await?;
+        let owner = self.clone();
+        Ok(Box::pin(async_stream::try_stream! {
+            loop {
+                let changed = scope.roster_changed();
+                let rows = {
+                    let _admission = owner.admit()?;
+                    jobs.roster(&scope).map_err(background_job_error)?
+                };
+                yield rows;
+                tokio::select! {
+                    () = owner.projection_stopped.cancelled() => break,
+                    () = changed => {},
+                }
+            }
+        }))
+    }
+    async fn peek_background_job(
+        &self,
+        job: rsi_session_protocol::BackgroundJobId,
+    ) -> Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+        let (jobs, scope) = self.background_scope().await?;
+        let _admission = self.admit()?;
+        let Some(sample) = jobs
+            .peek(&scope, &job.id, job.origin.as_str(), [8192; 2])
+            .map_err(background_job_error)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(rsi_agent_turn_protocol::JobPreview {
+            status: sample.job.status,
+            stdout: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stdout, 8192)
+                .map_err(map_turn_error)?,
+            stderr: rsi_agent_turn_protocol::JobPreviewStream::from_read(sample.stderr, 8192)
+                .map_err(map_turn_error)?,
+        }))
+    }
+    async fn background_job_control(&self) -> Result<bool> {
+        let _admission = self.admit()?;
+        if matches!(self.origin, rsi_api_protocol::CallOrigin::Local) {
+            return Ok(true);
+        }
+        let Some((slot, devices)) = self.browser_slot.zip(self.plugin_context.as_ref().and_then(
+            rsi_meta::Context::lookup_local::<rsi_api_protocol::DeviceAdministrationContract>,
+        )) else {
+            return Ok(false);
+        };
+        devices
+            .owns_managed_slot(slot, &self.origin)
+            .map_err(SessionError::Api)
+    }
+    async fn stop_background_job(&self, job: rsi_session_protocol::BackgroundJobId) -> Result<()> {
+        if !self.background_job_control().await? {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
+        }
+        let (jobs, scope) = self.background_scope().await?;
+        let _admission = self.admit_mutation()?;
+        jobs.request_stop(&scope, &job.id, job.origin.as_str())
+            .map_err(background_job_error)
     }
     async fn peek_job(
         &self,

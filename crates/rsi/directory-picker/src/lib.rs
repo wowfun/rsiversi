@@ -206,18 +206,6 @@ struct Owner {
     work: Work,
 }
 impl Owner {
-    fn owns_desktop(&self, origin: &CallOrigin) -> rsi_api_protocol::Result<bool> {
-        match origin {
-            CallOrigin::Local => Ok(true),
-            CallOrigin::Device(device) if device.revoked.is_cancelled() => {
-                Err(ApiError::Unauthorized)
-            }
-            CallOrigin::Device(device) => Ok(self
-                .devices
-                .managed_device(self.browser_slot)?
-                .is_some_and(|owner| owner.id == device.id)),
-        }
-    }
     #[cfg(not(any(unix, windows)))]
     fn unsupported<T>(
         &self,
@@ -356,7 +344,10 @@ impl PluginFactory for DirectoryPickerFactory {
                     let owner = desktop_owner.clone();
                     async move {
                         Ok(Ok::<_, Failure>(
-                            owner.owns_desktop(&context.origin)? && desktop::available(),
+                            owner
+                                .devices
+                                .owns_managed_slot(owner.browser_slot, &context.origin)?
+                                && desktop::available(),
                         ))
                     }
                 }),
@@ -369,7 +360,10 @@ impl PluginFactory for DirectoryPickerFactory {
                 json_handler(move |context, path: String| {
                     let owner = desktop_owner.clone();
                     async move {
-                        if !owner.owns_desktop(&context.origin)? {
+                        if !owner
+                            .devices
+                            .owns_managed_slot(owner.browser_slot, &context.origin)?
+                        {
                             return Err(ApiError::Unauthorized);
                         }
                         if !desktop::available() {

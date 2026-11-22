@@ -43,6 +43,8 @@ pub(crate) struct RenderState {
     pub interactions: Option<InteractionSnapshot>,
     pub projections: Option<rsi_session_protocol::ProjectionSnapshot>,
     pub projection_notice: String,
+    pub background_jobs: Vec<rsi_session_protocol::JobRosterRow>,
+    pub job_notice: String,
     fact_notice: String,
     interaction_notice: String,
 }
@@ -60,6 +62,7 @@ impl RenderState {
             ObservationKind::Facts | ObservationKind::Models => &mut self.fact_notice,
             ObservationKind::Interactions => &mut self.interaction_notice,
             ObservationKind::Projections => &mut self.projection_notice,
+            ObservationKind::BackgroundJobs => &mut self.job_notice,
         }
     }
 }
@@ -220,6 +223,26 @@ impl ObservationSink for Renderer {
         state.transcript.model(snapshot.as_ref());
         drop(state);
         self.changed();
+        Ok(())
+    }
+    fn wants_background_jobs(&self) -> bool {
+        true
+    }
+    async fn background_jobs(
+        &self,
+        rows: Vec<rsi_session_protocol::JobRosterRow>,
+    ) -> Result<(), ObservationFailure> {
+        self.ready().await?;
+        let mut state = self.state.lock().expect("Web renderer poisoned");
+        if self.stop.is_cancelled() {
+            return Err(ObservationFailure::SinkStopped);
+        }
+        if state.background_jobs != rows || !state.job_notice.is_empty() {
+            state.background_jobs = rows;
+            state.job_notice.clear();
+            drop(state);
+            self.changed();
+        }
         Ok(())
     }
     async fn interactions(&self, snapshot: InteractionSnapshot) -> Result<(), ObservationFailure> {

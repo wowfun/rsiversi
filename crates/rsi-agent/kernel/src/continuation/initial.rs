@@ -151,7 +151,7 @@ impl AgentKernel {
                         options: MessageOptions::default(),
                     },
                 },
-                None,
+                crate::turn_service::MessageAdmission::Session,
                 admission,
             )
             .await?;

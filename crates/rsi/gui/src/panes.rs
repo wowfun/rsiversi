@@ -404,7 +404,7 @@ impl Pane {
             .lock()
             .expect("GUI metrics poisoned")
             .clone();
-        let metadata = serde_json::json!({
+        let mut metadata = serde_json::json!({
             "kind":"native",
             "inline": inline::frames(&current, &state, ui),
             "generation": current.generation.to_string(), "selection": self.selection.load(std::sync::atomic::Ordering::Acquire).to_string(), "session":current.id,
@@ -430,6 +430,13 @@ impl Pane {
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(),
             "pending":state.pending(!current.protected),
         });
+        if !state.background_jobs.is_empty() {
+            metadata["background_jobs"] =
+                serde_json::to_value(&state.background_jobs).expect("bounded job roster");
+        }
+        if !state.job_notice.is_empty() {
+            metadata["job_notice"] = state.job_notice.as_str().into();
+        }
         project(
             metadata,
             Some(state.history.as_ref().unwrap_or(&state.transcript)),
@@ -1452,6 +1459,55 @@ impl GuiApplication {
         state.history = Some(transcript);
         Ok(())
     }
+    /// Reads one visible background job or requests its cancellation in the attached Session.
+    pub fn background_job(
+        self: &Arc<Self>,
+        source: &str,
+    ) -> futures_util::future::BoxFuture<'static, Result<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Action {
+            Control,
+            Peek {
+                job: rsi_session_protocol::BackgroundJobId,
+            },
+            Stop {
+                job: rsi_session_protocol::BackgroundJobId,
+            },
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            pane: crate::SurfaceId,
+            generation: String,
+            action: Action,
+        }
+        if source.len() > 4096 {
+            return Box::pin(async { Err("Background job request exceeds 4 KiB".into()) });
+        }
+        let request = serde_json::from_str::<Request>(source).map_err(error);
+        self.admit_reply(move |app| async move {
+            let request=request?;
+            let attachment=app.pane(request.pane)?.attachment(&request.generation)?;
+            match request.action {
+                Action::Control => serde_json::to_string(&attachment.handle.background_job_control().await.map_err(error)?).map_err(error),
+                Action::Stop {job} => {
+                    attachment.handle.stop_background_job(job).await.map_err(error)?;
+                    Ok("null".into())
+                }
+                Action::Peek {job} => {
+                    let Some(output)=attachment.handle.peek_background_job(job).await.map_err(error)? else {return Ok("null".into())};
+                    let stdout=output.stdout.bytes(8192).map_err(error)?;
+                    let stderr=output.stderr.bytes(8192).map_err(error)?;
+                    serde_json::to_string(&serde_json::json!({
+                        "stdout":String::from_utf8_lossy(&stdout), "stderr":String::from_utf8_lossy(&stderr),
+                        "truncated":output.stdout.truncated || output.stderr.truncated,
+                    })).map_err(error)
+                }
+            }
+        })
+    }
+
     /// Reads or changes one displayed answer without retaining its note in a GUI frame.
     pub fn message_feedback(
         self: &Arc<Self>,

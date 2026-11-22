@@ -38,6 +38,7 @@ fn operation(source: SurfaceSource) -> Operation {
         SurfaceSource::Interactions => Operation::Interactions,
         SurfaceSource::Projections => Operation::Projections,
         SurfaceSource::Goal => Operation::GoalObserve,
+        SurfaceSource::BackgroundJobs => Operation::SurfaceObserve,
     }
 }
 
@@ -129,6 +130,7 @@ pub(super) async fn serve(
                     }
                     frame(&budget, &target, SurfaceSource::Projections, false, value)?
                 }
+                SurfaceUpdate::BackgroundJobs(rows) => frame(&budget, &target, SurfaceSource::BackgroundJobs, false, rows)?,
                 SurfaceUpdate::Goal(value) => {
                     frame(&budget, &target, SurfaceSource::Goal, false, value)?
                 }
@@ -243,6 +245,13 @@ pub(super) async fn open(
                             &mut projection_cursor,
                             body(&frame)?,
                         )?)
+                    }
+                    SurfaceSource::BackgroundJobs => {
+                        let rows: Vec<rsi_session_protocol::JobRosterRow> = body(&frame)?;
+                        if rows.len() > rsi_session_protocol::MAXIMUM_BACKGROUND_JOBS || rows.iter().any(|r| r.validate().is_err()) {
+                            Err(client::malformed(operation))?;
+                        }
+                        SurfaceUpdate::BackgroundJobs(rows)
                     }
                     SurfaceSource::Goal => {
                         let value: rsi_goal::GoalLiveState = body(&frame)?;

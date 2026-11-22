@@ -506,7 +506,7 @@ pub(super) fn tool_start_extensions(
     effect_id: &EffectId,
     evidence_bytes: usize,
 ) -> std::result::Result<rsi_tools_protocol::ToolExecutionExtensions, TurnError> {
-    let caller = turns.tool_caller(claim, effect_id)?;
+    let (caller, background) = turns.tool_start_authorities(claim, effect_id)?;
     let mut extensions = rsi_tools_protocol::ToolExecutionExtensions::default()
         .with(Arc::new(rsi_tools_protocol::ToolExecutionSession {
             scope: rsi_spill::SpillScope::new("session", claim.session_id().as_str()),
@@ -524,6 +524,11 @@ pub(super) fn tool_start_extensions(
     if let Some(execution) = claim.execution() {
         extensions = extensions
             .with(Arc::new(execution.clone()))
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+    }
+    if let Some(background) = background {
+        extensions = extensions
+            .with(background)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
     }
     extensions = extensions

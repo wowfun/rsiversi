@@ -197,6 +197,7 @@ impl Registry {
             .or_default()
             .members
             .insert(record.sequence, id.to_owned());
+        record.scope.notify_roster();
         let previous = self.jobs.insert(id.to_owned(), record);
         assert!(previous.is_none(), "published job identities are unique");
         self.refresh_eligibility(id);
@@ -211,7 +212,10 @@ impl Registry {
             .retention_by_scope
             .get_mut(&record.scope.generation())
             .expect("every retained job has a scope count");
-        if record.status.is_terminal() && record.reported && record.readers == 0 {
+        if record.status.is_terminal()
+            && (record.reported || record.announced)
+            && record.readers == 0
+        {
             scope.evictable.insert(record.sequence);
             self.evictable
                 .entry(record.sequence)
@@ -227,6 +231,7 @@ impl Registry {
             .jobs
             .remove(id)
             .expect("eviction candidate is retained");
+        record.scope.notify_roster();
         let generation = record.scope.generation();
         let scope = self
             .retention_by_scope
@@ -273,6 +278,9 @@ impl Drop for JobReadLease<'_> {
             .readers
             .checked_sub(1)
             .expect("every admitted read has one release");
+        if record.readers == 0 && record.status.is_terminal() {
+            record.settled.notify_waiters();
+        }
         registry.refresh_eligibility(self.id);
     }
 }
@@ -281,6 +289,13 @@ impl Drop for JobReadLease<'_> {
 struct ProducerEntry {
     generation: u64,
     producer: Arc<dyn JobProducer>,
+}
+
+#[derive(Debug)]
+enum Retention {
+    Automatic,
+    Required,
+    Background(Option<Box<[Vec<u8>; 2]>>),
 }
 
 #[derive(Debug)]
@@ -294,11 +309,21 @@ struct JobRecord {
     status: JobStatus,
     control: Option<Arc<dyn JobControl>>,
     terminal: Option<JobTerminal>,
-    requires_report: bool,
+    retention: Retention,
     reported: bool,
+    announced: bool,
+    started_ms: u64,
+    finished_ms: Option<u64>,
     readers: usize,
     stream_ends: [u64; 2],
     settled: Arc<Notify>,
+}
+
+fn now_ms() -> u64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl JobRecord {
@@ -309,7 +334,7 @@ impl JobRecord {
             producer: self.producer.clone(),
             origin: self.origin.clone(),
             status: self.status,
-            requires_report: self.requires_report,
+            requires_report: matches!(self.retention, Retention::Required),
             reported: self.reported,
             terminal: self.terminal.clone(),
             output_retained: self.control.is_some(),
@@ -367,6 +392,13 @@ impl Jobs for Service {
                     .await
             },
         ))
+    }
+
+    fn find_scope(&self, id: &JobScopeId) -> Option<JobScopeAuthority> {
+        let state = lock(&self.registry).scopes.get(id)?.upgrade()?;
+        state
+            .is_active()
+            .then(|| JobScopeAuthority::from_provider_state(id.clone(), state))
     }
 
     fn acquire_scope(&self, id: JobScopeId) -> Result<JobScopeAuthority> {
@@ -461,6 +493,46 @@ impl Jobs for Service {
         Ok(records)
     }
 
+    fn roster(&self, scope: &JobScopeAuthority) -> Result<Vec<rsi_jobs::JobRosterRow>> {
+        let registry = lock(&self.registry);
+        self.validate_scope(&registry, scope)?;
+        Ok(registry
+            .scope_records(scope.generation())
+            .map(|(id, record)| rsi_jobs::JobRosterRow {
+                id: id.clone(),
+                name: record.name.clone(),
+                origin: record.origin.clone(),
+                status: record.status,
+                started_ms: record.started_ms,
+                finished_ms: record.finished_ms,
+                output_retained: !record.status.is_terminal()
+                    || record.control.is_some() && record.stream_ends != [0; 2]
+                    || matches!(record.retention, Retention::Background(Some(_))),
+            })
+            .collect())
+    }
+
+    fn request_stop(&self, scope: &JobScopeAuthority, id: &str, origin: &str) -> Result<()> {
+        let control = {
+            let mut registry = lock(&self.registry);
+            self.validate_scope(&registry, scope)?;
+            let record = visible_record_mut(&mut registry, scope, id)?;
+            if record.origin.as_deref() != Some(origin) {
+                return Err(JobsError::UnknownJob(id.into()));
+            }
+            if record.status != JobStatus::Running {
+                return Ok(());
+            }
+            record.status = JobStatus::Stopping;
+            record.scope.notify_roster();
+            record.control.clone()
+        };
+        if let Some(control) = control {
+            contained_cancel(&control)?;
+        }
+        Ok(())
+    }
+
     fn active(&self, scope: &JobScopeAuthority) -> Result<Vec<rsi_jobs::ActiveJob>> {
         let registry = lock(&self.registry);
         self.validate_scope(&registry, scope)?;
@@ -502,7 +574,27 @@ impl Jobs for Service {
                 return Err(JobsError::UnknownJob(id.into()));
             }
             let Some(control) = &record.control else {
-                return Ok(None);
+                let Retention::Background(Some(tail)) = &record.retention else {
+                    return Ok(None);
+                };
+                let sample = |index: usize| {
+                    let end = record.stream_ends[index];
+                    let bytes = &tail[index];
+                    let start = bytes.len().saturating_sub(limits[index]);
+                    let oldest_offset = end - (bytes.len() - start) as u64;
+                    JobOutputRead {
+                        bytes: bytes[start..].to_vec(),
+                        oldest_offset,
+                        next_offset: end,
+                        lossy: oldest_offset > 0,
+                        full_output: None,
+                    }
+                };
+                return Ok(Some(JobRead {
+                    job: record.summary(id),
+                    stdout: sample(0),
+                    stderr: sample(1),
+                }));
             };
             (Arc::clone(control), record.sequence)
         };
@@ -597,7 +689,7 @@ impl Jobs for Service {
                 .map_err(|error| self.read_failure(scope, id, error))?;
         }
         let job = self
-            .report_job_inner(id, false, Some([stdout.next_offset, stderr.next_offset]))?
+            .report_job_inner(id, false, Some([&stdout, &stderr]))?
             .ok_or_else(|| JobsError::UnknownJob(id.to_owned()))?;
         Ok(JobRead {
             job,
@@ -646,6 +738,7 @@ impl Jobs for Service {
                         .get_mut(&id)
                         .expect("scope member is retained");
                     record.status = JobStatus::Stopping;
+                    record.scope.notify_roster();
                     record.control.clone()
                 })
                 .collect::<Vec<_>>()
@@ -753,9 +846,11 @@ impl Service {
             record.scope.mark_outcome_unknown();
         }
         record.status = terminal.status;
+        record.finished_ms = Some(now_ms().max(record.started_ms));
         record.terminal = Some(terminal);
         record.stream_ends = stream_ends;
-        if !record.requires_report {
+        record.scope.notify_roster();
+        if matches!(record.retention, Retention::Automatic) {
             record.reported = true;
             record.control = None;
         }
@@ -777,6 +872,7 @@ impl Service {
     ) -> Result<JobRead> {
         validate_job_identifier("job identity", id)?;
         let mut cancellation_sent = false;
+        let mut reader = None;
         loop {
             let (notified, control) = {
                 let mut registry = lock(&self.registry);
@@ -786,9 +882,14 @@ impl Service {
                     drop(registry);
                     return self.read(scope, id, stdout_offset, stderr_offset);
                 }
+                if reader.is_none() {
+                    record.readers = record.readers.checked_add(1).ok_or(JobsError::Capacity)?;
+                    reader = Some(JobReadLease { service: self, id });
+                }
                 let notified = Arc::clone(&record.settled).notified_owned();
                 let control = if cancel && !cancellation_sent {
                     record.status = JobStatus::Stopping;
+                    record.scope.notify_roster();
                     record.control.clone()
                 } else {
                     None
@@ -800,6 +901,31 @@ impl Service {
                 contained_cancel(&control)?;
             }
             notified.await;
+        }
+    }
+
+    async fn uncollected_completion(&self, id: &str) -> Option<(JobSummary, u64)> {
+        loop {
+            let released = {
+                let registry = lock(&self.registry);
+                let record = registry.jobs.get(id)?;
+                if record.reported
+                    || !self.accepting.load(Ordering::Acquire)
+                    || !record.scope.is_active()
+                    || registry.producers.get(&record.producer)?.generation
+                        != record.producer_generation
+                {
+                    return None;
+                }
+                if record.readers == 0 {
+                    return Some((
+                        record.summary(id),
+                        record.stream_ends[0].saturating_add(record.stream_ends[1]),
+                    ));
+                }
+                Arc::clone(&record.settled).notified_owned()
+            };
+            released.await;
         }
     }
 
@@ -822,9 +948,9 @@ impl Service {
         &self,
         id: &str,
         only_if_unreported: bool,
-        sampled_stream_ends: Option<[u64; 2]>,
+        sampled: Option<[&JobOutputRead; 2]>,
     ) -> Result<Option<JobSummary>> {
-        let control = {
+        let (control, keep_tail) = {
             let registry = lock(&self.registry);
             let Some(record) = registry.jobs.get(id) else {
                 return if only_if_unreported {
@@ -845,10 +971,21 @@ impl Service {
                     Ok(Some(record.summary(id)))
                 };
             }
-            record.control.clone()
+            (
+                record.control.clone(),
+                matches!(record.retention, Retention::Background(_)),
+            )
         };
-        let stream_ends = sampled_stream_ends
+        let stream_ends = sampled
+            .map(|reads| reads.map(|read| read.next_offset))
             .unwrap_or_else(|| control.as_ref().map_or([0, 0], capture_stream_ends));
+        let tail = if keep_tail && stream_ends != [0; 2] {
+            control
+                .as_ref()
+                .and_then(|control| panel_tail(control, stream_ends, sampled))
+        } else {
+            None
+        };
         let mut registry = lock(&self.registry);
         let Some(record) = registry.jobs.get_mut(id) else {
             return if only_if_unreported {
@@ -863,8 +1000,12 @@ impl Service {
         if record.status.is_terminal() {
             record.reported = true;
             if record.control.is_some() {
+                if let Retention::Background(saved) = &mut record.retention {
+                    *saved = tail;
+                }
                 record.stream_ends = stream_ends;
                 record.control = None;
+                record.scope.notify_roster();
             }
         }
         let summary = record.summary(id);
@@ -892,6 +1033,7 @@ impl Service {
                 })
                 .filter_map(|record| {
                     record.status = JobStatus::Stopping;
+                    record.scope.notify_roster();
                     record.control.clone()
                 })
                 .collect::<Vec<_>>();
@@ -942,7 +1084,9 @@ impl Service {
         }
         let pending = lock(&self.registry)
             .scope_records(generation)
-            .filter(|(_, record)| record.requires_report && !record.reported)
+            .filter(|(_, record)| {
+                matches!(record.retention, Retention::Required) && !record.reported
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         let mut unreported = Vec::with_capacity(pending.len());
@@ -972,6 +1116,7 @@ impl Service {
                 .filter(|record| !record.status.is_terminal())
                 .filter_map(|record| {
                     record.status = JobStatus::Stopping;
+                    record.scope.notify_roster();
                     record.control.clone()
                 })
                 .collect::<Vec<_>>();
@@ -1175,9 +1320,42 @@ fn decrement_map(map: &mut HashMap<u64, usize>, key: u64) {
     }
 }
 
+fn panel_tail(
+    control: &Arc<dyn JobControl>,
+    ends: [u64; 2],
+    sampled: Option<[&JobOutputRead; 2]>,
+) -> Option<Box<[Vec<u8>; 2]>> {
+    let bytes = std::array::from_fn(|i| {
+        let count = ends[i].min(8192) as usize;
+        if count == 0 {
+            return Vec::new();
+        }
+        if let Some(read) = sampled.map(|reads| reads[i])
+            && read.bytes.len() >= count
+        {
+            return read.bytes[read.bytes.len() - count..].to_vec();
+        }
+        let stream = [JobStream::Stdout, JobStream::Stderr][i];
+        std::panic::catch_unwind(AssertUnwindSafe(|| control.peek(stream, count)))
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .filter(|read| read.next_offset == ends[i] && read.bytes.len() <= count)
+            .map_or_else(Vec::new, |read| read.bytes)
+    });
+    bytes
+        .iter()
+        .any(|stream| !stream.is_empty())
+        .then(|| Box::new(bytes))
+}
+
 fn capture_stream_ends(control: &Arc<dyn JobControl>) -> [u64; 2] {
-    [JobStream::Stdout, JobStream::Stderr]
-        .map(|stream| contained_read(control, stream, 0).map_or(0, |read| read.next_offset))
+    [JobStream::Stdout, JobStream::Stderr].map(|stream| {
+        std::panic::catch_unwind(AssertUnwindSafe(|| control.stream_end(stream)))
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(0)
+    })
 }
 
 fn contained_read(
@@ -1330,8 +1508,15 @@ impl Service {
                             status: JobStatus::Running,
                             control: Some(control.clone()),
                             terminal: None,
-                            requires_report: submission.requires_report,
+                            retention: match submission.reporting {
+                                rsi_jobs::JobReporting::Automatic => Retention::Automatic,
+                                rsi_jobs::JobReporting::Required => Retention::Required,
+                                rsi_jobs::JobReporting::Notify(_) => Retention::Background(None),
+                            },
                             reported: false,
+                            announced: false,
+                            started_ms: now_ms(),
+                            finished_ms: None,
                             readers: 0,
                             stream_ends: [0, 0],
                             settled: Arc::new(Notify::new()),
@@ -1366,6 +1551,18 @@ impl Service {
             let terminal = contained_wait(watcher_control.clone()).await;
             if let Some(service) = service.upgrade() {
                 service.settle(&watcher_id, &watcher_control, terminal);
+                if let rsi_jobs::JobReporting::Notify(completion) = submission.reporting
+                    && let Some((job, bytes)) = service.uncollected_completion(&watcher_id).await
+                    && completion
+                        .settled(job, bytes, service.as_ref(), &scope)
+                        .await
+                {
+                    let mut registry = lock(&service.registry);
+                    if let Some(record) = registry.jobs.get_mut(&watcher_id) {
+                        record.announced = true;
+                        registry.refresh_eligibility(&watcher_id);
+                    }
+                }
             }
         });
         Ok(id)
@@ -1382,7 +1579,10 @@ mod tests {
         for (id, record) in &registry.jobs {
             let scope = scopes.entry(record.scope.generation()).or_default();
             scope.members.insert(record.sequence, id.clone());
-            if record.status.is_terminal() && record.reported && record.readers == 0 {
+            if record.status.is_terminal()
+                && (record.reported || record.announced)
+                && record.readers == 0
+            {
                 scope.evictable.insert(record.sequence);
                 evictable.insert(record.sequence, id.clone());
             }
@@ -1403,8 +1603,11 @@ mod tests {
             status: JobStatus::Running,
             control: None,
             terminal: None,
-            requires_report: true,
+            retention: Retention::Required,
             reported: false,
+            announced: false,
+            started_ms: now_ms(),
+            finished_ms: None,
             readers: 0,
             stream_ends: [0, 0],
             settled: Arc::new(Notify::new()),

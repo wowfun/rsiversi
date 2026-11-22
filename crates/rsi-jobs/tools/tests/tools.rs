@@ -310,7 +310,7 @@ impl Fixture {
                     producer: "test".into(),
                     origin: None,
                     request: JobRequest::new(request),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await
@@ -419,7 +419,7 @@ async fn factory_publishes_only_generic_jobs_tools_and_preserves_control_semanti
         ),
         (
             "job_list",
-            "List background jobs in the current turn scope. Terminal jobs with reported=false still require job_output or job_kill before successful turn completion.",
+            "List background jobs in the current session. Use job_output to read retained output or job_kill to stop a running job.",
             json!({"type":"object","properties":{},"additionalProperties":false}),
         ),
         (

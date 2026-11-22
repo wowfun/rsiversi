@@ -15,6 +15,15 @@ docking preference. In a narrower pane its button opens a temporary overlay.
 Escape or a press outside closes it. The panel belongs to the selected Chat;
 the header control is unavailable in Trajectory.
 
+The Session panel shows background commands from the attached Session. A dot on
+the closed panel indicates live work. Running commands appear first, newest
+first. Finished commands start folded while other work is running. Each group
+shows five rows when at least two more can be unfolded. Expanding a row shows
+its retained output; closing the row or the panel ends output observation.
+Clear hides finished rows in this window. A Host owner can press Stop twice
+within three seconds to cancel a running command. Viewing, clearing and stopping
+from the panel preserve the model's completion notification.
+
 A conversation with an active, paused or blocked Goal shows its recorded phase
 and objective above the composer. Completed goals, protected interactions and
 global workbench pages leave the strip out of the composer. A current Goal

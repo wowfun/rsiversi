@@ -128,6 +128,10 @@ export const input = {
   restoreDrafts() { return actions?.restoreDrafts() ?? Promise.reject(new Error('Application is starting')) },
   resourceOwner() { return actions?.resources() },
   dismissSettings() { actions?.dismissSettings();settingsPanel.set(undefined) },
+  async backgroundJob(pane:string, generation:string, action:unknown):Promise<unknown> {
+    if (!actions) throw new Error('Application is starting');
+    return JSON.parse(await actions.call('background_job',JSON.stringify({pane,generation,action})) as string);
+  },
   async messageFeedback(pane: string, generation: string, message: string, action: unknown) {
     if (!actions) throw new Error('Application is starting');
     const response = await actions.call("message_feedback", JSON.stringify({pane,generation,message,action})) as string;

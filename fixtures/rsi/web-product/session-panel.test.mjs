@@ -31,7 +31,7 @@ test('the Chat panel follows its transcript gutter and the attached folder', asy
     document.body.prepend(titleActions);
     const root=createRoot(document.querySelector('#root'));
     window.show=(path='/home/work/project',chat=true,local=true)=>root.render(<><IconSprite/>
-      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} titleActions={titleActions} path={path} local={local} chat={chat}/></div></header>
+      <header className="pane-header"><div className="pane-heading"><SessionPanel key={path} titleActions={titleActions} path={path} local={local} chat={chat} pane="primary" generation="1"/></div></header>
       <button style={{marginTop:'160px'}}>Outside</button></>);
     window.show();
   `});

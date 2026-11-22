@@ -675,6 +675,39 @@ impl SessionHandle for Handle {
         }
         reservation.retain(response)
     }
+    async fn observe_background_jobs(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::BackgroundJobsStream> {
+        let view = rsi_session_protocol::SurfaceView::attached(Default::default())
+            .one(rsi_session_protocol::SurfaceSource::BackgroundJobs);
+        let mut surface = crate::surface::open(self.frozen().into(), view).await?;
+        Ok(Box::pin(async_stream::try_stream! {
+            while let Some(update) = futures_util::StreamExt::next(&mut surface).await {
+                match update? {
+                    rsi_session_protocol::SurfaceUpdate::BackgroundJobs(rows) => yield rows,
+                    rsi_session_protocol::SurfaceUpdate::Stopped(_, error) => Err(error)?,
+                    _ => Err(malformed(Operation::SurfaceObserve))?,
+                }
+            }
+        }))
+    }
+    async fn background_job_control(&self) -> rsi_session_protocol::Result<bool> {
+        self.frozen()
+            .call(Operation::BackgroundJobControl, &())
+            .await
+    }
+    async fn peek_background_job(
+        &self,
+        job: rsi_session_protocol::BackgroundJobId,
+    ) -> rsi_session_protocol::Result<Option<rsi_agent_turn_protocol::JobPreview>> {
+        self.frozen().call(Operation::PeekBackgroundJob, &job).await
+    }
+    async fn stop_background_job(
+        &self,
+        job: rsi_session_protocol::BackgroundJobId,
+    ) -> rsi_session_protocol::Result<()> {
+        self.frozen().call(Operation::StopBackgroundJob, &job).await
+    }
     async fn peek_job(
         &self,
         request: rsi_agent_turn_protocol::JobPreviewRequest,

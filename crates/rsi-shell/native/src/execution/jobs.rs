@@ -54,6 +54,13 @@ struct ShellJobControl {
 
 #[async_trait]
 impl JobControl for ShellJobControl {
+    fn stream_end(&self, stream: JobStream) -> rsi_jobs::Result<u64> {
+        let reader = match stream {
+            JobStream::Stdout => self.process.stdout(),
+            JobStream::Stderr => self.process.stderr(),
+        };
+        Ok(reader.peek_tail(1).map_err(map_process)?.next_offset)
+    }
     fn peek(&self, stream: JobStream, maximum: usize) -> rsi_jobs::Result<Option<JobOutputRead>> {
         let reader = match stream {
             JobStream::Stdout => self.process.stdout(),

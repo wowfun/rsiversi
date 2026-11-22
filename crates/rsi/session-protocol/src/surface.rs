@@ -19,6 +19,8 @@ pub enum SurfaceSource {
     Projections = 3,
     /// Process-local Goal driver state.
     Goal = 4,
+    /// Background jobs across Turns in this Session.
+    BackgroundJobs = 5,
 }
 
 /// Read sources sharing one Session target and acknowledged durable cursors.
@@ -51,7 +53,14 @@ impl SurfaceView {
     const PUBLISHED: u8 = SurfaceSource::History.bit()
         | SurfaceSource::Model.bit()
         | SurfaceSource::Interactions.bit();
-    const ALL: u8 = Self::DRAFT | Self::PUBLISHED;
+    const ALL: u8 = Self::DRAFT | Self::PUBLISHED | SurfaceSource::BackgroundJobs.bit();
+    /// Includes the background job roster in the existing connection.
+    pub fn with_background_jobs(self) -> Self {
+        Self {
+            sources: self.sources | SurfaceSource::BackgroundJobs.bit(),
+            ..self
+        }
+    }
     /// State available before publication.
     pub fn draft() -> Self {
         Self {
@@ -69,7 +78,7 @@ impl SurfaceView {
     /// All observations for an already durable conversation.
     pub fn attached(cursor: ObservationCursor) -> Self {
         Self {
-            sources: Self::ALL,
+            sources: Self::DRAFT | Self::PUBLISHED,
             cursor,
         }
     }
@@ -116,6 +125,8 @@ pub enum SurfaceUpdate {
     Projections(ProjectionSnapshot),
     /// Current process-local Goal state.
     Goal(rsi_goal::GoalLiveState),
+    /// Latest Session-owned job statuses.
+    BackgroundJobs(Vec<crate::JobRosterRow>),
     /// One source stopped while its siblings remain attached.
     Stopped(SurfaceSource, SessionError),
 }
@@ -142,12 +153,21 @@ pub(super) fn observe<H: SessionHandle + ?Sized>(
                         None => break SessionError::Backend("Session observation ended".into()),
                     }
                 },
+                Err(SessionError::NotFound(_)) if kind == SurfaceSource::BackgroundJobs => return,
                 Err(error) => error,
             };
             yield Ok(SurfaceUpdate::Stopped(kind, error));
         })
     }
     let mut sources = stream::SelectAll::new();
+    if view.includes(SurfaceSource::BackgroundJobs) {
+        let session = handle.clone();
+        sources.push(source(
+            SurfaceSource::BackgroundJobs,
+            async move { session.observe_background_jobs().await },
+            SurfaceUpdate::BackgroundJobs,
+        ));
+    }
     if view.includes(SurfaceSource::Projections) {
         let session = handle.clone();
         sources.push(source(

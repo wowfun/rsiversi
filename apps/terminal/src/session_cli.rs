@@ -163,6 +163,7 @@ impl rsi_client::ObservationSink for CliObservationSink {
             rsi_client::ObservationKind::Models => "Model",
             rsi_client::ObservationKind::Interactions => "Interaction",
             rsi_client::ObservationKind::Projections => "Extension state",
+            rsi_client::ObservationKind::BackgroundJobs => "Background jobs",
         };
         let _ = self.send(CliEvent::Notice { kind: if kind == rsi_client::ObservationKind::Projections { "projection_stopped" } else { "error" }, value: json!({"message":format!("{name} observation stopped; reattach to continue: {error}")}) }).await;
         if kind == rsi_client::ObservationKind::Facts {

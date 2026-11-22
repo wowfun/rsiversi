@@ -67,6 +67,9 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::GoalStatus
             | Operation::GoalObserve
             | Operation::Jobs
+            | Operation::BackgroundJobControl
+            | Operation::PeekBackgroundJob
+            | Operation::StopBackgroundJob
             | Operation::PeekJob
             | Operation::Inspect
             | Operation::Metrics

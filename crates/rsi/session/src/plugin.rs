@@ -17,8 +17,16 @@ use rsi_workspace_protocol::WorkspaceRegistryContract;
 use std::sync::Arc;
 
 /// Ordinary owner of one native Session domain service generation.
-#[derive(Clone, Debug, Default)]
-pub struct SessionFactory;
+#[derive(Clone, Debug)]
+pub struct SessionFactory {
+    browser_slot: &'static str,
+}
+impl SessionFactory {
+    /// Binds Host operator controls to the composition's managed browser identity.
+    pub const fn new(browser_slot: &'static str) -> Self {
+        Self { browser_slot }
+    }
+}
 
 #[async_trait]
 impl PluginFactory for SessionFactory {
@@ -106,6 +114,7 @@ impl PluginFactory for SessionFactory {
             service.with_spill(move || context.lookup_local::<rsi_spill::SpillStoreContract>());
         let mut service = service;
         service.plugin_context = Some(plan.context().clone());
+        service.browser_slot = Some(self.browser_slot);
         let service = Arc::new(service);
         let frozen_supply = plan
             .context()

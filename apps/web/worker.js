@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, directory_input, scheduled_tasks, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, directory_input, scheduled_tasks, background_job, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -81,6 +81,8 @@ async function dispatch(data) {
     result = await read_session_resource(data.payload);
   } else if (data.method === "prepare_submission") {
     result = await prepare_submission(data.payload);
+  } else if (data.method === "background_job") {
+    result = await background_job(data.payload);
   } else if (data.method === "message_feedback") {
     result = await message_feedback(data.payload);
   } else if (data.method === "automation_artifact") {

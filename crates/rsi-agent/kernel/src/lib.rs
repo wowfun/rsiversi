@@ -714,6 +714,7 @@ struct CapturedRegistration {
 
 #[derive(Clone)]
 struct ClaimOwner {
+    background: std::sync::OnceLock<TurnResult<Arc<rsi_jobs::BackgroundJobs>>>,
     jobs: Option<Weak<dyn rsi_agent_turn_protocol::TurnJobStatusSource>>,
     executor: String,
     registration: u64,

@@ -31,8 +31,9 @@ Scoped foreground and background work use the selected Jobs producer. Origin
 comes from the executor's `JobOrigin`; display labels contain the approved
 command with bounded length and sanitized control characters. Processes receive
 the full command. Previews use bounded Process tail peeks. Unscoped foreground
-calls run directly; background calls require live turn-scoped Jobs authority and
-have no command timeout. Foreground timeout/cancellation joins native cleanup.
+calls run directly. Explicit model background commands use the authenticated
+Session Jobs owner and have no command timeout. Hosts without a Session owner
+use the original execution scope. Foreground timeout/cancellation joins native cleanup.
 Windows owns descendants through a Job Object and force-terminates them rather
 than using Unix signals.
 

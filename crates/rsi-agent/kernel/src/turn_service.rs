@@ -2,6 +2,12 @@ use super::observation::durable_message_entry;
 use super::*;
 use rsi_agent_session_protocol::{AgentMessageSourceKind, MessageDelivery};
 
+pub(super) enum MessageAdmission<'a> {
+    Session,
+    Agent(&'a AgentCallerAuthority, &'a CancellationToken),
+    BackgroundJob,
+}
+
 #[async_trait]
 impl TurnService for AgentKernel {
     async fn change_message_feedback(
@@ -1024,7 +1030,11 @@ impl AgentKernel {
             .submission_admission
             .acquire(request.session.session_id())
             .await?;
-        self.submit_message_admitted(request, source, admission)
+        let owner = match source {
+            Some((caller, cancellation)) => MessageAdmission::Agent(caller, cancellation),
+            None => MessageAdmission::Session,
+        };
+        self.submit_message_admitted(request, owner, admission)
             .await
     }
 
@@ -1032,9 +1042,13 @@ impl AgentKernel {
     pub(super) async fn submit_message_admitted(
         &self,
         request: SubmitMessage,
-        source: Option<(&AgentCallerAuthority, &CancellationToken)>,
+        owner: MessageAdmission<'_>,
         admission: SubmissionAdmissionLease,
     ) -> TurnResult<MessageReceipt> {
+        let source = match owner {
+            MessageAdmission::Agent(caller, cancellation) => Some((caller, cancellation)),
+            _ => None,
+        };
         let execution = request
             .session
             .execution()
@@ -1169,7 +1183,10 @@ impl AgentKernel {
             return Err(TurnError::ContinuationDisarmed);
         }
         let pending_count = scan.pending.len();
-        let superseded = if !automatic && target == MessageTarget::NextTurn {
+        let superseded = if !automatic
+            && !matches!(owner, MessageAdmission::BackgroundJob)
+            && target == MessageTarget::NextTurn
+        {
             scan.pending
                 .into_iter()
                 .filter(|entry| entry.source_kind == AgentMessageSourceKind::Continuation)
@@ -1929,7 +1946,7 @@ impl AgentKernel {
                     message,
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 },
-                Some((&request.caller, &request.cancellation)),
+                MessageAdmission::Agent(&request.caller, &request.cancellation),
                 admission,
             )
             .await?;

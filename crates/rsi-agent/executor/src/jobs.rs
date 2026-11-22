@@ -148,7 +148,7 @@ mod tests {
                     producer: "fixture".into(),
                     origin: None,
                     request: JobRequest::new(()),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await

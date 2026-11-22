@@ -425,7 +425,7 @@ fn submission(producer: &str, name: &str, control: Arc<TestControl>) -> JobSubmi
         producer: producer.into(),
         origin: None,
         request: JobRequest::new(TestRequest(control)),
-        requires_report: true,
+        reporting: rsi_jobs::JobReporting::Required,
     }
 }
 
@@ -440,6 +440,148 @@ async fn wait_terminal(jobs: &Arc<dyn Jobs>, authority: &rsi_jobs::JobScopeAutho
     })
     .await
     .unwrap();
+}
+
+#[derive(Debug)]
+struct Notices(tokio::sync::mpsc::UnboundedSender<rsi_jobs::JobSummary>);
+
+#[async_trait]
+impl rsi_jobs::JobCompletion for Notices {
+    async fn settled(
+        &self,
+        job: rsi_jobs::JobSummary,
+        _: u64,
+        _: &dyn Jobs,
+        _: &rsi_jobs::JobScopeAuthority,
+    ) -> bool {
+        self.0.send(job).unwrap();
+        true
+    }
+}
+
+#[tokio::test]
+async fn only_uncollected_session_jobs_deliver_one_settlement() {
+    let (_runtime, _fiber, jobs) = activated(json!({})).await;
+    let _producer = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    for mode in [
+        "unattended",
+        "abandoned-wait",
+        "collected",
+        "model-kill",
+        "teardown",
+    ] {
+        let authority = jobs.acquire_scope(scope(mode)).unwrap();
+        let (tx, mut notices) = tokio::sync::mpsc::unbounded_channel();
+        let control = TestControl::new(
+            if matches!(mode, "model-kill" | "teardown") {
+                TestSettlement::OnCancel
+            } else {
+                TestSettlement::OnRelease
+            },
+            b"output",
+            b"",
+        );
+        let mut input = submission("test", "controlled job", control.clone());
+        input.reporting = rsi_jobs::JobReporting::Notify(Arc::new(Notices(tx)));
+        let id = jobs.submit(&authority, input).await.unwrap();
+        match mode {
+            "unattended" => control.release.cancel(),
+            "model-kill" => assert!(jobs.kill(&authority, &id).await.unwrap().job.reported),
+            "teardown" => {
+                jobs.finalize_scope(&authority).await.unwrap();
+            }
+            _ => {
+                let mut wait = Box::pin(jobs.wait(&authority, &id, 0, 0));
+                tokio::select! {
+                    biased;
+                    _ = &mut wait => panic!("job completed before release"),
+                    () = tokio::task::yield_now() => {}
+                }
+                if mode == "abandoned-wait" {
+                    drop(wait);
+                    control.release.cancel();
+                } else {
+                    control.release.cancel();
+                    assert_eq!(wait.await.unwrap().stdout.bytes, b"output");
+                }
+            }
+        }
+        let drain = async {
+            if matches!(mode, "unattended" | "abandoned-wait") {
+                assert_eq!(notices.recv().await.unwrap().id, id);
+            }
+            assert!(notices.recv().await.is_none(), "{mode}");
+        };
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn closing_roster_does_not_cancel_and_human_stop_keeps_output_and_notice() {
+    let (_runtime, _fiber, jobs) = activated(json!({})).await;
+    let _producer = jobs
+        .register_producer(registration("test", Arc::new(TestProducer::default())))
+        .unwrap();
+    let scope = jobs.acquire_scope(scope("panel")).unwrap();
+    let changed = scope.roster_changed();
+    let control = TestControl::new(TestSettlement::IgnoreCancelUntilRelease, b"unfinished", b"");
+    let (tx, mut notices) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = submission("test", "sample", control.clone());
+    input.origin = Some("effect-panel".into());
+    input.reporting = rsi_jobs::JobReporting::Notify(Arc::new(Notices(tx)));
+    let id = jobs.submit(&scope, input).await.unwrap();
+    changed.await;
+    assert_eq!(jobs.roster(&scope).unwrap()[0].status, JobStatus::Running);
+    drop(scope.roster_changed());
+    assert!(!control.cancelled.is_cancelled());
+    assert!(matches!(
+        jobs.request_stop(&scope, &id, "other"),
+        Err(JobsError::UnknownJob(_))
+    ));
+    let reopened = scope.roster_changed();
+    jobs.request_stop(&scope, &id, "effect-panel").unwrap();
+    jobs.request_stop(&scope, &id, "effect-panel").unwrap();
+    reopened.await;
+    assert_eq!(jobs.roster(&scope).unwrap()[0].status, JobStatus::Stopping);
+    assert_eq!(control.cancel_count.load(Ordering::Acquire), 1);
+    control.release.cancel();
+    let notice = tokio::time::timeout(Duration::from_secs(5), notices.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notice.status, JobStatus::Cancelled);
+    let row = jobs.roster(&scope).unwrap().pop().unwrap();
+    assert!(row.finished_ms.unwrap() >= row.started_ms);
+    assert!(row.output_retained);
+    let output = jobs
+        .peek(&scope, &id, "effect-panel", [16, 16])
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.stdout.bytes, b"unfinished");
+    assert!(!output.job.reported);
+    let collected = jobs.read(&scope, &id, 0, 0).unwrap();
+    assert!(collected.job.reported);
+    assert!(!collected.job.requires_report);
+    assert!(!collected.job.output_retained);
+    let panel = jobs
+        .peek(&scope, &id, "effect-panel", [3, 1])
+        .unwrap()
+        .unwrap();
+    assert_eq!(panel.stdout.bytes, b"hed");
+    assert_eq!(panel.stdout.oldest_offset, 7);
+    assert!(panel.stdout.lossy);
+    assert!(jobs.roster(&scope).unwrap()[0].output_retained);
+    assert!(
+        jobs.read(&scope, &id, 0, 0)
+            .unwrap()
+            .stdout
+            .bytes
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -711,7 +853,7 @@ async fn read_racing_settlement_returns_one_coherent_active_or_terminal_snapshot
                 producer: "test".into(),
                 origin: None,
                 request: JobRequest::new(control),
-                requires_report: true,
+                reporting: rsi_jobs::JobReporting::Required,
             },
         )
         .await
@@ -755,7 +897,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
                 producer: "test".into(),
                 origin: None,
                 request: JobRequest::new(control_for_request),
-                requires_report: false,
+                reporting: rsi_jobs::JobReporting::Automatic,
             },
         )
         .await
@@ -775,7 +917,7 @@ async fn admitted_read_survives_concurrent_terminal_tombstone_compaction() {
         request: JobRequest::new(
             TestControl::new(TestSettlement::OnCancel, b"", b"") as Arc<dyn JobControl>
         ),
-        requires_report: false,
+        reporting: rsi_jobs::JobReporting::Automatic,
     };
     assert_eq!(
         jobs.submit(&authority, replacement()).await.unwrap_err(),
@@ -810,7 +952,7 @@ async fn concurrent_terminal_read_wins_over_the_scope_finalization_snapshot() {
                 producer: "test".into(),
                 origin: None,
                 request: JobRequest::new(control_for_request),
-                requires_report: true,
+                reporting: rsi_jobs::JobReporting::Required,
             },
         )
         .await
@@ -863,7 +1005,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
                 producer: "test".into(),
                 origin: None,
                 request: JobRequest::new(read_control),
-                requires_report: true,
+                reporting: rsi_jobs::JobReporting::Required,
             },
         )
         .await
@@ -888,7 +1030,7 @@ async fn producer_read_and_cancel_panics_are_contained_as_jobs_errors() {
                 producer: "test".into(),
                 origin: None,
                 request: JobRequest::new(cancel_control),
-                requires_report: true,
+                reporting: rsi_jobs::JobReporting::Required,
             },
         )
         .await
@@ -1231,7 +1373,7 @@ async fn terminal_jobs_not_requiring_report_compact_automatically() {
             b"",
         ),
     );
-    request.requires_report = false;
+    request.reporting = rsi_jobs::JobReporting::Automatic;
     let id = jobs.submit(&authority, request).await.unwrap();
     wait_terminal(&jobs, &authority, &id).await;
     let summary = jobs.get(&authority, &id).unwrap();
@@ -1330,7 +1472,7 @@ async fn producer_readiness_precedes_publication_but_submit_returns_a_visible_jo
                     producer: "blocking".into(),
                     origin: None,
                     request: JobRequest::new(()),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await
@@ -1378,7 +1520,7 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
                     producer: "blocking".into(),
                     origin: None,
                     request: JobRequest::new(()),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await
@@ -1419,7 +1561,7 @@ async fn racing_scope_revocation_cancels_started_work_without_publishing_an_id()
                 producer: "blocking".into(),
                 origin: None,
                 request: JobRequest::new(()),
-                requires_report: false,
+                reporting: rsi_jobs::JobReporting::Automatic,
             },
         )
         .await
@@ -1534,7 +1676,7 @@ async fn cancelled_submit_waiter_retains_start_until_revocation_reaps_the_unpubl
                     producer: "delayed".into(),
                     origin: None,
                     request: JobRequest::new(()),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await
@@ -1657,7 +1799,7 @@ async fn unknown_unpublished_effect_survives_lost_submit_waiter_and_revocation()
                         producer: "uncertain".into(),
                         origin: None,
                         request: JobRequest::new(()),
-                        requires_report: true,
+                        reporting: rsi_jobs::JobReporting::Required,
                     },
                 )
                 .await

@@ -87,7 +87,7 @@ fn registrations(jobs: Arc<dyn Jobs>) -> rsi_tools_protocol::Result<Vec<ToolRegi
             output: None,
             definition: ToolDefinition::new(
                 "job_list",
-                "List background jobs in the current turn scope. Terminal jobs with reported=false still require job_output or job_kill before successful turn completion.",
+                "List background jobs in the current session. Use job_output to read retained output or job_kill to stop a running job.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
             )?
             .with_scheduling(ToolScheduling::ParallelSafe),
@@ -154,16 +154,20 @@ impl ToolExecutor for JobOutputTool {
                 format!("timeout_ms must be within 1..={MAXIMUM_JOB_OUTPUT_TIMEOUT_MS}"),
             );
         }
-        let Some(scope) = execution.job_scope() else {
-            return error_result(
-                "missing_job_scope",
-                "job_output requires live turn-scoped Jobs authority",
-            );
+        let scope = match tool_job_scope(&execution, self.jobs.as_ref()) {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                return error_result(
+                    "missing_job_scope",
+                    "this tool requires live Jobs authority",
+                );
+            }
+            Err(error) => return jobs_error_result(&error),
         };
         if arguments.wait {
             let waiting = tokio::time::timeout(
                 Duration::from_millis(timeout),
-                self.jobs.wait(scope, &arguments.job_id, 0, 0),
+                self.jobs.wait(&scope, &arguments.job_id, 0, 0),
             );
             tokio::pin!(waiting);
             let outcome = tokio::select! {
@@ -177,7 +181,7 @@ impl ToolExecutor for JobOutputTool {
                 Err(_) => {}
             }
         }
-        match self.jobs.read(scope, &arguments.job_id, 0, 0) {
+        match self.jobs.read(&scope, &arguments.job_id, 0, 0) {
             Ok(read) => {
                 let wait_timed_out = arguments.wait && read.job.terminal.is_none();
                 job_read_result(&read, wait_timed_out)
@@ -206,13 +210,17 @@ impl ToolExecutor for JobListTool {
         if let Err(result) = parse_arguments::<EmptyArguments>(arguments) {
             return Ok(*result);
         }
-        let Some(scope) = execution.job_scope() else {
-            return error_result(
-                "missing_job_scope",
-                "job_list requires live turn-scoped Jobs authority",
-            );
+        let scope = match tool_job_scope(&execution, self.jobs.as_ref()) {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                return error_result(
+                    "missing_job_scope",
+                    "this tool requires live Jobs authority",
+                );
+            }
+            Err(error) => return jobs_error_result(&error),
         };
-        match self.jobs.list(scope) {
+        match self.jobs.list(&scope) {
             Ok(jobs) if jobs.len() <= MAXIMUM_JOBS_PER_LIST => result_with_text(
                 json!({"jobs":jobs}),
                 serde_json::to_string_pretty(&jobs)
@@ -250,13 +258,17 @@ impl ToolExecutor for JobKillTool {
             Ok(arguments) => arguments,
             Err(result) => return Ok(*result),
         };
-        let Some(scope) = execution.job_scope() else {
-            return error_result(
-                "missing_job_scope",
-                "job_kill requires live turn-scoped Jobs authority",
-            );
+        let scope = match tool_job_scope(&execution, self.jobs.as_ref()) {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                return error_result(
+                    "missing_job_scope",
+                    "this tool requires live Jobs authority",
+                );
+            }
+            Err(error) => return jobs_error_result(&error),
         };
-        let killing = self.jobs.kill(scope, &arguments.job_id);
+        let killing = self.jobs.kill(&scope, &arguments.job_id);
         tokio::pin!(killing);
         let outcome = tokio::select! {
             biased;
@@ -267,6 +279,17 @@ impl ToolExecutor for JobKillTool {
             Ok(read) => job_read_result(&read, false),
             Err(error) => jobs_error_result(&error),
         }
+    }
+}
+
+fn tool_job_scope(
+    execution: &ToolExecution,
+    jobs: &dyn Jobs,
+) -> rsi_jobs::Result<Option<rsi_jobs::JobScopeAuthority>> {
+    if let Some(owner) = execution.extension::<rsi_jobs::BackgroundJobs>() {
+        jobs.acquire_scope(owner.scope.clone()).map(Some)
+    } else {
+        Ok(execution.job_scope().cloned())
     }
 }
 

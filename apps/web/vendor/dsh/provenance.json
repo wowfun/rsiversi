@@ -17,7 +17,8 @@
     "TextSearchIndex retains the upstream multilingual matching and ranking. The task manager builds it on the first search and releases it when cleared. Its closure omits localization helpers and cross-index preparation caches.",
     "typography.css keeps the font shorthands used by the Web components and the code font size adjustment.",
     "The resource guide uses upstream card styling and the Files, Terminal, More tools and compass artwork. Only mounted glyphs are included.",
-    "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls."
+    "AttachmentRail accepts the composer's keyed children and item count. Its styles retain the rail and paging controls.",
+    "Background job rows use the upstream section styles and terminal block. Terminal copy uses the document clipboard bridge."
   ],
   "files": [
     {
@@ -648,6 +649,76 @@
       "source": "packages/client/ui-primitives/src/overlay-top-margin.ts",
       "source_sha256": "94c769ceb7337056030da13a24a5031c2abee62f7ebde993924e5a1181e67599",
       "adapted_sha256": "94c769ceb7337056030da13a24a5031c2abee62f7ebde993924e5a1181e67599",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/TerminalBlock.tsx",
+      "source": "packages/client/ui-primitives/src/TerminalBlock.tsx",
+      "source_sha256": "f99b2576e31fc1bd270579fca81bd4def825f0da61c148aec01396caad0768c3",
+      "adapted_sha256": "f99b2576e31fc1bd270579fca81bd4def825f0da61c148aec01396caad0768c3",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/TerminalBlock.module.css",
+      "source": "packages/client/ui-primitives/src/TerminalBlock.module.css",
+      "source_sha256": "2222cf3fe4bb3ed72a9eaeea3663978d51bbc45af054035b82bcbe244410e3c5",
+      "adapted_sha256": "2222cf3fe4bb3ed72a9eaeea3663978d51bbc45af054035b82bcbe244410e3c5",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/ansi.ts",
+      "source": "packages/client/ui-primitives/src/ansi.ts",
+      "source_sha256": "ead9aad984518d58d325ead446914895395707e392053d96349b693ca56eda5e",
+      "adapted_sha256": "ead9aad984518d58d325ead446914895395707e392053d96349b693ca56eda5e",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/head-tail-cap.ts",
+      "source": "packages/client/ui-primitives/src/head-tail-cap.ts",
+      "source_sha256": "1bede50ddacde225b92dfd8d5cf9621f4e39f7febbfc4363cf3446cab6953eed",
+      "adapted_sha256": "1bede50ddacde225b92dfd8d5cf9621f4e39f7febbfc4363cf3446cab6953eed",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/use-clipboard-copy.ts",
+      "source": "packages/client/ui-primitives/src/use-clipboard-copy.ts",
+      "source_sha256": "d4b0abaddcf5b31b9faea3eb1e87b3ed0ec5397650b089eb86780e2115e12c0b",
+      "adapted_sha256": "18d7b0059642631749df125be37cb7ea3545c372bc12166515193fa441ba186a",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/Pill.tsx",
+      "source": "packages/client/ui-primitives/src/Pill.tsx",
+      "source_sha256": "851727b4f745755f8553a92bc5881e54d0479ea680d1686533ba210cb943ca2f",
+      "adapted_sha256": "851727b4f745755f8553a92bc5881e54d0479ea680d1686533ba210cb943ca2f",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/Pill.module.css",
+      "source": "packages/client/ui-primitives/src/Pill.module.css",
+      "source_sha256": "f515dbf09e1cee7c746edf2231e9aa09c4154f3dfbf92e4c818e90399d042910",
+      "adapted_sha256": "f515dbf09e1cee7c746edf2231e9aa09c4154f3dfbf92e4c818e90399d042910",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/CommandText.tsx",
+      "source": "packages/client/ui-primitives/src/CommandText.tsx",
+      "source_sha256": "b0677dfc354a0be87fb19f8424ac8194209e4a942d33a7cb35276e32a8e6c17f",
+      "adapted_sha256": "b0677dfc354a0be87fb19f8424ac8194209e4a942d33a7cb35276e32a8e6c17f",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "primitives/CommandText.module.css",
+      "source": "packages/client/ui-primitives/src/CommandText.module.css",
+      "source_sha256": "06cb8fb047eb046d96773d95a39f13c41deb085b83d8af8cd6c144280fd9900c",
+      "adapted_sha256": "06cb8fb047eb046d96773d95a39f13c41deb085b83d8af8cd6c144280fd9900c",
+      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "jobs/JobsSection.module.css",
+      "source": "packages/client/ui-jobs/src/client/JobsSection.module.css",
+      "source_sha256": "0c1c679d067cde61fbc82703beef3000276f351ebe889607300602a88ccabc10",
+      "adapted_sha256": "0c1c679d067cde61fbc82703beef3000276f351ebe889607300602a88ccabc10",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
     }
   ]

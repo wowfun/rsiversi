@@ -1,5 +1,13 @@
 # rsi-session-protocol
 
+The Session panel observes the roster of background commands belonging to its
+authenticated Session and immutable Header. Its initial snapshot includes
+running and retained terminal jobs. Hosts without Jobs omit this observation.
+Later snapshots follow roster changes. An
+expanded row may sample retained stdout and stderr without reporting the job.
+Stopping a running command requires Host owner access. Closing the panel or
+losing the observation has no effect on the command.
+
 `SessionInput::File` carries an immutable `FileRef`, never a caller-supplied host
 path. The native Session adapter verifies that object through its configured
 file reader before mailbox admission. Queuing, replay, forks and input

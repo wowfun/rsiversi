@@ -5,7 +5,8 @@ Jobs. `JobsToolsFactory` registers the exact `job_output`, `job_list`, and
 `job_kill` batch through `ToolRegistrarContract`; it does not own or know any
 shell producer and depends only on Jobs plus the unpublished Tool registrar.
 
-Every operation requires live turn-scoped Jobs authority. Waiting reads remain
+Model calls use the originating Session and immutable Header to access background
+Jobs across Turns. Nested program calls use their existing execution scope. Waiting reads remain
 bounded, waiting reads and killing settle promptly when their Tool call is
 cancelled, terminal reads report the Job exactly once, killing joins settlement,
 and provider failures are projected into the stable model-visible error codes.

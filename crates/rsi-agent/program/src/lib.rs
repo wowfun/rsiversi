@@ -198,7 +198,7 @@ impl ProgramRuntime {
                         .extension::<rsi_jobs::JobOrigin>()
                         .map(|origin| origin.as_str().to_owned()),
                     request: JobRequest::new(request.clone()),
-                    requires_report: true,
+                    reporting: rsi_jobs::JobReporting::Required,
                 },
             )
             .await

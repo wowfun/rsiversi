@@ -15,6 +15,7 @@ fn sink_kind(source: SurfaceSource) -> Option<ObservationKind> {
         SurfaceSource::Interactions => Some(ObservationKind::Interactions),
         SurfaceSource::Projections => Some(ObservationKind::Projections),
         SurfaceSource::Goal => None,
+        SurfaceSource::BackgroundJobs => Some(ObservationKind::BackgroundJobs),
     }
 }
 
@@ -92,6 +93,7 @@ impl SessionController {
                 SurfaceSource::Projections,
                 SurfaceSource::Model,
                 SurfaceSource::Interactions,
+                SurfaceSource::BackgroundJobs,
             ]
             .into_iter()
             .find(|source| view.includes(*source))
@@ -164,6 +166,11 @@ impl SessionController {
                     self.projections.send_replace(Some(snapshot));
                     Ok(())
                 }
+                SurfaceUpdate::BackgroundJobs(rows) => self
+                    .sink
+                    .background_jobs(rows)
+                    .await
+                    .map_err(|e| (ObservationKind::BackgroundJobs, e)),
                 SurfaceUpdate::Goal(value) => {
                     self.publish_goal(value);
                     Ok(())

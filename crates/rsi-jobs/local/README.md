@@ -10,9 +10,9 @@ only that identity. New mappings below capacity do not scan unrelated entries;
 dead or revoked mappings may remain until capacity pressure. At capacity, one cleanup
 scan precedes rejection with `Capacity`; this saturated path remains linear in
 the bounded backing allocation. Exact finalization removes its own mapping.
-Unreported terminal jobs are deliberately not eviction candidates; capacity is
-therefore backpressure on consumers that fail to report observable background
-work, not silent data loss.
+Terminal jobs become eligible for eviction after a reporting read or acceptance
+of their completion notice by the Session. Announced jobs retain their output
+until a reporting read or eviction under capacity pressure.
 
 Producer retirement first withdraws its exact generation, then cancels and
 waits for that generation's work under the configured shutdown timeout. Scope
@@ -33,8 +33,10 @@ does not subscribe to provider-global change traffic; aggregate scope,
 producer, and provider finalizers retain their separate bounded lifecycle
 notification.
 
-Once a terminal job is reported, the provider releases its producer control and
-captured output and keeps a small immutable tombstone. Oldest reported
+Once a terminal job is reported, the provider releases its producer control.
+A Session background job with output keeps up to 8 KiB from the end of each
+stream for non-consuming panel reads. The model's reporting cursor stays at the
+end. Other reported records keep only an immutable tombstone. Oldest reported
 tombstones are compacted at the configured retention bounds, except while an
 already-admitted read holds that exact record. Such a read completes from one
 stable record identity even when concurrent settlement and admission would
@@ -45,7 +47,7 @@ reported. Per-scope
 retention cannot exceed the 256-record list contract; global retention may span
 many scopes.
 Admission uses maintained per-scope retained counts and sequence-ordered
-eviction indexes. Only terminal, reported records with no admitted readers
+eviction indexes. Only terminal records with a report or accepted notice and no admitted readers
 enter those indexes. Publication, settlement, reporting, and the final read
 release update them under the registry lock; revoking a scope leaves its
 retained records charged until compaction removes them. Admission therefore

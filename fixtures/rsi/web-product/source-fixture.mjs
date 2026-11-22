@@ -11,7 +11,7 @@ export async function sourceFixture({name, source, configure, root = fileURLToPa
   const config = documentConfiguration({command:'build'});
   const server = await createServer({...config, root, configFile:false,
     cacheDir:join(root, `node_modules/.vite-${name}`),
-    optimizeDeps:{...config.optimizeDeps,entries:[],noDiscovery:true,include:['react','react-dom','react-dom/client','react/jsx-runtime','react/jsx-dev-runtime','use-sync-external-store/shim','use-sync-external-store/shim/with-selector','clsx','@xterm/addon-fit']},
+    optimizeDeps:{...config.optimizeDeps,entries:[],noDiscovery:true,include:['react','react-dom','react-dom/client','react/jsx-runtime','react/jsx-dev-runtime','use-sync-external-store/shim','use-sync-external-store/shim/with-selector','clsx','anser','@xterm/addon-fit']},
     esbuild:{...config.esbuild,jsx:'automatic'}, server:{...config.server,host:'127.0.0.1',port:0,watch:null},
     plugins:[...(config.plugins??[]),{name,
       resolveId(id) { if(id===`/${name}.tsx`)return entry; },

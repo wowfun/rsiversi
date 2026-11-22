@@ -137,11 +137,22 @@ impl ToolExecutor for ShellTool {
         if let Some(reason) = arguments.invalid_reason() {
             return error_result("invalid_arguments", reason);
         }
-        let scope = execution.job_scope().cloned();
+        let background = arguments
+            .run_in_background
+            .then(|| execution.extension::<rsi_jobs::BackgroundJobs>())
+            .flatten();
+        let scope = if let Some(owner) = &background {
+            match self.services.jobs.acquire_scope(owner.scope.clone()) {
+                Ok(scope) => Some(scope),
+                Err(error) => return jobs_error_result(&error),
+            }
+        } else {
+            execution.job_scope().cloned()
+        };
         if arguments.run_in_background && scope.is_none() {
             return error_result(
                 "missing_job_scope",
-                "background shell requires live turn-scoped Jobs authority",
+                "background shell requires live Jobs authority",
             );
         }
         let process = execution.take_prepared_process()?;
@@ -171,7 +182,9 @@ impl ToolExecutor for ShellTool {
                 request: JobRequest::new(ShellJobRequest {
                     spec: Mutex::new(Some(spec)),
                 }),
-                requires_report: true,
+                reporting: background.map_or(rsi_jobs::JobReporting::Required, |owner| {
+                    rsi_jobs::JobReporting::Notify(owner.completion.clone())
+                }),
             };
             let id = match self.services.jobs.submit(&scope, submission).await {
                 Ok(id) => id,

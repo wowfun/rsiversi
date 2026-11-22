@@ -111,6 +111,53 @@ impl ClaimFactRead {
     }
 }
 
+impl AgentKernel {
+    fn started_tool_authorities(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+        include_background: bool,
+    ) -> TurnResult<(AgentCallerAuthority, Option<Arc<rsi_jobs::BackgroundJobs>>)> {
+        let state = lock_state(&self.inner);
+        let turn = self.validate_claim(&state, claim)?;
+        let Some(ActiveEffect::Tool {
+            started: true,
+            origin,
+            source_selection,
+            source_tools,
+            identity,
+            ..
+        }) = turn.effects.get(effect_id)
+        else {
+            return Err(TurnError::Invalid(
+                "Tool caller requires an exact started Tool effect".into(),
+            ));
+        };
+        let caller = self.inner.claim_issuer.tool_caller(
+            claim,
+            effect_id.clone(),
+            identity.clone(),
+            source_selection.as_ref().clone(),
+            source_tools.clone(),
+        )?;
+        let background = if include_background
+            && matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. })
+        {
+            let header = &state.sessions[claim.session_id()].header_fingerprint;
+            let owner = turn.claim.as_ref().expect("validated claim has an owner");
+            Some(
+                owner
+                    .background
+                    .get_or_init(|| self.background_jobs(claim, header).map(Arc::new))
+                    .clone()?,
+            )
+        } else {
+            None
+        };
+        Ok((caller, background))
+    }
+}
+
 #[async_trait]
 impl TurnExecution for AgentKernel {
     async fn reserve_model_attempt(
@@ -351,6 +398,7 @@ impl TurnExecution for AgentKernel {
                         .get_mut(&turn_id)
                         .expect("claimable turn was observed");
                     turn.claim = Some(ClaimOwner {
+                        background: Default::default(),
                         jobs: None,
                         mutations: Arc::new(mutation::ClaimMutationGate::default()),
                         executor: executor_id.into(),
@@ -490,27 +538,16 @@ impl TurnExecution for AgentKernel {
         claim: &TurnClaim,
         effect_id: &EffectId,
     ) -> TurnResult<AgentCallerAuthority> {
-        let state = lock_state(&self.inner);
-        let turn = self.validate_claim(&state, claim)?;
-        let Some(ActiveEffect::Tool {
-            started: true,
-            source_selection,
-            source_tools,
-            identity,
-            ..
-        }) = turn.effects.get(effect_id)
-        else {
-            return Err(TurnError::Invalid(
-                "Tool caller requires an exact started Tool effect".into(),
-            ));
-        };
-        self.inner.claim_issuer.tool_caller(
-            claim,
-            effect_id.clone(),
-            identity.clone(),
-            source_selection.as_ref().clone(),
-            source_tools.clone(),
-        )
+        self.started_tool_authorities(claim, effect_id, false)
+            .map(|(caller, _)| caller)
+    }
+
+    fn tool_start_authorities(
+        &self,
+        claim: &TurnClaim,
+        effect_id: &EffectId,
+    ) -> TurnResult<(AgentCallerAuthority, Option<Arc<rsi_jobs::BackgroundJobs>>)> {
+        self.started_tool_authorities(claim, effect_id, true)
     }
 
     async fn tool_settlement_domains(

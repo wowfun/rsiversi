@@ -25,6 +25,7 @@ pub(crate) const fn surface_frame_limit(source: rsi_session_protocol::SurfaceSou
         SurfaceSource::Interactions => INTERACTION_REPLY,
         SurfaceSource::Projections => PROJECTION_REPLY,
         SurfaceSource::Goal => GOAL_REPLY,
+        SurfaceSource::BackgroundJobs => 512 * 1024,
     };
     maximum + 256
 }
@@ -90,6 +91,9 @@ pub enum Operation {
     GoalObserve,
     Jobs,
     PeekJob,
+    BackgroundJobControl,
+    PeekBackgroundJob,
+    StopBackgroundJob,
     Inspect,
     Metrics,
     TreeMetrics,
@@ -101,7 +105,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 68] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -159,6 +163,9 @@ impl Operation {
         Self::GoalObserve,
         Self::Jobs,
         Self::PeekJob,
+        Self::BackgroundJobControl,
+        Self::PeekBackgroundJob,
+        Self::StopBackgroundJob,
         Self::Inspect,
         Self::Metrics,
         Self::TreeMetrics,
@@ -269,6 +276,9 @@ impl Operation {
             ),
             Self::Metrics => ("metrics", Data, Read, 8192, 64 * 1024),
             Self::TreeMetrics => ("tree-metrics", Data, Read, 8192, 256 * 1024),
+            Self::BackgroundJobControl => ("background-job-control", Control, Read, 8192, 4096),
+            Self::PeekBackgroundJob => ("peek-background-job", Data, Read, 8192, 32768),
+            Self::StopBackgroundJob => ("stop-background-job", Control, Mutation, 8192, 4096),
             Self::PeekJob => ("peek-job", Data, Read, 8192, 64 * 1024),
             Self::Evidence => ("evidence", Data, Read, 8192, 2 * 1024 * 1024),
             Self::Inspect => ("inspect", Data, Read, 8192, LARGE_REPLY),
@@ -282,7 +292,11 @@ impl Operation {
             id: OperationId::new("session", name, self.version()).expect("constant operation"),
             class,
             effect,
-            access: rsi_api_protocol::OperationAccess::Authenticated,
+            access: if matches!(self, Self::StopBackgroundJob | Self::BackgroundJobControl) {
+                rsi_api_protocol::OperationAccess::Credential
+            } else {
+                rsi_api_protocol::OperationAccess::Authenticated
+            },
             encoding: RequestEncoding::Json,
             maximum_request_bytes: input,
             maximum_response_bytes: output,
@@ -292,6 +306,7 @@ impl Operation {
     const fn version(self) -> u16 {
         match self {
             Self::Create => 12,
+            Self::SurfaceObserve => 2,
             Self::Recent => 11,
             Self::Inspect | Self::DraftSnapshot | Self::SelectPreset | Self::Observe => 10,
             Self::Submit | Self::History | Self::ReadMessage => 7,

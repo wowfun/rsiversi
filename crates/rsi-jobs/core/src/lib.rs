@@ -86,11 +86,18 @@ impl JobScopeId {
 pub struct JobScopeAuthorityState {
     provider_id: u64,
     generation: u64,
+    roster: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     revoked: AtomicBool,
     outcome_unknown: AtomicBool,
 }
 
 impl JobScopeAuthorityState {
+    fn notify_roster(&self) {
+        if let Some(roster) = self.roster.get() {
+            roster.notify_waiters();
+        }
+    }
+
     /// Reads revocation without cloning a scope identity.
     #[doc(hidden)]
     pub fn is_active(&self) -> bool {
@@ -101,6 +108,7 @@ impl JobScopeAuthorityState {
     #[doc(hidden)]
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
+        self.notify_roster();
     }
 }
 
@@ -115,6 +123,21 @@ pub struct JobScopeAuthority {
 }
 
 impl JobScopeAuthority {
+    /// Observes coalesced roster changes for this exact scope generation.
+    pub fn roster_changed(&self) -> tokio::sync::futures::OwnedNotified {
+        self.state
+            .roster
+            .get_or_init(Default::default)
+            .clone()
+            .notified_owned()
+    }
+
+    /// Invalidates this generation's roster after a provider transition.
+    #[doc(hidden)]
+    pub fn notify_roster(&self) {
+        self.state.notify_roster();
+    }
+
     /// Returns the bounded human-readable scope identity.
     pub const fn id(&self) -> &JobScopeId {
         &self.id
@@ -128,6 +151,7 @@ impl JobScopeAuthority {
             state: Arc::new(JobScopeAuthorityState {
                 provider_id,
                 generation,
+                roster: Default::default(),
                 revoked: AtomicBool::new(false),
                 outcome_unknown: AtomicBool::new(false),
             }),
@@ -402,6 +426,45 @@ impl JobSummary {
     }
 }
 
+/// Process-local panel row. Captured bytes and terminal diagnostics stay with the job.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobRosterRow {
+    /// Identifier within the service generation.
+    pub id: String,
+    /// Bounded display label.
+    pub name: String,
+    /// Original Tool invocation, when one launched the job.
+    pub origin: Option<String>,
+    /// Latest status.
+    pub status: JobStatus,
+    /// UTC epoch milliseconds when the job was published.
+    pub started_ms: u64,
+    /// UTC epoch milliseconds at settlement.
+    pub finished_ms: Option<u64>,
+    /// A non-consuming output sample is available from this producer.
+    pub output_retained: bool,
+}
+
+impl JobRosterRow {
+    /// Checks bounded metadata and the settlement timestamp at the external boundary.
+    pub fn validate(&self) -> Result<()> {
+        validate_job_identifier("job id", &self.id)?;
+        validate_job_label(&self.name)?;
+        if let Some(origin) = &self.origin {
+            validate_job_identifier("job origin", origin)?;
+        }
+        if self.status.is_terminal() != self.finished_ms.is_some()
+            || self.finished_ms.is_some_and(|end| end < self.started_ms)
+        {
+            return Err(JobsError::InvalidInput(
+                "invalid job settlement time".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Result of one output operation, including an atomic status snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobRead {
@@ -448,8 +511,42 @@ pub struct JobSubmission {
     pub origin: Option<String>,
     /// Producer-specific trusted request.
     pub request: JobRequest,
-    /// Whether completion must be reported before a turn may complete.
-    pub requires_report: bool,
+    /// Owner of terminal reporting and output retention.
+    pub reporting: JobReporting,
+}
+
+/// Settlement behavior selected by the caller that owns the submission scope.
+#[derive(Clone, Debug)]
+pub enum JobReporting {
+    /// Releases producer control at settlement.
+    Automatic,
+    /// A reporting read or scope finalization must collect the terminal facts.
+    Required,
+    /// An uncollected result can wake its Session.
+    Notify(Arc<dyn JobCompletion>),
+}
+
+/// Session background authority supplied to Tools by their execution owner.
+#[derive(Clone, Debug)]
+pub struct BackgroundJobs {
+    /// Stable owner of background work across foreground execution scopes.
+    pub scope: JobScopeId,
+    /// Routes uncollected settlements to that owner.
+    pub completion: Arc<dyn JobCompletion>,
+}
+
+/// Receives a published background job's terminal status outside registry locks.
+#[async_trait]
+pub trait JobCompletion: fmt::Debug + Send + Sync + 'static {
+    /// Returns true once the owner accepts the notice. The owner can sample output
+    /// through the original scope when the complete output fits its inline budget.
+    async fn settled(
+        &self,
+        job: JobSummary,
+        output_bytes: u64,
+        jobs: &dyn Jobs,
+        scope: &JobScopeAuthority,
+    ) -> bool;
 }
 
 /// Producer-owned control transferred to Jobs before identifier publication.
@@ -459,6 +556,10 @@ pub struct JobSubmission {
 pub trait JobControl: fmt::Debug + Send + Sync + 'static {
     /// Reads raw retained producer output at one whole-stream offset.
     fn read(&self, stream: JobStream, offset: u64) -> Result<JobOutputRead>;
+    /// Returns the whole-stream length at settlement. Buffered producers can read their cursor directly.
+    fn stream_end(&self, stream: JobStream) -> Result<u64> {
+        Ok(self.read(stream, 0)?.next_offset)
+    }
     /// Bounded non-consuming tail; `None` means this producer has no preview.
     fn peek(&self, _stream: JobStream, _maximum: usize) -> Result<Option<JobOutputRead>> {
         Ok(None)
@@ -555,10 +656,16 @@ pub trait Jobs: fmt::Debug + Send + Sync + 'static {
     fn register_producer(&self, registration: JobProducerRegistration) -> Result<JobProducerLease>;
     /// Acquires the live authority generation for one identity.
     fn acquire_scope(&self, id: JobScopeId) -> Result<JobScopeAuthority>;
+    /// Looks up a live scope without creating one during activity inspection.
+    fn find_scope(&self, id: &JobScopeId) -> Option<JobScopeAuthority>;
     /// Admits one scoped request and publishes its identifier after ownership transfer.
     async fn submit(&self, scope: &JobScopeAuthority, submission: JobSubmission) -> Result<String>;
     /// Lists at most [`MAXIMUM_JOBS_PER_LIST`] exact-scope records oldest-first.
     fn list(&self, scope: &JobScopeAuthority) -> Result<Vec<JobSummary>>;
+    /// Lists the status and timing needed by a visible panel, oldest first.
+    fn roster(&self, scope: &JobScopeAuthority) -> Result<Vec<JobRosterRow>>;
+    /// Requests a human stop without waiting or consuming the terminal result.
+    fn request_stop(&self, scope: &JobScopeAuthority, id: &str, origin: &str) -> Result<()>;
     /// Lists only running and stopping identities in the original scope.
     fn active(&self, scope: &JobScopeAuthority) -> Result<Vec<ActiveJob>>;
     /// Gets one exact-scope record.

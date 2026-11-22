@@ -221,6 +221,10 @@ wire decoding admits that identity once. Typed local relays trust that result; t
 client validates decoded wire pages before admitting them for presentation.
 Missing retained output is `None`, never scope reacquisition or execution.
 
+A started model Tool may receive a Session background owner from the Kernel.
+Program-origin Tools keep their enclosing execution lifetime. The background
+owner routes a settlement to the Session and immutable Header that started it.
+
 Current-Turn Jobs observation is process-local. The Executor publishes a weak
 read-only source under its authenticated claim, retaining the strong source only
 for that claim. The source contains the exact originally acquired Jobs authority;

@@ -6947,6 +6947,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tokio-util",
 ]
 
@@ -7593,6 +7594,7 @@ dependencies = [
  "rsi-extension-agent",
  "rsi-files-native-fs",
  "rsi-host",
+ "rsi-jobs",
  "rsi-meta",
  "rsi-navigation",
  "rsi-navigation-api",
@@ -7706,6 +7708,7 @@ dependencies = [
  "rsi-execution",
  "rsi-files-protocol",
  "rsi-goal",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta",
  "rsi-navigation",
@@ -7863,6 +7866,7 @@ dependencies = [
  "rsi-conversation",
  "rsi-execution",
  "rsi-goal",
+ "rsi-jobs",
  "rsi-media-protocol",
  "rsi-meta-contract",
  "rsi-pty-protocol",

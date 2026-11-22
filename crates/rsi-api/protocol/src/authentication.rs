@@ -55,6 +55,18 @@ pub trait DeviceAuthentication: fmt::Debug + Send + Sync + 'static {
 /// Local operator authority; it is not implicitly exported as a remote domain API.
 #[async_trait]
 pub trait DeviceAdministration: fmt::Debug + Send + Sync + 'static {
+    /// Whether the caller is Local or holds the exact current managed slot.
+    fn owns_managed_slot(&self, slot: &str, origin: &crate::CallOrigin) -> Result<bool> {
+        match origin {
+            crate::CallOrigin::Local => Ok(true),
+            crate::CallOrigin::Device(device) if device.revoked.is_cancelled() => {
+                Err(ApiError::Unauthorized)
+            }
+            crate::CallOrigin::Device(device) => Ok(self
+                .managed_device(slot)?
+                .is_some_and(|owner| owner.id == device.id)),
+        }
+    }
     /// Durably registers a device and returns its new secret once.
     async fn register(&self, label: &str) -> Result<RegisteredDevice>;
     /// Rotates a Local-owned managed slot, preserving its device identity.
