@@ -1024,3 +1024,27 @@ async fn builtin_workflow_is_discoverable_but_cannot_prepare_without_an_active_r
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }
+
+async fn session_wire(
+    running: &RunningRsi,
+    origin: rsi_api_protocol::CallOrigin,
+    operation: rsi_session_api::Operation,
+    target: &serde_json::Value,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, rsi_api_protocol::ApiError> {
+    let spec = operation.spec();
+    let payload = rsi_api_protocol::ByteBudget::default().encode(
+        &serde_json::json!({"target":target,"input":input}),
+        spec.maximum_request_bytes,
+    )?;
+    let rsi_api_protocol::ApiOutput::Reply(reply) = running
+        .api_dispatch()
+        .unwrap()
+        .admit(&spec.call(), origin)?
+        .invoke(payload)
+        .await?
+    else {
+        panic!("expected a unary Session reply")
+    };
+    Ok(serde_json::from_slice(reply.json.as_bytes()).unwrap())
+}

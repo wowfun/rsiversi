@@ -1235,7 +1235,7 @@ impl GuiApplication {
             sandbox: header.settings().sandbox(),
             protected: header.protection().is_some(),
             can_stop_without_navigation: self.navigation.is_none()
-                && handle.can_stop_work().await.unwrap_or(false),
+                && controller.can_stop_work().await.unwrap_or(false),
             creation,
             defaults: if reused {
                 before_defaults
@@ -1526,10 +1526,10 @@ impl GuiApplication {
             let request = request?;
             let attachment = app.pane(request.pane)?.attachment(&request.generation)?;
             match request.action {
-                Action::Control => {
-                    serde_json::to_string(&attachment.handle.can_stop_work().await.map_err(error)?)
-                        .map_err(error)
-                }
+                Action::Control => serde_json::to_string(
+                    &attachment.controller.can_stop_work().await.map_err(error)?,
+                )
+                .map_err(error),
                 Action::Stop { job } => {
                     attachment
                         .handle

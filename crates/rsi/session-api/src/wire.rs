@@ -296,7 +296,11 @@ impl Operation {
             effect,
             access: if matches!(
                 self,
-                Self::Cancel | Self::StopBackgroundJob | Self::CanStopWork
+                Self::Cancel
+                    | Self::CancelWorkflow
+                    | Self::GoalControl
+                    | Self::StopBackgroundJob
+                    | Self::CanStopWork
             ) {
                 rsi_api_protocol::OperationAccess::Credential
             } else {
@@ -327,6 +331,8 @@ impl Operation {
             Self::ModelObserve
             | Self::Purge
             | Self::PurgeStatus
+            | Self::CancelWorkflow
+            | Self::GoalControl
             | Self::ListWorkflows
             | Self::Interactions
             | Self::Questions
@@ -608,10 +614,16 @@ mod setup_tests {
     fn session_stop_uses_the_extended_cancel_contract() {
         use rsi_agent_turn_protocol::CancelTarget;
         assert_eq!(Operation::Cancel.spec().id.version(), 4);
-        assert_eq!(
-            Operation::Cancel.spec().access,
-            rsi_api_protocol::OperationAccess::Credential
-        );
+        for operation in [
+            Operation::Cancel,
+            Operation::GoalControl,
+            Operation::CancelWorkflow,
+        ] {
+            assert_eq!(
+                operation.spec().access,
+                rsi_api_protocol::OperationAccess::Credential
+            );
+        }
         let clear = serde_json::json!({"kind":"inbox"});
         assert_eq!(serde_json::to_value(CancelTarget::Inbox).unwrap(), clear);
         assert_eq!(

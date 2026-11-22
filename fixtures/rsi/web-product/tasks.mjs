@@ -1,4 +1,5 @@
 import {disconnect} from './controls.mjs';
+import {connectHostOwner} from './browser-fixture.mjs';
 import {workspaceForm} from './controls.mjs';
 import {closeDetails,openResource,resourceSelector} from "./controls.mjs";
 import {detailMode,resources} from './controls.mjs';
@@ -70,7 +71,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
   let service, page;
   const errors = [], measurements = [];
   try {
-    service = await startService({ binary, assets, report: directory });
+    service = await startService({ binary, assets, report: directory, localWeb: true });
     await writeFile(join(service.workspace, "card.txt"), "before\n");
     const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 980 } });
     await context.addInitScript(() => {
@@ -137,10 +138,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     page = await context.newPage();
     page.setDefaultTimeout(30000);
     page.on("pageerror", error => errors.push(error.message));
-    await page.goto(service.origin);
-    await page.getByLabel("Device registration receipt").fill(JSON.stringify(service.register(`${name} task evidence`)));
-    await page.getByRole("button", { name: "Connect", exact: true }).click();
-    await page.locator("#workbench").waitFor({ state: "visible" });
+    await connectHostOwner(page, service);
     await workspaceForm(page);
     await page.getByLabel("Directory path").fill(service.workspace);
     await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();

@@ -144,6 +144,9 @@ async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying(
     assert!(model.contains("Current driving") && model.contains("Armed"));
     assert!(model.contains("Durable phase") && model.contains("Active"));
     assert!(model.contains("Allocated rounds") && model.contains("0 / 3"));
+    assert!(
+        model.contains("Pause after current round") && !model.contains("Cancel automatic round")
+    );
     backend.task_panels.unknown.store(false, Ordering::SeqCst);
     app.command(&open(&app, "goal")).await.unwrap();
     app.command(&crate::ui::button(&detail(&app), Some("Pause after current round")).to_string())

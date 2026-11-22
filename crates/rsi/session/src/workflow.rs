@@ -1,5 +1,5 @@
 use super::{Arc, HandleState, LocalSessionHandle, map_store_error, map_turn_error};
-use rsi_agent_turn_protocol::{ProgramCancelReceipt, ResidentComposition};
+use rsi_agent_turn_protocol::ResidentComposition;
 use rsi_session_protocol::{
     MAXIMUM_WORKFLOW_FRAGMENT_BYTES, Result, SessionError, WorkflowCursor, WorkflowDetail,
     WorkflowList, WorkflowPage, WorkflowPlan, WorkflowRead, WorkflowReadiness,
@@ -241,12 +241,6 @@ impl LocalSessionHandle {
                 })
             } => result,
         }
-    }
-    pub(super) async fn workflow_cancel(
-        &self,
-        run: &rsi_agent_session_protocol::ProgramRunId,
-    ) -> Result<ProgramCancelReceipt> {
-        self.draft_commands.cancel_workflow(self, run.clone()).await
     }
 }
 

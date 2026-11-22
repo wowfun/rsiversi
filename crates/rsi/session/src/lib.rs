@@ -1566,6 +1566,9 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
+        if matches!(request.action, rsi_agent_goal::GoalAction::Cancel { .. }) {
+            self.require_work_control()?;
+        }
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         let request_id = request.request_id.clone();
@@ -2334,7 +2337,8 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         run: &rsi_agent_session_protocol::ProgramRunId,
     ) -> Result<rsi_agent_turn_protocol::ProgramCancelReceipt> {
-        self.workflow_cancel(run).await
+        self.require_work_control()?;
+        self.draft_commands.cancel_workflow(self, run.clone()).await
     }
     async fn inspect(&self) -> Result<rsi_agent_store_protocol::StoreSessionInspection> {
         let _admission = self.admit()?;

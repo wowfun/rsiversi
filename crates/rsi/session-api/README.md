@@ -188,7 +188,8 @@ resolving a compact receipt or command catalog can still load Headers, canonical
 controls and complete domain snapshots. Its wire response remains independently
 bounded (512 KiB for discovery, 8 KiB for receipts).
 
-`goal-control` is an owned Data mutation carrying the immutable Goal request and
+`goal-control` v2 preserves the original credential for the Session to authorize
+its action. It is an owned Data mutation carrying the immutable Goal request and
 expected command revision. It reserves the command materialization ceiling and
 returns a verified canonical command receipt plus a separate small live snapshot.
 `goal-status` is a Control read and `goal-observe` is a disposable Subscription;
@@ -290,12 +291,12 @@ The [summary read](../session-protocol/README.md) returns one `SessionSummary`.
 Its response bound is the Header bound plus 256 bytes for the wrapper and three
 numeric metadata fields; it creates no attached handle or subscription.
 
-Workflow-readiness, read-workflow and cancel-workflow are v1. List-workflows is v2:
+Workflow-readiness and read-workflow are v1. List-workflows is v2:
 an absent cursor requests the latest history, and the response returns its exact
 server-captured seed. Older-page requests preserve that seed. No preliminary
 Session inspection is needed.
-The first three are authenticated finite Data/Read operations; cancellation is
-Control/Mutation. They use the existing exact Session/Header target. History
+These three reads are authenticated finite Data operations. Cancel-workflow v2 is
+a Control mutation that preserves the original caller credential. They use the existing exact Session/Header target. History
 responses fit 4 MiB and details 2 MiB, with shared retained client byte admission.
 Clients reject foreign runs, stale revisions, reordered acceptance positions and
 nonadvancing child or CAS pages. Every cancellation receipt echoes the requested

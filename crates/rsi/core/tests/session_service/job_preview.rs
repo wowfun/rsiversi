@@ -302,7 +302,7 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
     let owner = rsi_api_protocol::CallOrigin::Device(auth.authenticate(&owner.token).unwrap());
     use rsi_session_api::Operation::{CanStopWork, StopBackgroundJob};
     for (origin, allowed) in [(viewer.clone(), false), (owner, true)] {
-        let reply = job_wire(
+        let reply = session_wire(
             &daemon.running,
             origin,
             CanStopWork,
@@ -324,7 +324,7 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         ),
     ] {
         assert!(matches!(
-            job_wire(
+            session_wire(
                 &daemon.running,
                 viewer.clone(),
                 rsi_session_api::Operation::Cancel,
@@ -336,7 +336,7 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         ));
     }
     assert!(matches!(
-        job_wire(
+        session_wire(
             &daemon.running,
             viewer,
             StopBackgroundJob,
@@ -407,28 +407,4 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
     daemon.shutdown().await;
     server.abort();
     let _ = server.await;
-}
-
-async fn job_wire(
-    running: &RunningRsi,
-    origin: rsi_api_protocol::CallOrigin,
-    operation: rsi_session_api::Operation,
-    target: &serde_json::Value,
-    input: serde_json::Value,
-) -> Result<serde_json::Value, rsi_api_protocol::ApiError> {
-    let spec = operation.spec();
-    let payload = rsi_api_protocol::ByteBudget::default().encode(
-        &serde_json::json!({"target":target,"input":input}),
-        spec.maximum_request_bytes,
-    )?;
-    let rsi_api_protocol::ApiOutput::Reply(reply) = running
-        .api_dispatch()
-        .unwrap()
-        .admit(&spec.call(), origin)?
-        .invoke(payload)
-        .await?
-    else {
-        panic!("expected a unary job reply")
-    };
-    Ok(serde_json::from_slice(reply.json.as_bytes()).unwrap())
 }

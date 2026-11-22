@@ -151,7 +151,7 @@ async fn read(
                         elements.push(UiElement::Text { text: "No accepted workflows on this page. Select the workflow preset after configuring your Host Node runtime, then ask the agent to use a local Workflow Skill.".into() });
                     }
                     if page.runs.iter().any(|run| run.outcome.is_none()) {
-                        elements.push(UiElement::Text { text: "This Session's Workflow slot is occupied. Cancel its unfinished run to release it. A Host admits at most 8 live workflows; background runs have no total time limit.".into() });
+                        elements.push(UiElement::Text { text: "This Session's Workflow slot is occupied until its unfinished run ends. A Host admits at most 8 live workflows; background runs have no total time limit.".into() });
                     }
                     for run in page.runs {
                         elements.push(field(
@@ -192,7 +192,12 @@ async fn read(
         }
         WorkflowSelection::Detail(request) => {
             match controller.read_workflow(request.clone()).await {
-                Ok(detail) => detail_elements(&mut elements, detail),
+                Ok(detail) => {
+                    let can_cancel = detail.run.outcome.is_none()
+                        && !detail.run.orphaned
+                        && controller.can_stop_work().await.unwrap_or(false);
+                    detail_elements(&mut elements, detail, can_cancel);
+                }
                 Err(error) => elements.push(field("Detail unavailable", diagnostic(error))),
             }
         }
@@ -203,7 +208,7 @@ async fn read(
         elements,
     })
 }
-fn detail_elements(elements: &mut Vec<UiElement>, detail: WorkflowDetail) {
+fn detail_elements(elements: &mut Vec<UiElement>, detail: WorkflowDetail, can_cancel: bool) {
     let run = &detail.run;
     elements.push(field("Run", run.run_id.to_string()));
     elements.push(field("State", status(run)));
@@ -213,7 +218,7 @@ fn detail_elements(elements: &mut Vec<UiElement>, detail: WorkflowDetail) {
     if let Some(progress) = &run.progress {
         elements.push(field("Progress", progress));
     }
-    if run.outcome.is_none() && !run.orphaned {
+    if can_cancel {
         elements.push(button(
             "Cancel workflow",
             Input::Cancel {

@@ -9,8 +9,11 @@ use rsi_goal::GoalControl;
 #[derive(Debug)]
 pub(super) struct GoalCard;
 impl SurfaceRenderer for GoalCard {
-    fn render(&self, target: &Context) -> Result<UiView> {
-        goal_view(controller(target)?.as_ref())
+    fn model(&self, target: Context) -> BoxFuture<'_, Result<rsi_ui::UiModel>> {
+        Box::pin(async move {
+            rsi_ui::UiModel::standard(goal_view(controller(&target)?.as_ref()).await?)
+                .map_err(Into::into)
+        })
     }
 }
 fn text(value: impl Into<String>) -> UiElement {
@@ -55,7 +58,7 @@ fn goal_button(label: &str, input: GoalInput) -> UiElement {
         value: serde_json::to_value(input).expect("closed Goal input"),
     }
 }
-fn goal_view(controller: &SessionController) -> Result<UiView> {
+async fn goal_view(controller: &SessionController) -> Result<UiView> {
     let cache = controller.projection_changes().borrow().clone();
     let live = controller.goal_changes().borrow().clone();
     let control = controller.goal_control_changes().borrow().clone();
@@ -148,11 +151,20 @@ fn goal_view(controller: &SessionController) -> Result<UiView> {
     if !available {
         return Ok(view("Goal", elements));
     }
-    elements.extend(goal_controls(&state, revision)?);
+    let can_cancel = state
+        .goal
+        .as_ref()
+        .is_some_and(|goal| goal.phase != GoalPhase::Completed)
+        && controller.can_stop_work().await.unwrap_or(false);
+    elements.extend(goal_controls(&state, revision, can_cancel)?);
     Ok(view("Goal", elements))
 }
 
-fn goal_controls(state: &GoalState, revision: CommandRevision) -> Result<Vec<UiElement>> {
+fn goal_controls(
+    state: &GoalState,
+    revision: CommandRevision,
+    can_cancel: bool,
+) -> Result<Vec<UiElement>> {
     let mut elements = Vec::new();
     if let Some(goal) = &state.goal {
         for (label, action) in [
@@ -176,6 +188,7 @@ fn goal_controls(state: &GoalState, revision: CommandRevision) -> Result<Vec<UiE
             ),
         ] {
             if goal.phase == GoalPhase::Completed
+                || (matches!(action, Control::Cancel { .. }) && !can_cancel)
                 || (matches!(action, Control::Resume { .. })
                     && goal.allocated_rounds == goal.max_rounds
                     && !goal.unsettled())
@@ -294,7 +307,7 @@ impl UiAction for GoalAction {
                 .map_err(invalid)
             }
             .await;
-            let mut result_view = goal_view(&controller)?;
+            let mut result_view = goal_view(&controller).await?;
             if let Err(error) = result
                 && (!control_requested
                     || matches!(

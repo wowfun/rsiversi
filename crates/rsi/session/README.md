@@ -16,7 +16,9 @@ and an additional queue-index lookup; handle admission and read lifetime still
 apply.
 
 For published Sessions, cancellation checks the calling device against the current
-managed Web slot, or admits a Local caller, before delegating to Kernel.
+managed Web slot, or admits a Local caller, before delegating to Kernel. Explicit
+Workflow and Goal cancellation apply this check before transferring work or
+revoking the Goal scheduling lease.
 Session-wide cancellation delegates one atomic durable inbox/Turn stop to Kernel.
 For an unpublished draft, clearing input drops all held command inputs in one
 revision while retaining command receipts and domain state; keeping input is a

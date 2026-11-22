@@ -654,6 +654,49 @@ async fn remote_stale_cancel_is_known_rejection_and_fresh_cancel_settles_exact_r
         .unwrap();
     start(&handle, 3).await;
     entered(&gate).await;
+    let header = handle.header().await.unwrap();
+    let target = serde_json::json!({"session_id":header.session_id(),"header_key":header.fingerprint().unwrap()});
+    let device = daemon
+        .running
+        .device_administration()
+        .unwrap()
+        .register("Goal viewer")
+        .await
+        .unwrap();
+    let caller = rsi_api_protocol::CallOrigin::Device(
+        daemon
+            .running
+            .device_authentication()
+            .unwrap()
+            .authenticate(&device.token)
+            .unwrap(),
+    );
+    for (operation, input) in [
+        (
+            rsi_session_api::Operation::GoalControl,
+            serde_json::json!({
+                "request_id":"viewer-stop", "expected_revision":{"kind":"durable","control_seq":1},
+                "action":{"action":"cancel","id":"test-goal"}
+            }),
+        ),
+        (
+            rsi_session_api::Operation::CancelWorkflow,
+            serde_json::json!("viewer-run"),
+        ),
+    ] {
+        assert!(matches!(
+            session_wire(&daemon.running, caller.clone(), operation, &target, input).await,
+            Err(rsi_api_protocol::ApiError::Unauthorized)
+        ));
+    }
+    assert!(handle.goal_status().await.unwrap().armed);
+    assert!(
+        handle
+            .command_status(&DomainRequestId::new("viewer-stop").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
     let request_id = DomainRequestId::new("stale-cancel").unwrap();
     let rejected = handle
         .control_goal(GoalControl {

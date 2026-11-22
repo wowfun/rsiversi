@@ -120,6 +120,9 @@ for the controller's exact Header, retains finite read activity, and never infer
 Local authority from the absence of a caller. The capability is not serialized or
 exported to browser code. Each source request rechecks the same origin's Use grant.
 
+Only a Host owner sees actions to cancel an automatic round or a running Workflow.
+Pausing a Goal lets the admitted round finish.
+
 Workflows is a shared Session surface for Web, native Desktop and TUI (`/workflows`).
 Its controller watches ProgramRun invalidations on the existing Session observer
 and rereads Kernel snapshots; there is no client lifecycle reducer. Latest history
