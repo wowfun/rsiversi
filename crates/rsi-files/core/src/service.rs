@@ -56,6 +56,10 @@ struct Job {
     owner: Arc<Owner>,
     _permit: OwnedSemaphorePermit,
 }
+enum JobAdmission {
+    Immediate,
+    Wait,
+}
 impl Drop for Job {
     fn drop(&mut self) {
         self.owner
@@ -113,13 +117,26 @@ impl LocalFiles {
             changed.await;
         }
     }
-    fn acquire(&self, cancellation: &CancellationToken) -> Result<Job> {
+    async fn acquire(
+        &self,
+        admission: JobAdmission,
+        cancellation: &CancellationToken,
+    ) -> Result<Job> {
         if cancellation.is_cancelled() || self.owner.stopped.is_cancelled() {
             return Err(FilesError::Cancelled);
         }
-        let permit = Arc::clone(&JOBS)
-            .try_acquire_owned()
-            .map_err(|_| FilesError::Capacity)?;
+        let permit = match Arc::clone(&JOBS).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) if matches!(admission, JobAdmission::Immediate) => {
+                return Err(FilesError::Capacity);
+            }
+            Err(_) => tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(FilesError::Cancelled),
+                () = self.owner.stopped.cancelled() => return Err(FilesError::Cancelled),
+                permit = Arc::clone(&JOBS).acquire_owned() => permit.map_err(|_| FilesError::Cancelled)?,
+            },
+        };
         let mut state = self
             .owner
             .state
@@ -137,10 +154,11 @@ impl LocalFiles {
     }
     async fn run<T: Send + 'static>(
         &self,
+        admission: JobAdmission,
         cancellation: CancellationToken,
         operation: impl FnOnce(CancellationToken) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let job = self.acquire(&cancellation)?;
+        let job = self.acquire(admission, &cancellation).await?;
         let stopped = cancellation.child_token();
         let _on_drop = stopped.clone().drop_guard();
         let result = tokio::task::spawn_blocking(move || {
@@ -223,7 +241,7 @@ impl Files for LocalFiles {
         maximum: usize,
         cancellation: CancellationToken,
     ) -> Result<Vec<u8>> {
-        self.run(cancellation, move |stop| {
+        self.run(JobAdmission::Immediate, cancellation, move |stop| {
             platform::read_body(&binding, path, maximum, &stop)
         })
         .await
@@ -233,7 +251,7 @@ impl Files for LocalFiles {
         request: rsi_files_protocol::PathRead,
         cancellation: CancellationToken,
     ) -> Result<rsi_files_protocol::PathPage> {
-        self.run(cancellation, move |stopped| {
+        self.run(JobAdmission::Wait, cancellation, move |stopped| {
             platform::read_path(&request, &stopped)
         })
         .await
@@ -261,22 +279,26 @@ impl Files for LocalFiles {
         cancellation: CancellationToken,
     ) -> Result<OpenedFile> {
         let resource = self
-            .run(cancellation.clone(), move |stopped| {
-                let permit = {
-                    let _owners = reclaim_tokens();
-                    Arc::clone(&TOKENS)
-                        .try_acquire_owned()
-                        .map_err(|_| FilesError::Capacity)?
-                };
-                let data = platform::open(&binding, path, kind, &stopped)?;
-                check(&stopped)?;
-                Ok(Resource {
-                    binding,
-                    expires: Instant::now() + FILE_TOKEN_LIFETIME,
-                    _permit: permit,
-                    data,
-                })
-            })
+            .run(
+                JobAdmission::Immediate,
+                cancellation.clone(),
+                move |stopped| {
+                    let permit = {
+                        let _owners = reclaim_tokens();
+                        Arc::clone(&TOKENS)
+                            .try_acquire_owned()
+                            .map_err(|_| FilesError::Capacity)?
+                    };
+                    let data = platform::open(&binding, path, kind, &stopped)?;
+                    check(&stopped)?;
+                    Ok(Resource {
+                        binding,
+                        expires: Instant::now() + FILE_TOKEN_LIFETIME,
+                        _permit: permit,
+                        data,
+                    })
+                },
+            )
             .await?;
         check(&cancellation)?;
         let mut owners = reclaim_tokens();
@@ -309,7 +331,7 @@ impl Files for LocalFiles {
             return Err(FilesError::Invalid);
         }
         let resource = self.resource(&binding, &token)?;
-        self.run(cancellation, move |stopped| {
+        self.run(JobAdmission::Immediate, cancellation, move |stopped| {
             resource.data.read(offset, maximum, &stopped)
         })
         .await
@@ -326,7 +348,7 @@ impl Files for LocalFiles {
             return Err(FilesError::Invalid);
         }
         let resource = self.resource(&binding, &token)?;
-        self.run(cancellation, move |stopped| {
+        self.run(JobAdmission::Immediate, cancellation, move |stopped| {
             resource.data.list(offset, maximum, &stopped)
         })
         .await
@@ -354,6 +376,51 @@ impl Files for LocalFiles {
 mod tests {
     use super::*;
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn finite_path_reads_wait_for_a_job_and_observe_cancellation_and_retirement() {
+        use rsi_files_protocol::{PathRead, ReadPage, ReadPath};
+        let _serial = SERIAL.lock().await;
+        let lanes = JOBS
+            .clone()
+            .acquire_many_owned(u32::try_from(MAXIMUM_FILE_JOBS).unwrap())
+            .await
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("file"), b"abc").unwrap();
+        let request = PathRead::new(
+            temporary.path().to_owned(),
+            ReadPath::new(b"file").unwrap(),
+            FileKind::File,
+            0,
+            3,
+        )
+        .unwrap();
+        let files = LocalFiles::new().unwrap();
+        let retiring = LocalFiles::new().unwrap();
+        let cancel = CancellationToken::new();
+        let first = files.read_path(request.clone(), cancel.clone());
+        let second = retiring.read_path(request.clone(), CancellationToken::new());
+        let third = files.read_path(request, CancellationToken::new());
+        tokio::pin!(first, second, third);
+        tokio::select! {
+            biased;
+            result = &mut first => panic!("read ran without a lane: {result:?}"),
+            result = &mut second => panic!("read ran without a lane: {result:?}"),
+            result = &mut third => panic!("read ran without a lane: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        cancel.cancel();
+        retiring.close().await;
+        assert!(matches!(first.await, Err(FilesError::Cancelled)));
+        assert!(matches!(second.await, Err(FilesError::Cancelled)));
+        drop(lanes);
+        let ReadPage::File(page) = third.await.unwrap().page else {
+            panic!("expected file")
+        };
+        assert_eq!(page.bytes_hex, "616263");
+    }
 
     #[cfg(any(unix, windows))]
     #[tokio::test]
@@ -426,12 +493,16 @@ mod tests {
             let (release_tx, release_rx) = std::sync::mpsc::channel();
             let waiter = tokio::spawn(async move {
                 service
-                    .run(CancellationToken::new(), move |stopped| {
-                        entered_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        assert!(stopped.is_cancelled());
-                        Ok(())
-                    })
+                    .run(
+                        JobAdmission::Immediate,
+                        CancellationToken::new(),
+                        move |stopped| {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            assert!(stopped.is_cancelled());
+                            Ok(())
+                        },
+                    )
                     .await
             });
             entered_rx.await.unwrap();
@@ -440,7 +511,8 @@ mod tests {
             releases.push(release_tx);
         }
         assert!(matches!(
-            new.acquire(&CancellationToken::new()),
+            new.acquire(JobAdmission::Immediate, &CancellationToken::new())
+                .await,
             Err(FilesError::Capacity)
         ));
         let closing = old.clone();
@@ -451,7 +523,8 @@ mod tests {
         assert!(!close.is_finished());
         assert_eq!(old.owner.state.lock().unwrap().jobs, MAXIMUM_FILE_JOBS);
         assert!(matches!(
-            old.acquire(&CancellationToken::new()),
+            old.acquire(JobAdmission::Immediate, &CancellationToken::new())
+                .await,
             Err(FilesError::Cancelled)
         ));
         for release in releases {
@@ -462,7 +535,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(old.owner.state.lock().unwrap().jobs, 0);
-        let permit = new.acquire(&CancellationToken::new()).unwrap();
+        let permit = new
+            .acquire(JobAdmission::Immediate, &CancellationToken::new())
+            .await
+            .unwrap();
         drop(permit);
         new.close().await;
     }

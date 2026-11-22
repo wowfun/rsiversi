@@ -7,6 +7,8 @@ or name symlinks; the execution backend resolves them against cwd. Unix uses
 exact filename bytes; Windows uses UTF-8 native paths. Resolution is independent
 of the workspace write boundary. It returns one `PathPage` with the resolved
 absolute path and a bounded file or directory page, without allocating a token.
+The native provider waits for a blocking-job slot for this operation. Caller
+cancellation or provider retirement ends the wait before any filesystem work starts.
 Directory entries are immediate relative names; consumers combine them with
 the returned directory path. The existing page limits and version checks apply.
 External adapters validate reply shape, absolute resolved path, coordinates,
