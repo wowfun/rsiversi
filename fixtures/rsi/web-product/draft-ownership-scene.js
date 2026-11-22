@@ -108,8 +108,13 @@ export async function verifyReferenceOwnership() {
   const references = recovered.references, encode = TextEncoder.prototype.encode;
   let largeEncodes = 0;
   TextEncoder.prototype.encode = function(text) { if (text?.length >= 900000) largeEncodes++; return encode.call(this,text); };
-  try { recovered.edit('x'.repeat(900000)); } finally { TextEncoder.prototype.encode = encode; }
-  check(largeEncodes === 1 && recovered.references === references, 'keystroke repeated encoding or attachment identity');
+  try {
+    const text = 'x'.repeat(900000);
+    recovered.edit(text);
+    check(largeEncodes === 0 && recovered.references === references, 'ASCII edit encoded or replaced attachments');
+    recovered.edit(text + '界');
+    check(largeEncodes === 1 && recovered.references === references, 'Unicode edit repeated encoding or replaced attachments');
+  } finally { TextEncoder.prototype.encode = encode; }
   await recovered.flush(); await store.verify();
   return {failedSave:true,frozenOwner:true,unknownOwner:true,reloadedOutbox:true,preparationConflict:true,staleReplacement:true,transientRelease:true,offlineTextAtCapacity:true,boundedOutbox:true,largeEncodes};
 }
