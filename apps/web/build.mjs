@@ -57,7 +57,7 @@ const bootstrap=builtBootstrap[0].output.find(item=>item.type==="chunk").code;
 for(const file of bootstrapFiles.filter(file => file.stage === "preview").map(file => file.name))await writeFile(join(output,file),previewDocument(bootstrap));
 await buildRenderers(output);
 const math = await build({
-  root: source, configFile:false,
+  root: source, configFile:false, publicDir:false,
   plugins:[{name:'katex-woff2', enforce:'pre', transform(css,id) {
     if(id.endsWith('/katex.min.css')) return css.replace(/,\s*url\([^)]*\.(?:woff|ttf)\)\s*format\([^)]*\)/g,'');
   }}],

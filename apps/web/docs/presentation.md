@@ -214,8 +214,8 @@ Hovering that button or focusing it by keyboard replaces the logo with the panel
 icon in the same hit area, with an expand tooltip. Tapping the resting logo also
 expands the rail.
 The same SVG supplies the favicon and the source for native application icons.
-Vite serves it from `public/` and copies it unchanged into the flat production
-bundle as a fixed document-stage bootstrap asset.
+Vite serves it from `public/`. The document build copies public assets once
+into the flat production bundle. The math build emits only its module, stylesheet and fonts.
 
 DSH tokens retain their fill and indicator roles. The document theme owns separate
 warning, success and accent text aliases, with at least 4.5:1 contrast against
