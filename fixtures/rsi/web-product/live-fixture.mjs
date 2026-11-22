@@ -23,7 +23,7 @@ export async function liveFixture({configure, foregroundHost = false, developmen
   }
 
   try {
-  service=await startService({binary,assets,report,deepseekKey:key,foregroundHost,developmentHttp,localWeb,configure:async({config,workspace})=>{
+  service=await startService({binary,assets,report,deepseekKey:key,networkProxy:process.env.RSI_LIVE_PROXY,foregroundHost,developmentHttp,localWeb,configure:async({config,workspace})=>{
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},default_reasoning_effort:'off'}}));
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits));
     await configure?.({config,workspace});

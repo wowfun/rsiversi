@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {chromium,firefox} from 'playwright';
-import {openBrowserPage,connectWorkbench,openWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage,connectHostOwner,openWorkspace} from './browser-fixture.mjs';
 import {openResource,resources,details,closeDetails,clickDetails} from './controls.mjs';
 import {startService,waitUntil} from './service.mjs';
 import {assertNoPendingWorkflowCleanup,configureProgram,nativePrograms,programEvidence} from './program-fixture.mjs';
@@ -21,7 +21,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   const folder=join(report,name);await mkdir(folder);
   let service,browser,page;const errors=[];
   try {
-    service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report:folder,configure:configureProgram});
+    service=await startService({binary,assets:process.env.RSI_WEB_ASSETS,report:folder,localWeb:true,foregroundHost:true,configure:configureProgram});
     ({browser,page}=await openBrowserPage(engine,errors));
     await page.addInitScript(()=>{
       window.workflowInvocations=[];
@@ -46,7 +46,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
         return post.call(this,message,...rest);
       };
     });
-    await connectWorkbench(page,service,`workflow ${name}`);await openWorkspace(page,service);
+    await connectHostOwner(page,service);await openWorkspace(page,service);
     const pane=page.getByRole('region',{name:'Main conversation',exact:true});
     const input=pane.getByRole('textbox',{name:'Main message',exact:true});
     await openResource(page,'Workflows');
@@ -91,7 +91,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     assert(initialInvocations.length&&initialInvocations.every(row=>row.reply.ok),'initial Workflow controls must acknowledge without errors');
     await writeFile(join(folder,'initial-invocations.json'),JSON.stringify(initialInvocations,null,2));
     await service.restart();
-    await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
+    await connectHostOwner(page,service);
     const workspace=page.locator('#workspaces .workspace-toggle').first();
     if(await workspace.getAttribute('aria-expanded')==='false')await workspace.click();
     await page.locator(`[data-testid="conversation-row"][data-session-id="${root}"]`).getByTestId('conversation-open').click();

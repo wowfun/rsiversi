@@ -112,6 +112,7 @@ document with deterministic transport replies in Chromium and Firefox. Set
 opt-in shipped Worker/Service check: it starts with no providers, uses the key
 from `RSI_LIVE_ENV_FILE` through the UI, discovers models, configures DeepSeek,
 and accepts an explicit `RSI_LIVE_PROXY` HTTP(S) proxy for provider requests.
+The shared live fixtures, including Workflow, accept the same opt-in proxy.
 The isolated Service bypasses this proxy for loopback traffic; default fixtures
 never inherit ambient proxy variables. The live check continues through setup
 and sends one short request. It verifies persistence after a Service restart and
@@ -868,6 +869,8 @@ failure; this is contention evidence, not a successful second SSH connection.
 After directory creation, the picker waits for the new folder in its breadcrumb
 navigation. Its parent-column entry can carry the same accessible name.
 
+Workflow cancellation and Goal round cancellation are exercised through the Host owner's local Web launch ticket.
+Linux Workflow process checks follow the fixture's foreground Host when the launcher runs separately.
 The opt-in Workflow workbench fixture uses `RSI_TEST_NODE=/absolute/node
 RSI_WEB_REPORT=/new/report node fixtures/rsi/web-product/workflow-verify.mjs` after
 a paired build. Chromium and Firefox exercise readiness, empty and cold history,

@@ -3,8 +3,9 @@ import {test} from 'node:test';
 import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {spawnSync} from 'node:child_process';
-import {assertNoPendingWorkflowCleanup,configureProgram} from './program-fixture.mjs';
+import {spawn,spawnSync} from 'node:child_process';
+import {once} from 'node:events';
+import {assertNoPendingWorkflowCleanup,configureProgram,nativePrograms} from './program-fixture.mjs';
 
 test('Program setup requires explicit Node and emits one valid Workflow Host patch', async () => {
   const config = await mkdtemp(join(tmpdir(),'rsi-program-config-'));
@@ -33,4 +34,17 @@ test('Program setup requires explicit Node and emits one valid Workflow Host pat
 test('terminal cleanup check rejects the real pending feedback as a positive control', () => {
   assert.throws(() => assertNoPendingWorkflowCleanup('Cancelling · cleanup pending'), /terminal readback/);
   assertNoPendingWorkflowCleanup('Cancelled');
+});
+
+test('native Workflow snapshots follow the foreground Host with a separate launcher', {skip:process.platform!=='linux'}, async () => {
+  const program=spawn(process.execPath,['-e','process.stdin.resume()'],{stdio:['pipe','ignore','ignore']});
+  const exited=once(program,'exit');
+  try {
+    await once(program,'spawn');
+    const processes=await nativePrograms({foregroundPids:[process.pid],pid:program.pid},program.pid);
+    assert.deepEqual(processes.map(row=>row.pid),[program.pid]);
+  } finally {
+    program.stdin.end();
+    await exited;
+  }
 });

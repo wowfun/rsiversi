@@ -39,7 +39,7 @@ for row in rows.values():
    break
   seen.add(parent); parent=rows.get(parent,{}).get('parent',0)
 print(json.dumps({"owner":owner,"selected":found,"descendants":descendants,"failures":failures}))`;
-  const result=JSON.parse(execFileSync('python3',['-c',script,String(service.pid),namespacePid===undefined?'':String(namespacePid)],{encoding:'utf8'}));
+  const result=JSON.parse(execFileSync('python3',['-c',script,String(service.foregroundPids[0]),namespacePid===undefined?'':String(namespacePid)],{encoding:'utf8'}));
   return diagnostic?result:result.selected;
 }
 

@@ -1,5 +1,5 @@
 import {assistantText} from './model-attempt.mjs';
-import {openBrowserPage, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
+import {openBrowserPage, connectHostOwner, connectWorkbench, openWorkspace} from './browser-fixture.mjs';
 import {cleanupAll} from './cleanup.mjs';
 // Explicit live native workflow proof through the actual browser and Host.
 import assert from 'node:assert/strict';
@@ -20,7 +20,7 @@ const skill=process.env.RSI_WORKFLOW_SKILL;
 assert(!skill || ['workflow-collect','workflow-review'].includes(skill));
 const reviewing=skill==='workflow-review';
 
-const fixture = await liveFixture({configure: async ({config, workspace}) => {
+const fixture = await liveFixture({localWeb:cancellation,foregroundHost:cancellation,configure: async ({config, workspace}) => {
   await configureProgram({config});
   if(skill) {
     const destination=join(workspace,'.agents/skills',skill);
@@ -42,7 +42,8 @@ let page, browser;
 try {
   ({browser, page} = await openBrowserPage(chromium, errors));
   page.on('requestfailed',request=>{if(requestsFailed.length<32)requestsFailed.push({method:request.method(),path:new URL(request.url()).pathname,error:request.failure()?.errorText});});
-  await connectWorkbench(page, service, 'live background workflow');
+  if(cancellation) await connectHostOwner(page,service);
+  else await connectWorkbench(page, service, 'live background workflow');
   await openWorkspace(page, service);
   const pane = page.getByRole('region', {name: 'Main conversation', exact: true});
   const input = pane.getByRole('textbox', {name: 'Main message', exact: true});
@@ -84,8 +85,8 @@ try {
   while (Date.now() < deadline) {
     data = programEvidence(service.workspace);
     const terminal = data.controls.find(({record}) => record.type === 'program_run' && record.event.event === 'terminal');
-    const assistantText = assistantText(data.facts.map(({record})=>record));
-    if (terminal && assistantText.includes(finalMarker) && await pane.locator('.pane-status').innerText() === 'Completed') break;
+    const replies = assistantText(data.facts.map(({record})=>record));
+    if (terminal && replies.includes(finalMarker) && await pane.locator('.pane-status').innerText() === 'Completed') break;
     if (terminal && !['completed', ...(cancellation?['cancelled']:[])].includes(terminal.record.event.outcome.status)) break;
     await page.waitForTimeout(200);
   }
