@@ -56,6 +56,7 @@ pub struct DeepSeekConfig {
     responses: OpenAiConfig,
     protocol: DeepSeekProtocol,
     default_output_tokens: BTreeMap<String, u32>,
+    image_input: BTreeMap<String, bool>,
 }
 
 impl Default for DeepSeekConfig {
@@ -72,7 +73,6 @@ impl DeepSeekConfig {
         let chat = ChatCompletionsConfig::new(endpoint.clone())?
             .with_stream_idle_timeout(std::time::Duration::from_mins(5))?
             .with_path("/chat/completions")?
-            .with_image_input(false)
             .with_disabled_reasoning_alias(
                 rsi_ai_protocol::ReasoningEffortId::new("off").expect("static effort ID"),
             )
@@ -88,6 +88,7 @@ impl DeepSeekConfig {
             responses,
             protocol: DeepSeekProtocol::default(),
             default_output_tokens: BTreeMap::new(),
+            image_input: BTreeMap::new(),
         })
     }
 
@@ -96,6 +97,14 @@ impl DeepSeekConfig {
     pub const fn with_protocol(mut self, protocol: DeepSeekProtocol) -> Self {
         self.protocol = protocol;
         self
+    }
+
+    /// Overrides the default image support of an exact model.
+    pub fn with_image_input(mut self, model: &str, enabled: bool) -> Result<Self, AiError> {
+        rsi_ai_protocol::validate_identifier("model", model)
+            .map_err(rsi_ai_transport::invalid_request_error)?;
+        self.image_input.insert(model.to_owned(), enabled);
+        Ok(self)
     }
 
     /// Overrides a model's request cap before installing its capacity profile.
@@ -176,11 +185,12 @@ impl DeepSeekConfig {
 }
 
 /// One generation-pinned `DeepSeek` adapter with provider-owned compatibility admission.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DeepSeekAdapter {
     inner: Arc<dyn LanguageAdapter>,
     protocol: DeepSeekProtocol,
     default_output_tokens: BTreeMap<String, u32>,
+    image_input: BTreeMap<String, bool>,
 }
 
 impl DeepSeekAdapter {
@@ -197,18 +207,15 @@ impl DeepSeekAdapter {
             },
             protocol: config.protocol,
             default_output_tokens: config.default_output_tokens,
+            image_input: config.image_input,
         }
     }
-}
 
-impl fmt::Debug for DeepSeekAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DeepSeekAdapter")
-            .field("inner", &self.inner)
-            .field("protocol", &self.protocol)
-            .field("default_output_tokens", &self.default_output_tokens)
-            .finish()
+    fn accepts_images(&self, model: &str) -> bool {
+        self.image_input
+            .get(model)
+            .copied()
+            .unwrap_or(model == "deepseek-flash")
     }
 }
 
@@ -218,25 +225,14 @@ impl LanguageAdapter for DeepSeekAdapter {
     }
 
     fn describe(&self, model: &str) -> Result<rsi_ai_protocol::LanguageProfile, AiError> {
-        let profile = self.inner.describe(model)?;
-        if self.protocol == DeepSeekProtocol::ChatCompletions {
-            return profile
-                .with_default_output_tokens(self.default_output_tokens.get(model).copied())
-                .map_err(rsi_ai_transport::invalid_request_error);
+        let mut profile = self.inner.describe(model)?;
+        if !self.accepts_images(model) {
+            profile =
+                profile.with_image_tool_result(rsi_ai_protocol::ImageToolResultCapability::No);
         }
-        rsi_ai_protocol::LanguageProfile::new(
-            profile.context_window_tokens(),
-            profile.default_output_reserve_tokens(),
-            profile.max_output_reserve_tokens(),
-            rsi_ai_protocol::ToolDialect::Responses,
-            true,
-            rsi_ai_protocol::ImageToolResultCapability::No,
-            Vec::new(),
-        )
-        .expect("validated DeepSeek model limits")
-        .with_reasoning_efforts(profile.reasoning_efforts().clone())
-        .with_default_output_tokens(self.default_output_tokens.get(model).copied())
-        .map_err(rsi_ai_transport::invalid_request_error)
+        profile
+            .with_default_output_tokens(self.default_output_tokens.get(model).copied())
+            .map_err(rsi_ai_transport::invalid_request_error)
     }
 
     fn validate_request(&self, model: &str, request: &LanguageRequest) -> Result<(), AiError> {
@@ -250,9 +246,7 @@ impl LanguageAdapter for DeepSeekAdapter {
             )
             .expect("static DeepSeek setting error"));
         }
-        if self.protocol == DeepSeekProtocol::Responses {
-            validate_responses_support(request)?;
-        }
+        validate_model_input(request, self.protocol, self.accepts_images(model))?;
         self.inner.validate_request(model, request)
     }
 
@@ -308,34 +302,56 @@ impl LanguageAdapter for DeepSeekAdapter {
     }
 }
 
-fn validate_responses_support(request: &LanguageRequest) -> Result<(), AiError> {
-    fn unsupported(content: &MessageContent) -> bool {
-        match content {
-            MessageContent::Image(_) | MessageContent::Audio(_) => true,
-            MessageContent::ToolResult { content, .. } => content.iter().any(unsupported),
-            MessageContent::ToolCall(call) => {
-                call.kind == ToolCallKind::Freeform && call.name != "apply_patch"
-            }
-            _ => false,
-        }
-    }
-    if request
-        .messages()
-        .iter()
-        .flat_map(rsi_ai_protocol::Message::content)
-        .any(unsupported)
-        || request
+fn validate_model_input(
+    request: &LanguageRequest,
+    protocol: DeepSeekProtocol,
+    images: bool,
+) -> Result<(), AiError> {
+    const CUSTOM: &str = "DeepSeek Responses limits custom tools to apply_patch";
+    let unsupported = |reason| {
+        rsi_ai_transport::provider_error(
+            rsi_ai_protocol::ErrorKind::Unsupported,
+            rsi_ai_protocol::ErrorPhase::Prepare,
+            rsi_ai_protocol::DispatchStatus::NotStarted,
+            reason,
+        )
+    };
+    let responses = protocol == DeepSeekProtocol::Responses;
+    if responses
+        && request
             .tools()
             .iter()
             .any(|tool| tool.freeform().is_some() && tool.name() != "apply_patch")
     {
-        return Err(AiError::new(
-            rsi_ai_protocol::ErrorKind::Unsupported,
-            rsi_ai_protocol::ErrorPhase::Prepare,
-            rsi_ai_protocol::DispatchStatus::NotStarted,
-            "DeepSeek Responses requires text-only input and limits custom tools to apply_patch",
-        )
-        .expect("static compatibility error"));
+        return Err(unsupported(CUSTOM));
+    }
+    for message in request.messages() {
+        for block in message.content() {
+            let parts = match block {
+                MessageContent::ToolResult { content, .. } => content.as_slice(),
+                item => std::slice::from_ref(item),
+            };
+            for part in parts {
+                let reason = match part {
+                    MessageContent::Image(_) if !images => {
+                        "Selected DeepSeek model does not accept image input"
+                    }
+                    MessageContent::Image(_) if message.role() == MessageRole::Assistant => {
+                        "DeepSeek accepts images in user messages and tool results"
+                    }
+                    MessageContent::Audio(_) => "DeepSeek does not accept audio input",
+                    MessageContent::ToolCall(call)
+                        if responses
+                            && call.kind == ToolCallKind::Freeform
+                            && call.name != "apply_patch" =>
+                    {
+                        CUSTOM
+                    }
+                    _ => continue,
+                };
+                return Err(unsupported(reason));
+            }
+        }
     }
     Ok(())
 }
@@ -368,6 +384,8 @@ struct DeepSeekPluginConfig {
     #[serde(default)]
     protocol: DeepSeekProtocol,
     language_models: BTreeMap<String, LanguageModelLimits>,
+    #[serde(default)]
+    image_input: BTreeMap<String, bool>,
     #[serde(default)]
     http_timeouts: DeepSeekTimeouts,
     #[serde(default)]
@@ -483,6 +501,16 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
         for (model, limits) in &config.language_models {
             adapter = adapter
                 .with_model_profile(model, *limits)
+                .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
+        }
+        for (model, &enabled) in &config.image_input {
+            if !config.language_models.contains_key(model) {
+                return Err(rsi_meta::MetaError::InvalidInput(
+                    "image input names an unconfigured model".into(),
+                ));
+            }
+            adapter = adapter
+                .with_image_input(model, enabled)
                 .map_err(|error| rsi_meta::MetaError::InvalidInput(error.to_string()))?;
         }
         adapter = config

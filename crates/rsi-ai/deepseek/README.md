@@ -23,8 +23,16 @@ effort declaration; capabilities are not inferred from a name prefix.
 Responses reuses the bounded shared serializer and event parser with stateless
 history: no previous-response identity, background operation or stored-response
 recovery is advertised. Plain reasoning events remain distinct from visible
-text. Unsupported media and custom Tool names other than `apply_patch` are
-rejected during Prepare instead of relying on silent provider omission.
+text. Responses supports the `apply_patch` custom Tool. Prepare rejects other
+custom Tool names and audio input.
+
+The exact `deepseek-flash` model accepts user images and image Tool results on
+both protocols. Responses sends Tool images in the function output. Chat sends
+them in a user message following the corresponding Tool results. Other models
+default to text input. A deployment can declare an exact model's capability
+with `image_input.<model> = true` or `false`. Prepare uses the pinned declaration
+before credential or media access. Image bytes use the shared streaming request
+serializer and the same local media descriptor on subsequent turns.
 
 DeepSeek has no distinct developer instruction role (Responses treats it as
 user input). Its adapter translates semantic

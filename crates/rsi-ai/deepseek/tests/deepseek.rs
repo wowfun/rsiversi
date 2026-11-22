@@ -101,7 +101,7 @@ fn context(model: &str) -> rsi_ai_provider::PrepareContext {
 }
 
 #[tokio::test]
-async fn responses_rejects_media_and_unknown_custom_tools_before_dispatch() {
+async fn responses_rejects_unsupported_media_and_unknown_custom_tools_before_dispatch() {
     use rsi_ai_protocol::{
         FreeformFormat, FreeformToolDefinition, MediaDescriptor, MediaKind, MessageContent,
         ToolCall, ToolCallKind, ToolDefinition,
@@ -179,6 +179,87 @@ async fn responses_rejects_media_and_unknown_custom_tools_before_dispatch() {
                 .unwrap(),
         )
         .unwrap();
+}
+
+#[test]
+fn image_support_follows_the_exact_model_on_both_protocols() {
+    use rsi_ai_protocol::{
+        ImageToolResultCapability, ImageToolResultMode, MediaDescriptor, MediaKind, MessageContent,
+        ToolCall, ToolCallKind,
+    };
+    let image = MessageContent::Image(
+        MediaDescriptor::new(MediaKind::Image, "image/png", 1, "1".repeat(64)).unwrap(),
+    );
+    let user = LanguageRequest::new(vec![Message::user(vec![image.clone()]).unwrap()]).unwrap();
+    let tool = LanguageRequest::new(vec![
+        Message::assistant(vec![MessageContent::ToolCall(ToolCall {
+            id: "call".into(),
+            name: "inspect".into(),
+            arguments: "{}".into(),
+            kind: ToolCallKind::Function,
+        })])
+        .unwrap(),
+        Message::tool_result("call", vec![image.clone()], false).unwrap(),
+    ])
+    .unwrap();
+    let assistant = LanguageRequest::new(vec![Message::assistant(vec![image]).unwrap()]).unwrap();
+    for (protocol, projection) in [
+        (
+            DeepSeekProtocol::Responses,
+            ImageToolResultMode::FunctionOutput,
+        ),
+        (
+            DeepSeekProtocol::ChatCompletions,
+            ImageToolResultMode::AdjacentUserMessage,
+        ),
+    ] {
+        for (model, declared, images) in [
+            ("deepseek-flash", None, true),
+            ("deepseek-v4-pro", None, false),
+            ("deepseek-flash-other", None, false),
+            ("custom", Some(true), true),
+            ("deepseek-flash", Some(false), false),
+        ] {
+            let mut config = DeepSeekConfig::default()
+                .with_protocol(protocol)
+                .with_model_profile(
+                    model,
+                    LanguageModelLimits::new(128_000, 4096, 16384).unwrap(),
+                )
+                .unwrap();
+            if let Some(enabled) = declared {
+                config = config.with_image_input(model, enabled).unwrap();
+            }
+            let adapter = DeepSeekAdapter::new(config, Arc::new(ReqwestTransport::new().unwrap()));
+            let expected = if images {
+                ImageToolResultCapability::Yes(projection)
+            } else {
+                ImageToolResultCapability::No
+            };
+            assert_eq!(
+                adapter.describe(model).unwrap().image_tool_result(),
+                expected
+            );
+            for request in [&user, &tool] {
+                let result = adapter.validate_request(model, request);
+                if images {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().dispatch_status(),
+                        rsi_ai_protocol::DispatchStatus::NotStarted
+                    );
+                }
+            }
+            assert_eq!(
+                adapter
+                    .validate_request(model, &assistant)
+                    .unwrap_err()
+                    .kind(),
+                rsi_ai_protocol::ErrorKind::Unsupported
+            );
+        }
+    }
 }
 
 #[tokio::test]

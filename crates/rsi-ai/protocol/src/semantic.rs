@@ -430,6 +430,13 @@ impl LanguageProfile {
         self.image_tool_result
     }
 
+    /// Applies the selected model's capability to a protocol's result projection.
+    #[must_use]
+    pub const fn with_image_tool_result(mut self, capability: ImageToolResultCapability) -> Self {
+        self.image_tool_result = capability;
+        self
+    }
+
     pub fn accepted_provider_extensions(&self) -> &[ProviderExtensionFormat] {
         &self.accepted_provider_extensions
     }
