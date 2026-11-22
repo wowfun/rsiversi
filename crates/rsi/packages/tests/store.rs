@@ -195,6 +195,18 @@ fn profiles_retain_independent_versions_and_their_dependencies_through_restart_a
     store
         .replace_profile_roots("two", &BTreeMap::new(), &b)
         .unwrap();
+    let reader = std::fs::File::open(path.join("writer.lock")).unwrap();
+    reader.lock_shared().unwrap();
+    store.replace_profile_roots("one", &a, &a).unwrap();
+    assert!(matches!(
+        store.replace_profile_roots("one", &b, &b),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        store.replace_profile_roots("one", &a, &b),
+        Err(Error::Busy)
+    ));
+    drop(reader);
     drop(held);
     drop(store);
     let store = PackageStore::open(&path).unwrap();

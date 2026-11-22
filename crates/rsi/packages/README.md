@@ -99,7 +99,9 @@ official signature claim. Signature tests use independent fixture keys.
 Installed objects remain immutable. A named profile can retain exact installed
 roots across process retirement. Its roots map manifest digests to package
 names, so two versions of one package can coexist during handoff. A writer
-compares the previous set before replacing it. Roots acquire no new execution
+compares the previous set before replacing it. Confirming an unchanged set
+shares the Store's read lock and still checks the expected roots. Changes
+acquire the exclusive writer lock. Roots acquire no new execution
 authority. Additions must already be selected, retained by another profile,
 or held by the Store's process leases. Collection retains the transitive
 closure of every profile's roots.

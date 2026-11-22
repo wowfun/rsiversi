@@ -88,13 +88,14 @@ impl PackageStore {
         profile_key(profile)?;
         validate(expected)?;
         validate(next)?;
-        let _writer = self.root.lock("writer.lock", false)?;
+        let unchanged = expected == next;
+        let _coordinator = self.root.lock("writer.lock", unchanged)?;
         let mut document = self.read_profiles()?;
         let current = document.profiles.remove(profile).unwrap_or_default();
         if &current != expected {
             return Err(invalid("profile roots changed"));
         }
-        if &current == next {
+        if unchanged {
             return Ok(());
         }
         let selected = self.resolution_unlocked()?;
