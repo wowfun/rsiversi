@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile,stat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium,firefox} from 'playwright';
+import {connectHostOwner} from './browser-fixture.mjs';
+import {verifyQueue} from './queue.mjs';
 import {startService} from './service.mjs';
 import {cleanupAll} from './cleanup.mjs';
 const report=resolve(process.env.RSI_WEB_REPORT??'target/rsi-web-product/ui-alignment');
@@ -14,11 +16,11 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
   const browser=await engine.launch();
   let service,page;const errors=[],checks=[];
   try{
-    service=await startService({binary:paired.binary,assets:paired.assets,report:directory});
+    service=await startService({localWeb:true,binary:paired.binary,assets:paired.assets,report:directory});
     const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900},colorScheme:'dark'});
     if(name==='chromium')await context.grantPermissions(['clipboard-read','clipboard-write']);
     page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
-    await page.goto(service.origin);await page.locator('#receipt').fill(JSON.stringify(service.register('UI alignment')));await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});
+    await connectHostOwner(page,service);
     await page.screenshot({path:join(directory,'empty-dark.png')});
     const editor=await page.getByLabel('Main message',{exact:true}).elementHandle();
     await page.getByTestId('choose-workspace').click();
@@ -72,9 +74,11 @@ for(const [name,engine] of Object.entries({chromium,firefox})){
       checks.push({width,theme,...geometry});await page.screenshot({path:join(directory,`${width}-${theme}.png`)});
     }
     await page.setViewportSize({width:1440,height:900});
-    await input.fill('hold this turn');await input.press('Enter');await page.getByTestId('composer-send').filter({hasText:'Queue'}).waitFor();
-    await input.fill('queued survivor');await input.press('Enter');await page.locator('.queue-row').waitFor();await input.fill('draft remains');
-    await page.getByRole('button',{name:'Stop',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.pane-status').textContent==='Completed');assert.equal(await input.inputValue(),'draft remains');
+    await input.fill('hold this turn');await input.press('Enter');
+    const pane=page.locator('.pane.selected');
+    await pane.locator('.transcript').getByText('Waiting for cancellation.',{exact:true}).waitFor();
+    await verifyQueue(page,pane,service,directory,name);
+    await input.fill('draft remains');
     checks.push({queue:true,stopKeepsDraft:true});
     await page.screenshot({path:join(directory,'conversation.png')});assert.deepEqual(errors,[]);assert.equal(await page.locator('#notice:visible').count(),0);
     await page.reload();await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();await page.locator('#workbench').waitFor({state:'visible'});await page.getByRole('region',{name:'Pinned conversations'}).getByTestId('conversation-open').click();await page.waitForFunction(()=>document.querySelector('[aria-label="Main message"]').value==='draft remains');checks.push({reloadReconnect:true,draftRestored:true,pinRestored:true});

@@ -93,6 +93,28 @@ impl LocalSessionService {
     }
 }
 impl LocalSessionHandle {
+    pub(super) fn owns_work_control(&self) -> Result<bool> {
+        if matches!(self.origin, rsi_api_protocol::CallOrigin::Local) {
+            return Ok(true);
+        }
+        let Some((slot, devices)) = self.browser_slot.zip(self.plugin_context.as_ref().and_then(
+            rsi_meta::Context::lookup_local::<rsi_api_protocol::DeviceAdministrationContract>,
+        )) else {
+            return Ok(false);
+        };
+        devices
+            .owns_managed_slot(slot, &self.origin)
+            .map_err(SessionError::Api)
+    }
+
+    pub(super) fn require_work_control(&self) -> Result<()> {
+        if self.owns_work_control()? {
+            Ok(())
+        } else {
+            Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized))
+        }
+    }
+
     pub(super) fn protection_lease_for(
         &self,
         origin: &rsi_api_protocol::CallOrigin,

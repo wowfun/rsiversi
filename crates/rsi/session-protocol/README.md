@@ -7,7 +7,9 @@ Later snapshots follow roster changes. Expanding a row opens a non-consuming
 output observation. It delivers the current retained stdout and stderr, wakes
 when output changes and drains the terminal sample. Collapsing the row releases
 the observation. A quiet native command produces no output reads over the transport.
-Stopping a running command requires Host owner access. Closing the panel or
+Stopping a published Session's work requires Host owner access. This applies to
+exact Message and Turn cancellation, inbox and Session cancellation, and stopping
+a running background command. An unpublished draft can still clear its held inputs. Closing the panel or
 losing the observation has no effect on the command.
 
 `SessionInput::File` carries an immutable `FileRef`, never a caller-supplied host

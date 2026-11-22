@@ -414,8 +414,8 @@ fn handle_operations(
                 owner.read_resource(request).await
             }
         ),
-        add!(BackgroundJobControl, |owner, (): ()| async move {
-            owner.background_job_control().await
+        add!(CanStopWork, |owner, (): ()| async move {
+            owner.can_stop_work().await
         }),
         add!(
             StopBackgroundJob,

@@ -44,7 +44,7 @@ export function createFramePresenter(context) {
       if (pane.kind !== "external") {
         const data = next.surfaces[key];
         pane.bindActions(
-          data?.active && !data?.protected
+          data?.active && !data.protected && (next.navigation?.can_archive ?? data.can_stop_work)
             ? { generation: data.generation, turn_id: data.active }
             : undefined,
           data && !data.protected

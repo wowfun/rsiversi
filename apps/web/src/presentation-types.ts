@@ -94,7 +94,7 @@ export interface NativeSurface extends ComposerProjection {
   selection:string;creation:SessionCreation|null;sandbox:SandboxMode;ui_revision:string;active:string|null;
   completions:{query:string;sequence:string;entries:import('./session/projection-types.ts').CompletionEntry[];notice:string|null}|null;
   transcript:TranscriptView;notice?:string;historical?:boolean;history_more?:boolean;
-  background_jobs?:BackgroundJob[]|null; job_notice?:string|null;
+  can_stop_work?:boolean; background_jobs?:BackgroundJob[]|null; job_notice?:string|null;
   metrics?:MetricsRead|null;context_capacity_tokens?:number|null;ui_cards?:boolean;inline?:Record<string,InlineCard>;
   ui_surfaces:{bundle:string;title:string;reference:{name:string;[key:string]:unknown}}[];
 }

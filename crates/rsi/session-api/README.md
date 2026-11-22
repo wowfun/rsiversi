@@ -42,7 +42,8 @@ context without starting a Turn; ordinary message bounds and receipts apply.
 
 `wait-idle` v1 is a Session-bound read that waits for
 whole-driver quiescence without retaining inbox bodies or reserving future work.
-It retains `cancel` v3 with Session-wide stop and inbox-only
+The `cancel` v4 mutation uses the original credential to admit exact and Session-wide
+cancellation under the [Session control contract](../session-protocol/README.md). It supports Session-wide stop and inbox-only
 clear targets as defined by the Turn protocol. Each captures a new cut, so
 transport failure never triggers an automatic replay. Exact Turn/Message targets
 retain their identity-based semantics. Inspection includes the durable `inbox_paused` flag in each inspected

@@ -691,10 +691,8 @@ impl SessionHandle for Handle {
             }
         }))
     }
-    async fn background_job_control(&self) -> rsi_session_protocol::Result<bool> {
-        self.frozen()
-            .call(Operation::BackgroundJobControl, &())
-            .await
+    async fn can_stop_work(&self) -> rsi_session_protocol::Result<bool> {
+        self.frozen().call(Operation::CanStopWork, &()).await
     }
     async fn observe_background_output(
         &self,

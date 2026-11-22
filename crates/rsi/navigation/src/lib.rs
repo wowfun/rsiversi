@@ -748,7 +748,7 @@ impl Navigation {
                 drop(document);
                 let updated = match owner
                     .commit_edit(
-                        &origin,
+                        &credential,
                         &session,
                         header.as_ref(),
                         was_archived,

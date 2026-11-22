@@ -174,6 +174,7 @@ struct Attachment {
     agent_preset: String,
     sandbox: rsi_sandbox::SandboxMode,
     protected: bool,
+    can_stop_without_navigation: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
     defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
@@ -430,6 +431,9 @@ impl Pane {
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(),
             "pending":state.pending(!current.protected),
         });
+        if current.can_stop_without_navigation {
+            metadata["can_stop_work"] = true.into();
+        }
         if !state.background_jobs.is_empty() {
             metadata["background_jobs"] =
                 serde_json::to_value(&state.background_jobs).expect("bounded job roster");
@@ -1230,6 +1234,8 @@ impl GuiApplication {
             agent_preset: header.agent_preset_id().to_string(),
             sandbox: header.settings().sandbox(),
             protected: header.protection().is_some(),
+            can_stop_without_navigation: self.navigation.is_none()
+                && handle.can_stop_work().await.unwrap_or(false),
             creation,
             defaults: if reused {
                 before_defaults
@@ -1520,14 +1526,10 @@ impl GuiApplication {
             let request = request?;
             let attachment = app.pane(request.pane)?.attachment(&request.generation)?;
             match request.action {
-                Action::Control => serde_json::to_string(
-                    &attachment
-                        .handle
-                        .background_job_control()
-                        .await
-                        .map_err(error)?,
-                )
-                .map_err(error),
+                Action::Control => {
+                    serde_json::to_string(&attachment.handle.can_stop_work().await.map_err(error)?)
+                        .map_err(error)
+                }
                 Action::Stop { job } => {
                     attachment
                         .handle

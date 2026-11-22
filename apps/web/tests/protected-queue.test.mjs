@@ -26,7 +26,12 @@ test('acknowledgement leaves protected stop and queue bindings absent after defe
  assert.equal(pane.stopBinding,undefined);assert.equal(pane.queueBinding,undefined);
  release();assert.equal((await work).accepted,true);
  assert.equal(pane.stopBinding,undefined);assert.equal(pane.queueBinding,undefined);
- frame.frame_id='2';frame.view.surfaces.left.protected=false;
+ frame.frame_id='2';frame.view.surfaces.left.protected=false;frame.view.navigation={can_archive:false};
+ await scope.presentFrame(frame,{},current);
+ assert.equal(pane.stopBinding,undefined);assert.equal(pane.queueBinding.generation,'1');
+ frame.frame_id='3';frame.view.navigation.can_archive=true;
  await scope.presentFrame(frame,{},current);
  assert.equal(pane.stopBinding.turn_id,'turn');assert.equal(pane.queueBinding.generation,'1');
+ delete frame.view.navigation;frame.view.surfaces.left.can_stop_work=true;frame.frame_id='4';
+ await scope.presentFrame(frame,{},current);assert.equal(pane.stopBinding.turn_id,'turn');
 });

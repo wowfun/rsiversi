@@ -7,7 +7,7 @@ import { chromium } from 'playwright';
 import { startService, waitUntil } from './service.mjs';
 import { deepseekProfile } from './live-limits.mjs';
 import {attemptEvents} from './model-attempt.mjs';
-import {chooseStartingWorkspace, connectWorkbench} from './browser-fixture.mjs';
+import {chooseStartingWorkspace, connectHostOwner} from './browser-fixture.mjs';
 import {navigationMode, openConversation} from './controls.mjs';
 import {setTimeout as sleep} from 'node:timers/promises';
 
@@ -31,7 +31,7 @@ await once(provider, 'listening');
 let service, browser, page;
 try {
   const model = 'fixture-model';
-  service = await startService({binary, assets, report, developmentHttp:true,
+  service = await startService({binary, assets, report, localWeb:true, developmentHttp:true,
     foregroundHost:process.platform === 'win32', deepseekKey:'isolated-loopback-fixture',
     configure: async ({config}) => {
       const profile = deepseekProfile(model, {context_window_tokens:128000,default_output_reserve_tokens:4096,max_output_reserve_tokens:8192})
@@ -41,7 +41,7 @@ try {
     }});
   browser = await chromium.launch();
   page = await browser.newPage({viewport:{width:1440,height:960},colorScheme:'dark'});
-  await connectWorkbench(page,service,'Model retry fixture');
+  await connectHostOwner(page,service);
   await chooseStartingWorkspace(page,service);
   const composer = page.getByRole('textbox',{name:'Main message',exact:true});
   const send = async text => { await composer.fill(text); await page.getByTestId('composer-send').click(); };

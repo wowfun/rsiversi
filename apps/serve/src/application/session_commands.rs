@@ -147,7 +147,22 @@ impl Sessions {
         request: &str,
         id: &rsi_agent_session_protocol::SessionId,
     ) -> Result<Arc<dyn rsi_session_protocol::SessionHandle>> {
-        let handle = self.read_handle(request, id, None).await?;
+        let origin = self.routes.caller(request).map_err(|_| Error::Cancelled)?;
+        self.interactive_handle_for(request, id, origin).await
+    }
+
+    async fn interactive_handle_for(
+        &self,
+        request: &str,
+        id: &rsi_agent_session_protocol::SessionId,
+        origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn rsi_session_protocol::SessionHandle>> {
+        let handle = self
+            .ingress
+            .scoped(origin)
+            .attach(id)
+            .await
+            .map_err(|_| Error::Remote("Session unavailable to caller".into()))?;
         let header = handle
             .header()
             .await
@@ -173,12 +188,13 @@ impl Sessions {
             inbox_only: bool,
         }
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let handle = self
-            .interactive_handle(&input.request, &input.session_id)
-            .await?;
-        self.routes
-            .caller(&input.request)
+        let origin = self
+            .routes
+            .credential(&input.request)
             .map_err(|_| Error::Cancelled)?;
+        let handle = self
+            .interactive_handle_for(&input.request, &input.session_id, origin)
+            .await?;
         let receipt = handle
             .cancel(
                 if input.inbox_only {

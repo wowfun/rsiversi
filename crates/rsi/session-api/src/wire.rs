@@ -91,7 +91,7 @@ pub enum Operation {
     GoalObserve,
     Jobs,
     PeekJob,
-    BackgroundJobControl,
+    CanStopWork,
     ObserveBackgroundOutput,
     StopBackgroundJob,
     Inspect,
@@ -163,7 +163,7 @@ impl Operation {
         Self::GoalObserve,
         Self::Jobs,
         Self::PeekJob,
-        Self::BackgroundJobControl,
+        Self::CanStopWork,
         Self::ObserveBackgroundOutput,
         Self::StopBackgroundJob,
         Self::Inspect,
@@ -276,7 +276,7 @@ impl Operation {
             ),
             Self::Metrics => ("metrics", Data, Read, 8192, 64 * 1024),
             Self::TreeMetrics => ("tree-metrics", Data, Read, 8192, 256 * 1024),
-            Self::BackgroundJobControl => ("background-job-control", Control, Read, 8192, 4096),
+            Self::CanStopWork => ("can-stop-work", Control, Read, 8192, 4096),
             Self::ObserveBackgroundOutput => {
                 ("background-job-output", Subscription, Read, 8192, 32768)
             }
@@ -294,7 +294,10 @@ impl Operation {
             id: OperationId::new("session", name, self.version()).expect("constant operation"),
             class,
             effect,
-            access: if matches!(self, Self::StopBackgroundJob | Self::BackgroundJobControl) {
+            access: if matches!(
+                self,
+                Self::Cancel | Self::StopBackgroundJob | Self::CanStopWork
+            ) {
                 rsi_api_protocol::OperationAccess::Credential
             } else {
                 rsi_api_protocol::OperationAccess::Authenticated
@@ -307,6 +310,7 @@ impl Operation {
 
     const fn version(self) -> u16 {
         match self {
+            Self::Cancel => 4,
             Self::Create => 12,
             Self::SurfaceObserve => 2,
             Self::Recent => 11,
@@ -317,7 +321,6 @@ impl Operation {
             | Self::TerminalOutput
             | Self::Jobs
             | Self::MutateQueue
-            | Self::Cancel
             | Self::Projections
             | Self::ScheduledTasks
             | Self::ScheduledTasksObserve => 3,
@@ -604,7 +607,11 @@ mod setup_tests {
     #[test]
     fn session_stop_uses_the_extended_cancel_contract() {
         use rsi_agent_turn_protocol::CancelTarget;
-        assert_eq!(Operation::Cancel.spec().id.version(), 3);
+        assert_eq!(Operation::Cancel.spec().id.version(), 4);
+        assert_eq!(
+            Operation::Cancel.spec().access,
+            rsi_api_protocol::OperationAccess::Credential
+        );
         let clear = serde_json::json!({"kind":"inbox"});
         assert_eq!(serde_json::to_value(CancelTarget::Inbox).unwrap(), clear);
         assert_eq!(

@@ -188,7 +188,7 @@ try {
     await coldPane.getByRole("textbox", { name: "Main message" }).fill("hold this turn");
     await coldPane.getByTestId("composer-send").click();
     await coldPane.locator(".transcript").filter({ hasText: "Waiting for cancellation" }).waitFor();
-    await coldPane.getByRole("button", { name: "Stop", exact: true }).click();
+    assert.equal(await coldPane.getByRole("button", { name: "Stop", exact: true }).isVisible(), false);
     assert.equal(await cold.evaluate(() => window.workerStarts), 1);
     await cold.evaluate(() => document.addEventListener("rsi-disconnected", event => { window.closedResources = event.detail; }, { once: true }));
     await disconnect(cold);

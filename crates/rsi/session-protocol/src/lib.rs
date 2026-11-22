@@ -788,8 +788,8 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<BackgroundOutputStream> {
         Err(SessionError::NotFound("background job".into()))
     }
-    /// Checks the original caller's authority to stop a Session job.
-    async fn background_job_control(&self) -> Result<bool> {
+    /// Checks whether the caller can stop published Session work.
+    async fn can_stop_work(&self) -> Result<bool> {
         Ok(false)
     }
     /// Requests a human stop and leaves delivery of the terminal notice to the Session.

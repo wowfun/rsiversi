@@ -300,18 +300,40 @@ async fn explicit_background_bash_survives_turn_and_wakes_its_session_once() {
         .await
         .unwrap();
     let owner = rsi_api_protocol::CallOrigin::Device(auth.authenticate(&owner.token).unwrap());
-    use rsi_session_api::Operation::{BackgroundJobControl, StopBackgroundJob};
+    use rsi_session_api::Operation::{CanStopWork, StopBackgroundJob};
     for (origin, allowed) in [(viewer.clone(), false), (owner, true)] {
         let reply = job_wire(
             &daemon.running,
             origin,
-            BackgroundJobControl,
+            CanStopWork,
             &target,
             serde_json::Value::Null,
         )
         .await
         .unwrap();
         assert_eq!(reply["body"], allowed);
+    }
+    for cancel in [
+        rsi_agent_turn_protocol::CancelTarget::Inbox,
+        rsi_agent_turn_protocol::CancelTarget::Session { keep_inbox: true },
+        rsi_agent_turn_protocol::CancelTarget::Turn(
+            rsi_agent_session_protocol::TurnId::new("test-turn").unwrap(),
+        ),
+        rsi_agent_turn_protocol::CancelTarget::Message(
+            rsi_agent_session_protocol::MessageId::new("test-message").unwrap(),
+        ),
+    ] {
+        assert!(matches!(
+            job_wire(
+                &daemon.running,
+                viewer.clone(),
+                rsi_session_api::Operation::Cancel,
+                &target,
+                serde_json::json!({"target":cancel})
+            )
+            .await,
+            Err(rsi_api_protocol::ApiError::Unauthorized)
+        ));
     }
     assert!(matches!(
         job_wire(

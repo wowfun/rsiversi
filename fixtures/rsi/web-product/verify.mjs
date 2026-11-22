@@ -5,7 +5,6 @@ import {detailMode,navigationFilter,navigationMode,selectSurface,sessionTools} f
 import {recordNavigationEvidence} from './navigation-evidence.mjs';
 import {paired} from './paired-env.mjs';
 import { verifyPairing } from "./pairing.mjs";
-import { verifyQueue } from "./queue.mjs";
 import { verifyPresentation } from "./presentation.mjs";
 import { verifyLocalLaunch } from "./local-launch.mjs";
 import { verifyMcp } from "./mcp.mjs";
@@ -243,10 +242,12 @@ try {
       await left.locator(".pane-session").filter({ hasText: leftIdentity.split(" · ").at(-1) }).waitFor({state:"attached"});
       await left.getByRole("textbox", { name: "Main message" }).click({ trial: true });
       assert.equal(await left.getByRole("textbox", { name: "Main message" }).inputValue(), "Keep this draft while switching");
-      await left.getByRole("textbox", { name: "Main message" }).fill("hold this turn until I cancel");
+      await left.getByRole("textbox", { name: "Main message" }).fill("UI Goal hold paired reader");
       await left.getByTestId("composer-send").click();
-      await left.locator(".transcript").getByText("Waiting for cancellation.", { exact: true }).waitFor();
-      await verifyQueue(page,left,service,report,name);
+      await left.locator(".transcript").getByText("Waiting for fixture release.", { exact: true }).waitFor();
+      assert.equal(await left.getByRole("button", { name: "Stop", exact: true }).isVisible(), false);
+      service.provider.release("UI Goal hold paired reader");
+      await left.locator(".message.assistant").filter({hasText:"Fixture released the model stream."}).waitFor();
       await left.getByRole("textbox", { name: "Main message" }).fill("Produce a long streamed reply");
       await left.getByTestId("composer-send").click();
       await left.locator(".pane-status").filter({ hasText: "Completed" }).waitFor({state:'attached'});
@@ -463,7 +464,7 @@ try {
       assert.equal((await context.cookies()).length, 0);
       assert.equal(await page.evaluate(() => window.previewUrls.size), 0);
       assert.deepEqual(errors, []);
-      results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "cancellation", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
+      results.push({ browser: name, version: browser.version(), status: "passed", cases: ["login", "two-panes", "literal-model-text", "questions", "draft-switch", "paired viewer follows running turn", "partial-history-and-live-return", "settings", "approval", "tool-exit-status", "responsive", "clean-sign-out"], resources: await page.evaluate(() => window.closedResources) });
       results.at(-1).cases.push("Files draft browsing, exact text/hex, raw names and changed snapshots", "contributed Session and Tool cards with exact-source actions", "exact-source UTF-8 paging and literal rendering", "Session commands and draft-to-durable plan changes", "independent draft and idle durable extension state");
       results.at(-1).cases.push("completed stdout/stderr byte pages and exact hex");
       results.at(-1).cases.push("restricted Markdown with literal HTML, referrer-free remote images, fullscreen preview and safe links");

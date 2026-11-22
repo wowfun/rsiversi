@@ -7,6 +7,7 @@ import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {chromium} from 'playwright';
+import {connectHostOwner} from './browser-fixture.mjs';
 import {startService} from './service.mjs';
 import {detailMode} from './controls.mjs';
 import {readDeepseekKey,liveLimits,deepseekProfile} from './live-limits.mjs';
@@ -19,15 +20,14 @@ const original='RSI_READONLY_OK_1027\nalpha=7\nbeta=11\nRead this file only. Do 
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 let service,browser,page;const errors=[],checks=[];
 try {
-  service=await startService({binary:paired.binary,assets:paired.assets,report,deepseekKey:key,configure:async({config,workspace})=>{
+  service=await startService({localWeb:true,binary:paired.binary,assets:paired.assets,report,deepseekKey:key,configure:async({config,workspace})=>{
     await writeFile(join(config,'host-profiles/fixture/host.profile.toml'),deepseekProfile(model,limits).replace('default="off"','default="high"'));
     await writeFile(join(config,'settings.json'),JSON.stringify({'rsi.agent':{default_model:{deployment:'live',model},output_budgets:[{model:{deployment:'live',model},max_output_tokens:limits.default_output_reserve_tokens}]}}));
     await writeFile(join(workspace,'live-check.txt'),original);
   }});
   browser=await chromium.launch();const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});
   page=await context.newPage();page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
-  await page.goto(service.origin);await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.register('alignment live')));
-  await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#workbench').waitFor();
+  await connectHostOwner(page,service);
   await workspaceForm(page);await page.getByLabel('Directory path').fill(service.workspace);
   await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
   await page.getByRole('dialog',{name:'Select workspace directory',exact:true}).waitFor({state:'detached'});

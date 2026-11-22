@@ -1467,26 +1467,14 @@ impl SessionHandle for LocalSessionHandle {
             }
         }))
     }
-    async fn background_job_control(&self) -> Result<bool> {
+    async fn can_stop_work(&self) -> Result<bool> {
         let _admission = self.admit()?;
-        if matches!(self.origin, rsi_api_protocol::CallOrigin::Local) {
-            return Ok(true);
-        }
-        let Some((slot, devices)) = self.browser_slot.zip(self.plugin_context.as_ref().and_then(
-            rsi_meta::Context::lookup_local::<rsi_api_protocol::DeviceAdministrationContract>,
-        )) else {
-            return Ok(false);
-        };
-        devices
-            .owns_managed_slot(slot, &self.origin)
-            .map_err(SessionError::Api)
+        self.owns_work_control()
     }
     async fn stop_background_job(&self, job: rsi_session_protocol::BackgroundJobId) -> Result<()> {
-        if !self.background_job_control().await? {
-            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
-        }
-        let (jobs, scope) = self.background_scope().await?;
         let _admission = self.admit_mutation()?;
+        self.require_work_control()?;
+        let (jobs, scope) = self.background_scope().await?;
         jobs.request_stop(&scope, &job.id, job.origin.as_str())
             .map_err(background_job_error)
     }
@@ -2078,6 +2066,7 @@ impl SessionHandle for LocalSessionHandle {
                 });
             }
         }
+        self.require_work_control()?;
         self.turns
             .cancel_target(self.session_id(), target, reason)
             .await
