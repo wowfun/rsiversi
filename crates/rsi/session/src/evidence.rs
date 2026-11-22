@@ -27,6 +27,7 @@ struct Key(SessionId, u64, EvidenceSection);
 enum Selected {
     Available {
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        original_seq: u64,
         text: Box<str>,
         sha256: String,
         _reservation: ByteReservation,
@@ -39,6 +40,7 @@ impl Selected {
         sha256: String,
         mut reservation: ByteReservation,
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
+        original_seq: u64,
     ) -> Self {
         let text = text.into_boxed_str();
         reservation
@@ -46,6 +48,7 @@ impl Selected {
             .expect("validated section fits its cold-load reservation");
         Self::Available {
             purpose,
+            original_seq,
             text,
             sha256,
             _reservation: reservation,
@@ -172,6 +175,7 @@ impl EvidenceReader {
                 text,
                 purpose,
                 sha256,
+                original_seq,
                 ..
             } = selected.as_ref()
         {
@@ -181,35 +185,37 @@ impl EvidenceReader {
                 .previous_model_intent(&session, request.intent_seq, *purpose)
                 .await
                 .map_err(map_store_error)?;
-            let comparison = if let Some(seq) = previous {
-                let previous = self
-                    .load(
-                        store,
-                        Key(session, seq, EvidenceSection::Tools),
-                        retiring,
-                        guard,
-                    )
-                    .await?;
-                match previous.as_ref() {
-                    Selected::Unavailable(reason) => ToolComparison::Unavailable {
-                        intent_seq: seq,
-                        reason: *reason,
-                    },
-                    Selected::Available {
-                        sha256: prior_digest,
-                        text: prior,
-                        ..
-                    } => current.compare(
-                        seq,
-                        if sha256 == prior_digest {
-                            None
-                        } else {
-                            Some(ToolCatalog::read(prior)?)
+            let comparison = match previous {
+                None => ToolComparison::First,
+                Some(seq) if seq == *original_seq => current.compare(seq, None),
+                Some(seq) => {
+                    let previous = self
+                        .load(
+                            store,
+                            Key(session, seq, EvidenceSection::Tools),
+                            retiring,
+                            guard,
+                        )
+                        .await?;
+                    match previous.as_ref() {
+                        Selected::Unavailable(reason) => ToolComparison::Unavailable {
+                            intent_seq: seq,
+                            reason: *reason,
                         },
-                    ),
+                        Selected::Available {
+                            sha256: prior_digest,
+                            text: prior,
+                            ..
+                        } => current.compare(
+                            seq,
+                            if sha256 == prior_digest {
+                                None
+                            } else {
+                                Some(ToolCatalog::read(prior)?)
+                            },
+                        ),
+                    }
                 }
-            } else {
-                ToolComparison::First
             };
             let page = EvidencePage {
                 intent_seq: request.intent_seq,
@@ -386,9 +392,13 @@ async fn load_section(
                 .into_part(*section)
                 .expect("available evidence has every section");
             match part {
-                EvidencePart::Inline { text, sha256 } => {
-                    Ok(Selected::available(text, sha256, reservation, purpose))
-                }
+                EvidencePart::Inline { text, sha256 } => Ok(Selected::available(
+                    text,
+                    sha256,
+                    reservation,
+                    purpose,
+                    *intent_seq,
+                )),
                 EvidencePart::Reference {
                     seq,
                     section,
@@ -410,7 +420,7 @@ async fn load_section(
                     let text = original
                         .into_text(section, &sha256, bytes)
                         .map_err(resolve_error)?;
-                    Ok(Selected::available(text, sha256, reservation, purpose))
+                    Ok(Selected::available(text, sha256, reservation, purpose, seq))
                 }
             }
         }

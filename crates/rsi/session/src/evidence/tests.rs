@@ -29,7 +29,19 @@ impl Store {
             sha256: inline.sha256().into(),
             bytes: u32::try_from(inline.bytes()).unwrap(),
         };
-        let fact = |seq, system| {
+        let evidence = |system| RequestEvidence::Available {
+            configuration: EvidencePart::inline(String::new()),
+            system,
+            tools: EvidencePart::inline(String::new()),
+            manifest: vec![],
+        };
+        Self::with_evidence(blocked, [evidence(inline), evidence(reference)])
+    }
+    fn with_evidence(
+        blocked: bool,
+        captures: impl IntoIterator<Item = RequestEvidence>,
+    ) -> Arc<Self> {
+        let fact = |seq, evidence| {
             SessionFact::new(
                 seq,
                 seq,
@@ -54,12 +66,7 @@ impl Store {
                         request_sha256: "0".repeat(64),
                         language_settings: None,
                     },
-                    evidence: RequestEvidence::Available {
-                        configuration: EvidencePart::inline(String::new()),
-                        system,
-                        tools: EvidencePart::inline(String::new()),
-                        manifest: vec![],
-                    },
+                    evidence,
                 },
             )
             .unwrap()
@@ -69,7 +76,11 @@ impl Store {
             gate.cancel();
         }
         Arc::new(Self {
-            facts: vec![fact(1, inline), fact(2, reference)],
+            facts: captures
+                .into_iter()
+                .zip(1..)
+                .map(|(capture, seq)| fact(seq, capture))
+                .collect(),
             calls: AtomicUsize::new(0),
             gate,
             entered: tokio::sync::Semaphore::new(0),
@@ -95,6 +106,109 @@ fn request(seq: u64, offset: u32) -> EvidenceRead {
         offset,
         maximum_bytes: 256 * 1024,
     }
+}
+
+fn tool_captures(source: &str) -> [RequestEvidence; 2] {
+    let inline = EvidencePart::inline(source.into());
+    let reference = EvidencePart::Reference {
+        seq: 1,
+        section: EvidenceSection::Tools,
+        sha256: inline.sha256().into(),
+        bytes: u32::try_from(inline.bytes()).unwrap(),
+    };
+    [inline, reference].map(|tools| RequestEvidence::Available {
+        configuration: EvidencePart::inline(String::new()),
+        system: EvidencePart::inline(String::new()),
+        tools,
+        manifest: vec![],
+    })
+}
+
+async fn tool_summary(
+    reader: &Arc<EvidenceReader>,
+    store: &Arc<Store>,
+    seq: u64,
+) -> EvidencePageContent {
+    let request = EvidenceRead {
+        section: EvidenceSection::Tools,
+        tool_summary: true,
+        ..request(seq, 0)
+    };
+    reader
+        .read(
+            store.clone(),
+            SessionId::new("tool-history").unwrap(),
+            &request,
+            CancellationToken::new(),
+            (),
+        )
+        .await
+        .unwrap()
+        .content
+}
+
+#[tokio::test]
+async fn comparing_a_direct_tool_reference_retains_and_reads_its_original_once() {
+    use rsi_session_protocol::ToolComparison;
+    let source =
+        r#"{"definitions":[{"name":"never_called"}],"hosted":[],"choice":{"type":"auto"}}"#;
+    let store = Store::with_evidence(false, tool_captures(source));
+    let reader = Arc::new(EvidenceReader::default());
+    let EvidencePageContent::ToolSummary {
+        names,
+        comparison:
+            ToolComparison::Compared {
+                intent_seq: 1,
+                added,
+                removed,
+                changed,
+                hosted_changed: false,
+                choice_changed: false,
+            },
+        ..
+    } = tool_summary(&reader, &store, 2).await
+    else {
+        panic!("expected a comparison with the original request");
+    };
+    assert_eq!(names, ["never_called"]);
+    assert!(added.is_empty() && removed.is_empty() && changed.is_empty());
+    assert_eq!(
+        (store.calls.load(Ordering::SeqCst), reader.budget.used()),
+        (2, source.len())
+    );
+    reader.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_tool_reference_cannot_skip_an_unavailable_predecessor() {
+    use rsi_agent_session_protocol::EvidenceUnavailable;
+    use rsi_session_protocol::ToolComparison;
+    let [inline, reference] =
+        tool_captures(r#"{"definitions":[],"hosted":[],"choice":{"type":"auto"}}"#);
+    let reason = EvidenceUnavailable::Budget;
+    let store = Store::with_evidence(
+        false,
+        [inline, RequestEvidence::Unavailable { reason }, reference],
+    );
+    let reader = Arc::new(EvidenceReader::default());
+    assert!(matches!(
+        tool_summary(&reader, &store, 2).await,
+        EvidencePageContent::Unavailable {
+            reason: EvidenceUnavailable::Budget
+        }
+    ));
+    assert!(matches!(
+        tool_summary(&reader,&store,3).await,
+        EvidencePageContent::ToolSummary {
+            names,
+            comparison: ToolComparison::Unavailable {
+                intent_seq: 2,
+                reason: EvidenceUnavailable::Budget,
+            },
+            ..
+        } if names.is_empty()
+    ));
+    reader.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -722,7 +836,16 @@ impl SessionStore for Store {
         limit: usize,
         maximum_bytes: usize,
     ) -> Result<StoreBackwardFactPage> {
-        unreachable!()
+        let end = self
+            .facts
+            .partition_point(|fact| fact.seq() < exclusive_before_seq);
+        let start = end.saturating_sub(limit);
+        Ok(StoreBackwardFactPage {
+            before_seq: exclusive_before_seq,
+            facts: self.facts[start..end].to_vec(),
+            durable_seq: self.facts.last().unwrap().seq(),
+            has_more: start > 0,
+        })
     }
     async fn read_turn_facts(
         &self,
@@ -807,7 +930,7 @@ impl SessionStore for Store {
         }
         Ok(StoreFactPage {
             after_seq,
-            durable_seq: 2,
+            durable_seq: self.facts.last().unwrap().seq(),
             facts: self
                 .facts
                 .iter()
