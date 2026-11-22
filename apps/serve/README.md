@@ -336,6 +336,13 @@ Language model catalog through `application.models`. Each page reports
 the configured creation default, the deployment and model identifiers,
 and reasoning efforts actually supported by each route. An unavailable
 catalog or missing default reports its native failure.
+The selected application process may also invoke the Host Language router
+directly on behalf of an enabled, trusted plugin. Its private
+`application.language` request owns one provider attempt and the delivery of
+its normalized events. The process receives model output through acknowledged
+batches. Cancelling the request or retiring the process ends the stream.
+These calls use the configured Host provider and credentials and create no
+Session, Turn, retry schedule, or stored model transcript.
 `application.model.select` executes the Session's pinned model-selection command
 with a caller-supplied request identity and the current command revision. The
 existing command validates route and effort support and commits the choice.

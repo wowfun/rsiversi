@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 struct Request {
     request: String,
     after: Option<ModelRef>,
+    #[serde(default)]
+    optional_default: bool,
 }
 impl Sessions {
     pub(super) async fn select_model(&self, payload: Value) -> Result<Value> {
@@ -48,12 +50,16 @@ impl Sessions {
             .models
             .as_ref()
             .ok_or_else(|| Error::Remote("Language model catalog unavailable".into()))?;
-        let defaults = self
-            .defaults
-            .as_ref()
-            .ok_or_else(|| Error::Remote("Agent defaults unavailable".into()))?
-            .current()
-            .map_err(|error| Error::Remote(error.to_string()))?;
+        let defaults = match self.defaults.as_ref().map(|source| source.current()) {
+            Some(Ok(value)) => Some(value),
+            None | Some(Err(rsi_session_protocol::SessionError::SetupRequired))
+                if input.optional_default =>
+            {
+                None
+            }
+            None => return Err(Error::Remote("Agent defaults unavailable".into())),
+            Some(Err(error)) => return Err(Error::Remote(error.to_string())),
+        };
         let page = models
             .list_models(input.after.as_ref(), 16)
             .await
@@ -71,7 +77,7 @@ impl Sessions {
             rows.push(entry);
         }
         Ok(
-            json!({"models":rows,"next":next,"default":defaults.default_model(),"effort":defaults.default_reasoning_effort()}),
+            json!({"models":rows,"next":next,"default":defaults.as_ref().map(|d|d.default_model()),"effort":defaults.as_ref().and_then(|d|d.default_reasoning_effort())}),
         )
     }
 }

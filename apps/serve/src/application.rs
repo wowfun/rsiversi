@@ -10,6 +10,7 @@ use rsi_web_control::Assets;
 use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 
+mod language;
 #[cfg(test)]
 mod lease_tests;
 mod model_catalog;
@@ -271,6 +272,7 @@ struct Sessions {
     history_pages: session_fragments::Pages,
     owner: Arc<dyn rsi_api_http::BrowserOwner>,
     models: Option<Arc<dyn rsi_ai_protocol::LanguageModels>>,
+    language: Option<Arc<dyn rsi_ai_protocol::LanguageCall>>,
     defaults: Option<Arc<dyn rsi_session_protocol::AgentSettingsSource>>,
     tools: Option<Arc<tools::Publisher>>,
     ingress: Arc<dyn rsi_session_protocol::SessionIngress>,
@@ -322,6 +324,7 @@ impl Sessions {
                 "application.session",
                 "application.sessions",
                 "application.models",
+                "application.language",
                 "application.model.select",
                 "application.command",
                 "application.inbox",
@@ -363,6 +366,7 @@ impl rsi_extension::Handler for BoundSessions {
                     "application.create"=>self.create(payload).await,
                     "application.workspaces"=>self.workspace_operation(payload).await,
                     "application.models"=>self.model_catalog(payload).await,
+                    "application.language"=>self.language(payload,&stop).await,
                     "application.model.select"=>self.select_model(payload).await,
                     "application.command"=>self.command(payload).await,
                     "application.inbox"=>self.inbox(payload).await,
@@ -523,10 +527,14 @@ async fn open_application(
     key: &SecretValue,
     importer: bool,
     tools: Option<&tools::Publisher>,
+    language: bool,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
     const PROTOCOL: u32 = 14;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
+    if language {
+        payload["language"] = true.into();
+    }
     if let Some(source) = tools {
         payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});
     }
@@ -626,6 +634,9 @@ impl PluginFactory for Factory {
             models: plan
                 .context()
                 .lookup_local::<rsi_ai_protocol::LanguageModelsContract>(),
+            language: plan
+                .context()
+                .lookup_local::<rsi_ai_protocol::LanguageCallContract>(),
             defaults: plan
                 .context()
                 .lookup_local::<rsi_session_protocol::AgentSettingsContract>(),
@@ -753,6 +764,7 @@ async fn start_process(
         let disconnected = connection.disconnect_token();
         let owner = sessions.owner_callback(&connection).await?;
         let tools = sessions.tools.clone();
+        let language = sessions.language.is_some() && sessions.models.is_some();
         let _directory = session_page::watch_directory(&sessions, &connection, owner.id())?;
         let _sessions = sessions.attach(&connection)?;
         let import_available = importer.is_some();
@@ -774,6 +786,7 @@ async fn start_process(
             &key,
             import_available,
             tools.as_deref(),
+            language,
             &owner,
         )
         .await?;
