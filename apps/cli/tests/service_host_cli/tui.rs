@@ -554,7 +554,7 @@ fn independent_headless(fixture: &CliFixture) {
         .iter()
         .find(|entry| entry["name"] == "plan")
         .unwrap();
-    let command = serde_json::json!({"command":descriptor["id"],"request_id":"headless-plan-on","expected_revision":list["revision"],"arguments":"on"});
+    let command = serde_json::json!({"command":descriptor["id"],"request_id":"headless-plan-on","expected_revision":list["revision"],"arguments":""});
     let output = fixture.assert_success(&[
         "run",
         "test-headless",
@@ -1574,7 +1574,7 @@ async fn fullscreen_closed_plan_review_uses_explicit_actions_and_typed_feedback(
     let fixture = CliFixture::new(&endpoint);
     let mut terminal = TerminalClient::start(&fixture, &["--session-id", "tui-plan-review"]);
     terminal.until("Ctrl+J adds a line").await;
-    terminal.send(b"/plan on\r");
+    terminal.send(b"/plan\r");
     terminal.absent("/plan").await;
     inspect_plan_projection(&mut terminal, true, "Draft").await;
     terminal.send(b"Save and review a plan\r");

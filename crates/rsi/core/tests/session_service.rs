@@ -362,7 +362,14 @@ async fn run_message_with_text_to_terminal(
         })
         .await
         .unwrap();
-    let (turn_id, claimed_fact_seq) = observe_message_claim(handle, &receipt).await;
+    wait_message_terminal(handle, &receipt).await;
+}
+
+async fn wait_message_terminal(
+    handle: &Arc<dyn rsi_session_protocol::SessionHandle>,
+    receipt: &MessageReceipt,
+) {
+    let (turn_id, claimed_fact_seq) = observe_message_claim(handle, receipt).await;
     let mut observation = handle
         .observe(ObservationCursor {
             control_seq: receipt.accepted_control_seq,
@@ -449,7 +456,7 @@ async fn standard_plan_commands_reach_the_actual_projection_and_provider_context
         })
         .await
         .unwrap();
-    for (id, argument, enabled) in [("plan-on", "on", true), ("plan-off", "off", false)] {
+    for (id, argument, enabled) in [("plan-on", "", true), ("plan-off", "off", false)] {
         let catalog = handle.commands().await.unwrap();
         let command = catalog
             .commands()

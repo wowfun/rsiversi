@@ -60,6 +60,17 @@ impl SessionCommandReceipt {
 
     /// Projects a canonical command control with exact predecessor correspondence.
     pub fn committed(control_seq: u64, commit: &DomainStateCommit) -> Result<Self> {
+        if control_seq == 1
+            && let Some(source) = commit.first_command_source()
+        {
+            return Ok(Self {
+                command: source.command.clone(),
+                request_id: source.request_id.clone(),
+                outcome: CommandOutcome::Committed { control_seq },
+                invocation_sha256: source.invocation_sha256.clone(),
+                state_sha256: commit.request_sha256().into(),
+            });
+        }
         let DomainMutationSource::Command { invocation } = commit.source() else {
             return Err(SessionError::Invalid(
                 "command receipt requires a command control".into(),

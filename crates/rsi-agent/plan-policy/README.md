@@ -18,12 +18,13 @@ grammar. Configuration is frozen in the Agent generation, independent of the
 typed enabled state; changing it never relaxes an already prepared call's other
 approval or sandbox constraints.
 
-The command accepts a bounded string: `on`, `off`, `toggle`, or empty text for
-toggle. It proposes only a complete typed state replacement. Before each model
+Bare `/plan` enables the mode, including when it is already enabled. The exact
+trimmed argument `off` disables it. Every other nonempty argument is a user
+task. The command publishes that text once together with the enabled state.
+It steers a running conversation or starts work in an idle or new one. Before each model
 retry series, the plugin supplies the current mode through the existing
 [`StepPrepared` instruction slot](../context/README.md). Each preparation replaces
-the preceding guidance, including explicit deactivation; it contributes no chat
-input or additional domain state. Retries reuse the prepared guidance, and
+the preceding guidance, including explicit deactivation. Retries reuse the prepared guidance, and
 terminal cleanup clears it. Repeated preparations therefore do not accumulate
 copies of plan instructions in model history or request evidence.
 When enabled, policy abstains only for an exact allowlisted name and denies all

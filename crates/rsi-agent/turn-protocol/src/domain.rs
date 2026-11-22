@@ -40,7 +40,7 @@ pub struct DomainMutationReceipt {
 }
 
 impl DomainMutationReceipt {
-    /// Validates a canonical non-baseline domain request record.
+    /// Validates a canonical domain request record, including a first command task.
     pub fn new(session_id: SessionId, record: AgentControlRecord) -> Result<Self> {
         if !matches!(record.body(), AgentControlRecordBody::DomainStateCommitted { commit } if commit.request_id().is_some())
         {

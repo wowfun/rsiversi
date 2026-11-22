@@ -351,7 +351,11 @@ external admission owner verifies referenced objects before returning the propos
 Attribution and
 content are validated before any owner state changes. All messages and domain replacements publish atomically. A draft
 retains these inputs locally, without waking or creating a Session; first submit
-publishes them as held next-Step inputs with the actual baseline. Changing the
+publishes them as held next-Step inputs with the actual baseline. A callback
+may explicitly submit a steering task as the draft's first turn. The Session
+owner then publishes the successor baseline, any earlier held inputs and the
+task in one mailbox transaction. A failed first submission leaves the draft
+available. Changing the
 draft preset clears both its baseline and its pending command inputs. Aggregate
 pending input is bounded at 64 messages and 256 KiB, including the draft's whole
 unpublished batch. Observers receive the exact selected command messages.

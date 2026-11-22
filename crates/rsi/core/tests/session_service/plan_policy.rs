@@ -3,6 +3,132 @@ use rsi_agent_session_protocol::{
     CommandArguments, DomainRequestId, SessionCommandInvocation, ToolRejection, TurnOutcome,
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plan_tasks_start_a_new_session_then_steer_with_the_original_command_identity() {
+    use rsi_agent_session_protocol::{CommandMessageSource, CommandOutcome};
+    let (endpoint, requests, provider) = capturing_provider().await;
+    let fixture = fixture(&endpoint);
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let service = running.session_service().unwrap();
+    let id = SessionId::new("plan-task").unwrap();
+    let mut handle = service
+        .create(CreateSession {
+            workspace_id: running
+                .workspace_registry()
+                .unwrap()
+                .get_or_create(&fixture.workspace)
+                .await
+                .unwrap()
+                .id,
+            session_id: id.clone(),
+            agent_preset_id: None,
+            fork: None,
+        })
+        .await
+        .unwrap();
+    let held = command_request(
+        &handle,
+        "context-input",
+        "held",
+        serde_json::json!({"content":[{"type":"text","text":"held before Plan"}]}),
+    )
+    .await;
+    handle.execute_command(held).await.unwrap();
+    assert!(requests.lock().unwrap().is_empty());
+    let mut initial = None;
+    for (index, task) in ["on", "toggle"].into_iter().enumerate() {
+        let invocation = command_request(
+            &handle,
+            "plan",
+            &format!("task-{index}"),
+            serde_json::json!(format!(" {task} ")),
+        )
+        .await;
+        let source = CommandMessageSource {
+            command: invocation.command.clone(),
+            request_id: invocation.request_id.clone(),
+            invocation_sha256: invocation.digest().unwrap(),
+            ordinal: 0,
+            attribution: None,
+        };
+        let receipt = handle.execute_command(invocation.clone()).await.unwrap();
+        assert!(matches!(
+            receipt.outcome(),
+            CommandOutcome::Committed { .. }
+        ));
+        let accepted = handle
+            .message_status(&source.message_id().unwrap())
+            .await
+            .unwrap();
+        wait_message_terminal(&handle, &accepted).await;
+        handle = service.attach(&id).await.unwrap();
+        assert_eq!(
+            handle
+                .command_status(&invocation.request_id)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&receipt)
+        );
+        assert_eq!(
+            handle.execute_command(invocation.clone()).await.unwrap(),
+            receipt
+        );
+        if index == 0 {
+            initial = Some((invocation.clone(), receipt));
+        }
+        let different = SessionCommandInvocation {
+            arguments: CommandArguments::new("different".into()).unwrap(),
+            ..invocation
+        };
+        assert!(handle.execute_command(different).await.is_err());
+        let received = requests.lock().unwrap();
+        assert_eq!(received.len(), index + 1);
+        let messages = received.last().unwrap()["messages"].as_array().unwrap();
+        if index == 0 {
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["content"].to_string().contains("held before Plan"))
+            );
+        }
+        assert!(messages.iter().filter(|m| m["role"] == "user").any(|m| {
+            m["content"] == task
+                || m["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| p["text"] == task))
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["content"].to_string().contains("Plan mode is enabled."))
+        );
+    }
+    assert!(running.shutdown().await.is_clean());
+    drop(handle);
+    drop(service);
+    let restarted = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let attached = restarted
+        .session_service()
+        .unwrap()
+        .attach(&id)
+        .await
+        .unwrap();
+    let (original, receipt) = initial.unwrap();
+    assert_eq!(
+        attached.command_status(&original.request_id).await.unwrap(),
+        Some(receipt.clone())
+    );
+    assert_eq!(attached.execute_command(original).await.unwrap(), receipt);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(restarted.shutdown().await.is_clean());
+    provider.abort();
+}
+
 async fn denied_call(Json(request): Json<serde_json::Value>) -> Response {
     if let Some(reply) = request["messages"]
         .as_array()
@@ -143,7 +269,7 @@ async fn standard_plan_policy_denies_bash_before_intent_start_or_filesystem_effe
                 .clone(),
             request_id: DomainRequestId::new("plan-enable").unwrap(),
             expected_revision: commands.revision(),
-            arguments: CommandArguments::new("on".into()).unwrap(),
+            arguments: CommandArguments::new("".into()).unwrap(),
         })
         .await
         .unwrap();
@@ -207,22 +333,31 @@ async fn plan_command(
     id: &str,
     value: &str,
 ) {
-    let commands = handle.commands().await.unwrap();
     handle
-        .execute_command(SessionCommandInvocation {
-            command: commands
-                .commands()
-                .iter()
-                .find(|c| c.name() == "plan")
-                .unwrap()
-                .id()
-                .clone(),
-            request_id: DomainRequestId::new(id).unwrap(),
-            expected_revision: commands.revision(),
-            arguments: CommandArguments::new(value.into()).unwrap(),
-        })
+        .execute_command(command_request(handle, "plan", id, serde_json::json!(value)).await)
         .await
         .unwrap();
+}
+
+async fn command_request(
+    handle: &Arc<dyn rsi_session_protocol::SessionHandle>,
+    name: &str,
+    id: &str,
+    args: serde_json::Value,
+) -> SessionCommandInvocation {
+    let catalog = handle.commands().await.unwrap();
+    SessionCommandInvocation {
+        command: catalog
+            .commands()
+            .iter()
+            .find(|command| command.name() == name)
+            .unwrap()
+            .id()
+            .clone(),
+        request_id: DomainRequestId::new(id).unwrap(),
+        expected_revision: catalog.revision(),
+        arguments: CommandArguments::new(args).unwrap(),
+    }
 }
 async fn plan_view(handle: &Arc<dyn rsi_session_protocol::SessionHandle>) -> serde_json::Value {
     let snapshot = handle
@@ -300,7 +435,7 @@ async fn saved_plan_review_commits_exact_decision_and_rejects_stale_mode_revisio
             })
             .await
             .unwrap();
-        plan_command(&handle, "enable", "on").await;
+        plan_command(&handle, "enable", "").await;
         let worker_handle = handle.clone();
         let worker = tokio::spawn(async move {
             run_message_to_terminal(&worker_handle, "review-plan").await;
@@ -371,7 +506,7 @@ async fn saved_plan_review_commits_exact_decision_and_rejects_stale_mode_revisio
         }
         if choice == "stale" {
             plan_command(&handle, "off", "off").await;
-            plan_command(&handle, "on-again", "on").await;
+            plan_command(&handle, "on-again", "").await;
         }
         let reply = rsi_user_questions_protocol::QuestionAnswer {
             answers: vec![],

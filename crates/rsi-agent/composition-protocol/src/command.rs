@@ -44,6 +44,8 @@ pub struct SessionCommandOutput {
     pub domains: Vec<ValidatedDomainProposal>,
     /// Bounded messages published atomically with the replacements.
     pub inputs: Vec<CommandInput>,
+    /// On an unpublished Session, publish the last steering input as its first turn.
+    pub start_draft: bool,
     /// Resource and receipt guards retained through publication and notification.
     /// Initial automatic continuation reservations do not admit observers.
     pub publications: Vec<Publication>,
@@ -53,6 +55,7 @@ impl From<Vec<ValidatedDomainProposal>> for SessionCommandOutput {
         Self {
             domains,
             inputs: vec![],
+            start_draft: false,
             publications: vec![],
         }
     }
@@ -175,9 +178,21 @@ pub(crate) fn initial_commit(
     baseline: &crate::DomainBaseline,
     inputs: &[PreparedCommandInput],
     selection: &rsi_agent_session_protocol::GenerationSelection,
+    start_draft: bool,
 ) -> ContributionResult<rsi_agent_session_protocol::DomainStateCommit> {
+    let mut messages: Vec<_> = inputs.iter().map(|input| input.publication(true)).collect();
+    let request_id = if start_draft {
+        let last = messages.last_mut().expect("prepared first command task");
+        last.delivery = MessageDelivery::NextTurn;
+        let AgentMessageSource::Command { source } = &last.message.source else {
+            unreachable!()
+        };
+        Some(source.request_id.clone())
+    } else {
+        None
+    };
     rsi_agent_session_protocol::DomainStateCommit::new_with_command_inputs(
-        None,
+        request_id,
         rsi_agent_session_protocol::DomainMutationSource::Generation {
             selection: selection.clone(),
             turn_id: None,
@@ -185,7 +200,7 @@ pub(crate) fn initial_commit(
         baseline
             .commit()
             .map_or_else(Vec::new, |commit| commit.updates().to_vec()),
-        inputs.iter().map(|input| input.publication(true)).collect(),
+        messages,
     )
     .map_err(|error| crate::ContributionError::Invalid(error.to_string()))
 }

@@ -58,7 +58,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     const plan = extensions.locator('[data-producer="rsi.plan-policy.view"] pre');
     await plan.filter({ hasText: '"enabled": false' }).waitFor({state:'attached'});
     assert.equal(requests.length, 0);
-    await pane.getByRole("textbox", { name: "Main message" }).fill("/plan on");
+    await pane.getByRole("textbox", { name: "Main message" }).fill("/plan");
     await pane.getByTestId("composer-send").click();
     const draftReceipt = pane.locator('.command-receipt').filter({hasText:'Draft changed'});
     await draftReceipt.waitFor();

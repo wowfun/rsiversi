@@ -438,7 +438,17 @@ impl TurnService for AgentKernel {
     }
 
     async fn submit_message(&self, request: SubmitMessage) -> TurnResult<MessageReceipt> {
-        if matches!(
+        let first_task = match &request.session {
+            SubmitSession::Fresh(prepared) => prepared.first_command_task(),
+            SubmitSession::Resume(_) => None,
+        };
+        if let Some(task) = first_task {
+            if task != &request.message || request.delivery != MessageDelivery::NextTurn {
+                return Err(TurnError::Invalid(
+                    "first turn must admit the command's exact task".into(),
+                ));
+            }
+        } else if matches!(
             request.message.source,
             AgentMessageSource::Continuation { .. }
                 | AgentMessageSource::Program { .. }

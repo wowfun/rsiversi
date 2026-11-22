@@ -208,6 +208,7 @@ impl SessionCommand for Command {
             ],
             inputs,
             publications,
+            start_draft: false,
         })
     }
 }

@@ -333,7 +333,8 @@ including through deserialization.
 
 Durable command inputs carry the same delivery intent as mailbox messages. A
 follow-up targets the next Turn even when the current Turn is running. Draft
-command inputs are held for the first Step of the first Turn.
+command context is held for the first Step of the first Turn. A submitted
+command task can wake that Turn.
 
 Command invocations bind a ContributionId, DomainRequestId, typed draft or
 durable control revision, and at most 64 KiB of structurally validated JSON
@@ -341,6 +342,10 @@ arguments. A durable command control retains that complete invocation alongside
 its domain replacements; the canonical request digest therefore binds command,
 arguments and expected revision. Its request identity must equal the control's
 request identity, and a draft revision cannot appear in a durable command.
+A command that starts the first turn binds its request ID to the initial
+generation commit. Its last input carries next-turn delivery and the original
+command digest. Earlier inputs remain held. This single publication is the
+canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header

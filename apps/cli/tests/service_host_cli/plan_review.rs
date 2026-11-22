@@ -37,7 +37,7 @@ async fn cli_closed_plan_review_sends_typed_choice_and_feedback() {
     let (endpoint, requests, task) = provider().await;
     let fixture = CliFixture::new(&endpoint);
     let mut client = JsonClient::start(&fixture, &["--session-id", "cli-plan-review"]);
-    client.send("/plan on\n").await;
+    client.send("/plan\n").await;
     client.until(|v| v["type"] == "command_result").await;
     client.send("Save and review a plan\n").await;
     let pending = client

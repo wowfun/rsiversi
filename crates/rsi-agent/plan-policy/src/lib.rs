@@ -5,15 +5,15 @@
 
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    BeforeStepContext, BeforeStepContributor, BeforeStepOutput, ContributionContext,
+    BeforeStepContext, BeforeStepContributor, BeforeStepOutput, CommandInput, ContributionContext,
     ContributionError, ContributionKind, ContributionRegistrarContract, ContributionRegistration,
     ContributionResult, DomainDefinition, DomainHandle, DomainRegistrarContract, SessionCommand,
     SessionCommandContext, SessionCommandRegistration, SessionProjection, SessionProjectionContext,
     ToolPolicy, ToolPolicyDecision, ToolPolicyRequest,
 };
 use rsi_agent_session_protocol::{
-    CommandArguments, ContributionId, DomainIdentity, DomainStateView, ProjectionValue,
-    SessionCommandDescriptor,
+    AgentMessageContent, CommandArguments, ContributionId, DomainIdentity, DomainStateView,
+    MessageDelivery, ProjectionValue, SessionCommandDescriptor,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
@@ -127,23 +127,30 @@ impl SessionCommand for PlanPolicy {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
-        let (view, previous) = self.current(&context.domains)?;
-        let enabled = match arguments.value().as_str().map(str::trim) {
-            Some("on") => true,
-            Some("off") => false,
-            Some("" | "toggle") => !previous,
-            _ => {
-                return Err(ContributionError::Invalid(
-                    "usage: /plan [on|off|toggle]".into(),
-                ));
-            }
-        };
-        Ok(vec![
-            self.state
-                .propose(view.revision, &enabled)
-                .map_err(invalid)?,
-        ]
-        .into())
+        let (view, enabled) = self.current(&context.domains)?;
+        let task = arguments
+            .value()
+            .as_str()
+            .ok_or_else(|| ContributionError::Invalid("usage: /plan [off|message]".into()))?
+            .trim();
+        let enter = task != "off";
+        let mut output = rsi_agent_composition_protocol::SessionCommandOutput::default();
+        if enter && !task.is_empty() {
+            output.start_draft = true;
+            output.inputs.push(CommandInput {
+                delivery: MessageDelivery::Steer,
+                content: vec![AgentMessageContent::Text {
+                    text: task.to_owned(),
+                }],
+                attribution: None,
+            });
+        }
+        if enabled != enter || output.inputs.is_empty() {
+            output
+                .domains
+                .push(self.state.propose(view.revision, &enter).map_err(invalid)?);
+        }
+        Ok(output)
     }
 }
 #[async_trait]
@@ -281,10 +288,10 @@ impl PluginFactory for PlanPolicyFactory {
         let descriptor = SessionCommandDescriptor::new(
             command_id.clone(),
             "plan",
-            "Set plan mode: /plan [on|off|toggle]",
+            "Enter or leave plan mode",
             true,
             Some(rsi_agent_session_protocol::ComposerCommandInput::Text {
-                hint: "on | off | toggle".into(),
+                hint: "[off|message]".into(),
             }),
         )
         .map_err(|error| MetaError::Activation(error.to_string()))?;

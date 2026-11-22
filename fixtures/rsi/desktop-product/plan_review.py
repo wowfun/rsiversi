@@ -26,7 +26,7 @@ def provider_reply(body):
 def verify(script, button, fill, until, screenshot, report):
     button('Navigation options'); button('Needs attention')
     button('Verbose')
-    fill('[aria-label="Main conversation"] .composer textarea', '/plan on')
+    fill('[aria-label="Main conversation"] .composer textarea', '/plan')
     button('Send')
     until(lambda: script('return document.querySelector(".command-receipt")?.textContent.includes("Committed")'))
     until(lambda: script(FOCUS_INPUT, ['[aria-label="Main conversation"] .composer textarea', 'value']) == '')

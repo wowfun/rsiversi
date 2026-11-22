@@ -568,7 +568,7 @@ impl DomainStateCommit {
     ) -> Result<Self> {
         source.validate()?;
         let baseline = source.is_initial();
-        if (baseline || source.is_generation()) != request_id.is_none() {
+        if !baseline && source.is_generation() != request_id.is_none() {
             return Err(SessionError::Invalid(
                 "only a baseline or Kernel generation commit omits a request identity".into(),
             ));
@@ -685,7 +685,10 @@ impl DomainStateCommit {
             .into_iter()
             .take(crate::MAXIMUM_FACTS_PER_READ + 1)
             .collect::<Vec<_>>();
-        if facts.iter().any(|fact| fact.body().turn_id() != Some(turn_id)) {
+        if facts
+            .iter()
+            .any(|fact| fact.body().turn_id() != Some(turn_id))
+        {
             return Err(SessionError::Invalid(
                 "domain request Facts changed the originating Turn".into(),
             ));
@@ -725,6 +728,14 @@ impl DomainStateCommit {
         };
         crate::CommandMessage::validate_batch(&inputs, invocation, self.source.is_initial())?;
         self.command_inputs = inputs;
+        if self.source.is_initial()
+            && self.request_id.as_ref()
+                != self.first_command_source().map(|source| &source.request_id)
+        {
+            return Err(SessionError::Invalid(
+                "initial request identity must match the first command task".into(),
+            ));
+        }
         self.request_sha256 = request_digest(
             &self.source,
             &self.updates,
@@ -737,6 +748,17 @@ impl DomainStateCommit {
     /// Exact ordered inputs that must be accepted in this same transaction.
     pub fn command_inputs(&self) -> &[crate::CommandMessage] {
         &self.command_inputs
+    }
+    /// Original invocation identity when a command created this Session.
+    pub fn first_command_source(&self) -> Option<&crate::CommandMessageSource> {
+        let input = self.command_inputs.last()?;
+        if self.source.is_initial()
+            && input.delivery == crate::MessageDelivery::NextTurn
+            && let crate::AgentMessageSource::Command { source } = &input.message.source
+        {
+            return Some(source);
+        }
+        None
     }
     /// Returns the exact canonical Fact interval, absent for control-only requests.
     pub const fn fact_span(&self) -> Option<&DomainFactSpan> {

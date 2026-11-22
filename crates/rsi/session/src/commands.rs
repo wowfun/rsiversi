@@ -413,12 +413,62 @@ impl LocalSessionHandle {
             };
             return Ok(receipt);
         };
-        let mutation = prepared.execute(cancellation).await.map_err(draft_error)?;
+        let mut mutation = prepared.execute(cancellation).await.map_err(draft_error)?;
         self.reconcile_fresh_read().await?;
         let mut state = self.state.lock().await;
         let HandleState::Fresh(draft) = &mut *state else {
             return Err(SessionError::NotFound("unpublished draft".into()));
         };
+        if let Some(first) = draft
+            .prepare_first_command_task(&mut mutation)
+            .map_err(draft_error)?
+        {
+            let selection = rsi_agent_model_selection::resolve_selection(
+                first.header(),
+                first
+                    .baseline()
+                    .initial_state(rsi_agent_model_selection::DOMAIN),
+                None,
+            )
+            .map_err(|error| SessionError::Invalid(error.to_string()))?;
+            self.validate_model_selection(&selection)?;
+            let execution = self.prepare_workspace(first.header()).await?;
+            let message = first
+                .first_command_task()
+                .expect("prepared first command task")
+                .clone();
+            let commit = first
+                .initial_commit()
+                .map_err(|error| SessionError::Invalid(error.to_string()))?;
+            let session = Self::bind_submission(
+                rsi_agent_turn_protocol::SubmitSession::Fresh(first),
+                execution,
+            )?;
+            mutation.begin_publication();
+            let accepted = self
+                .turns
+                .submit_message(rsi_agent_turn_protocol::SubmitMessage {
+                    session,
+                    message,
+                    delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+                })
+                .await;
+            self.reconcile_fresh_submission(&mut state, accepted.is_ok())
+                .await;
+            drop(state);
+            self.projection_changed();
+            accepted.map_err(map_turn_error)?;
+            mutation
+                .committed(&rsi_agent_composition_protocol::PublicationReceipt {
+                    session_id: self.session_id(),
+                    facts: &[],
+                    domain_commit: Some((1, &commit)),
+                })
+                .await
+                .map_err(draft_error)?;
+            return SessionCommandReceipt::committed(1, &commit)
+                .map_err(|error| protocol_error(&error));
+        }
         let applied = draft.apply_command(mutation);
         drop(state);
         self.projection_changed();

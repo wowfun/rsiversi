@@ -7,7 +7,7 @@ import 'fake-indexeddb/auto';
 import {DraftStore,DraftEditor} from '../drafts.js';
 import {clearDraftRecords} from './clear-draft-records.mjs';
 
-const plan={name:'plan',composer_input:{kind:'text',hint:'on | off | toggle'}};
+const plan={name:'plan',composer_input:{kind:'text',hint:'[off|message]'}};
 test('skill completion places the caret before arguments and only changes an admitted draft',()=>{
   const item={group:'skill',replacement:'/audit-proof'};
   for(const tail of ['', ' prior text', '\tprior text']){

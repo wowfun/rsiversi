@@ -441,6 +441,7 @@ pub struct PreparedFreshSession {
 
 #[derive(Debug)]
 struct PreparedFreshSessionInner {
+    start_draft: bool,
     execution: Option<rsi_execution::ExecutionLease>,
     header: SessionHeader,
     composition: AgentCompositionPin,
@@ -482,6 +483,7 @@ impl PreparedFreshSession {
         let baseline = DomainBaseline::new(composition.domains().clone())?;
         Ok(Self {
             inner: Box::new(PreparedFreshSessionInner {
+                start_draft: false,
                 execution: None,
                 header,
                 composition,
@@ -509,6 +511,16 @@ impl PreparedFreshSession {
     pub fn command_inputs(&self) -> &[PreparedCommandInput] {
         &self.inner.command_inputs
     }
+    /// Command-owned first turn submitted with this baseline, if present.
+    pub fn first_command_task(&self) -> Option<&rsi_agent_session_protocol::AgentMessage> {
+        self.inner.start_draft.then(|| {
+            self.inner
+                .command_inputs
+                .last()
+                .expect("prepared first task")
+                .message()
+        })
+    }
     /// Complete initial publication, binding the baseline and all held command input.
     ///
     /// # Errors
@@ -520,6 +532,7 @@ impl PreparedFreshSession {
             &self.inner.baseline,
             &self.inner.command_inputs,
             self.inner.composition.selection(),
+            self.inner.start_draft,
         )
     }
 
@@ -707,6 +720,7 @@ impl AgentSessionDraft {
     pub fn freeze(&self) -> PreparedFreshSession {
         PreparedFreshSession {
             inner: Box::new(PreparedFreshSessionInner {
+                start_draft: false,
                 execution: None,
                 header: self.header.clone(),
                 composition: self.composition.clone(),
@@ -799,6 +813,7 @@ impl AgentSessionDraft {
     pub fn into_fresh(self) -> PreparedFreshSession {
         PreparedFreshSession {
             inner: Box::new(PreparedFreshSessionInner {
+                start_draft: false,
                 execution: None,
                 header: self.header,
                 composition: self.composition,

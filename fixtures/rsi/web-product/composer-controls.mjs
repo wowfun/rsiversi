@@ -15,7 +15,7 @@ fixture.setReply('command',async payload=>{
  const command=JSON.parse(payload);
  if(command.action==='commands')fixture.commandReads++;
  if(command.action==='create'){
-  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true,composer_input:{kind:'text',hint:'on | off | toggle'}}]}};
+  fixture.creates++;fixture.view.surfaces.main={...structuredClone(fixture.base),generation:'2',selection:'2',workspace:fixture.attachedWorkspace(command.workspace),creation:{workspace_id:command.workspace,session_id:fixture.base.session,agent_preset_id:null},sandbox:'workspace-write',transcript:{blocks:[],status:'Ready'},effort_profile:{supported:['off','low','high','max'],default:'high'},commands:{revision:{kind:'draft'},commands:[{name:'plan',description:'Plan mode',draft_safe:true,composer_input:{kind:'text',hint:'[off|message]'}}]}};
  }
  const data=fixture.view.surfaces.main;
  if(command.action==='model'){fixture.modelWrites++;data.model=command.model;data.reasoning_effort=command.reasoning_effort;}

@@ -103,7 +103,7 @@ impl SessionCommands for AgentKernel {
             !matches!(
                 receipt.commit().source(),
                 DomainMutationSource::Command { .. }
-            )
+            ) && receipt.commit().first_command_source().is_none()
         }) {
             return Err(TurnError::DomainRequestConflict {
                 request_id: request_id.to_string(),
@@ -886,7 +886,16 @@ fn matching_receipt(
     receipt: DomainMutationReceipt,
     source: &DomainMutationSource,
 ) -> CommandResult {
-    if source_digest(receipt.commit().source())? != source_digest(source)? {
+    let matches = match (receipt.commit().first_command_source(), source) {
+        (Some(first), DomainMutationSource::Command { invocation }) => {
+            first.invocation_sha256
+                == invocation
+                    .digest()
+                    .map_err(|error| TurnError::Invalid(error.to_string()))?
+        }
+        _ => receipt.commit().source() == source,
+    };
+    if !matches {
         let request_id = receipt
             .commit()
             .request_id()

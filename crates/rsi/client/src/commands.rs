@@ -174,7 +174,13 @@ impl SessionController {
             let _permit = permit;
             tokio::select! { biased;
                 () = controller.stop.cancelled() => Err(unresolved),
-                result = work => result,
+                result = work => {
+                    if let Ok(receipt) = &result
+                        && matches!(receipt.outcome(), rsi_agent_session_protocol::CommandOutcome::Committed { .. }) {
+                        controller.observe_durable_session();
+                    }
+                    result
+                },
             }
         }));
         drop(admission);

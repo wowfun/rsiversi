@@ -111,6 +111,37 @@ fn input_only_commits_bind_provenance_and_cannot_be_emptied() {
         },
         delivery: MessageDelivery::NextStep,
     };
+    let first = CommandMessage {
+        delivery: MessageDelivery::NextTurn,
+        ..input.clone()
+    };
+    let initial = |request, messages| {
+        DomainStateCommit::new_with_command_inputs(
+            request,
+            DomainMutationSource::Baseline,
+            vec![],
+            messages,
+        )
+    };
+    let id = Some(invocation.request_id.clone());
+    assert!(initial(None, vec![first.clone()]).is_err());
+    assert!(initial(id.clone(), vec![input.clone()]).is_err());
+    assert!(
+        initial(
+            Some(DomainRequestId::new("wrong").unwrap()),
+            vec![first.clone()]
+        )
+        .is_err()
+    );
+    let committed = initial(id, vec![first]).unwrap();
+    let receipt = SessionCommandReceipt::committed(1, &committed).unwrap();
+    assert_eq!(receipt.invocation_sha256(), invocation.digest().unwrap());
+    assert!(SessionCommandReceipt::committed(2, &committed).is_err());
+    assert_eq!(
+        serde_json::from_value::<DomainStateCommit>(serde_json::to_value(&committed).unwrap())
+            .unwrap(),
+        committed
+    );
     for (request, source) in [
         (None, DomainMutationSource::Baseline),
         (

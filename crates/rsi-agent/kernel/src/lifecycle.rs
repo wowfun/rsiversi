@@ -4,11 +4,8 @@ pub(super) fn initial_controls(
     prepared: &PreparedFreshSession,
 ) -> TurnResult<Vec<AgentControlRecord>> {
     let header = prepared.header();
-    let inputs = prepared
-        .command_inputs()
-        .iter()
-        .map(|input| input.publication(true))
-        .collect::<Vec<_>>();
+    let staged = prepared.command_inputs();
+    let held = &staged[..staged.len() - usize::from(prepared.first_command_task().is_some())];
     let mut controls = Vec::new();
     let commit = prepared
         .initial_commit()
@@ -21,7 +18,8 @@ pub(super) fn initial_controls(
         )
         .map_err(|error| TurnError::Invalid(error.to_string()))?,
     );
-    for input in inputs {
+    for input in held {
+        let input = input.publication(true);
         controls.push(
             AgentControlRecord::new(
                 controls.len() as u64 + 1,

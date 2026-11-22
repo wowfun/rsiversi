@@ -886,7 +886,7 @@ For non-Skill runs it checks the actual submitted script/background/observation
 arguments and correlates a successful terminal `workflow_read` result to its Tool
 intent, exact run and terminal control sequence. Completion-notice text alone
 cannot satisfy that read. `RSI_WORKFLOW_MODE=foreground` exercises observation
-timeout detachment; `plan` exercises `/plan on` revocation and exact Node reaping.
+timeout detachment; `plan` exercises `/plan` revocation and exact Node reaping.
 
 The CI Workflow browser gate runs `workflow-verify.mjs --dock-only`: readiness,
 canonical run/result/script/child reads, restart, narrow layout and cancellation

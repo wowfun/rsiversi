@@ -74,7 +74,7 @@ async fn headless_commands_freeze_draft_before_model_and_query_durable_receipt_a
         .iter()
         .find(|entry| entry["name"] == "plan")
         .unwrap();
-    let on = json!({"command":descriptor["id"],"request_id":"plan-on","expected_revision":list["revision"],"arguments":"on"});
+    let on = json!({"command":descriptor["id"],"request_id":"plan-on","expected_revision":list["revision"],"arguments":""});
     let output = fixture.assert_success(&[
         "run",
         "test-headless",

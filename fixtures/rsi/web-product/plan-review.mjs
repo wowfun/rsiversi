@@ -46,7 +46,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
   await connectHostOwner(page,service);
   await openWorkspace(page, service);
     const pane=page.getByRole('region',{name:'Main conversation',exact:true}),input=pane.getByRole('textbox',{name:'Main message',exact:true});
-    await input.fill('/plan on');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
+    await input.fill('/plan');await pane.getByTestId('composer-send').click();await pane.locator('.command-receipt').filter({hasText:'Draft changed'}).waitFor();assert.equal(requests.length,0);
     const planChip=pane.getByRole('button',{name:'Plan mode on, press to turn off',exact:true});
     await planChip.waitFor();
     assert.equal(await input.getAttribute('placeholder'),'describe your task to generate plan');
@@ -61,8 +61,9 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     assert.notEqual(await input.getAttribute('placeholder'),'describe your task to generate plan');
     assert.equal(await input.inputValue(),'Keep this draft while leaving Plan');
     assert.equal(requests.length,0);
-    await input.fill('/plan on');await pane.getByTestId('composer-send').click();await planChip.waitFor();
-    await input.fill('Review the exact saved plan.');await pane.getByTestId('composer-send').click();
+    await input.fill('/plan Review the exact saved plan.');await pane.getByTestId('composer-send').click();
+    await planChip.waitFor();
+    await pane.getByText('Review the exact saved plan.',{exact:true}).waitFor();
     await navigationFilter(page,'attention');await page.getByRole('region',{name:'Needs attention',exact:true}).getByRole('button',{name:'Answer question 1',exact:true}).click();
     const dialog=pane.locator('form').filter({has:page.locator('.review-plan')});await dialog.locator('.review-plan').waitFor();
     assert.equal(await page.locator('.review-plan').count(),1,'opening an observed plan mounts only one review');
@@ -75,6 +76,7 @@ for(const [name,engine] of [['chromium',chromium],['firefox',firefox]]) {
     await dialog.getByLabel('Optional review feedback',{exact:true}).fill('Verified in the actual browser.');
     await dialog.getByRole('button',{name:'Approve and execute',exact:true}).click();await page.getByLabel('Optional review feedback',{exact:true}).waitFor({state:'hidden'});await pane.locator('.pane-status').filter({hasText:'Completed'}).waitFor({state:'attached'});
     assert.equal(requests.length,3);assert(JSON.stringify(requests[2].messages).includes('Plan mode is disabled'));
+    await pane.getByText('REVIEW_SETTLED',{exact:true}).waitFor();
     assert(JSON.stringify(requests[2].messages).includes('Verified in the actual browser.'));
     await page.setViewportSize({width:1440,height:980});await page.screenshot({path:join(path,'approved.png')});await assertNoNotices(page);assert.deepEqual(errors,[]);
     results.push({browser:name,version:browser.version(),closed_choices:true,literal_plan:true,narrow_containment:true,provider_requests:requests.length,approval_commit_visible_to_next_request:true,ok:true});

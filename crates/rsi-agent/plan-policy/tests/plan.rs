@@ -281,24 +281,39 @@ async fn ordinary_factory_owns_disabled_defaults_commands_projection_and_preset_
         serde_json::json!({"enabled":false,"allow_tools":["ask_user","directory_list","file_read","output_read","plan_write","request_plan_execution","todo_write","workflow_cancel","workflow_read"],"review":{"plan":null,"last_review":null}})
     );
     for (id, argument, expected) in [
-        ("on", "on", true),
+        ("enter", "", true),
+        ("enter-again", "  ", true),
         ("off", "off", false),
-        ("toggle", "toggle", true),
-        ("empty", "", false),
+        ("off-again", " off ", false),
     ] {
         command(&mut draft, id, argument).await;
         assert_eq!(view(&draft).await["enabled"], expected);
     }
     let before = draft.revision();
-    let DraftCommandPreparation::Run(prepared) = draft
-        .prepare_command(invocation(&draft, "bad", "enable"))
-        .unwrap()
-    else {
-        panic!("new command")
-    };
-    assert!(prepared.execute(CancellationToken::new()).await.is_err());
-    assert_eq!(draft.revision(), before);
-    command(&mut draft, "on-again", "on").await;
+    for task in ["on", "toggle", "sketch the layout"] {
+        let original = invocation(&draft, "plan-task", &format!(" {task} "));
+        let DraftCommandPreparation::Run(prepared) =
+            draft.prepare_command(original.clone()).unwrap()
+        else {
+            panic!("new task")
+        };
+        let mut mutation = prepared.execute(CancellationToken::new()).await.unwrap();
+        let staged = draft
+            .prepare_first_command_task(&mut mutation)
+            .unwrap()
+            .unwrap();
+        let initial = staged.initial_commit().unwrap();
+        assert_eq!(
+            initial.first_command_source().unwrap().invocation_sha256,
+            original.digest().unwrap()
+        );
+        assert_eq!(
+            staged.first_command_task().unwrap().content,
+            [rsi_agent_session_protocol::AgentMessageContent::Text { text: task.into() }]
+        );
+        assert_eq!(draft.revision(), before);
+    }
+    command(&mut draft, "on-again", "").await;
     let prepared = draft
         .prepare_preset_selection(AgentPresetId::new("fixture").unwrap())
         .await
@@ -319,7 +334,7 @@ async fn actual_draft_state_enters_kernel_and_policy_only_adds_constraints() {
 async fn check_actual_draft(review_tools: bool) {
     let fixture = Fixture::with_review_tools(review_tools).await;
     let mut draft = fixture.draft().await;
-    command(&mut draft, "enable", "on").await;
+    command(&mut draft, "enable", "").await;
     let pin = draft.composition().clone();
     let store = Arc::new(MemoryStore::new());
     let kernel = AgentKernel::recover(store.clone(), fixture.composition.clone())

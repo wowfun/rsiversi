@@ -124,6 +124,25 @@ pub struct DraftCommandMutation {
     output: SessionCommandOutput,
 }
 
+impl DraftCommandMutation {
+    /// Marks the boundary after which a lost first-turn reply needs a receipt lookup.
+    pub fn begin_publication(&self) {
+        self.outcome.begin_publication();
+    }
+
+    /// Notifies observers after the first mailbox publication has been confirmed.
+    pub async fn committed(
+        mut self,
+        receipt: &crate::PublicationReceipt<'_>,
+    ) -> DraftCommandResult<()> {
+        self.outcome.committed(receipt);
+        for publication in &mut self.output.publications {
+            publication.committed(receipt).await?;
+        }
+        Ok(())
+    }
+}
+
 /// Completed local admission with deferred notification outside the draft mutation lock.
 #[derive(Debug)]
 pub struct AppliedDraftCommand {
@@ -168,6 +187,41 @@ impl AppliedDraftCommand {
 }
 
 impl AgentSessionDraft {
+    /// Stages the successor independently, so refused first-turn admission leaves the lease intact.
+    pub fn prepare_first_command_task(
+        &self,
+        mutation: &mut DraftCommandMutation,
+    ) -> DraftCommandResult<Option<crate::PreparedFreshSession>> {
+        if !mutation.output.start_draft {
+            return Ok(None);
+        }
+        if !Arc::ptr_eq(&self.identity, &mutation.identity) {
+            return Err(DraftCommandError::WrongDraft);
+        }
+        self.check_command_revision(&mutation.invocation)?;
+        if mutation.output.inputs.last().map(|input| input.delivery)
+            != Some(rsi_agent_session_protocol::MessageDelivery::Steer)
+        {
+            return Err(DraftCommandError::Invalid(
+                "first command task requires a steering input".into(),
+            ));
+        }
+        let mut session = self.freeze();
+        session
+            .inner
+            .baseline
+            .apply_batch(&mutation.output.domains)?;
+        session
+            .inner
+            .command_inputs
+            .extend(super::PreparedCommandInput::prepare(
+                &mutation.invocation,
+                std::mem::take(&mut mutation.output.inputs),
+            )?);
+        super::PreparedCommandInput::validate_batch(&session.inner.command_inputs)?;
+        session.inner.start_draft = true;
+        Ok(Some(session))
+    }
     /// Returns the lease-local mutation revision, independent of domain revision zero.
     pub const fn revision(&self) -> CommandRevision {
         CommandRevision::Draft {
@@ -292,6 +346,11 @@ impl AgentSessionDraft {
         &mut self,
         mutation: &mut DraftCommandMutation,
     ) -> DraftCommandResult<SessionCommandReceipt> {
+        if mutation.output.start_draft {
+            return Err(DraftCommandError::Invalid(
+                "first command task requires mailbox admission".into(),
+            ));
+        }
         if !Arc::ptr_eq(&self.identity, &mutation.identity) {
             return Err(DraftCommandError::WrongDraft);
         }
@@ -310,9 +369,10 @@ impl AgentSessionDraft {
             std::mem::take(&mut mutation.output.inputs),
         )?);
         super::PreparedCommandInput::validate_batch(&inputs)?;
-        let state_sha256 = super::initial_commit(&baseline, &inputs, self.composition.selection())?
-            .request_sha256()
-            .to_owned();
+        let state_sha256 =
+            super::initial_commit(&baseline, &inputs, self.composition.selection(), false)?
+                .request_sha256()
+                .to_owned();
         let receipt = SessionCommandReceipt::draft_changed(&mutation.invocation, state_sha256)?;
         let CommandRevision::Draft { revision } = receipt.revision() else {
             unreachable!("draft receipt")

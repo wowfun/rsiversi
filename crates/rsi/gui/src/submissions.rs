@@ -669,16 +669,8 @@ impl GuiApplication {
                         *accepted = Some(receipt.accepted_control_seq);
                     }
                     drop(owned);
-                    if !attached
-                        .durable
-                        .swap(true, std::sync::atomic::Ordering::AcqRel)
-                    {
-                        if mode == Mode::Query {
-                            attached.controller.observe_durable_session();
-                        }
-                        if let Some(navigation) = &self.navigation {
-                            navigation.invalidate();
-                        }
+                    if self.mark_published(attached) && mode == Mode::Query {
+                        attached.controller.observe_durable_session();
                     }
                 }
                 result.map(|_| ())
@@ -691,6 +683,12 @@ impl GuiApplication {
                     attached.controller.reconcile_command(invocation).await
                 };
                 result.map(|receipt| {
+                    if matches!(
+                        receipt.outcome(),
+                        rsi_agent_session_protocol::CommandOutcome::Committed { .. }
+                    ) {
+                        self.mark_published(attached);
+                    }
                     *attached
                         .submission
                         .receipt
@@ -708,5 +706,15 @@ impl GuiApplication {
                 error: error(reason),
             },
         }
+    }
+
+    fn mark_published(&self, attached: &Attachment) -> bool {
+        let first = !attached
+            .durable
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        if first && let Some(navigation) = &self.navigation {
+            navigation.invalidate();
+        }
+        first
     }
 }

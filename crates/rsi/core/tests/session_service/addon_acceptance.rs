@@ -252,7 +252,7 @@ async fn prepare_durable_state(
     check_settings(running).await;
     let old = create(running, fixture, "workbench-old").await;
     assert!(!enabled(&old).await);
-    set_plan(&old, "on", "draft-on").await;
+    set_plan(&old, "", "draft-on").await;
     assert!(enabled(&old).await);
     assert!(old.history_before(None, 8).await.unwrap().facts.is_empty());
     assert!(
@@ -362,7 +362,7 @@ async fn fork_completed_state(
     provider: &Provider,
     parent: &Arc<dyn SessionHandle>,
 ) -> SessionId {
-    set_plan(parent, "on", "idle-on-after-completed-turn").await;
+    set_plan(parent, "", "idle-on-after-completed-turn").await;
     provider
         .calls
         .lock()

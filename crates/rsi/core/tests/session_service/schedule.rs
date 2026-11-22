@@ -1204,7 +1204,7 @@ async fn plan_enablement_while_schedule_disarm_is_blocked_rejects_the_mutation()
                 .clone(),
             request_id: rsi_agent_session_protocol::DomainRequestId::new("enable-plan").unwrap(),
             expected_revision: commands.revision(),
-            arguments: rsi_agent_session_protocol::CommandArguments::new("on".into()).unwrap(),
+            arguments: rsi_agent_session_protocol::CommandArguments::new("".into()).unwrap(),
         })
         .await
         .unwrap();

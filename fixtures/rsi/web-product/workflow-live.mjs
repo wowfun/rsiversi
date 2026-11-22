@@ -68,7 +68,7 @@ try {
     processIdentity={...nodes[0],namespace_pid:JSON.parse(progress.record.event.message).pid};
     await writeFile(join(report,'process.json'),JSON.stringify(processIdentity));
     if(mode==='plan') {
-      await input.fill('/plan on');
+      await input.fill('/plan');
       await pane.getByTestId('composer-send').click();
       await page.waitForFunction(() => document.querySelector('[aria-label="Main message"]')?.value === '');
     } else {

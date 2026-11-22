@@ -83,7 +83,7 @@ async fn todo_replaces_across_turns_clears_and_is_allowed_in_plan_mode() {
                 .clone(),
             request_id: DomainRequestId::new("plan-on").unwrap(),
             expected_revision: commands.revision(),
-            arguments: CommandArguments::new("on".into()).unwrap(),
+            arguments: CommandArguments::new("".into()).unwrap(),
         })
         .await
         .unwrap();

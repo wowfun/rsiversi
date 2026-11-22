@@ -552,6 +552,7 @@ impl ExternalCommand {
             domains: vec![operation.prepared.proposal().clone()],
             inputs,
             publications: vec![Publication::new(operation)],
+            start_draft: false,
         })
     }
 }

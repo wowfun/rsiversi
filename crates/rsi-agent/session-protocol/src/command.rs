@@ -22,7 +22,7 @@ pub const MAXIMUM_COMMAND_INPUT_BYTES: usize = 256 * 1024;
 pub struct CommandMessage {
     /// Immutable command source, identity and typed content.
     pub message: crate::AgentMessage,
-    /// Mailbox delivery intent. Draft publications hold all inputs for their first Step.
+    /// Mailbox delivery intent, including the task that starts a fresh Session.
     pub delivery: crate::MessageDelivery,
 }
 impl CommandMessage {
@@ -31,7 +31,7 @@ impl CommandMessage {
         compact_json_len(self)
     }
     /// Validates ordering, provenance and aggregate bounds for one command-input batch.
-    /// Draft batches must hold every input for their first Step.
+    /// An initial publication can end with the task that starts its first turn.
     pub fn validate_batch(
         inputs: &[Self],
         invocation: Option<&SessionCommandInvocation>,
@@ -48,7 +48,7 @@ impl CommandMessage {
             .transpose()?;
         let mut ids = std::collections::BTreeSet::new();
         let mut ordinals = std::collections::BTreeMap::new();
-        for input in inputs {
+        for (index, input) in inputs.iter().enumerate() {
             let source = input.validated_source()?;
             if let Some((invocation, digest)) = &binding
                 && (source.command != invocation.command
@@ -71,9 +71,13 @@ impl CommandMessage {
             if !ids.insert(&input.message.message_id) {
                 return Err(SessionError::Invalid("duplicate command input".into()));
             }
-            if draft && input.delivery != crate::MessageDelivery::NextStep {
+            if draft
+                && input.delivery != crate::MessageDelivery::NextStep
+                && !(index + 1 == inputs.len()
+                    && input.delivery == crate::MessageDelivery::NextTurn)
+            {
                 return Err(SessionError::Invalid(
-                    "draft input must be held for first Step".into(),
+                    "only the last initial command input can start the first turn".into(),
                 ));
             }
         }
