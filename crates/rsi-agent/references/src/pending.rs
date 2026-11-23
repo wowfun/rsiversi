@@ -30,6 +30,14 @@ impl Default for Pending {
     }
 }
 impl Pending {
+    pub(super) fn has_session(&self, id: &SessionId) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(id)
+            .is_some_and(|slots| slots.strong_count() != 0)
+    }
     pub(super) fn reserve(&self, id: &SessionId) -> Result<Reservation> {
         let global = self
             .slots
@@ -126,7 +134,9 @@ mod tests {
         let retained = Arc::new(());
         let original =
             PreparedCasObject::new(object(0).reference().clone(), retained.clone()).unwrap();
+        assert!(!pending.has_session(&id));
         let first = pending.reserve(&id).unwrap();
+        assert!(pending.has_session(&id));
         let first_id = first.id.clone();
         pending.publish(id.clone(), original, first).unwrap();
         let second = pending.reserve(&id).unwrap();
@@ -145,10 +155,12 @@ mod tests {
         assert_eq!(Arc::strong_count(&retained), 2);
         pending.release(&id, &first_id);
         assert_eq!(Arc::strong_count(&retained), 1);
+        assert!(pending.has_session(&id));
         pending.release(&id, &first_id);
         assert_eq!(Arc::strong_count(&other_retained), 2);
         assert_eq!(pending.slots.available_permits(), 255);
         pending.release(&id, &second_id);
+        assert!(!pending.has_session(&id));
         assert_eq!(Arc::strong_count(&other_retained), 1);
         assert_eq!(pending.slots.available_permits(), 256);
     }

@@ -240,6 +240,10 @@ impl References {
     ) {
         self.pending.release(target, &snapshot.capture_id);
     }
+    /// Whether an in-flight or unsubmitted capture still needs this Session owner.
+    pub fn has_pending(&self, target: &rsi_agent_session_protocol::SessionId) -> bool {
+        self.pending.has_session(target)
+    }
     /// Releases all captures when the actual Session/draft owner ends.
     pub fn release_session(&self, target: &rsi_agent_session_protocol::SessionId) {
         self.pending.release_session(target);

@@ -258,6 +258,79 @@ fn request(_path: &Path, id: impl Into<String>) -> CreateSession {
 }
 
 #[tokio::test]
+async fn full_device_reclaims_only_unused_shared_preparations() {
+    let dir = tempfile::tempdir().unwrap();
+    let preparation = Preparation::new(false);
+    let service = service(dir.path(), preparation.clone());
+    let create = |id: String| service.create_shared_blank(request(dir.path(), id), device(1));
+    let private = request(dir.path(), "private");
+    service
+        .create_from(private.clone(), device(1))
+        .await
+        .unwrap();
+    let live = create("live".into()).await.unwrap();
+    let retained = create("retained".into())
+        .await
+        .unwrap()
+        .retain_draft()
+        .unwrap()
+        .unwrap();
+    let changed = create("changed".into()).await.unwrap();
+    let selected = changed
+        .select_preset(rsi_session_protocol::SelectDraftPreset {
+            expected_revision: 0,
+            preset_id: AgentPresetId::new("selected").unwrap(),
+        })
+        .await
+        .unwrap();
+    drop(changed);
+    let mut handles = Vec::new();
+    for n in 0..60 {
+        handles.push(create(format!("catalog-{n:02}")).await.unwrap());
+    }
+    let saved = handles[0].header().await.unwrap();
+    assert!(matches!(
+        create("extra".into()).await,
+        Err(SessionError::Capacity)
+    ));
+    drop(handles);
+    for n in 0..12 {
+        create(format!("extra-{n:02}")).await.unwrap();
+    }
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 64);
+    assert!(retained.is_active());
+    assert_eq!(live.draft_snapshot().await.unwrap().revision, 0);
+    let reader = service.scoped(device(1));
+    reader
+        .attach(&private.session_id)
+        .await
+        .unwrap()
+        .draft_snapshot()
+        .await
+        .unwrap();
+    let reopened = reader
+        .attach(selected.header.session_id())
+        .await
+        .unwrap()
+        .draft_snapshot()
+        .await
+        .unwrap();
+    assert_eq!(reopened.revision, selected.revision);
+    assert_eq!(
+        reader
+            .attach(saved.session_id())
+            .await
+            .unwrap()
+            .header()
+            .await
+            .unwrap(),
+        saved
+    );
+    assert_eq!(preparation.leases.load(Ordering::SeqCst), 64);
+    service.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_creates_keep_one_preparation_after_the_first_waiter_is_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let preparation = Preparation::new(true);

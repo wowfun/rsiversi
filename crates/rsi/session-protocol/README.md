@@ -299,6 +299,10 @@ and cannot be supplied through JSON. The first creator owns the device charge;
 an identical retry from any client shares that lease before checking new-draft
 capacity. Publication, failed preparation and expiry release the charge together
 with the draft. Local callers share the global bound without a device charge.
+At capacity, an unused shared blank can give up its preparation slot. Its
+catalog Header stays available for the next attachment. A live handle, retained
+owner, in-flight operation, changed draft revision or pending reference keeps
+the preparation. A full device can reclaim only its own slots.
 An identical live retry does not repeat those reads, even if the registration
 is subsequently removed; a new draft with that unknown WorkspaceId fails.
 Dropping a create waiter does not cancel its service-owned preparation. Creating

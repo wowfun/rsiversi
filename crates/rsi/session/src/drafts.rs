@@ -1,6 +1,6 @@
 use super::{LocalSessionHandle, LocalSessionService};
 use futures_util::FutureExt as _;
-use rsi_agent_session_protocol::SessionId;
+use rsi_agent_session_protocol::{CommandRevision, SessionId};
 use rsi_meta::{Deadline, Execution};
 use rsi_session_protocol::{CreateSession, Result, SessionError};
 use std::collections::BTreeMap;
@@ -74,6 +74,42 @@ struct LeaseState {
 }
 
 impl Entry {
+    // Called under the directory lock. A getter can be between cloning the
+    // entry, subscribing to its result, and binding its own handle.
+    fn is_unused_shared_blank(self: &Arc<Self>) -> bool {
+        if !self.request.shared()
+            || Arc::strong_count(self) != 1
+            || self.result.receiver_count() != 0
+        {
+            return false;
+        }
+        let result = self.result.borrow();
+        let Some(Ok(handle)) = result.as_ref() else {
+            return false;
+        };
+        if Arc::strong_count(handle) != 1 || Arc::strong_count(&handle.state) != 1 {
+            return false;
+        }
+        let Ok(state) = handle.state.try_lock() else {
+            return false;
+        };
+        let super::HandleState::Fresh(draft) = &*state else {
+            return false;
+        };
+        if !matches!(draft.revision(), CommandRevision::Draft { revision: 0 }) {
+            return false;
+        }
+        let lease = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lease.owners == 0
+            && !handle
+                .references
+                .as_ref()
+                .is_some_and(|refs| refs.has_pending(handle.session_id()))
+    }
+
     fn is_catalog_draft(&self) -> bool {
         !self.request.shared()
             && self.device.is_some()
@@ -258,6 +294,7 @@ impl Drafts {
         self.prune();
         let key = request.key();
         let shared = key.shared();
+        let mut displaced = None;
         let (entry, owner) = {
             let mut entries = self
                 .entries
@@ -274,16 +311,24 @@ impl Drafts {
                 }
                 (entry.clone(), false)
             } else {
-                if entries.len() >= CAPACITY
-                    || device.as_ref().is_some_and(|device| {
-                        entries
-                            .values()
-                            .filter(|entry| entry.device.as_ref() == Some(device))
-                            .count()
-                            >= DEVICE_CAPACITY
-                    })
-                {
-                    return Err(SessionError::Capacity);
+                let device_full = device.as_ref().is_some_and(|device| {
+                    entries
+                        .values()
+                        .filter(|entry| entry.device.as_ref() == Some(device))
+                        .count()
+                        >= DEVICE_CAPACITY
+                });
+                if device_full || entries.len() >= CAPACITY {
+                    let (_, unused) = entries
+                        .extract_if(.., |_, entry| {
+                            (!device_full || entry.device == device)
+                                && entry.is_unused_shared_blank()
+                        })
+                        .next()
+                        .ok_or(SessionError::Capacity)?;
+                    // Only the cached preparation ends. The catalog and its
+                    // reference owner remain live while a new caller reattaches.
+                    displaced = unused.result.send_replace(None);
                 }
                 let (result, _) = watch::channel(None);
                 let entry = Arc::new(Entry {
@@ -301,6 +346,7 @@ impl Drafts {
                 (entry, true)
             }
         };
+        drop(displaced);
         let receiver = entry.result.subscribe();
         if owner {
             let drafts = self.clone();
