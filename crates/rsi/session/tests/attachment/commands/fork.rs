@@ -225,7 +225,7 @@ async fn create_enumerated_fork(
         )
         .await
         .unwrap();
-    let drafts = fixture.service.device_drafts(&owner).await.unwrap();
+    let drafts = fixture.service.device_drafts(&owner, None).await.unwrap();
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].session_id, request.session_id);
     assert_eq!(drafts[0].inherited_turns, 1);
@@ -240,7 +240,7 @@ async fn create_enumerated_fork(
         )
         .await
         .unwrap();
-    let drafts = fixture.service.device_drafts(&owner).await.unwrap();
+    let drafts = fixture.service.device_drafts(&owner, None).await.unwrap();
     assert_eq!(
         drafts
             .iter()

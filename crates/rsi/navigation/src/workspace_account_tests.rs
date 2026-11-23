@@ -21,7 +21,11 @@ async fn attachment_enrolls_only_the_named_session_once() {
     );
     let other_id = other.id.clone();
     Arc::get_mut(&mut owner).unwrap().workspace = Arc::new(Workspaces {
-        records: [(workspace.clone(), record), (other_id.clone(), other)].into(),
+        records: [
+            (workspace.clone(), record.clone()),
+            (other_id.clone(), other.clone()),
+        ]
+        .into(),
         ..Default::default()
     });
     let first = SessionId::new("row-001").unwrap();
@@ -45,6 +49,21 @@ async fn attachment_enrolls_only_the_named_session_once() {
             .is_err()
     );
     assert!(!owner.workspace_contains(&other_id, &first));
+    let members = owner
+        .workspace_members(CallOrigin::Local, &record)
+        .unwrap()
+        .await
+        .unwrap();
+    let summary = owner.store.session_summary(&first).await.unwrap();
+    assert_eq!(members, [(first, summary.last_activity_ms)]);
+    assert!(
+        owner
+            .workspace_members(CallOrigin::Local, &other)
+            .unwrap()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(owner.metadata_revision(), 1);
     owner.close().await;
 }
@@ -105,7 +124,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     let editable = Arc::get_mut(&mut owner).unwrap();
     editable.domain = domain.domain.clone();
     editable.workspace = Arc::new(Workspaces {
-        records: [(workspace.clone(), row)].into(),
+        records: [(workspace.clone(), row.clone())].into(),
         ..Default::default()
     });
     let id = |n| SessionId::new(format!("row-{n:03}")).unwrap();
@@ -119,7 +138,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     assert_eq!(account(&owner, &workspace).await, expected);
     assert_eq!(
         move_to(id(1), Some(id(299))).await.unwrap(),
-        WorkspaceMoveOutcome::Applied
+        WorkspaceMoveOutcome::Applied(row.clone())
     );
     expected.retain(|entry| entry != &id(1));
     expected.insert(1, id(1));
@@ -128,7 +147,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
     for (session, before) in [(id(1), Some(id(1))), (id(1), Some(id(299))), (id(2), None)] {
         assert_eq!(
             move_to(session, before).await.unwrap(),
-            WorkspaceMoveOutcome::Applied
+            WorkspaceMoveOutcome::Applied(row.clone())
         );
     }
     assert_eq!(owner.metadata_revision(), 1);
@@ -250,7 +269,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     let editable = Arc::get_mut(&mut owner).unwrap();
     editable.domain = domain.domain.clone();
     editable.workspace = Arc::new(Workspaces {
-        records: [(workspace.clone(), row)].into(),
+        records: [(workspace.clone(), row.clone())].into(),
         ..Default::default()
     });
     let id = |n| SessionId::new(format!("row-{n:03}")).unwrap();
@@ -285,8 +304,8 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     // Disjoint moves commute; both must survive regardless of writer arrival order.
     let (first, second) =
         tokio::join!(move_to(id(1), Some(id(300))), move_to(id(2), Some(id(299))));
-    assert_eq!(first.unwrap(), WorkspaceMoveOutcome::Applied);
-    assert_eq!(second.unwrap(), WorkspaceMoveOutcome::Applied);
+    assert_eq!(first.unwrap(), WorkspaceMoveOutcome::Applied(row.clone()));
+    assert_eq!(second.unwrap(), WorkspaceMoveOutcome::Applied(row));
     assert_eq!(owner.metadata_revision(), 2);
     let mut expected = vec![id(1), id(300), id(2)];
     expected.extend((3..=299).rev().map(id));

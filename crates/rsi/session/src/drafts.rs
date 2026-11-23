@@ -436,6 +436,7 @@ impl Drafts {
     pub(super) fn ready_for(
         &self,
         device: &rsi_api_protocol::DeviceId,
+        workspace: Option<&rsi_workspace_protocol::WorkspaceId>,
     ) -> Vec<Arc<LocalSessionHandle>> {
         self.entries
             .lock()
@@ -450,6 +451,15 @@ impl Drafts {
                 }
                 let ready = entry.result.borrow();
                 let handle = ready.as_ref()?.as_ref().ok()?;
+                if workspace.is_some_and(|id| {
+                    handle
+                        .lease
+                        .as_ref()
+                        .and_then(|lease| lease.enrollment.as_ref())
+                        != Some(id)
+                }) {
+                    return None;
+                }
                 (!handle.private_owner).then(|| Arc::clone(handle))
             })
             .collect()

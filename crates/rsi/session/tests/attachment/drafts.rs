@@ -1082,18 +1082,46 @@ async fn enumerating_device_drafts_is_private_and_does_not_renew_the_idle_lease(
         async move { service.create_from(source, origin).await }
     });
     preparation.entered.acquire().await.unwrap().forget();
-    assert!(service.device_drafts(&owner).await.unwrap().is_empty());
+    assert!(
+        service
+            .device_drafts(&owner, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     preparation.release.as_ref().unwrap().add_permits(1);
     let handle = creating.await.unwrap().unwrap();
     tokio::time::advance(std::time::Duration::from_mins(30)).await;
-    let drafts = service.device_drafts(&owner).await.unwrap();
+    let drafts = service
+        .device_drafts(&owner, Some(&workspace))
+        .await
+        .unwrap();
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].session_id.as_str(), "blank");
     assert_eq!(drafts[0].workspace_id.as_ref(), Some(&workspace));
     assert_eq!(drafts[0].inherited_turns, 0);
-    assert!(service.device_drafts(&other).await.unwrap().is_empty());
+    assert!(
+        service
+            .device_drafts(&owner, Some(&WorkspaceId::from_bytes([17; 32])))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .device_drafts(&other, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     tokio::time::advance(std::time::Duration::from_mins(31)).await;
-    assert!(service.device_drafts(&owner).await.unwrap().is_empty());
+    assert!(
+        service
+            .device_drafts(&owner, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(handle.header().await.is_err());
     service.stop().await.unwrap();
 }

@@ -230,6 +230,7 @@ impl SessionIngress for Ingress {
     async fn device_drafts(
         &self,
         _: &rsi_api_protocol::AuthenticatedDevice,
+        _: Option<&rsi_workspace_protocol::WorkspaceId>,
     ) -> rsi_session_protocol::Result<Vec<rsi_session_protocol::DeviceDraft>> {
         panic!("local-only fixture cannot enumerate device drafts")
     }

@@ -133,21 +133,27 @@ impl Sessions {
             }
             Operation::Drafts { after } => self.workspace_drafts(&origin, after.as_ref()).await?,
             Operation::Default => self.default_workspace(origin).await?,
-            Operation::Rename { id, title } => record(
-                &self
+            Operation::Rename { id, title } => {
+                let row = self
                     .workspaces
-                    .scoped(origin)
+                    .scoped(origin.clone())
                     .rename(&id, title)
                     .await
-                    .map_err(remote)?,
-            ),
+                    .map_err(remote)?;
+                self.workspace_account(origin, &row).await?
+            }
             Operation::Create { path } => {
                 let (row, created) = self
                     .workspaces
-                    .register_local(origin, &path)
+                    .register_local(origin.clone(), &path)
                     .await
                     .map_err(remote)?;
-                json!({"record":record(&row),"created":created})
+                let row = if created {
+                    record(&row)
+                } else {
+                    self.workspace_account(origin, &row).await?
+                };
+                json!({"record":row,"created":created})
             }
             Operation::Delete { id } => {
                 json!(
@@ -180,6 +186,48 @@ impl Sessions {
         )
     }
 
+    async fn workspace_account(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        row: &WorkspaceRecord,
+    ) -> Result<Value> {
+        let rsi_api_protocol::CallOrigin::Device(device) = &origin else {
+            return Err(Error::Protocol);
+        };
+        let drafts = self
+            .ingress
+            .device_drafts(device, Some(&row.id))
+            .await
+            .map_err(remote)?;
+        let members = self
+            .navigation
+            .workspace_members(origin, row)
+            .map_err(remote)?
+            .await
+            .map_err(remote)?;
+        let mut drafts: std::collections::BTreeMap<_, _> = drafts
+            .into_iter()
+            .map(|draft| (draft.session_id, draft.created_at_ms))
+            .collect();
+        for (id, _) in &members {
+            drafts.remove(id);
+        }
+        let mut updated = row.created_at_ms;
+        let sessions = drafts
+            .into_iter()
+            .rev()
+            .chain(members)
+            .map(|(id, at)| {
+                updated = updated.max(Some(at));
+                id
+            })
+            .collect::<Vec<_>>();
+        let mut value = record(row);
+        value["sessions"] = json!(sessions);
+        value["updated"] = json!(updated);
+        Ok(value)
+    }
+
     async fn move_workspace_session(
         &self,
         origin: rsi_api_protocol::CallOrigin,
@@ -197,15 +245,17 @@ impl Sessions {
             use rsi_navigation::WorkspaceMoveOutcome;
             let outcome = self
                 .navigation
-                .insert_workspace_session_before(origin, id, session, before)
+                .insert_workspace_session_before(origin.clone(), id, session, before)
                 .map_err(remote)?
                 .await
                 .map_err(remote)?;
-            Ok(json!({"status":match outcome {
-                WorkspaceMoveOutcome::Applied => "applied",
-                WorkspaceMoveOutcome::UnknownWorkspace => "unknown",
-                WorkspaceMoveOutcome::InvalidMember => "invalid_member",
-            }}))
+            Ok(match outcome {
+                WorkspaceMoveOutcome::Applied(row) => {
+                    json!({"status":"applied","record":self.workspace_account(origin, &row).await?})
+                }
+                WorkspaceMoveOutcome::UnknownWorkspace => json!({"status":"unknown"}),
+                WorkspaceMoveOutcome::InvalidMember => json!({"status":"invalid_member"}),
+            })
         } else {
             Ok(json!({"status":"invalid_member"}))
         }
@@ -213,7 +263,10 @@ impl Sessions {
 
     async fn default_workspace(&self, origin: rsi_api_protocol::CallOrigin) -> Result<Value> {
         let spec = rsi_workspace_default_api::operation();
-        let invocation = self.dispatch.admit(&spec.call(), origin).map_err(remote)?;
+        let invocation = self
+            .dispatch
+            .admit(&spec.call(), origin.clone())
+            .map_err(remote)?;
         let bytes = self
             .dispatch
             .input_budget(spec.class)
@@ -226,7 +279,10 @@ impl Sessions {
         };
         let selected: Option<WorkspaceRecord> =
             serde_json::from_slice(message.json.as_bytes()).map_err(|_| Error::Protocol)?;
-        Ok(selected.as_ref().map_or(Value::Null, record))
+        match selected {
+            Some(row) => self.workspace_account(origin, &row).await,
+            None => Ok(Value::Null),
+        }
     }
 
     async fn workspace_drafts(
@@ -237,7 +293,11 @@ impl Sessions {
         let rsi_api_protocol::CallOrigin::Device(device) = origin else {
             return Err(Error::Protocol);
         };
-        let rows = self.ingress.device_drafts(device).await.map_err(remote)?;
+        let rows = self
+            .ingress
+            .device_drafts(device, None)
+            .await
+            .map_err(remote)?;
         let mut slice = rows
             .iter()
             .filter(|row| after.is_none_or(|id| id < &row.session_id));

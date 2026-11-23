@@ -1207,6 +1207,7 @@ pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
     async fn device_drafts(
         &self,
         device: &rsi_api_protocol::AuthenticatedDevice,
+        workspace: Option<&WorkspaceId>,
     ) -> Result<Vec<DeviceDraft>>;
     /// Binds every service operation and returned handle to this authenticated caller.
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin) -> Arc<dyn SessionService>;

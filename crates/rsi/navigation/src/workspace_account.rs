@@ -8,7 +8,7 @@ use std::collections::HashSet;
 #[derive(Debug, Eq, PartialEq)]
 pub enum WorkspaceMoveOutcome {
     /// The order is durable, including an unchanged move.
-    Applied,
+    Applied(rsi_workspace_protocol::WorkspaceRecord),
     /// The selected Workspace is not registered.
     UnknownWorkspace,
     /// The Session or anchor does not belong to this account.
@@ -91,6 +91,40 @@ impl Document {
 }
 
 impl Navigation {
+    /// Reads authorized identities and activity times in this registration's committed order.
+    pub fn workspace_members(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        workspace: &rsi_workspace_protocol::WorkspaceRecord,
+    ) -> Result<BoxFuture<'static, Result<Vec<(SessionId, u64)>>>> {
+        let admission = self
+            .resolver
+            .admit(&origin, workspace.coordinates.location())?;
+        let id = workspace.id.clone();
+        let coordinates = workspace.coordinates.clone();
+        self.run_read(move |owner| {
+            Box::pin(async move {
+                let _admission = admission;
+                let document = owner.document();
+                let mut result = Vec::new();
+                let mut leases = Vec::new();
+                if let Some(members) = document.workspace_orders.get(&id) {
+                    for member in members {
+                        if let Some(row) =
+                            super::visible_summary(owner.store.session_summary(member).await)?
+                            && row.header.coordinates() == &coordinates
+                            && owner.retain_header_view(&row.header, &origin, &mut leases)?
+                        {
+                            result.push((member.clone(), row.last_activity_ms));
+                        }
+                    }
+                }
+                super::finish_scope(&origin, &leases)?;
+                Ok(result)
+            })
+        })
+    }
+
     /// Tests membership in this registration's committed account.
     pub fn workspace_contains(&self, workspace: &WorkspaceId, session: &SessionId) -> bool {
         self.document()
@@ -220,7 +254,7 @@ impl Navigation {
                     admissions[index] = Some(owner.admit_metadata(&header, &origin)?);
                 }
                 if before.as_ref() == Some(&session) {
-                    return Ok(WorkspaceMoveOutcome::Applied);
+                    return Ok(WorkspaceMoveOutcome::Applied(record));
                 }
                 let [from, at] = positions;
                 if from + 1 != at {
@@ -231,7 +265,7 @@ impl Navigation {
                     drop(current);
                     owner.publish(change).await?;
                 }
-                Ok(WorkspaceMoveOutcome::Applied)
+                Ok(WorkspaceMoveOutcome::Applied(record))
             })
         })
     }

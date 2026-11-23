@@ -953,6 +953,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
     async fn device_drafts(
         &self,
         device: &rsi_api_protocol::AuthenticatedDevice,
+        workspace: Option<&rsi_workspace_protocol::WorkspaceId>,
     ) -> Result<Vec<rsi_session_protocol::DeviceDraft>> {
         let scope = Self {
             origin: rsi_api_protocol::CallOrigin::Device(device.clone()),
@@ -961,7 +962,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         let visible = scope.visibility()?;
         let mut protections = Vec::new();
         let mut rows = Vec::new();
-        for handle in self.drafts.ready_for(&device.id) {
+        for handle in self.drafts.ready_for(&device.id, workspace) {
             if !visible.locations().contains(handle.coordinates.location()) {
                 continue;
             }

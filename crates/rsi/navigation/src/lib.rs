@@ -1179,16 +1179,7 @@ impl Navigation {
         &self,
         id: &SessionId,
     ) -> Result<Option<rsi_agent_session_protocol::SessionHeader>> {
-        use rsi_agent_store_protocol::StoreError;
-        match self
-            .store
-            .session_summary(id)
-            .await
-            .map(|summary| summary.header)
-        {
-            Err(StoreError::ReadCapacity | StoreError::ValidationBusy) => Err(ApiError::Capacity),
-            result => visible_header(result),
-        }
+        Ok(visible_summary(self.store.session_summary(id).await)?.map(|summary| summary.header))
     }
 
     async fn retain_session_view(
@@ -1254,12 +1245,14 @@ impl Navigation {
         }
     }
 }
-fn visible_header(
-    result: rsi_agent_store_protocol::Result<rsi_agent_session_protocol::SessionHeader>,
-) -> Result<Option<rsi_agent_session_protocol::SessionHeader>> {
+fn visible_summary(
+    result: rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSession>,
+) -> Result<Option<rsi_agent_store_protocol::StoreRecentSession>> {
+    use rsi_agent_store_protocol::StoreError;
     match result {
-        Ok(header) => Ok(Some(header)),
-        Err(rsi_agent_store_protocol::StoreError::NotFound(_)) => Ok(None),
+        Ok(summary) => Ok(Some(summary)),
+        Err(StoreError::NotFound(_)) => Ok(None),
+        Err(StoreError::ReadCapacity | StoreError::ValidationBusy) => Err(ApiError::Capacity),
         Err(_) => Err(ApiError::Unavailable),
     }
 }

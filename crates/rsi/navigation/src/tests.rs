@@ -1992,12 +1992,12 @@ async fn a_linear_scan_replaces_its_cut_and_expires_after_five_minutes() {
 fn header_failure_is_not_silently_treated_as_a_protection_denial() {
     use rsi_agent_store_protocol::StoreError;
     assert!(matches!(
-        visible_header(Err(StoreError::NotFound("missing".into()))),
+        visible_summary(Err(StoreError::NotFound("missing".into()))),
         Ok(None)
     ));
     assert!(matches!(
-        visible_header(Err(StoreError::ValidationBusy)),
-        Err(ApiError::Unavailable)
+        visible_summary(Err(StoreError::ValidationBusy)),
+        Err(ApiError::Capacity)
     ));
 }
 

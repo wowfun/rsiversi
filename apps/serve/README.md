@@ -333,6 +333,9 @@ without starting another Turn. Repeating the archive skips
 the stop.
 It uses the Workspace registry for creating, renaming and deleting
 registrations. Creation returns the registry's atomic inserted flag.
+Resolving, renaming, selecting the default or reordering one registration
+returns its current visible members directly. The owner device's unpublished
+drafts are read before the committed account so publication preserves position.
 An application chat creation with an explicit Workspace ID attaches its Session
 to that registration. Reusing a requested blank requires membership of the
 selected Workspace. Creating a Session with only a cwd resolves that directory

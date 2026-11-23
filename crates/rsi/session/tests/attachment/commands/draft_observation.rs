@@ -24,7 +24,7 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
         Some(Some(Ok(DirectoryChange::Catalog)))
     ));
     assert_eq!(
-        fixture.service.device_drafts(&device).await.unwrap()[0].session_id,
+        fixture.service.device_drafts(&device, None).await.unwrap()[0].session_id,
         request.session_id
     );
     assert_eq!(
@@ -38,7 +38,7 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
     assert!(
         fixture
             .service
-            .device_drafts(&device)
+            .device_drafts(&device, None)
             .await
             .unwrap()
             .is_empty()
@@ -60,7 +60,7 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
     assert!(
         fixture
             .service
-            .device_drafts(&device)
+            .device_drafts(&device, None)
             .await
             .unwrap()
             .is_empty()
