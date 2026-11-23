@@ -2,7 +2,21 @@ use super::{
     ApiError, Arc, BoxFuture, CallOrigin, Document, DocumentChange, MetadataSize, Navigation,
     Result, SessionId, WorkspaceError, WorkspaceId, encoded_entry_bytes, storage_error,
 };
-use std::collections::HashSet;
+use futures_util::StreamExt;
+use std::collections::{HashMap, HashSet};
+
+/// Account and partition metadata for an already authorized Session header.
+#[derive(Debug, Default)]
+pub struct WorkspaceCatalogMetadata {
+    /// Current registration and committed position, when explicitly enrolled.
+    pub account: Option<(WorkspaceId, usize)>,
+    /// Whether the Session is archived.
+    pub archived: bool,
+    /// Whether the Session is pinned.
+    pub pinned: bool,
+    /// Latest partition change used for archive and pin ordering.
+    pub partition_revision: Option<u64>,
+}
 
 /// Outcome of a shared Workspace Session account move.
 #[derive(Debug, Eq, PartialEq)]
@@ -91,6 +105,58 @@ impl Document {
 }
 
 impl Navigation {
+    /// Joins an authorized header page to the current accounts, in input order.
+    pub async fn workspace_catalog_metadata(
+        &self,
+        sessions: &[rsi_agent_store_protocol::StoreRecentSession],
+    ) -> Result<Vec<WorkspaceCatalogMetadata>> {
+        let document = self.document();
+        let mut rows: Vec<_> = sessions
+            .iter()
+            .map(|session| {
+                let metadata = document.records.get(session.header.session_id());
+                WorkspaceCatalogMetadata {
+                    account: None,
+                    archived: metadata.is_some_and(|row| row.archived),
+                    pinned: metadata.is_some_and(|row| row.pinned),
+                    partition_revision: metadata.and_then(|row| row.partition_revision),
+                }
+            })
+            .collect();
+        if sessions.is_empty() || document.workspace_orders.is_empty() {
+            return Ok(rows);
+        }
+        let page: HashMap<_, _> = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, session)| (session.header.session_id(), i))
+            .collect();
+        let mut candidates = Vec::new();
+        for (id, order) in &document.workspace_orders {
+            for (position, member) in order.iter().enumerate() {
+                if let Some(&index) = page.get(member) {
+                    rows[index].account = Some((id.clone(), position));
+                    candidates.push(index);
+                }
+            }
+        }
+        // A replacement registration at the same directory has a new identity.
+        drop(document);
+        let registrations = self.workspace_lookups(
+            candidates
+                .iter()
+                .map(|&index| Some(sessions[index].header.coordinates())),
+        );
+        let mut checked = futures_util::stream::iter(candidates.iter().copied()).zip(registrations);
+        while let Some((index, registered)) = checked.next().await {
+            let registered = registered?;
+            if rows[index].account.as_ref().map(|(id, _)| id) != registered.as_ref() {
+                rows[index].account = None;
+            }
+        }
+        Ok(rows)
+    }
+
     /// Reads authorized identities and activity times in this registration's committed order.
     pub fn workspace_members(
         self: &Arc<Self>,

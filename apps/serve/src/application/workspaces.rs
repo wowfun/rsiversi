@@ -2,7 +2,7 @@ use super::Sessions;
 use rsi_agent_session_protocol::SessionId;
 use rsi_extension::{Error, Result};
 use rsi_navigation::{ArchiveIntent, ArchiveOutcome};
-use rsi_navigation_api::{OrderMembership, OrderScope};
+use rsi_session_protocol::RecentSessionCursor;
 use rsi_workspace_protocol::{WorkspaceCursor, WorkspaceId, WorkspaceName, WorkspaceRecord};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,7 +24,11 @@ enum Operation {
         id: WorkspaceId,
         before: Option<WorkspaceId>,
     },
-    Membership,
+    Membership {
+        after: Option<RecentSessionCursor>,
+        #[serde(default)]
+        headers: bool,
+    },
     InsertSessionBefore {
         id: WorkspaceId,
         session: String,
@@ -96,7 +100,10 @@ impl Sessions {
                     Err(error) => return Err(remote(error)),
                 }
             }
-            Operation::Membership => self.workspace_membership(&origin).await?,
+            Operation::Membership { after, headers } => {
+                self.workspace_membership(origin, after.as_ref(), headers)
+                    .await?
+            }
             Operation::InsertSessionBefore {
                 id,
                 session,
@@ -171,19 +178,56 @@ impl Sessions {
         Ok(value)
     }
 
-    async fn workspace_membership(&self, origin: &rsi_api_protocol::CallOrigin) -> Result<Value> {
-        let seed = self
-            .navigation
-            .order_seed(origin, OrderScope::All)
-            .map_err(remote)?
+    async fn workspace_membership(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        after: Option<&RecentSessionCursor>,
+        headers: bool,
+    ) -> Result<Value> {
+        let page = self
+            .ingress
+            .scoped(origin)
+            .list_recent(after, 64)
             .await
             .map_err(remote)?;
-        let OrderMembership::Available { groups, members } = seed.membership else {
-            return Err(Error::Capacity);
-        };
-        Ok(
-            json!({"groups":groups.iter().map(|group| &group.workspace).collect::<Vec<_>>(),"members":members}),
-        )
+        let metadata = self
+            .navigation
+            .workspace_catalog_metadata(&page.sessions)
+            .await
+            .map_err(remote)?;
+        let mut members = Vec::new();
+        for (row, metadata) in page.sessions.iter().zip(metadata) {
+            let listed = metadata.account.is_some() || metadata.pinned || metadata.archived;
+            if headers && !listed {
+                continue;
+            }
+            let mut member = json!({"session":row.header.session_id()});
+            if let Some((id, position)) = metadata.account {
+                member["workspace"] = json!(id);
+                member["account_position"] = json!(position);
+                if headers {
+                    member["header"] = super::session_history::stored_snapshot(
+                        &row.header,
+                        row.durable_fact_seq,
+                        row.durable_control_seq,
+                    );
+                }
+            }
+            if listed {
+                member["last_activity_ms"] = json!(row.last_activity_ms.to_string());
+            }
+            if metadata.archived {
+                member["archived"] = json!(true);
+            }
+            if metadata.pinned {
+                member["pinned"] = json!(true);
+            }
+            if let Some(rank) = metadata.partition_revision {
+                member["partition_revision"] = json!(rank.to_string());
+            }
+            members.push(member);
+        }
+        Ok(json!({"members":members,"next":page.next}))
     }
 
     async fn workspace_account(

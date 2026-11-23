@@ -16,6 +16,9 @@ removes the selected Session from a former registration in the same transaction.
 Reordering changes only the selected account. Enrollment checks other accounts
 only for the identity being attached.
 Discovery intersects the account with the caller's visible Store identities.
+For catalog pages, Navigation checks the registered directory of each accounted
+identity and returns its committed position and partition metadata. Catalog
+discovery is independent of the maximum size of one atomic reorder operation.
 An exact account read visits the selected registration's members in committed
 order and applies the same directory and Session protection as global discovery.
 Unattached identities remain available through authorized global and exact reads.

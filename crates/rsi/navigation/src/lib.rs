@@ -40,7 +40,7 @@ mod persistence;
 mod workspace_account;
 pub use attention::AttentionFactory;
 use persistence::{DocumentChange, Revision, domain_schema, domain_spec, load_document};
-pub use workspace_account::WorkspaceMoveOutcome;
+pub use workspace_account::{WorkspaceCatalogMetadata, WorkspaceMoveOutcome};
 
 /// Durable navigation payload version; retained corpora gate encoding changes.
 pub const NAVIGATION_STORAGE_VERSION: u32 = 2;

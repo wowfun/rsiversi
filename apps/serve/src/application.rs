@@ -530,7 +530,7 @@ async fn open_application(
     language: bool,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
-    const PROTOCOL: u32 = 14;
+    const PROTOCOL: u32 = 15;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
     if language {
         payload["language"] = true.into();

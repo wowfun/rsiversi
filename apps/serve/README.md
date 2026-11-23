@@ -93,7 +93,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 14, a private profile directory
+host sends `application.open` with protocol 15, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
@@ -318,6 +318,10 @@ Serve derives its Workspace and preset from the admitted source. The draft
 starts an independent root and retains the native inherited cut.
 `application.workspaces` pages the visible Workspace registry and reads
 membership, archive and pin state through Navigation under the browser owner.
+Membership follows the authorized durable Session catalog in pages. Each
+enrolled row carries its registration, account position and immutable header.
+The workbench can enumerate or restore these accounts across a large corpus
+without opening transcripts or requesting a complete manual reorder seed.
 A pin intent on a published Session merges with current metadata under the
 Navigation writer. Its receipt lists the owner's visible pins in pin order.
 Archive admission reads the root and its activation-owned descendants at one

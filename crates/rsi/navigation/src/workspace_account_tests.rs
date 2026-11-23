@@ -55,6 +55,13 @@ async fn attachment_enrolls_only_the_named_session_once() {
         .await
         .unwrap();
     let summary = owner.store.session_summary(&first).await.unwrap();
+    let detached = owner.store.session_summary(&sibling).await.unwrap();
+    let projected = owner
+        .workspace_catalog_metadata(&[detached, summary.clone()])
+        .await
+        .unwrap();
+    assert_eq!(projected[0].account, None);
+    assert_eq!(projected[1].account, Some((workspace.clone(), 0)));
     assert_eq!(members, [(first, summary.last_activity_ms)]);
     assert!(
         owner
@@ -440,6 +447,15 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     current_domain.seed_document(&restored).await;
     editable.state.lock().unwrap().document = Arc::new(restored);
     assert!(account(&current, &current_id).await.is_empty());
+    let summary = current.store.session_summary(&first).await.unwrap();
+    assert!(
+        current
+            .workspace_catalog_metadata(&[summary])
+            .await
+            .unwrap()[0]
+            .account
+            .is_none()
+    );
     assert_eq!(
         current
             .insert_workspace_session_before(CallOrigin::Local, old_id.clone(), first.clone(), None)
