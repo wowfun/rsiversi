@@ -25,7 +25,7 @@ One allocation-record commit publishes a changed order. A failed commit keeps th
 previous live order; unknown outcomes use the Storage generation's existing fence.
 Insertion-order pages and their durable cursors remain independent of this order.
 
-Domain version 5 stores typed Workspace records in the `records` table and the
+Domain version 6 stores typed Workspace records in the `records` table and the
 independent allocation high-water mark in the global value. Durable decoding
 validates each record once; activation checks cross-record identity and order.
 A new registration receives an opaque random identity

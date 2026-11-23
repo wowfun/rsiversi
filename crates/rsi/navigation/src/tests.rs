@@ -2072,7 +2072,14 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
         pinned: true,
     };
     owner.state.lock().unwrap().document = Arc::new(Document {
-        workspace_orders: [(workspace.clone(), vec![selected.clone(), other.clone()])].into(),
+        workspace_orders: [(
+            workspace.clone(),
+            WorkspaceAccount {
+                updated_at_ms: 1,
+                members: vec![selected.clone(), other.clone()],
+            },
+        )]
+        .into(),
         accounting: None,
         revision: 7,
         records: [
@@ -2119,7 +2126,7 @@ async fn purge_cleanup_requires_completion_preserves_other_records_and_retries_c
     let state = navigation.state.lock().unwrap();
     assert_eq!(state.document.records.len(), 1);
     assert_eq!(
-        state.document.workspace_orders[&workspace],
+        state.document.workspace_orders[&workspace].members,
         vec![other.clone()]
     );
     assert_eq!(

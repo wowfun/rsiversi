@@ -84,7 +84,7 @@ impl Sessions {
                     None
                 };
                 let page = registry.list(after, 16).await.map_err(remote)?;
-                json!({"items":page.records.iter().map(record).collect::<Vec<_>>(),"next":page.next,"order":order})
+                json!({"items":page.records.iter().map(|row| record(row, self.navigation.workspace_changed_at(&row.id))).collect::<Vec<_>>(),"next":page.next,"order":order})
             }
             Operation::InsertBefore { id, before } => {
                 match self
@@ -156,7 +156,7 @@ impl Sessions {
                     .await
                     .map_err(remote)?;
                 let row = if created {
-                    record(&row)
+                    record(&row, None)
                 } else {
                     self.workspace_account(origin, &row).await?
                 };
@@ -243,32 +243,20 @@ impl Sessions {
             .device_drafts(device, Some(&row.id))
             .await
             .map_err(remote)?;
-        let members = self
+        let (members, changed_at) = self
             .navigation
             .workspace_members(origin, row)
             .map_err(remote)?
             .await
             .map_err(remote)?;
-        let mut drafts: std::collections::BTreeMap<_, _> = drafts
-            .into_iter()
-            .map(|draft| (draft.session_id, draft.created_at_ms))
-            .collect();
-        for (id, _) in &members {
+        let mut drafts: std::collections::BTreeSet<_> =
+            drafts.into_iter().map(|draft| draft.session_id).collect();
+        for id in &members {
             drafts.remove(id);
         }
-        let mut updated = row.created_at_ms;
-        let sessions = drafts
-            .into_iter()
-            .rev()
-            .chain(members)
-            .map(|(id, at)| {
-                updated = updated.max(Some(at));
-                id
-            })
-            .collect::<Vec<_>>();
-        let mut value = record(row);
+        let sessions: Vec<_> = drafts.into_iter().rev().chain(members).collect();
+        let mut value = record(row, changed_at);
         value["sessions"] = json!(sessions);
-        value["updated"] = json!(updated);
         Ok(value)
     }
 
@@ -421,8 +409,9 @@ impl Sessions {
     }
 }
 
-fn record(row: &WorkspaceRecord) -> Value {
-    json!({"id":row.id,"path":row.coordinates.path(),"title":row.name,"created":row.created_at_ms})
+fn record(row: &WorkspaceRecord, account_time: Option<u64>) -> Value {
+    json!({"id":row.id,"path":row.coordinates.path(),"title":row.name,"created":row.created_at_ms,
+        "updated":row.renamed_at_ms.or(row.created_at_ms).max(account_time)})
 }
 fn remote(error: impl std::fmt::Display) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())

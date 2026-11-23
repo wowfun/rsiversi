@@ -41,6 +41,92 @@ async fn storage_runtime(path: &std::path::Path) -> Runtime {
     runtime
 }
 
+#[tokio::test]
+async fn registration_removal_can_retry_cleanup_after_the_registry_commit() {
+    use rsi_workspace_protocol::{
+        WorkspaceError, WorkspaceId, WorkspaceRegistrationCleanup,
+        WorkspaceRegistrationCleanupContract,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug, Default)]
+    struct Cleanup(AtomicUsize);
+    #[async_trait::async_trait]
+    impl WorkspaceRegistrationCleanup for Cleanup {
+        async fn forget(&self, _: &WorkspaceId) -> rsi_api_protocol::Result<()> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(rsi_api_protocol::ApiError::Unavailable);
+            }
+            Ok(())
+        }
+    }
+    #[derive(Debug)]
+    struct CleanupFactory(Arc<Cleanup>);
+    #[async_trait::async_trait]
+    impl rsi_meta::PluginFactory for CleanupFactory {
+        fn prepare(
+            &self,
+            _: &rsi_meta::ConfigValue,
+        ) -> rsi_meta::Result<rsi_meta::PreparedActivation> {
+            Ok(rsi_meta::PreparedActivation::new(Value::Null))
+        }
+        async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
+            let supply = plan
+                .context()
+                .provide_local::<WorkspaceRegistrationCleanupContract>(self.0.clone())?;
+            plan.defer(
+                "withdraw fixture cleanup",
+                Box::new(move || {
+                    Box::pin(async move {
+                        drop(supply);
+                        Ok(())
+                    })
+                }),
+            )
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let state =
+        rsi_workspace_protocol::canonical_native_path(directory.path().canonicalize().unwrap())
+            .join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
+    let runtime = storage_runtime(&state.join("store.sqlite3")).await;
+    runtime
+        .root()
+        .apply(
+            linked("workspaces", Arc::new(WorkspaceFactory)),
+            json!({"backend":"sqlite"}),
+        )
+        .await
+        .unwrap();
+    let registry = runtime
+        .root()
+        .lookup_local::<WorkspaceRegistryContract>()
+        .unwrap();
+    let cleanup = Arc::new(Cleanup::default());
+    let provider = runtime
+        .root()
+        .apply(
+            linked("cleanup", Arc::new(CleanupFactory(cleanup.clone()))),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider.snapshot().state, rsi_meta::FiberState::Active);
+    let row = registry.get_or_create(directory.path()).await.unwrap();
+    assert!(matches!(
+        registry.delete_registration(&row.id).await,
+        Err(WorkspaceError::Api(rsi_api_protocol::ApiError::Unavailable))
+    ));
+    assert!(matches!(
+        registry.get(&row.id).await,
+        Err(WorkspaceError::Unknown(_))
+    ));
+    assert!(!registry.delete_registration(&row.id).await.unwrap());
+    assert_eq!(cleanup.0.load(Ordering::SeqCst), 2);
+    assert!(directory.path().is_dir());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
 async fn assert_membership(
     registry: &dyn rsi_workspace_protocol::WorkspaceRegistry,
     expected: &[rsi_workspace_protocol::WorkspaceRecord],
@@ -620,7 +706,7 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
         spec: rsi_storage_domain::DomainSpec {
             id: "rsi.workspace".into(),
             backend: "test".into(),
-            version: 5,
+            version: rsi_workspace::WORKSPACE_STORAGE_VERSION,
             maximum_records: 16_385,
             maximum_bytes: 128 * 1024 * 1024,
             ..rsi_storage_domain::DomainSpec::default()
@@ -660,6 +746,7 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
         .await
         .unwrap();
     assert!(original.created_at_ms.is_some());
+    assert!(original.renamed_at_ms.is_none());
     assert_eq!(
         domain.values.lock().await["allocation"]["display_order"],
         json!([2])
@@ -678,6 +765,13 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
         .unwrap();
     assert_eq!(kept.coordinates, original.coordinates);
     assert_eq!(kept.created_at_ms, original.created_at_ms);
+    assert!(kept.renamed_at_ms >= original.created_at_ms);
+    let unchanged = registry
+        .rename(&kept.id, kept.name.clone().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(unchanged, kept);
+    assert_eq!(ingress.directory_revision(), Some(2));
     assert_eq!(
         registry
             .get_or_create(&temporary.path().join("kept"))
@@ -966,7 +1060,7 @@ async fn cold_registry_preserves_distinct_machines_without_local_remote_probes()
         .unwrap();
     let descriptor = rsi_storage::UnitDescriptor::new(
         "rsi.workspace".into(),
-        5,
+        rsi_workspace::WORKSPACE_STORAGE_VERSION,
         std::collections::BTreeSet::new(),
         [("records".into(), rsi_storage::RecordPolicy::Reject)].into(),
         true,
@@ -1079,7 +1173,7 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
         spec: rsi_storage_domain::DomainSpec {
             id: "rsi.workspace".into(),
             backend: "test".into(),
-            version: 5,
+            version: rsi_workspace::WORKSPACE_STORAGE_VERSION,
             maximum_records: 16_385,
             maximum_bytes: 128 * 1024 * 1024,
             ..rsi_storage_domain::DomainSpec::default()
@@ -1262,7 +1356,7 @@ async fn retirement_drains_abandoned_workspace_mutations_before_withdrawal() {
             spec: rsi_storage_domain::DomainSpec {
                 id: "rsi.workspace".into(),
                 backend: "test".into(),
-                version: 5,
+                version: rsi_workspace::WORKSPACE_STORAGE_VERSION,
                 maximum_records: 16_385,
                 maximum_bytes: 128 * 1024 * 1024,
                 ..rsi_storage_domain::DomainSpec::default()

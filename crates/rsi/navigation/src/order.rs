@@ -104,7 +104,12 @@ impl Navigation {
                 .as_ref()
                 .and_then(|id| document.workspace_orders.get(id))
             {
-                positions.extend(ids.iter().enumerate().map(|(rank, id)| (id, (index, rank))));
+                positions.extend(
+                    ids.members
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, id)| (id, (index, rank))),
+                );
             }
         }
         let mut groups = Vec::new();

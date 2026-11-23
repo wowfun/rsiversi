@@ -1,6 +1,7 @@
 use super::{
     ApiError, Document, Domain, DomainSpec, MetadataSize, NAVIGATION_STORAGE_VERSION, Result,
-    Schema, SessionId, StoredMetadata, WorkspaceId, metadata_bytes, storage_error,
+    Schema, SessionId, StoredMetadata, WorkspaceAccount, WorkspaceId, metadata_bytes,
+    storage_error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -29,7 +30,7 @@ pub(super) fn domain_schema() -> std::result::Result<Schema, rsi_storage::Storag
     Schema::default()
         .global::<Revision>()?
         .table::<StoredMetadata>("metadata")?
-        .table::<Vec<SessionId>>("orders")
+        .table::<WorkspaceAccount>("orders")
 }
 
 pub(super) fn load_document(domain: &Domain) -> Result<Document> {
@@ -47,7 +48,7 @@ pub(super) fn load_document(domain: &Domain) -> Result<Document> {
         .and_then(|table| table.snapshot())
         .map_err(storage_error)?;
     let orders = domain
-        .table::<Vec<SessionId>>("orders")
+        .table::<WorkspaceAccount>("orders")
         .and_then(|table| table.snapshot())
         .map_err(storage_error)?;
     if revision.is_none() && (!records.is_empty() || !orders.is_empty()) {
@@ -77,7 +78,7 @@ pub(super) struct DocumentChange {
     pub revision: u64,
     pub accounting: MetadataSize,
     pub records: Vec<(SessionId, Option<StoredMetadata>)>,
-    pub orders: Vec<(WorkspaceId, Vec<SessionId>)>,
+    pub orders: Vec<(WorkspaceId, Option<WorkspaceAccount>)>,
 }
 
 impl DocumentChange {
@@ -89,11 +90,11 @@ impl DocumentChange {
                 document.records.remove(&id);
             }
         }
-        for (id, members) in self.orders {
-            if members.is_empty() {
-                document.workspace_orders.remove(&id);
+        for (id, account) in self.orders {
+            if let Some(account) = account {
+                document.workspace_orders.insert(id, account);
             } else {
-                document.workspace_orders.insert(id, members);
+                document.workspace_orders.remove(&id);
             }
         }
         document.revision = self.revision;
@@ -114,26 +115,20 @@ impl DocumentChange {
             orders: Vec::new(),
         };
         for (id, previous) in &document.workspace_orders {
-            if !previous.iter().any(|id| removed.contains(id)) {
+            if !previous.members.iter().any(|id| removed.contains(id)) {
                 continue;
             }
             let members: Vec<_> = previous
+                .members
                 .iter()
                 .filter(|id| !removed.contains(id))
                 .cloned()
                 .collect();
-            let previous_bytes = super::workspace_account::order_bytes(id, previous)?;
-            change.accounting.orders = if members.is_empty() {
-                change.accounting.orders.without_entry(previous_bytes)
-            } else {
-                change.accounting.orders.with_entry(
-                    Some(previous_bytes),
-                    super::workspace_account::order_bytes(id, &members)?,
-                )
-            }
-            .map_err(storage_error)?;
-            change.accounting.order_members -= previous.len() - members.len();
-            change.orders.push((id.clone(), members));
+            let account = WorkspaceAccount {
+                updated_at_ms: super::workspace_account::account_time()?,
+                members,
+            };
+            change.set_account(document, id.clone(), Some(account))?;
         }
         for id in removed {
             if let Some(previous) = document.records.get(id) {
@@ -177,7 +172,7 @@ impl Document {
         if self.accounting.is_none() {
             self.validate()?;
         }
-        self.project_orders(vec![(id.clone(), members)])?
+        self.project_orders(vec![(id.clone(), Some(members))])?
             .apply(self);
         Ok(())
     }

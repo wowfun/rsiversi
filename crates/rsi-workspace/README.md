@@ -23,7 +23,7 @@ and directory status. An exact `get` reads one registration without filesystem
 access. Listing takes a bounded page size and a stable insertion-order cursor;
 deleting the cursor's registration does not invalidate continuation. Returned
 paths identify the server's directory and confer no client filesystem authority.
-Domain version 5 retains mandatory execution coordinates in a typed `records`
+Domain version 6 retains execution coordinates and registration metadata in a typed `records`
 table and an allocation global independently of live registrations, including when the registry
 is empty. Older domains are rejected without mutation. Registrations and cursors
 must be recreated in a separate new state directory; the old backend remains
@@ -55,7 +55,7 @@ Trusted application ingress can resolve a local directory under the same
 caller admission and filesystem checks without writing a registration.
 
 Workspace's API plugins own their versioned request DTOs, operation bounds and
-client proxy. The version-5 endpoint consumes trusted ingress and the API registrar; the client
+client proxy. The version-6 endpoint consumes trusted ingress and the API registrar; the client
 publishes the same Workspace contract over a negotiated connection. Generic
 transports do not classify Workspace operations. Transport failures preserve the
 API error taxonomy, including authentication and uncertain mutation outcomes.

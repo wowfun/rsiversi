@@ -29,7 +29,8 @@ use std::sync::{
 use tokio::sync::{Mutex, RwLock};
 
 const DOMAIN_ID: &str = "rsi.workspace";
-const DOMAIN_VERSION: u32 = 5;
+/// Current durable Workspace registry format.
+pub const WORKSPACE_STORAGE_VERSION: u32 = 6;
 const RECORDS: &str = "records";
 const MAXIMUM_WORKSPACES: usize = MAXIMUM_REGISTERED_WORKSPACES;
 const MAXIMUM_WORKSPACE_DOMAIN_BYTES: usize = 128 * 1024 * 1024;
@@ -79,6 +80,7 @@ struct RegistryData {
 
 #[derive(Clone, Debug)]
 struct Service {
+    context: rsi_meta::Context,
     resolver: Arc<dyn ExecutionResolver>,
     origin: CallOrigin,
     domain: Domain,
@@ -264,11 +266,12 @@ impl WorkspaceRegistry for Service {
             .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
         let permit = self.admit(current.coordinates.location())?;
         let order = *order;
+        if current.name.as_ref() == Some(&name) {
+            return Ok(current.clone());
+        }
         let mut record = current.clone();
         record.name = Some(name);
-        if &record == current {
-            return Ok(record);
-        }
+        record.renamed_at_ms = Some(unix_millis()?);
         drop(state);
         let value = DurableWorkspaceRecord {
             order,
@@ -326,10 +329,13 @@ impl WorkspaceRegistry for Service {
     }
 
     async fn delete_registration(&self, id: &WorkspaceId) -> Result<bool> {
-        let _commit = Arc::clone(&self.commit).lock_owned().await;
+        let commit = Arc::clone(&self.commit).lock_owned().await;
         let state = self.state.read().await;
         self.ensure_available()?;
         let Some((order, record)) = state.records.get(id) else {
+            drop(state);
+            drop(commit);
+            forget_registration(&self.context, id).await?;
             return Ok(false);
         };
         let _permit = self.admit(record.coordinates.location())?;
@@ -349,9 +355,9 @@ impl WorkspaceRegistry for Service {
         let state = Arc::clone(&self.state);
         let id = id.clone();
         let revision = self.revision.clone();
+        let context = self.context.clone();
         self.execution
             .spawn(async move {
-                let _commit = _commit;
                 let _permit = _permit;
                 domain
                     .batch(vec![
@@ -374,6 +380,9 @@ impl WorkspaceRegistry for Service {
                 state.order.remove(&order);
                 state.display_order.retain(|position| *position != order);
                 revision.fetch_add(1, Ordering::Release);
+                drop(state);
+                drop(commit);
+                forget_registration(&context, &id).await?;
                 Ok(true)
             })
             .await
@@ -410,7 +419,7 @@ impl PluginFactory for WorkspaceFactory {
                 DomainSpec {
                     id: DOMAIN_ID.into(),
                     backend: config.backend,
-                    version: DOMAIN_VERSION,
+                    version: WORKSPACE_STORAGE_VERSION,
                     maximum_records: MAXIMUM_WORKSPACES + 1,
                     maximum_bytes: MAXIMUM_WORKSPACE_DOMAIN_BYTES,
                     ..DomainSpec::default()
@@ -425,6 +434,7 @@ impl PluginFactory for WorkspaceFactory {
         let state =
             load_registry(&domain).map_err(|error| MetaError::Activation(error.to_string()))?;
         let service = Arc::new(Service {
+            context: plan.context().clone(),
             resolver: plan.local::<ExecutionResolverContract>()?,
             origin: CallOrigin::Local,
             domain,
@@ -456,6 +466,15 @@ impl PluginFactory for WorkspaceFactory {
             }),
         )
     }
+}
+
+async fn forget_registration(context: &rsi_meta::Context, id: &WorkspaceId) -> Result<()> {
+    if let Some(cleanup) =
+        context.lookup_local::<rsi_workspace_protocol::WorkspaceRegistrationCleanupContract>()
+    {
+        cleanup.forget(id).await.map_err(WorkspaceError::Api)?;
+    }
+    Ok(())
 }
 
 async fn canonical_directory(path: &Path) -> Result<PathBuf> {
@@ -634,14 +653,7 @@ impl Service {
         getrandom::fill(&mut bytes).map_err(|error| WorkspaceError::Storage(error.to_string()))?;
         let id = WorkspaceId::from_bytes(bytes);
         let mut record = WorkspaceRecord::new(id.clone(), coordinates);
-        record.created_at_ms = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| WorkspaceError::Storage("system clock precedes Unix epoch".into()))?
-                .as_millis()
-                .try_into()
-                .map_err(|_| WorkspaceError::Storage("system clock is out of range".into()))?,
-        );
+        record.created_at_ms = Some(unix_millis()?);
         record.validate()?;
         let order = state
             .next_order
@@ -794,6 +806,15 @@ impl<'a> Permissions<'a> {
         Ok(self.locations[location].is_some())
     }
 }
+fn unix_millis() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| WorkspaceError::Storage("system clock precedes Unix epoch".into()))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| WorkspaceError::Storage("system clock is out of range".into()))
+}
+
 fn execution_error(error: rsi_process::ProcessError) -> WorkspaceError {
     WorkspaceError::Api(match error {
         rsi_process::ProcessError::Api(error) => error,
@@ -808,13 +829,21 @@ fn execution_error(error: rsi_process::ProcessError) -> WorkspaceError {
 }
 
 #[cfg(test)]
+fn read_prior_payload<T: serde::de::DeserializeOwned>(path: &Path, _version: u32) {
+    let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for sample in fixture["payload"]["samples"].as_array().unwrap() {
+        serde_json::from_str::<T>(sample.as_str().unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
 rsi_persistence_testkit::payload_contract!(
     persistence_allocation,
     Allocation,
-    DOMAIN_VERSION,
+    WORKSPACE_STORAGE_VERSION,
     format!(
         "tests/fixtures/persistence/allocation-v{}.json",
-        DOMAIN_VERSION
+        WORKSPACE_STORAGE_VERSION
     ),
     {
         let samples: Vec<Allocation> = vec![
@@ -829,17 +858,18 @@ rsi_persistence_testkit::payload_contract!(
         ];
 
         samples
-    }
+    },
+    read_prior_payload::<Allocation>
 );
 
 #[cfg(test)]
 rsi_persistence_testkit::payload_contract!(
     persistence_records,
     DurableWorkspaceRecord,
-    DOMAIN_VERSION,
+    WORKSPACE_STORAGE_VERSION,
     format!(
         "tests/fixtures/persistence/records-v{}.json",
-        DOMAIN_VERSION
+        WORKSPACE_STORAGE_VERSION
     ),
     {
         let samples: Vec<DurableWorkspaceRecord> = vec![DurableWorkspaceRecord {
@@ -853,9 +883,11 @@ rsi_persistence_testkit::payload_contract!(
                 .unwrap(),
                 name: Some(rsi_workspace_protocol::WorkspaceName::parse("fixture 中🦀").unwrap()),
                 created_at_ms: Some(123_456),
+                renamed_at_ms: Some(123_789),
             },
         }];
 
         samples
-    }
+    },
+    read_prior_payload::<DurableWorkspaceRecord>
 );

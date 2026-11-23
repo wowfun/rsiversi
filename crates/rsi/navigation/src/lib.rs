@@ -43,7 +43,7 @@ use persistence::{DocumentChange, Revision, domain_schema, domain_spec, load_doc
 pub use workspace_account::{WorkspaceCatalogMetadata, WorkspaceMoveOutcome};
 
 /// Durable navigation payload version; retained corpora gate encoding changes.
-pub const NAVIGATION_STORAGE_VERSION: u32 = 2;
+pub const NAVIGATION_STORAGE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,9 +51,16 @@ struct Document {
     revision: u64,
     records: BTreeMap<SessionId, StoredMetadata>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    workspace_orders: BTreeMap<WorkspaceId, Vec<SessionId>>,
+    workspace_orders: BTreeMap<WorkspaceId, WorkspaceAccount>,
     #[serde(skip)]
     accounting: Option<MetadataSize>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct WorkspaceAccount {
+    updated_at_ms: u64,
+    members: Vec<SessionId>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -920,7 +927,7 @@ impl Navigation {
             .map_err(storage_error)?;
         let orders = self
             .domain
-            .table::<Vec<SessionId>>("orders")
+            .table::<WorkspaceAccount>("orders")
             .map_err(storage_error)?;
         let mut batch = Vec::with_capacity(change.records.len() + change.orders.len() + 1);
         batch.push(
@@ -941,12 +948,11 @@ impl Navigation {
                 .map_err(storage_error)?,
             );
         }
-        for (id, members) in &change.orders {
+        for (id, account) in &change.orders {
             batch.push(
-                if members.is_empty() {
-                    orders.delete_change(id.as_str())
-                } else {
-                    orders.put_change(id.as_str(), members.clone())
+                match account {
+                    Some(account) => orders.put_change(id.as_str(), account.clone()),
+                    None => orders.delete_change(id.as_str()),
                 }
                 .map_err(storage_error)?,
             );
@@ -985,6 +991,16 @@ fn session_error(error: SessionError) -> ApiError {
 #[derive(Debug)]
 struct PurgeCleanup(std::sync::Weak<Navigation>);
 #[async_trait]
+impl rsi_workspace_protocol::WorkspaceRegistrationCleanup for PurgeCleanup {
+    async fn forget(&self, id: &WorkspaceId) -> Result<()> {
+        self.0
+            .upgrade()
+            .ok_or(ApiError::ShuttingDown)?
+            .discard_accounts(vec![id.clone()])
+            .await
+    }
+}
+#[async_trait]
 impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
     async fn status(
         &self,
@@ -1007,7 +1023,7 @@ impl rsi_session_protocol::SessionPurgeCleanup for PurgeCleanup {
                     .document
                     .workspace_orders
                     .values()
-                    .any(|ids| ids.contains(&target.session_id))
+                    .any(|account| account.members.contains(&target.session_id))
         });
         Ok(if absent {
             rsi_session_protocol::CleanupStatus::Complete
@@ -1141,11 +1157,16 @@ impl PluginFactory for NavigationFactory {
         let archive = plan
             .context()
             .provide_local::<rsi_agent_turn_protocol::SessionArchiveContract>(owner.clone())?;
+        let cleanup_owner = Arc::new(PurgeCleanup(Arc::downgrade(&owner)));
+        let removed = plan
+            .context()
+            .provide_local::<rsi_workspace_protocol::WorkspaceRegistrationCleanupContract>(
+                cleanup_owner.clone(),
+            )?;
+        owner.reconcile_accounts().await.map_err(activation)?;
         let cleanup = plan
             .context()
-            .provide_local::<rsi_session_protocol::SessionPurgeCleanupContract>(Arc::new(
-                PurgeCleanup(Arc::downgrade(&owner)),
-            ))?;
+            .provide_local::<rsi_session_protocol::SessionPurgeCleanupContract>(cleanup_owner)?;
         plan.defer(
             "drain navigation",
             Box::new(move || {
@@ -1153,6 +1174,7 @@ impl PluginFactory for NavigationFactory {
                     drop(supply);
                     drop(archive);
                     drop(cleanup);
+                    drop(removed);
                     futures_util::join!(
                         owner.close(),
                         futures_util::future::join_all(

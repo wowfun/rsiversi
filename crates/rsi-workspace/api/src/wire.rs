@@ -62,7 +62,7 @@ impl Operation {
         };
         OperationSpec {
             protocol: rsi_api_protocol::wire_contract!(),
-            id: OperationId::new("workspace", name, 5).expect("constant operation"),
+            id: OperationId::new("workspace", name, 6).expect("constant operation"),
             class: OperationClass::Data,
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,

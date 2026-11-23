@@ -368,6 +368,7 @@ impl SessionService for SessionClient {
         let workspace = rsi_workspace_protocol::WorkspaceRecord {
             name: None,
             created_at_ms: None,
+            renamed_at_ms: None,
             id: request.workspace_id,
             coordinates: header.coordinates().clone(),
         };

@@ -1,6 +1,7 @@
 use super::{
     ApiError, Arc, BoxFuture, CallOrigin, Document, DocumentChange, MetadataSize, Navigation,
-    Result, SessionId, WorkspaceError, WorkspaceId, encoded_entry_bytes, storage_error,
+    Result, SessionId, WorkspaceAccount, WorkspaceError, WorkspaceId, encoded_entry_bytes,
+    storage_error,
 };
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
@@ -29,11 +30,16 @@ pub enum WorkspaceMoveOutcome {
     InvalidMember,
 }
 
-pub(super) fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usize> {
+fn order_bytes(id: &WorkspaceId, account: &WorkspaceAccount) -> Result<usize> {
+    let members = &account.members;
     // SessionId admits unescaped ASCII. Count the brackets, string quotes and separators.
     let strings: usize = members.iter().map(|id| id.as_str().len() + 2).sum();
-    encoded_entry_bytes(id.as_str(), 2 + strings + members.len().saturating_sub(1))
-        .map_err(storage_error)
+    let bytes = br#"{"updated_at_ms":,"members":[]}"#.len()
+        + account.updated_at_ms.checked_ilog10().unwrap_or(0) as usize
+        + 1
+        + strings
+        + members.len().saturating_sub(1);
+    encoded_entry_bytes(id.as_str(), bytes).map_err(storage_error)
 }
 
 impl Document {
@@ -45,18 +51,20 @@ impl Document {
         workspace.filter(|id| {
             self.workspace_orders
                 .get(id)
-                .is_some_and(|members| members.contains(session))
+                .is_some_and(|account| account.members.contains(session))
         })
     }
     pub(super) fn validate_orders(&self, accounting: &mut MetadataSize) -> Result<()> {
         let mut known = HashSet::new();
         for (id, order) in &self.workspace_orders {
-            if order.is_empty() || order.iter().any(|id| !known.insert(id)) {
+            if order.updated_at_ms > rsi_workspace_protocol::MAXIMUM_WORKSPACE_TIMESTAMP_MS
+                || order.members.iter().any(|id| !known.insert(id))
+            {
                 return Err(ApiError::Invalid(
                     "invalid Workspace Session account order".into(),
                 ));
             }
-            accounting.order_members += order.len();
+            accounting.order_members += order.members.len();
             accounting.orders = accounting
                 .orders
                 .with_entry(None, order_bytes(id, order)?)
@@ -67,44 +75,118 @@ impl Document {
 
     pub(super) fn project_orders(
         &self,
-        changes: Vec<(WorkspaceId, Vec<SessionId>)>,
+        changes: Vec<(WorkspaceId, Option<Vec<SessionId>>)>,
     ) -> Result<DocumentChange> {
-        let mut accounting = self.accounting.expect("validated metadata accounting");
-        for (id, members) in &changes {
-            let previous = self.workspace_orders.get(id);
-            let prior_bytes = previous
-                .map(|members| order_bytes(id, members))
-                .transpose()?;
-            accounting.order_members =
-                accounting.order_members - previous.map_or(0, Vec::len) + members.len();
-            accounting.orders = if members.is_empty() {
-                prior_bytes
-                    .map_or(Ok(accounting.orders), |bytes| {
-                        accounting.orders.without_entry(bytes)
-                    })
-                    .map_err(storage_error)?
-            } else {
-                accounting
-                    .orders
-                    .with_entry(prior_bytes, order_bytes(id, members)?)
-                    .map_err(storage_error)?
-            };
-        }
         let revision = self
             .revision
             .checked_add(1)
             .ok_or_else(|| ApiError::Invalid("navigation revision exhausted".into()))?;
-        accounting.check(revision)?;
-        Ok(DocumentChange {
+        let mut change = DocumentChange {
             revision,
-            accounting,
+            accounting: self.accounting.expect("validated metadata accounting"),
             records: vec![],
-            orders: changes,
-        })
+            orders: Vec::with_capacity(changes.len()),
+        };
+        for (id, members) in changes {
+            let account = match members {
+                Some(members) => Some(WorkspaceAccount {
+                    updated_at_ms: account_time()?,
+                    members,
+                }),
+                None => None,
+            };
+            change.set_account(self, id, account)?;
+        }
+        change.accounting.check(revision)?;
+        Ok(change)
+    }
+}
+
+pub(super) fn account_time() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ApiError::Unavailable)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| ApiError::Unavailable)
+}
+
+impl DocumentChange {
+    pub(super) fn set_account(
+        &mut self,
+        document: &Document,
+        id: WorkspaceId,
+        account: Option<WorkspaceAccount>,
+    ) -> Result<()> {
+        let previous = document.workspace_orders.get(&id);
+        let previous_bytes = previous.map(|row| order_bytes(&id, row)).transpose()?;
+        self.accounting.order_members -= previous.map_or(0, |row| row.members.len());
+        if let Some(next) = &account {
+            self.accounting.order_members += next.members.len();
+            self.accounting.orders = self
+                .accounting
+                .orders
+                .with_entry(previous_bytes, order_bytes(&id, next)?)
+                .map_err(storage_error)?;
+        } else if let Some(bytes) = previous_bytes {
+            self.accounting.orders = self
+                .accounting
+                .orders
+                .without_entry(bytes)
+                .map_err(storage_error)?;
+        }
+        self.orders.push((id, account));
+        Ok(())
     }
 }
 
 impl Navigation {
+    pub(super) async fn discard_accounts(
+        self: &Arc<Self>,
+        retired: Vec<WorkspaceId>,
+    ) -> Result<()> {
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                let _writer = owner
+                    .writer
+                    .acquire()
+                    .await
+                    .map_err(|_| ApiError::ShuttingDown)?;
+                let current = owner.document();
+                let removals: Vec<_> = retired
+                    .into_iter()
+                    .filter(|id| current.workspace_orders.contains_key(id))
+                    .map(|id| (id, None))
+                    .collect();
+                if !removals.is_empty() {
+                    let change = current.project_orders(removals)?;
+                    drop(current);
+                    owner.publish(change).await?;
+                }
+                Ok(())
+            })
+        })?
+        .await
+    }
+
+    pub(super) async fn reconcile_accounts(self: &Arc<Self>) -> Result<()> {
+        let document = self.document();
+        let mut retired = Vec::new();
+        for id in document.workspace_orders.keys() {
+            if matches!(
+                self.workspace.get(id).await,
+                Err(WorkspaceError::Unknown(_))
+            ) {
+                retired.push(id.clone());
+            }
+        }
+        drop(document);
+        if !retired.is_empty() {
+            self.discard_accounts(retired).await?;
+        }
+        Ok(())
+    }
+
     /// Joins an authorized header page to the current accounts, in input order.
     pub async fn workspace_catalog_metadata(
         &self,
@@ -133,7 +215,7 @@ impl Navigation {
             .collect();
         let mut candidates = Vec::new();
         for (id, order) in &document.workspace_orders {
-            for (position, member) in order.iter().enumerate() {
+            for (position, member) in order.members.iter().enumerate() {
                 if let Some(&index) = page.get(member) {
                     rows[index].account = Some((id.clone(), position));
                     candidates.push(index);
@@ -157,12 +239,20 @@ impl Navigation {
         Ok(rows)
     }
 
-    /// Reads authorized identities and activity times in this registration's committed order.
+    /// Last committed membership change of this registration, including an empty account.
+    pub fn workspace_changed_at(&self, workspace: &WorkspaceId) -> Option<u64> {
+        self.document()
+            .workspace_orders
+            .get(workspace)
+            .map(|row| row.updated_at_ms)
+    }
+
+    /// Reads authorized identities in this registration's committed order.
     pub fn workspace_members(
         self: &Arc<Self>,
         origin: CallOrigin,
         workspace: &rsi_workspace_protocol::WorkspaceRecord,
-    ) -> Result<BoxFuture<'static, Result<Vec<(SessionId, u64)>>>> {
+    ) -> Result<BoxFuture<'static, Result<(Vec<SessionId>, Option<u64>)>>> {
         let admission = self
             .resolver
             .admit(&origin, workspace.coordinates.location())?;
@@ -175,18 +265,24 @@ impl Navigation {
                 let mut result = Vec::new();
                 let mut leases = Vec::new();
                 if let Some(members) = document.workspace_orders.get(&id) {
-                    for member in members {
+                    for member in &members.members {
                         if let Some(row) =
                             super::visible_summary(owner.store.session_summary(member).await)?
                             && row.header.coordinates() == &coordinates
                             && owner.retain_header_view(&row.header, &origin, &mut leases)?
                         {
-                            result.push((member.clone(), row.last_activity_ms));
+                            result.push(member.clone());
                         }
                     }
                 }
                 super::finish_scope(&origin, &leases)?;
-                Ok(result)
+                Ok((
+                    result,
+                    document
+                        .workspace_orders
+                        .get(&id)
+                        .map(|row| row.updated_at_ms),
+                ))
             })
         })
     }
@@ -196,7 +292,7 @@ impl Navigation {
         self.document()
             .workspace_orders
             .get(workspace)
-            .is_some_and(|members| members.contains(session))
+            .is_some_and(|account| account.members.contains(session))
     }
 
     /// Attaches an authorized durable Session to the registration for its execution directory.
@@ -238,7 +334,7 @@ impl Navigation {
                 let members = current
                     .workspace_orders
                     .get(&workspace)
-                    .map_or(&[][..], Vec::as_slice);
+                    .map_or(&[][..], |row| row.members.as_slice());
                 if members.contains(&session) {
                     return Ok(());
                 }
@@ -246,18 +342,19 @@ impl Navigation {
                 // A validated Navigation document gives each identity at most one owner.
                 for (former, ids) in &current.workspace_orders {
                     if former != &workspace
-                        && let Some(at) = ids.iter().position(|id| id == &session)
+                        && let Some(at) = ids.members.iter().position(|id| id == &session)
                     {
-                        let mut remaining = ids.clone();
+                        let mut remaining = ids.members.clone();
                         remaining.remove(at);
-                        changes.push((former.clone(), remaining));
+                        changes
+                            .push((former.clone(), (!remaining.is_empty()).then_some(remaining)));
                         break;
                     }
                 }
                 let mut order = Vec::with_capacity(members.len() + 1);
                 order.push(session);
                 order.extend_from_slice(members);
-                changes.push((workspace, order));
+                changes.push((workspace, Some(order)));
                 let change = current.project_orders(changes)?;
                 drop(current);
                 owner.publish(change).await?;
@@ -297,9 +394,10 @@ impl Navigation {
                     return Err(ApiError::Unauthorized);
                 }
                 let current = owner.document();
-                let Some(members) = current.workspace_orders.get(&workspace) else {
+                let Some(account) = current.workspace_orders.get(&workspace) else {
                     return Ok(WorkspaceMoveOutcome::InvalidMember);
                 };
+                let members = &account.members;
                 let mut admissions = [None, None];
                 let mut positions = [0, members.len()];
                 for (index, id) in std::iter::once(&session)
@@ -327,7 +425,7 @@ impl Navigation {
                     let mut order = members.clone();
                     let session = order.remove(from);
                     order.insert(if at > from { at - 1 } else { at }, session);
-                    let change = current.project_orders(vec![(workspace, order)])?;
+                    let change = current.project_orders(vec![(workspace, Some(order))])?;
                     drop(current);
                     owner.publish(change).await?;
                 }

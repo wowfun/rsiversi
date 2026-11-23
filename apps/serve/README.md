@@ -23,6 +23,8 @@ selected original JS wrapper keeps its classification at its original pipeline
 position; Serve adds no duplicate wrapper and never erases a settled receipt.
 
 Application Workspace Session moves use Navigation's shared native account order.
+Workspace summaries report the latest committed registration or membership
+change. Reading a Workspace or chatting in an existing member preserves that time.
 The caller's actual location and Session protection authority cover the commit;
 the bridge owns only the DSH error and projection mapping.
 

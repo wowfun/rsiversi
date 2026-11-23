@@ -80,6 +80,7 @@ fn custom_names_are_bounded_and_absent_metadata_stays_unknown() {
     record.validate().unwrap();
     assert!(record.name.is_none());
     assert!(record.created_at_ms.is_none());
+    assert!(record.renamed_at_ms.is_none());
 }
 
 #[test]
@@ -91,6 +92,7 @@ fn external_records_bound_paths_and_keep_host_paths_opaque() {
     let mut record = WorkspaceRecord {
         name: None,
         created_at_ms: None,
+        renamed_at_ms: None,
         id: WorkspaceId::parse("b".repeat(64)).unwrap(),
         coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
             rsi_workspace_protocol::ExecutionLocation::Local,
@@ -99,6 +101,9 @@ fn external_records_bound_paths_and_keep_host_paths_opaque() {
         .unwrap(),
     };
     record.validate().unwrap();
+    record.renamed_at_ms = Some(u64::MAX);
+    assert!(record.validate().is_err());
+    record.renamed_at_ms = None;
     record.id = WorkspaceId::parse("a".repeat(64)).unwrap();
     assert!(record.validate().is_ok());
     for path in [

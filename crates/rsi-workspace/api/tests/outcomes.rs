@@ -68,6 +68,7 @@ impl WorkspaceRegistry for Provider {
                 coordinates,
                 name: Some(name),
                 created_at_ms: Some(u64::MAX),
+                renamed_at_ms: None,
             })
         } else {
             Err(WorkspaceError::Storage(
@@ -102,6 +103,7 @@ impl WorkspaceRegistry for Provider {
             Ok(WorkspaceRecord {
                 name: None,
                 created_at_ms: Some(u64::MAX),
+                renamed_at_ms: None,
                 id: WorkspaceId::parse("0".repeat(64)).unwrap(),
                 coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                     rsi_workspace_protocol::ExecutionLocation::Local,

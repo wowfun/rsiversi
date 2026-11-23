@@ -1,10 +1,11 @@
 # rsi-workspace-protocol
 
-Registrations may carry a custom display name and their registration time in
-Unix milliseconds. Absent metadata means the path supplies the name and the
-creation time is unknown; readers never synthesize a historical timestamp.
+Registrations may carry a custom display name, their creation time and the time
+of their latest display-name change in Unix milliseconds. The latter is absent
+until the first rename. Reads and unchanged names preserve both times. An
+absent name uses the path and an absent creation time remains unknown.
 Names are trimmed, nonempty UTF-8 strings of at most 256 bytes without control
-characters. Rename replaces only the display name, retaining identity,
+characters. Rename commits the display name and its timestamp together, retaining identity,
 coordinates, creation time and insertion order. New native registrations record
 their creation time. Rename and deletion require the same location admission as
 registration and retain admitted commits through durable publication.
@@ -17,6 +18,10 @@ Deleting and re-registering the same directory creates a new identity, so an old
 identity cannot address the replacement. Exact `get` reads by registration ID;
 `find` reads by `WorkspaceKey` and returns an optional current registration.
 Both operations authorize the record's location without filesystem access.
+
+After durable deletion the native registry notifies the mounted registration
+cleanup service by retired ID. Repeating the deletion may finish outstanding
+cleanup. The consumer owns its records and reconciles removed IDs when it mounts.
 
 `WorkspaceKey` is derived only by this owner from validated execution
 coordinates. Local identity uses its normalized absolute path bytes; SSH identity

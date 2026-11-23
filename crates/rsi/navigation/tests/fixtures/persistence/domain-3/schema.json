@@ -1,0 +1,82 @@
+{
+  "": {
+    "root": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision"
+      ]
+    },
+    "definitions": []
+  },
+  "metadata": {
+    "root": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "pinned": {
+          "type": "boolean",
+          "default": false
+        },
+        "rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "archived",
+        "pinned"
+      ]
+    },
+    "definitions": []
+  },
+  "orders": {
+    "root": {
+      "type": "object",
+      "properties": {
+        "updated_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/0"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "updated_at_ms",
+        "members"
+      ]
+    },
+    "definitions": [
+      {
+        "type": "string"
+      }
+    ]
+  }
+}

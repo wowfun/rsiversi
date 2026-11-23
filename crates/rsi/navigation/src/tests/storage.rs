@@ -96,7 +96,7 @@ impl TestDomain {
         for (id, row) in &document.records {
             changes.push(records.put_change(id.as_str(), row.clone()).unwrap());
         }
-        let orders = self.domain.table::<Vec<SessionId>>("orders").unwrap();
+        let orders = self.domain.table::<WorkspaceAccount>("orders").unwrap();
         for (id, order) in &document.workspace_orders {
             changes.push(orders.put_change(id.as_str(), order.clone()).unwrap());
         }

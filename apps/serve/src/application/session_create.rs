@@ -150,6 +150,7 @@ impl Sessions {
             .await
             .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
+        let mut result = receipt(&header, false);
         if let Some(workspace) = input.workspace {
             let failure = |error| {
                 remote(format!(
@@ -163,11 +164,13 @@ impl Sessions {
                 .map_err(&failure)?
                 .await
                 .map_err(failure)?;
+            result["workspace_updated_at"] =
+                json!(self.navigation.workspace_changed_at(&workspace));
         }
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
-        Ok(receipt(&header, false))
+        Ok(result)
     }
 }
 

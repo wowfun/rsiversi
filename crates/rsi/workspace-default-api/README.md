@@ -8,11 +8,11 @@ Session creation and provider configuration. An existing workspace or persisted
 Session prevents first-use creation. A recorded initialization survives removal
 of its registration; it never recreates a deliberately removed workspace.
 
-The version-2 response contains the current registration when available, with
+The version-3 response contains the current registration when available, with
 its opaque registration ID. The ordinary
 client validates its coordinates and identity before exposing it to GUI code.
-The Service owner keeps one bounded typed global initialization receipt in domain
-schema 2. Decoding validates the Workspace record and its Local location. It
+The Service owner stores the opaque default registration ID in domain schema 3.
+Resolving that ID reads the current Local registration under caller admission. It
 retains admitted work through settlement, and never deletes directory contents.
 Directory failure leaves initialization retryable. If registration succeeded
 before its receipt failed, retry resolves the native canonical directory identity to recognize that registration and completes

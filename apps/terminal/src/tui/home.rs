@@ -428,6 +428,7 @@ mod tests {
             Ok(rsi_workspace_protocol::WorkspaceRecord {
                 name: None,
                 created_at_ms: None,
+                renamed_at_ms: None,
                 id: rsi_workspace_protocol::WorkspaceId::parse("a".repeat(64)).unwrap(),
                 coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
                     rsi_workspace_protocol::ExecutionLocation::Local,

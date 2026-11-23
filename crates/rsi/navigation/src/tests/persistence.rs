@@ -7,7 +7,7 @@ fn schemas() -> serde_json::Value {
     serde_json::json!({
         "": structural::<Revision>(),
         "metadata": structural::<StoredMetadata>(),
-        "orders": structural::<Vec<SessionId>>(),
+        "orders": structural::<WorkspaceAccount>(),
     })
 }
 
@@ -63,7 +63,7 @@ async fn capture_current_writer() {
         .document()
         .project_orders(vec![(
             WorkspaceId::from_bytes([0xab; 32]),
-            vec![SessionId::new("two").unwrap()],
+            Some(vec![SessionId::new("two").unwrap()]),
         )])
         .unwrap();
     owner.publish(change).await.unwrap();
@@ -153,7 +153,7 @@ async fn retained_payload_bytes() {
                             EncodedValue::encode(&value.decode::<StoredMetadata>().unwrap())
                         }
                         "orders" => {
-                            EncodedValue::encode(&value.decode::<Vec<SessionId>>().unwrap())
+                            EncodedValue::encode(&value.decode::<WorkspaceAccount>().unwrap())
                         }
                         _ => panic!("undeclared table"),
                     }

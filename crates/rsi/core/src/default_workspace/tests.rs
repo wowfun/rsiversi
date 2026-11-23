@@ -137,7 +137,7 @@ async fn registry_read_failure_is_known_and_retry_does_not_duplicate_initializat
                     maximum_bytes: 128 * 1024,
                     ..DomainSpec::default()
                 },
-                Schema::default().global::<Receipt>().unwrap(),
+                Schema::default().global::<WorkspaceId>().unwrap(),
             )
             .await
             .unwrap();

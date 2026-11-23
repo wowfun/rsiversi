@@ -505,6 +505,7 @@ impl WorkspaceRegistry for RemoteWorkspace {
         Ok(WorkspaceRecord {
             name: None,
             created_at_ms: None,
+            renamed_at_ms: None,
             id: id.clone(),
             coordinates: self.0.clone(),
         })

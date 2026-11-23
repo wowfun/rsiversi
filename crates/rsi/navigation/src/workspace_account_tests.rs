@@ -49,7 +49,7 @@ async fn attachment_enrolls_only_the_named_session_once() {
             .is_err()
     );
     assert!(!owner.workspace_contains(&other_id, &first));
-    let members = owner
+    let (members, changed_at) = owner
         .workspace_members(CallOrigin::Local, &record)
         .unwrap()
         .await
@@ -62,13 +62,15 @@ async fn attachment_enrolls_only_the_named_session_once() {
         .unwrap();
     assert_eq!(projected[0].account, None);
     assert_eq!(projected[1].account, Some((workspace.clone(), 0)));
-    assert_eq!(members, [(first, summary.last_activity_ms)]);
+    assert_eq!(members, [first]);
+    assert!(changed_at.is_some());
     assert!(
         owner
             .workspace_members(CallOrigin::Local, &other)
             .unwrap()
             .await
             .unwrap()
+            .0
             .is_empty()
     );
     assert_eq!(owner.metadata_revision(), 1);
@@ -82,10 +84,102 @@ async fn seed_members(
     members: Vec<SessionId>,
 ) {
     let mut document = Document::default();
-    document.workspace_orders.insert(workspace.clone(), members);
+    document.workspace_orders.insert(
+        workspace.clone(),
+        WorkspaceAccount {
+            updated_at_ms: 1,
+            members,
+        },
+    );
     document.validate().unwrap();
     domain.seed_document(&document).await;
     owner.state.lock().unwrap().document = Arc::new(document);
+}
+
+#[tokio::test]
+async fn purging_the_last_member_keeps_the_workspace_clock_after_reopen() {
+    use rsi_agent_store_protocol::StoreMaintenance;
+    use rsi_session_protocol::SessionPurgeCleanup;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(rsi_agent_store_sqlite::SqliteStore::open(root.path()).unwrap());
+    let mut navigation = owner().await;
+    let member = SessionId::new("row-001").unwrap();
+    let header = navigation.store.header(&member).await.unwrap();
+    let workspace = fixture_workspace_id(header.coordinates());
+    let request = seed_purge_cleanup(&store, header).await;
+    let domain = TestDomain::new(navigation.domain.spec().clone()).await;
+    let owner = Arc::get_mut(&mut navigation).unwrap();
+    owner.domain = domain.domain.clone();
+    owner.store = store.clone();
+    seed_members(&navigation, &domain, &workspace, vec![member.clone()]).await;
+    let cleanup = PurgeCleanup(Arc::downgrade(&navigation));
+    store.begin_purge(request).await.unwrap().unwrap();
+    assert!(store.purge_batch("cleanup").await.unwrap().complete);
+    cleanup.cleanup("cleanup").await.unwrap();
+    let changed = navigation.workspace_changed_at(&workspace).unwrap();
+    assert!(changed > 1);
+    cleanup.cleanup("cleanup").await.unwrap();
+    assert_eq!(domain.writes(), 1);
+    let reopened = load_document(&domain.domain).unwrap();
+    assert_eq!(reopened.workspace_orders[&workspace].updated_at_ms, changed);
+    assert!(reopened.workspace_orders[&workspace].members.is_empty());
+    assert!(
+        !serde_json::to_string(&reopened)
+            .unwrap()
+            .contains(member.as_str())
+    );
+    assert_eq!(
+        navigation.workspace_changed_at(&WorkspaceId::from_bytes([9; 32])),
+        None
+    );
+}
+
+#[tokio::test]
+async fn remount_discards_retired_accounts_and_preserves_registered_empty_clocks() {
+    use rsi_workspace_protocol::WorkspaceRegistrationCleanup;
+    let mut navigation = owner().await;
+    let live = workspace_record(
+        ExecutionCoordinates::new(
+            rsi_agent_session_protocol::ExecutionLocation::Local,
+            "/live",
+        )
+        .unwrap(),
+    );
+    let retired = WorkspaceId::from_bytes([7; 32]);
+    let domain = TestDomain::new(navigation.domain.spec().clone()).await;
+    let owner = Arc::get_mut(&mut navigation).unwrap();
+    owner.workspace = Arc::new(Workspaces {
+        records: [(live.id.clone(), live.clone())].into(),
+        ..Default::default()
+    });
+    owner.domain = domain.domain.clone();
+    let mut saved = Document::default();
+    for id in [&live.id, &retired] {
+        saved.workspace_orders.insert(
+            id.clone(),
+            WorkspaceAccount {
+                updated_at_ms: 9,
+                members: vec![],
+            },
+        );
+    }
+    saved.validate().unwrap();
+    domain.seed_document(&saved).await;
+    owner.state.lock().unwrap().document = Arc::new(saved);
+    navigation.reconcile_accounts().await.unwrap();
+    let reopened = load_document(&domain.domain).unwrap();
+    assert_eq!(reopened.workspace_orders.len(), 1);
+    assert_eq!(reopened.workspace_orders[&live.id].updated_at_ms, 9);
+    let cleanup = PurgeCleanup(Arc::downgrade(&navigation));
+    cleanup.forget(&retired).await.unwrap();
+    assert_eq!(domain.writes(), 1);
+    cleanup.forget(&live.id).await.unwrap();
+    assert!(
+        load_document(&domain.domain)
+            .unwrap()
+            .workspace_orders
+            .is_empty()
+    );
 }
 
 async fn account(owner: &Arc<Navigation>, workspace: &WorkspaceId) -> Vec<SessionId> {
@@ -320,7 +414,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     let persisted = domain.take_document().unwrap();
     let mut restored: Document = serde_json::from_value(persisted).unwrap();
     restored.validate().unwrap();
-    assert_eq!(restored.workspace_orders[&workspace], expected);
+    assert_eq!(restored.workspace_orders[&workspace].members, expected);
     owner.close().await;
 }
 
@@ -359,7 +453,7 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
             document
                 .workspace_orders
                 .values()
-                .map(Vec::len)
+                .map(|row| row.members.len())
                 .sum::<usize>()
         );
         assert_eq!(
@@ -369,23 +463,38 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
             accounting.bytes(document.revision)
         );
     }
+    let row = |members| WorkspaceAccount {
+        updated_at_ms: 42,
+        members,
+    };
     document.workspace_orders = [(
         a.clone(),
-        (0..1025)
+        row((0..1025)
             .map(|n| SessionId::new(format!("{n}")).unwrap())
-            .collect(),
+            .collect()),
     )]
     .into();
     document.validate().unwrap();
     for orders in [
-        [(a.clone(), vec![id.clone(), id.clone()])].into(),
-        [(a.clone(), vec![id.clone()]), (b, vec![id.clone()])].into(),
-        [(a.clone(), vec![])].into(),
+        [(a.clone(), row(vec![id.clone(), id.clone()]))].into(),
+        [
+            (a.clone(), row(vec![id.clone()])),
+            (b, row(vec![id.clone()])),
+        ]
+        .into(),
+        [(
+            a.clone(),
+            WorkspaceAccount {
+                updated_at_ms: u64::MAX,
+                members: vec![],
+            },
+        )]
+        .into(),
         [(
             a,
-            (0..8193)
+            row((0..8193)
                 .map(|n| SessionId::new(format!("{n}")).unwrap())
-                .collect(),
+                .collect()),
         )]
         .into(),
     ] {
@@ -472,7 +581,7 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
             .unwrap();
         if member == &first {
             assert_eq!(
-                current.document().workspace_orders[&old_id],
+                current.document().workspace_orders[&old_id].members,
                 std::slice::from_ref(&last)
             );
         }
@@ -494,7 +603,7 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     let mut durable: Document =
         serde_json::from_value(serde_json::to_value(current.document().as_ref()).unwrap()).unwrap();
     durable.validate().unwrap();
-    assert_eq!(durable.workspace_orders[&current_id].len(), 2);
+    assert_eq!(durable.workspace_orders[&current_id].members.len(), 2);
     current.close().await;
 }
 

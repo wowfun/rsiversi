@@ -199,6 +199,9 @@ pub struct WorkspacePage {
     pub next: Option<WorkspaceCursor>,
 }
 
+/// Latest Unix millisecond instant representable by a Workspace client.
+pub const MAXIMUM_WORKSPACE_TIMESTAMP_MS: u64 = 8_640_000_000_000_000;
+
 /// Durable workspace registration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -214,6 +217,9 @@ pub struct WorkspaceRecord {
     /// Recorded registration time; absence means unknown.
     #[serde(default)]
     pub created_at_ms: Option<u64>,
+    /// Time of the last display-name change, when one has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_at_ms: Option<u64>,
 }
 
 impl WorkspaceRecord {
@@ -224,6 +230,7 @@ impl WorkspaceRecord {
             coordinates,
             name: None,
             created_at_ms: None,
+            renamed_at_ms: None,
         }
     }
 
@@ -231,10 +238,11 @@ impl WorkspaceRecord {
     pub fn validate(&self) -> Result<()> {
         if self
             .created_at_ms
-            .is_some_and(|time| time > 8_640_000_000_000_000)
+            .max(self.renamed_at_ms)
+            .is_some_and(|time| time > MAXIMUM_WORKSPACE_TIMESTAMP_MS)
         {
             return Err(WorkspaceError::Corrupt(
-                "workspace creation time is out of range".into(),
+                "workspace timestamp is out of range".into(),
             ));
         }
         Ok(())
@@ -356,6 +364,22 @@ pub struct WorkspaceRegistryContract;
 impl LocalContract for WorkspaceRegistryContract {
     const KEY: &'static str = "rsi.workspace";
     type Service = dyn WorkspaceRegistry;
+}
+
+/// Cleans product-owned state after the registry retires an identity.
+#[async_trait]
+pub trait WorkspaceRegistrationCleanup: fmt::Debug + Send + Sync + 'static {
+    /// Discards records for this retired registration. Retries are idempotent.
+    async fn forget(&self, id: &WorkspaceId) -> rsi_api_protocol::Result<()>;
+}
+
+/// Optional native registration-removal participant.
+#[derive(Debug)]
+pub struct WorkspaceRegistrationCleanupContract;
+
+impl LocalContract for WorkspaceRegistrationCleanupContract {
+    const KEY: &'static str = "rsi.workspace.registration_cleanup";
+    type Service = dyn WorkspaceRegistrationCleanup;
 }
 
 /// Trusted authenticated ingress; a scoped view retains its caller, never a serialized grant.

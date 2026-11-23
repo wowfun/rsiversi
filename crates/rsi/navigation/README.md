@@ -7,7 +7,9 @@ Attaching a Session checks its stored execution coordinates and the caller's
 access, then prepends its ID to the registration's shared account. Repeated
 attachment leaves its order and the durable revision intact.
 
-The account stores one ordered list of Session IDs per registration. Position is
+The account stores its latest membership change time alongside its ordered list
+of Session IDs. Attaching a new member or changing member order writes both in
+one transaction. Unchanged moves and ordinary Session activity preserve the time. Position is
 independent of activity, pin and archive state, and device-local ordering.
 Moves require both the member and its anchor to belong to that registration.
 Self moves and already-positioned moves preserve the metadata revision. A
@@ -26,7 +28,13 @@ A single coordinate can therefore contribute both registered and unattached rows
 
 The Navigation writer commits membership and order changes before publication.
 It retains at most 8,192 references within the existing 8 MiB document bound.
-Empty account lists take no durable storage.
+A newly registered Workspace has no account row until its first member is
+attached. Removing its last member retains the Workspace's latest account
+change time and an empty list. That record contains no removed Session ID.
+A replacement registration starts with its own creation time.
+Deleting the Workspace discards its account. Navigation also reconciles retained
+accounts against the registry on mounting, including after an interrupted
+deletion or a period when Navigation was disabled.
 
 Purge cleanup removes only the completed operation's selected Session metadata
 and account-order references.
@@ -58,7 +66,7 @@ Unknown commit outcomes close query and mutation admission until Host restart
 reloads durable truth; a known pre-commit failure leaves admission available.
 
 This ordinary Host plugin joins durable Session summaries with navigation
-metadata. Domain schema 2 stores a global revision, a `metadata` table and an
+metadata. Domain schema 3 stores a global revision, a `metadata` table and an
 `orders` table. It requires atomic batches (SQLite or single JSON); per-record
 JSON is refused before activation. At most 8,192 title/archive records and 8,192
 order references fit within the same logical 8 MiB document bound, including
