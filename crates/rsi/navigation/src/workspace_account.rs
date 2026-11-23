@@ -16,13 +16,10 @@ pub enum WorkspaceMoveOutcome {
 }
 
 pub(super) fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usize> {
-    encoded_entry_bytes(
-        id.as_str(),
-        serde_json::to_vec(members)
-            .map_err(|_| ApiError::Unavailable)?
-            .len(),
-    )
-    .map_err(storage_error)
+    // SessionId admits unescaped ASCII. Count the brackets, string quotes and separators.
+    let strings: usize = members.iter().map(|id| id.as_str().len() + 2).sum();
+    encoded_entry_bytes(id.as_str(), 2 + strings + members.len().saturating_sub(1))
+        .map_err(storage_error)
 }
 
 impl Document {
@@ -54,30 +51,11 @@ impl Document {
         Ok(())
     }
 
-    pub(super) fn project_order(
+    pub(super) fn project_orders(
         &self,
-        id: &WorkspaceId,
-        members: Vec<SessionId>,
+        changes: Vec<(WorkspaceId, Vec<SessionId>)>,
     ) -> Result<DocumentChange> {
         let mut accounting = self.accounting.expect("validated metadata accounting");
-        // Store membership is immutable by coordinates. Members of this current
-        // registration cannot also belong to a deleted registration's saved account.
-        let selected = members.iter().collect::<HashSet<_>>();
-        let mut changes = self
-            .workspace_orders
-            .iter()
-            .filter(|(other, ids)| *other != id && ids.iter().any(|id| selected.contains(id)))
-            .map(|(other, ids)| {
-                (
-                    other.clone(),
-                    ids.iter()
-                        .filter(|id| !selected.contains(id))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        changes.push((id.clone(), members));
         for (id, members) in &changes {
             let previous = self.workspace_orders.get(id);
             let prior_bytes = previous
@@ -164,10 +142,23 @@ impl Navigation {
                 if members.contains(&session) {
                     return Ok(());
                 }
+                let mut changes = Vec::new();
+                // A validated Navigation document gives each identity at most one owner.
+                for (former, ids) in &current.workspace_orders {
+                    if former != &workspace
+                        && let Some(at) = ids.iter().position(|id| id == &session)
+                    {
+                        let mut remaining = ids.clone();
+                        remaining.remove(at);
+                        changes.push((former.clone(), remaining));
+                        break;
+                    }
+                }
                 let mut order = Vec::with_capacity(members.len() + 1);
                 order.push(session);
                 order.extend_from_slice(members);
-                let change = current.project_order(&workspace, order)?;
+                changes.push((workspace, order));
+                let change = current.project_orders(changes)?;
                 drop(current);
                 owner.publish(change).await?;
                 Ok(())
@@ -177,10 +168,6 @@ impl Navigation {
 
     /// Moves a durable Session inside its exact shared Workspace account.
     /// Uses the ordinary writer; an accepted commit survives loss of its waiter.
-    ///
-    /// # Panics
-    /// Panics if an internal account projection drops a member just admitted from
-    /// the same immutable Store snapshot.
     pub fn insert_workspace_session_before(
         self: &Arc<Self>,
         origin: CallOrigin,
@@ -214,13 +201,15 @@ impl Navigation {
                     return Ok(WorkspaceMoveOutcome::InvalidMember);
                 };
                 let mut admissions = [None, None];
+                let mut positions = [0, members.len()];
                 for (index, id) in std::iter::once(&session)
                     .chain(before.as_ref().filter(|id| *id != &session))
                     .enumerate()
                 {
-                    if !members.contains(id) {
+                    let Some(position) = members.iter().position(|member| member == id) else {
                         return Ok(WorkspaceMoveOutcome::InvalidMember);
-                    }
+                    };
+                    positions[index] = position;
                     let Some(header) = owner.metadata_header(id).await? else {
                         return Ok(WorkspaceMoveOutcome::InvalidMember);
                     };
@@ -233,21 +222,12 @@ impl Navigation {
                 if before.as_ref() == Some(&session) {
                     return Ok(WorkspaceMoveOutcome::Applied);
                 }
-                let from = members
-                    .iter()
-                    .position(|id| id == &session)
-                    .expect("admitted account member");
-                let at = before.as_ref().map_or(members.len(), |anchor| {
-                    members
-                        .iter()
-                        .position(|id| id == anchor)
-                        .expect("admitted account anchor")
-                });
+                let [from, at] = positions;
                 if from + 1 != at {
                     let mut order = members.clone();
                     let session = order.remove(from);
                     order.insert(if at > from { at - 1 } else { at }, session);
-                    let change = current.project_order(&workspace, order)?;
+                    let change = current.project_orders(vec![(workspace, order)])?;
                     drop(current);
                     owner.publish(change).await?;
                 }

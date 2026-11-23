@@ -13,6 +13,8 @@ Moves require both the member and its anchor to belong to that registration.
 Self moves and already-positioned moves preserve the metadata revision. A
 replacement registration at the same directory starts empty. Explicit attachment
 removes the selected Session from a former registration in the same transaction.
+Reordering changes only the selected account. Enrollment checks other accounts
+only for the identity being attached.
 Discovery intersects the account with the caller's visible Store identities.
 Unattached identities remain available through authorized global and exact reads.
 A single coordinate can therefore contribute both registered and unattached rows.

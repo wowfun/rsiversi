@@ -61,10 +61,10 @@ async fn capture_current_writer() {
     }
     let change = owner
         .document()
-        .project_order(
-            &WorkspaceId::from_bytes([0xab; 32]),
+        .project_orders(vec![(
+            WorkspaceId::from_bytes([0xab; 32]),
             vec![SessionId::new("two").unwrap()],
-        )
+        )])
         .unwrap();
     owner.publish(change).await.unwrap();
     let bytes = snapshot_bytes(&domain);

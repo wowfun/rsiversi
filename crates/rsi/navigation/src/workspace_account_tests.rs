@@ -312,7 +312,12 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
     let mut document = Document::default();
     for ids in [
         vec![id.clone()],
-        vec![id.clone(), SessionId::new("second").unwrap()],
+        vec![
+            id.clone(),
+            SessionId::new("AZaz09._-:").unwrap(),
+            SessionId::new("x".repeat(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES))
+                .unwrap(),
+        ],
         vec![],
     ] {
         document.edit_order(&a, ids).unwrap();
@@ -430,6 +435,12 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
             .unwrap()
             .await
             .unwrap();
+        if member == &first {
+            assert_eq!(
+                current.document().workspace_orders[&old_id],
+                std::slice::from_ref(&last)
+            );
+        }
     }
     current
         .insert_workspace_session_before(

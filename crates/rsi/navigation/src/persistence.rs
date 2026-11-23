@@ -177,7 +177,8 @@ impl Document {
         if self.accounting.is_none() {
             self.validate()?;
         }
-        self.project_order(id, members)?.apply(self);
+        self.project_orders(vec![(id.clone(), members)])?
+            .apply(self);
         Ok(())
     }
 }
