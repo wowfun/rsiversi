@@ -29,8 +29,9 @@ only its index under `content`; it does not store a second copy of the file bodi
 Payload containers cannot also be ordinary file or Web-asset exports. Files are regular,
 hash-checked and immutable; links and case-colliding paths are refused. Hidden
 ordinary components are allowed inside payloads for dependency-manager metadata.
-Each tree has at most 16,384 files, 32 path components and a 16 MiB header; one
-package has at most 65,536 expanded files plus directories. The index and expanded
+Each tree has a 16 MiB header limit and paths of at most 32 components. All
+trees in one package share a budget of 65,536 expanded files and directories.
+The index and expanded
 files together reserve the container's logical byte length once. The materialized payload retains
 its complete PackageLease, so selection changes and GC cannot remove a live tree.
 There is no second expansion cache or installation registry.

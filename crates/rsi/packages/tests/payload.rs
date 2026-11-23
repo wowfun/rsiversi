@@ -411,6 +411,26 @@ fn arbitrary_file_order_preserves_directory_authority_and_checks_every_file() {
     assert!(store.acquire("plugin").is_err());
 }
 #[test]
+fn payload_files_and_their_shared_directory_consume_one_entry_each() {
+    let mut header = PayloadHeader {
+        format: 1,
+        files: Vec::new(),
+    };
+    let digest = hash(b"");
+    for i in 0..65_535 {
+        header.files.push(FileRecord {
+            path: format!("modules/{i}"),
+            bytes: 0,
+            digest: digest.clone(),
+            executable: false,
+        });
+    }
+    header.validate().unwrap();
+    header.files[0].path = "modules/nested/0".into();
+    assert!(header.validate().is_err());
+}
+
+#[test]
 fn payload_file_count_does_not_reuse_the_small_manifest_limit() {
     let root = temporary_root();
     let store = PackageStore::open(&root.path().join("store")).unwrap();

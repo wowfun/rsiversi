@@ -36,7 +36,7 @@ impl PayloadHeader {
     }
 
     fn entries(&self, remaining: &mut usize) -> Result<Entries<'_>> {
-        if self.format != 1 || self.files.is_empty() || self.files.len() > 16_384 {
+        if self.format != 1 || self.files.is_empty() || self.files.len() > *remaining {
             return Err(invalid("payload format or count"));
         }
         let mut entries = HashMap::with_capacity(self.files.len());
@@ -61,7 +61,7 @@ impl PayloadHeader {
                     None => {}
                 }
             }
-            if entries.len() > MAX_PAYLOAD_ENTRIES || total > crate::MAX_FILE_BYTES {
+            if entries.len() > *remaining || total > crate::MAX_FILE_BYTES {
                 return Err(invalid("payload tree bounds"));
             }
         }
@@ -72,9 +72,7 @@ impl PayloadHeader {
         {
             return Err(invalid("payload path case collision"));
         }
-        *remaining = remaining
-            .checked_sub(entries.len())
-            .ok_or_else(|| invalid("package payload entry capacity"))?;
+        *remaining -= entries.len();
         Ok(entries)
     }
 }
