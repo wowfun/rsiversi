@@ -1,0 +1,29 @@
+{
+  "session_format": 41,
+  "store_schema": 56,
+  "schema_sha256": "9f2234dc8146102b3fbe56a3c891d3f9761d117f711b51d28681e1b52951f557",
+  "files": {
+    "domains/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "domains/sessions.sqlite3": "d08468f9175014fc619f68cd2ad5f31fd80175723e2ce5881fe214b26a8c6348",
+    "generations/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "generations/sessions.sqlite3": "a87a53302d69c5e4259d3761e9f491cae9c6db3ac5c44918ddecb877d80fdd91",
+    "mechanical/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "mechanical/cas/a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7": "a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7",
+    "mechanical/cas/staging/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/sessions.sqlite3": "3d659078670a1356dfda7974087c43b18c3833859170d6b3e383abd0f7075212",
+    "mechanical/sessions.sqlite3-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "mechanical/sessions.sqlite3-wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/media-fixture.png": "559c2b5a952c931a1d3794d806dcb4eecde89c58a3f8f0e26c1673374483bad9",
+    "model-tools/sessions.sqlite3": "72d5b725a987076bcf728a4256c3b589ffe7c29344b3f7e58d169e87978f666e",
+    "program/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "program/cas/staging/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/sessions.sqlite3": "43fd2aae7a2599ddfb351c2fb565495f8ee53f24613dc9fbc4fe20cc9f9428bb",
+    "queue/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "queue/sessions.sqlite3": "00eab62d321e5f2bb9c3ebc2d26b35778e3d793f8369d9e30cbca24f251c3360"
+  }
+}

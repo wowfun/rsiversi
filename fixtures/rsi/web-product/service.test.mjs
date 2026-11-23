@@ -296,13 +296,20 @@ test('live Fact admission stops metadata scanning before materializing oversized
   const database = new DatabaseSync(':memory:');
   let visited = 0;
   database.function('observe', value => { visited++; return value; });
-  database.exec('CREATE TABLE durable(session_id TEXT, seq INTEGER, body TEXT, PRIMARY KEY(session_id,seq)); CREATE TABLE agent_controls(session_id TEXT, seq INTEGER, control_json TEXT, PRIMARY KEY(session_id,seq)); CREATE VIEW facts AS SELECT session_id,seq,observe(body) AS fact_json, CASE WHEN session_id=\'claim\' THEN 4 END AS acceptance_control_seq FROM durable;');
+  database.exec('CREATE TABLE durable(session_id TEXT, seq INTEGER, body TEXT, PRIMARY KEY(session_id,seq)); CREATE TABLE frames(session_id TEXT, seq INTEGER, fact_frame BLOB, logical_bytes INTEGER); CREATE TABLE agent_controls(session_id TEXT, seq INTEGER, control_json TEXT, PRIMARY KEY(session_id,seq)); CREATE VIEW facts AS SELECT session_id,seq,observe(body) AS fact_json, fact_frame,logical_bytes,CASE WHEN session_id=\'claim\' THEN 4 END AS acceptance_control_seq FROM durable LEFT JOIN frames USING(session_id,seq);');
   const insert = database.prepare('INSERT INTO durable VALUES(?,?,?)');
   try {
     insert.run('accepted',2,JSON.stringify({seq:2,text:'中文'})); insert.run('accepted',1,JSON.stringify({seq:1}));
     const {facts,selection} = readFactEvidence(database,'accepted');
     assert.deepEqual(facts.map(fact=>fact.seq),[1,2]);
     assert.equal(selection.bytes,Buffer.byteLength(JSON.stringify(facts[0]))+Buffer.byteLength(JSON.stringify(facts[1])));
+    const {zstdCompressSync}=await import('node:zlib');
+    const framed=JSON.stringify({seq:1,text:'会话记录'.repeat(256)});
+    insert.run('framed',1,'{}');
+    database.prepare('INSERT INTO frames VALUES(?,?,?,?)').run('framed',1,zstdCompressSync(framed),Buffer.byteLength(framed));
+    assert.deepEqual(readFactEvidence(database,'framed').facts,[JSON.parse(framed)]);
+    database.exec("UPDATE frames SET logical_bytes=16777217");
+    assert.throws(()=>readFactEvidence(database,'framed'),/bounded Fact selection/);
     const reference={type:'input_message_claimed',seq:8,accepted_control_seq:4};
     const message={message_id:'original',source:{type:'continuation',source:{round:1}},content:[{type:'text',text:'Reminder'}]};
     insert.run('claim',8,JSON.stringify(reference));

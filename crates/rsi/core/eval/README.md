@@ -85,6 +85,9 @@ also runs Linux `/proc` timeout checks and a report-writing fixture with a dummy
 credential; these checks never contact a provider. Scripted provider tests
 remain separate evidence of the execution pipeline.
 
+The Linux coding evaluator reads compressed SQLite Facts through the system
+`libzstd`. It checks the recorded logical size before allocating trace bytes.
+
 `python3 crates/rsi/core/eval/coding.py --live --key-file .local/dev/.env
 --output .local/notes/0905/live` uses the built
 `target/debug/rsi` binary and a fresh isolated Host per task. The key reader

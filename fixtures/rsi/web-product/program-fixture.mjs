@@ -1,4 +1,6 @@
 import {execFileSync} from 'node:child_process';
+import {DatabaseSync} from 'node:sqlite';
+import {storedFact} from './fact-evidence.mjs';
 // Keyless opt-in Node setup shared by deterministic and explicit live fixtures.
 import assert from 'node:assert/strict';
 import {readFile,writeFile} from 'node:fs/promises';
@@ -45,12 +47,18 @@ print(json.dumps({"owner":owner,"selected":found,"descendants":descendants,"fail
 
 // Inspect the fixture-owned Store without modifying canonical evidence.
 export function programEvidence(workspace) {
-  const script=`import json,sqlite3,pathlib,sys
-paths=list((pathlib.Path(sys.argv[1]).parent/'state').rglob('sessions.sqlite3'))
-assert len(paths)==1,paths
-db=sqlite3.connect('file:'+str(paths[0])+'?mode=ro',uri=True)
-print(json.dumps({kind:[{'session_id':s,'record':json.loads(v)} for s,v in db.execute(sql)] for kind,sql in [('controls','SELECT session_id,control_json FROM agent_controls ORDER BY session_id,seq'),('facts','SELECT session_id,fact_json FROM facts ORDER BY session_id,seq')]}))`;
-  return JSON.parse(execFileSync('python3',['-c',script,workspace],{encoding:'utf8',maxBuffer:16*1024*1024}));
+  const db=new DatabaseSync(join(workspace,'../state/rsiversi/agent/sessions.sqlite3'),{readOnly:true});
+  try {
+    db.exec('BEGIN');
+    const {bytes}=db.prepare(`SELECT coalesce((SELECT sum(coalesce(logical_bytes,length(CAST(fact_json AS BLOB)))) FROM facts),0)
+      + coalesce((SELECT sum(length(CAST(control_json AS BLOB))) FROM agent_controls),0) AS bytes`).get();
+    assert(bytes<=16*1024*1024,'Program evidence exceeds its bounded selection');
+    const controls=Array.from(db.prepare('SELECT session_id,control_json FROM agent_controls ORDER BY session_id,seq').iterate(),
+      row=>({session_id:row.session_id,record:JSON.parse(row.control_json)}));
+    const facts=Array.from(db.prepare('SELECT session_id,fact_json,fact_frame,logical_bytes FROM facts ORDER BY session_id,seq').iterate(),
+      row=>({session_id:row.session_id,record:storedFact(row)}));
+    return {controls,facts};
+  } finally {db.close();}
 }
 
 // Matches the Session UI's actual cancelling feedback, including its casing.

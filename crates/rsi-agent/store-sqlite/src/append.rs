@@ -1392,10 +1392,13 @@ fn insert_fact_row(
     references: &super::reference_index::Writer<'_>,
     acceptance: Option<u64>,
 ) -> Result<()> {
+    let encoded = super::fact_storage::encode(fact, acceptance, references)?;
+    let logical_bytes = (acceptance.is_some() || encoded.frame.is_some())
+        .then(|| i64::try_from(fact.encoded_len()).expect("bounded Fact length"));
     let inserted = transaction
         .prepare_cached(
-            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes, intent_purpose)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO facts (session_id, seq, turn_id, fact_kind, fact_json, acceptance_control_seq, logical_bytes, intent_purpose, fact_frame)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(session_id, turn_id, json_extract(fact_json, '$.effect_id'), json_extract(fact_json, '$.type'))
              WHERE json_extract(fact_json, '$.type') IN ('model_intent', 'model_started', 'model_attempt_settled')
              DO NOTHING",
@@ -1406,10 +1409,11 @@ fn insert_fact_row(
             sqlite_u64("fact sequence", fact.seq())?,
             fact.body().turn_id().map(TurnId::as_str),
             fact_index_kind(fact.body()),
-            super::fact_storage::encode(fact, acceptance, references)?,
+            encoded.json.as_ref(),
             acceptance.map(|seq| sqlite_u64("claim acceptance", seq)).transpose()?,
-            acceptance.map(|_| i64::try_from(fact.encoded_len()).expect("bounded Fact length")),
+            logical_bytes,
             super::fact_storage::intent_purpose(fact.body()),
+            encoded.frame,
         ])
         .map_err(sql_error)?;
     if inserted == 0 {

@@ -1212,7 +1212,7 @@ pub(super) fn validate_canonical_fact_prefix(
             }
             _ => None,
         };
-        observer.fact(session_id, &fact, encoded)?;
+        observer.fact(session_id, &fact, &encoded)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))

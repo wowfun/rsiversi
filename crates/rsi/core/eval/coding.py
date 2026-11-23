@@ -3,6 +3,8 @@
 
 import argparse
 import collections
+import ctypes
+import functools
 import difflib
 import hashlib
 import json
@@ -1469,6 +1471,27 @@ max_output_reserve_tokens = 256000
     return settings
 
 
+@functools.cache
+def zstd_api():
+    # This evaluator already requires Linux; Ubuntu ships the stable zstd ABI.
+    api = ctypes.CDLL("libzstd.so.1")
+    api.ZSTD_decompress.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t)
+    api.ZSTD_decompress.restype = ctypes.c_size_t
+    return api
+
+
+def trace_fact(encoded, frame, logical_bytes):
+    if frame is None:
+        return json.loads(encoded)
+    if not 0 < len(frame) < logical_bytes <= 36 * 1024 * 1024:
+        raise ValueError("invalid persisted Fact lengths")
+    raw = ctypes.create_string_buffer(logical_bytes)
+    size = zstd_api().ZSTD_decompress(raw, len(raw), frame, len(frame))
+    if size != logical_bytes:
+        raise ValueError("invalid persisted Fact frame")
+    return json.loads(raw.raw)
+
+
 def durable_trace(root):
     database = root / "state/rsiversi/agent/sessions.sqlite3"
     if not database.exists():
@@ -1477,9 +1500,9 @@ def durable_trace(root):
     try:
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
             trace["facts"] = [
-                json.loads(row[0])
+                trace_fact(*row)
                 for row in connection.execute(
-                    "SELECT fact_json FROM facts ORDER BY session_id,seq"
+                    "SELECT fact_json,fact_frame,logical_bytes FROM facts ORDER BY session_id,seq"
                 )
             ]
             trace["controls"] = [
@@ -1488,7 +1511,7 @@ def durable_trace(root):
                     "SELECT control_json FROM agent_controls ORDER BY session_id,seq"
                 )
             ]
-    except (sqlite3.Error, ValueError) as error:
+    except (sqlite3.Error, ValueError, OSError) as error:
         trace["read_error"] = str(error)
     return trace
 

@@ -222,11 +222,13 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             fact_kind TEXT NOT NULL
                 CHECK (fact_kind IN ('accepted', 'terminal', 'event', 'command')),
             fact_json TEXT NOT NULL,
+            fact_frame BLOB,
             intent_purpose TEXT CHECK(intent_purpose IN ('conversation', 'context_compaction')),
             command_id TEXT GENERATED ALWAYS AS (CASE WHEN fact_kind='command' THEN json_extract(fact_json,'$.command_id') END) VIRTUAL,
             acceptance_control_seq INTEGER CHECK (acceptance_control_seq > 0),
             logical_bytes INTEGER CHECK (logical_bytes > 0),
-            CHECK ((acceptance_control_seq IS NULL) = (logical_bytes IS NULL)),
+            CHECK ((acceptance_control_seq IS NULL AND fact_frame IS NULL) = (logical_bytes IS NULL)),
+            CHECK (fact_frame IS NULL OR (acceptance_control_seq IS NULL AND fact_kind != 'command')),
             CHECK ((turn_id IS NULL) = (fact_kind='command') AND (command_id IS NOT NULL) = (fact_kind='command')),
             PRIMARY KEY (session_id, seq)
          ) STRICT",

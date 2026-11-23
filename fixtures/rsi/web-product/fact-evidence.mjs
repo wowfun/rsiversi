@@ -1,4 +1,14 @@
 import assert from 'node:assert/strict';
+import {zstdDecompressSync} from 'node:zlib';
+
+export function storedFact(row) {
+  if (row.fact_frame == null) return JSON.parse(row.fact_json);
+  const length = row.logical_bytes;
+  assert(Number.isSafeInteger(length) && length > 0 && length <= 36 * 1024 * 1024, 'invalid logical Fact size');
+  const bytes = zstdDecompressSync(row.fact_frame, {maxOutputLength:length});
+  assert.equal(bytes.length, length, 'Fact frame length differs');
+  return JSON.parse(bytes.toString('utf8'));
+}
 
 // Metadata admission and payload selection share one isolated SQLite snapshot.
 export function readFactEvidence(database, session) {
@@ -9,14 +19,14 @@ export function readFactEvidence(database, session) {
     const from = `FROM facts f LEFT JOIN agent_controls c
       ON c.session_id=f.session_id AND c.seq=f.acceptance_control_seq
       WHERE f.session_id=? ORDER BY f.seq`;
-    for (const row of database.prepare(`SELECT length(CAST(f.fact_json AS BLOB)) + coalesce(length(CAST(c.control_json AS BLOB)),0) AS bytes ${from} LIMIT 513`).iterate(session)) {
+    for (const row of database.prepare(`SELECT CASE WHEN f.fact_frame IS NULL THEN length(CAST(f.fact_json AS BLOB)) ELSE f.logical_bytes END + coalesce(length(CAST(c.control_json AS BLOB)),0) AS bytes ${from} LIMIT 513`).iterate(session)) {
       count += 1; bytes += row.bytes;
       assert(count <= 512 && bytes <= 16 * 1024 * 1024, 'live evidence exceeds its bounded Fact selection');
     }
     assert(count > 0, 'live evidence has no Facts');
     const facts = [];
-    for (const row of database.prepare(`SELECT f.fact_json, f.acceptance_control_seq, c.control_json ${from} LIMIT 512`).iterate(session)) {
-      const fact = JSON.parse(row.fact_json);
+    for (const row of database.prepare(`SELECT f.fact_json, f.fact_frame, f.logical_bytes, f.acceptance_control_seq, c.control_json ${from} LIMIT 512`).iterate(session)) {
+      const fact = storedFact(row);
       if (row.acceptance_control_seq != null) {
         const acceptance = JSON.parse(row.control_json);
         assert(fact.type === 'input_message_claimed' && fact.accepted_control_seq === row.acceptance_control_seq &&

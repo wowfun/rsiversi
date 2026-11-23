@@ -152,11 +152,24 @@ fn assert_encoding<T: serde::de::DeserializeOwned + Serialize + schemars::JsonSc
         .into_root_schema_for::<T>();
     let validator = jsonschema::validator_for(&serde_json::to_value(schema).unwrap()).unwrap();
     let mut statement = db.prepare(query).unwrap();
-    for value in statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-    {
-        let encoded = value.unwrap();
+    let mut rows = statement.query([]).unwrap();
+    while let Some(row) = rows.next().unwrap() {
+        let encoded = match row.get_ref(0).unwrap() {
+            rusqlite::types::ValueRef::Text(raw) => {
+                std::borrow::Cow::Borrowed(std::str::from_utf8(raw).unwrap())
+            }
+            rusqlite::types::ValueRef::Blob(frame) => {
+                let length = usize::try_from(row.get::<_, i64>(1).unwrap()).unwrap();
+                assert!(length <= rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES);
+                let raw = zstd::bulk::decompress(frame, length).unwrap();
+                assert_eq!(raw.len(), length);
+                std::borrow::Cow::Owned(String::from_utf8(raw).unwrap())
+            }
+            other => panic!(
+                "unexpected canonical JSON storage type: {:?}",
+                other.data_type()
+            ),
+        };
         let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert!(
             validator.is_valid(&value),
@@ -264,6 +277,59 @@ async fn capture_current_writer() {
         serde_json::to_vec_pretty(&baseline).unwrap(),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn compressed_model_events_reopen_and_reject_wrong_coordinates_or_damaged_frames() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("frames");
+    let store = SqliteStore::open(&path).unwrap();
+    execution::capture(&store, &path).await;
+    drop(store);
+    let db = Connection::open(path.join("sessions.sqlite3")).unwrap();
+    let (seq, logical, mut frame, index): (i64, i64, Vec<u8>, String) = db.query_row(
+        "SELECT seq,logical_bytes,fact_frame,fact_json FROM facts
+         WHERE json_extract(fact_json,'$.type')='model_attempt_settled' AND fact_frame IS NOT NULL LIMIT 1",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+    assert!(logical > i64::try_from(frame.len() + index.len()).unwrap());
+    let after = u64::try_from(seq - 1).unwrap();
+    let logical = usize::try_from(logical).unwrap();
+    let id = header("model-tools").session_id().clone();
+    let store = SqliteStore::open(&path).unwrap();
+    assert!(matches!(
+        store.read_facts(&id, after, 1, frame.len()).await,
+        Err(StoreError::ReadRequiresCapacity { minimum_bytes }) if minimum_bytes == logical
+    ));
+    let page = store.read_facts(&id, after, 1, logical).await.unwrap();
+    assert_eq!(page.facts[0].encoded_len(), logical);
+    assert!(matches!(
+        page.facts[0].body(),
+        SessionFactBody::ModelAttemptSettled { .. }
+    ));
+    drop(store);
+    db.execute(
+        "UPDATE facts SET fact_json=json_set(fact_json,'$.effect_id','incorrect') WHERE seq=?1",
+        [seq],
+    )
+    .unwrap();
+    let store = SqliteStore::open(&path).unwrap();
+    assert!(matches!(
+        store.read_facts(&id, after, 1, logical).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(store);
+    *frame.last_mut().unwrap() ^= 1;
+    db.execute(
+        "UPDATE facts SET fact_json=?1, fact_frame=?2 WHERE seq=?3",
+        rusqlite::params![index, frame, seq],
+    )
+    .unwrap();
+    let store = SqliteStore::open(&path).unwrap();
+    assert!(matches!(
+        store.read_facts(&id, after, 1, logical).await,
+        Err(StoreError::Corrupt(_))
+    ));
 }
 
 #[tokio::test]
@@ -399,7 +465,7 @@ async fn retained_writer_corpus() {
             // digest-checked by SqliteStore::verify above, not SessionFact serde.
             assert_encoding::<SessionFact>(
                 &db,
-                "SELECT fact_json FROM facts WHERE acceptance_control_seq IS NULL ORDER BY session_id, seq",
+                "SELECT coalesce(fact_frame,fact_json),logical_bytes FROM facts WHERE acceptance_control_seq IS NULL ORDER BY session_id, seq",
             );
             assert_encoding::<AgentControlRecord>(
                 &db,

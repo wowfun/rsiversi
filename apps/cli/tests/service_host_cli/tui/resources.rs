@@ -286,16 +286,33 @@ async fn project_and_personal_skills_and_markdown_work_through_both_tui_entries(
                 .unwrap(),
             2
         );
-        assert_eq!(
-            db.query_row(
-                "SELECT COUNT(*) FROM facts WHERE fact_json LIKE '%/markdown%'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
+        let sessions = db
+            .prepare("SELECT session_id FROM sessions")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         drop(db);
+        for session in sessions {
+            let history = fixture.assert_success(&[
+                "run",
+                "test-cli",
+                "--history",
+                &session,
+                "--output",
+                "jsonl",
+            ]);
+            let records = String::from_utf8(history.stdout).unwrap();
+            assert!(
+                records.contains("\"next_before_seq\":null"),
+                "fixture history must fit one page"
+            );
+            assert!(
+                !records.contains("/markdown"),
+                "local display commands entered Session history"
+            );
+        }
         if daemon {
             fixture.assert_success(&["host", "restart"]);
         }

@@ -1,6 +1,7 @@
 //! Physical Fact encoding and bounded logical reconstruction.
 
 use super::*;
+use std::borrow::Cow;
 
 // The acceptance coordinate column avoids parsing unrelated (possibly large)
 // Fact JSON to decide whether a join is needed. The JSON reference remains the
@@ -8,12 +9,14 @@ use super::*;
 macro_rules! fact_rows {
     ($maximum:literal, $tail:literal) => {
         concat!(
-            "SELECT CASE WHEN f.acceptance_control_seq IS NULL THEN length(CAST(f.fact_json AS BLOB)) ELSE f.logical_bytes END,
+            "SELECT coalesce(f.logical_bytes, length(CAST(f.fact_json AS BLOB))),
                     length(CAST(f.fact_json AS BLOB)),
                     CASE WHEN length(CAST(f.fact_json AS BLOB)) <= ", $maximum, " THEN f.fact_json END,
                     f.acceptance_control_seq, coalesce(length(CAST(c.control_json AS BLOB)),0),
                     CASE WHEN length(CAST(c.control_json AS BLOB)) <= ", $maximum, " THEN c.control_json END,
-                    f.seq, f.turn_id, f.fact_kind, f.session_id, f.intent_purpose
+                    f.seq, f.turn_id, f.fact_kind, f.session_id, f.intent_purpose, f.fact_frame IS NOT NULL,
+                    CASE WHEN length(f.fact_frame) BETWEEN 1 AND f.logical_bytes - 1
+                         AND f.logical_bytes <= ", $maximum, " THEN f.fact_frame END
              FROM facts f LEFT JOIN agent_controls c
                ON c.session_id=f.session_id AND c.seq=f.acceptance_control_seq ", $tail
         )
@@ -62,7 +65,38 @@ pub(super) fn read_with<T>(
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::Corrupt("absent canonical Fact".into()))?;
     let (fact, encoded) = decode(row)?;
-    visit(fact, encoded)
+    visit(fact, &encoded)
+}
+
+// Only language model coordinates index the body of an ordinary Fact.
+// Standalone commands keep the complete JSON used by their separate stage index.
+fn index_json(body: &SessionFactBody) -> Result<Cow<'static, str>> {
+    #[derive(Serialize)]
+    struct Coordinate<'a> {
+        r#type: &'a str,
+        effect_id: &'a str,
+    }
+    let (stage, effect) = match body {
+        SessionFactBody::ModelIntent { effect_id, .. } => ("model_intent", effect_id),
+        SessionFactBody::ModelStarted { effect_id, .. } => ("model_started", effect_id),
+        SessionFactBody::ModelAttemptSettled { effect_id, .. } => {
+            ("model_attempt_settled", effect_id)
+        }
+        _ => return Ok(Cow::Borrowed("{}")),
+    };
+    super::encode_json(
+        "model effect coordinate",
+        &Coordinate {
+            r#type: stage,
+            effect_id: effect.as_str(),
+        },
+    )
+    .map(Cow::Owned)
+}
+
+pub(super) struct EncodedFact {
+    pub json: Cow<'static, str>,
+    pub frame: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -90,8 +124,8 @@ pub(super) fn encode(
     fact: &SessionFact,
     acceptance: Option<u64>,
     references: &super::reference_index::Writer<'_>,
-) -> Result<String> {
-    if let Some(accepted_control_seq) = acceptance {
+) -> Result<EncodedFact> {
+    let json = if let Some(accepted_control_seq) = acceptance {
         let SessionFactBody::InputMessageClaimed {
             turn_id, step_id, ..
         } = fact.body()
@@ -112,7 +146,29 @@ pub(super) fn encode(
         )
     } else {
         references.fact(fact)
+    }?;
+    if json.len() >= 1024
+        && acceptance.is_none()
+        && !matches!(fact.body(), SessionFactBody::ManualCompaction { .. })
+    {
+        let packed = zstd::bulk::Compressor::new(3)
+            .and_then(|mut encoder| {
+                encoder.include_checksum(true)?;
+                encoder.compress(json.as_bytes())
+            })
+            .map_err(|error| StoreError::Io(format!("compressing session Fact: {error}")))?;
+        let index = index_json(fact.body())?;
+        if packed.len() + index.len() < json.len() {
+            return Ok(EncodedFact {
+                json: index,
+                frame: Some(packed),
+            });
+        }
     }
+    Ok(EncodedFact {
+        json: Cow::Owned(json),
+        frame: None,
+    })
 }
 
 pub(super) fn logical_len(row: &rusqlite::Row<'_>) -> Result<usize> {
@@ -126,9 +182,38 @@ pub(super) fn logical_len(row: &rusqlite::Row<'_>) -> Result<usize> {
     Ok(length)
 }
 
+fn decode_frame(
+    row: &rusqlite::Row<'_>,
+    length: usize,
+    index: Option<&str>,
+) -> Result<(SessionFact, String)> {
+    let frame = row
+        .get_ref(12)
+        .map_err(sql_error)?
+        .as_blob()
+        .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
+    let raw = zstd::bulk::decompress(frame, length)
+        .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
+    let json = String::from_utf8(raw).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
+        "session Fact",
+        (
+            i64::try_from(length).expect("bounded Fact length"),
+            Some(json),
+        ),
+        MAXIMUM_SESSION_FACT_BYTES,
+    )?;
+    if index != Some(index_json(fact.body())?.as_ref()) {
+        return Err(StoreError::Corrupt(
+            "Fact frame differs from its indexed coordinates".into(),
+        ));
+    }
+    Ok((fact, encoded))
+}
+
 /// Called only after the caller admits this row's logical bytes into its budget.
-/// Returns the owned logical value and borrowed physical bytes for coverage hashing.
-pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, &'a str)> {
+/// Plain rows borrow their JSON for coverage hashing. Compressed rows retain its expansion.
+pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow<'a, str>)> {
     let length = logical_len(row)?;
     let physical = (
         row.get::<_, i64>(1).map_err(sql_error)?,
@@ -184,13 +269,17 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, &'a
             },
         )
         .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        (fact, encoded)
+        (fact, Cow::Borrowed(encoded))
+    } else if row.get::<_, bool>(11).map_err(sql_error)? {
+        let (fact, encoded) = decode_frame(row, length, physical.1)?;
+        (fact, Cow::Owned(encoded))
     } else {
         super::cas::decode_projected_json_with_source(
             "session Fact",
             physical,
             MAXIMUM_SESSION_FACT_BYTES,
-        )?
+        )
+        .map(|(fact, encoded)| (fact, Cow::Borrowed(encoded)))?
     };
     if fact.encoded_len() != length
         || fact.seq() != decode_u64("Fact sequence", row.get(6).map_err(sql_error)?)?
@@ -228,7 +317,7 @@ mod tests {
         let decoded = db
             .query_row(
                 "SELECT length(CAST(?1 AS BLOB)), length(CAST(?1 AS BLOB)), ?1,
-                        NULL, 0, NULL, 1, 'turn', 'event', 'session', NULL AS intent_purpose",
+                        NULL, 0, NULL, 1, 'turn', 'event', 'session', NULL AS intent_purpose, 0, NULL",
                 [&json],
                 |row| {
                     let raw = row.get_ref(2)?.as_str().unwrap();

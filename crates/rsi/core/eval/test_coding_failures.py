@@ -13,6 +13,15 @@ import coding
 
 
 class HeadlessEvidence(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux coding evaluator")
+    def test_trace_decodes_checksum_and_exact_length(self):
+        frame = bytes.fromhex("28b52ffd646203f50000b87b22736571223a312c22636f6e74657874223a2278227d010091f80113b1ab4795")
+        self.assertEqual(coding.trace_fact("{}", frame, 1122), {"seq": 1, "context": "x" * 1100})
+        with self.assertRaises(ValueError):
+            coding.trace_fact("{}", frame[:-1] + bytes([frame[-1] ^ 1]), 1122)
+        with self.assertRaises(ValueError):
+            coding.trace_fact("{}", frame, 1123)
+
     @unittest.skipUnless(
         os.name == "posix", "oracle supervisor uses Unix process groups"
     )

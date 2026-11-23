@@ -1,5 +1,9 @@
 # Web product verification
 
+Canonical Fact evidence reads the fixture-owned SQLite snapshot, admits the
+logical byte total first and expands any checksummed zstd frames with Node's
+built-in zlib. The Program probe reads controls and Facts at the same cut.
+
 The deterministic provider selects the first User message after the last completed
 Assistant reply. Later User-role workspace and runtime-context messages remain
 in the actual request; Tool-call Assistant messages retain the current round.

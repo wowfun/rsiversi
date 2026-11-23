@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": { "test": "node --test *.test.mjs && node verify.mjs" },
-  "engines": { "node": ">=22" },
+  "engines": { "node": "^22.15.0 || >=23.8.0" },
   "devDependencies": { "playwright": "1.63.0" }
 }
