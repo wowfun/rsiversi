@@ -13,7 +13,7 @@ import { assemble } from '../packages.mjs';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const temporaryRoot = await realpath(tmpdir());
 const windows = process.platform === 'win32';
-const uninstaller = process.env.RSI_TEST_UNINSTALLER ?? join(root, 'target/debug', windows ? 'rsi-uninstall.exe' : 'rsi-uninstall');
+const uninstaller = process.env.RSI_TEST_UNINSTALLER ?? resolve(root, process.env.CARGO_TARGET_DIR || 'target', 'debug', windows ? 'rsi-uninstall.exe' : 'rsi-uninstall');
 let gitBashProgram;
 function gitBash() {
   if (gitBashProgram) return gitBashProgram;
@@ -301,7 +301,7 @@ fs.writeFileSync(path.join(target, 'build-inputs.json'), JSON.stringify({
     assert.equal(resolve(inputs.cargo), join(directory, 'cargo home'));
     assert.equal(resolve(inputs.rustup), join(directory, 'rustup home'));
     assert.equal(inputs.toolchain, 'fixture-toolchain');
-    assert.equal(inputs.home, join(checkout, 'target/rsi-build/build-home'));
+    assert.equal(inputs.home, join(target, 'rsi-build/build-home'));
     assert.equal(inputs.ci, 'true');
     assert.equal(inputs.credential, null);
     assert.deepEqual([inputs.proxy, inputs.noProxy], JSON.parse(selected.stdout));
@@ -432,8 +432,11 @@ test('source publication replaces only its own package and preserves unrelated o
     assert.deepEqual(JSON.parse(await readFile(join(output, 'package.json'), 'utf8')), three);
   } finally { await rm(directory, {recursive:true, force:true}); }
 });
-test('build subprocesses receive declared tool inputs and a private home, without runtime credentials', async () => {
+test('build subprocesses receive declared tool inputs and a private home, without runtime credentials', async t => {
+  const target = await mkdtemp(join(temporaryRoot, 'rsi build target '));
+  t.after(() => rm(target, {recursive:true, force:true}));
   const environment = await buildEnvironment({...process.env,
+    CARGO_TARGET_DIR:target,
     DEEPSEEK_API_KEY:'fixture-secret', RSI_REPOSITORY_SIGNING_KEY:'fixture-secret',
     RSI_PACKAGE_REPOSITORY_NAME:'release', RSI_PACKAGE_REPOSITORY_URL:'https://packages.example/',
     RSI_PACKAGE_REPOSITORY_KEY:'00'.repeat(32)});
@@ -443,7 +446,8 @@ test('build subprocesses receive declared tool inputs and a private home, withou
   assert.equal(environment.RSI_PACKAGE_REPOSITORY_URL, 'https://packages.example/');
   assert.equal(environment.RSI_PACKAGE_REPOSITORY_KEY, '00'.repeat(32));
   assert.notEqual(environment.HOME, process.env.HOME);
-  assert.match(environment.HOME, /rsi-build[/\\]build-home$/);
+  assert.equal(environment.HOME, join(target, 'rsi-build/build-home'));
+  assert.equal(environment.TMP, join(target, 'rsi-build/tmp'));
   assert.equal(environment.PATH, process.env.PATH);
 });
 
@@ -451,7 +455,7 @@ test('POSIX source installer admits SDK environment names and rejects malformed 
   const directory = await mkdtemp(join(temporaryRoot, 'rsi source env '));
   try {
     const scripts = join(directory, 'scripts'), tools = join(directory, 'tools');
-    const devtools = join(directory, 'apps/devtools'), target = join(directory, 'target');
+    const devtools = join(directory, 'apps/devtools'), target = join(directory, 'external target');
     await mkdir(scripts); await mkdir(tools); await mkdir(devtools, {recursive:true});
     const script = join(scripts, 'install.sh');
     await writeFile(script, await readFile(join(root, 'scripts/install.sh')));
@@ -463,6 +467,8 @@ test('POSIX source installer admits SDK environment names and rejects malformed 
     const first = spawnSync('bash', [script, '--prefix', join(directory,'installed'), '--no-path'], {env:environment,encoding:'utf8'});
     assert.equal(first.status, 0, first.stderr);
     assert.equal((await readFile(join(target,'sdk'),'utf8')).trim(), 'fixture-sdk');
+    assert.ok((await stat(join(target, 'rsi-build/build-home'))).isDirectory());
+    await assert.rejects(stat(join(directory, 'target')), {code:'ENOENT'});
     await writeFile(declarations, 'HOME=../escape\n');
     const invalid = spawnSync('bash', [script, '--prefix', join(directory,'invalid'), '--no-path'], {env:environment,encoding:'utf8'});
     assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /Invalid build environment declaration/);

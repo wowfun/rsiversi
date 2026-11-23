@@ -28,10 +28,10 @@ export function parseEnvironmentDeclaration(declaration) {
   return {key, suffix};
 }
 export async function buildEnvironment(original = process.env) {
-  const directory = join(root, 'target/rsi-build');
   const environment = {};
   const valueOf = key => original[key] ?? (process.platform === 'win32'
     ? original[Object.keys(original).find(name => name.toUpperCase() === key.toUpperCase())] : undefined);
+  const directory = resolve(root, valueOf('CARGO_TARGET_DIR') || 'target', 'rsi-build');
   for (const declaration of (await readFile(join(root, 'apps/devtools/build-environment.txt'), 'utf8')).trim().split(/\r?\n/)) {
     const {key, suffix} = parseEnvironmentDeclaration(declaration);
     if (suffix) {
@@ -66,7 +66,7 @@ export async function build(options) {
   }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   await mkdir(dirname(output), {recursive:true});
-  const target = resolve(root, process.env.CARGO_TARGET_DIR ?? 'target');
+  const target = resolve(root, process.env.CARGO_TARGET_DIR || 'target');
   const environment = await buildEnvironment();
   const profile = debug ? 'debug' : 'release';
   let input, temporary;

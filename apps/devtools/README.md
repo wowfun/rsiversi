@@ -50,6 +50,9 @@ file without replacing the competing destination.
 The Windows installer makes a newly created `bin` directory private to the current
 user, SYSTEM and Administrators so it can support core upgrade. Existing directory
 ACLs are preserved; shared installations require administrator-managed updates.
+The Windows removal launcher stages its executable in a directory owned by
+the caller. Its protected ACL grants access to the caller, SYSTEM and
+Administrators. A caller who already owns the directory only needs to set its ACL.
 Installer failures emit concise stderr diagnostics without PowerShell source
 locations or exception stacks. Parameter-binding tests use stable PowerShell
 error IDs, independent of the user's display language.
@@ -142,14 +145,15 @@ and exec can temporarily retain a descriptor after its parent closes it.
 All build entrypoints reject malformed environment declarations; Windows SDK
 names containing parentheses are valid even when a POSIX producer has no value
 for them. Private directory suffixes contain nonempty bounded path components.
-The legacy fixture distributor retains its target-scoped private home; ordinary
-package producers and minimal installers share `target/rsi-build`.
+The legacy fixture distributor retains its capture-scoped private home. Ordinary
+package producers and source installers place private build homes, caches and
+temporary files under `rsi-build` in the selected Cargo target directory.
 
 Build producers share `build-environment.txt` for forwarded tool inputs. Fixture
 captures deliberately replace `CARGO_TARGET_DIR` with their isolated captured
 target and use separate private homes; ordinary package builds use the caller's
 selected Cargo target. These directory choices are not wire identities.
 
-Installation and removal tests require a prebuilt native `rsi-uninstall` at
-`target/debug` or `RSI_TEST_UNINSTALLER`. Build it with `cargo build -p rsi-uninstall`
+Installation and removal tests require a prebuilt native `rsi-uninstall` in
+the selected Cargo target's `debug` directory or at `RSI_TEST_UNINSTALLER`. Build it with `cargo build -p rsi-uninstall`
 before running the isolated Node suites; their fixtures never build during uninstall.

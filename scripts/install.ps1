@@ -104,11 +104,13 @@ if (!$Binary) {
         $start.EnvironmentVariables.Clear()
         $start.EnvironmentVariables['CARGO_HOME'] = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
         $start.EnvironmentVariables['RUSTUP_HOME'] = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+        $target = if (!$env:CARGO_TARGET_DIR) { Join-Path $root 'target' }
+            else { [IO.Path]::GetFullPath([IO.Path]::Combine($root, $env:CARGO_TARGET_DIR)) }
         foreach ($declaration in Get-Content -LiteralPath (Join-Path $root 'apps\devtools\build-environment.txt')) {
             if ($declaration -cnotmatch '^([A-Za-z_][A-Za-z0-9_()]*)(=([a-z0-9_-]+(/[a-z0-9_-]+)*))?$') { throw 'Invalid build environment declaration.' }
             $key = $Matches[1]
             if ($Matches.ContainsKey(3)) {
-                $value = Join-Path $root ('target\rsi-build\' + $Matches[3])
+                $value = Join-Path $target ('rsi-build\' + $Matches[3])
                 New-Item -ItemType Directory -Force -Path $value | Out-Null
                 $start.EnvironmentVariables[$key] = $value
             } else {
@@ -134,9 +136,6 @@ if (!$Binary) {
             }
             $build.Dispose()
         }
-        $target = if (!$env:CARGO_TARGET_DIR) { Join-Path $root 'target' }
-            elseif ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) }
-            else { [IO.Path]::GetFullPath((Join-Path $root $env:CARGO_TARGET_DIR)) }
         $Binary = Join-Path $target 'release\rsi.exe'
         $Uninstaller = Join-Path $target 'release\rsi-uninstall.exe'
     } finally { Pop-Location }

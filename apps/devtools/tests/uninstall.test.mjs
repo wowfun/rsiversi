@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('../../../',import.meta.url));
 const temporaryRoot=await realpath(tmpdir());
 const windows=process.platform==='win32';
-const tool=process.env.RSI_TEST_UNINSTALLER??join(root,'target/debug',windows?'rsi-uninstall.exe':'rsi-uninstall');
+const tool=process.env.RSI_TEST_UNINSTALLER??resolve(root,process.env.CARGO_TARGET_DIR||'target','debug',windows?'rsi-uninstall.exe':'rsi-uninstall');
 const suffix=windows?'ps1':'sh';
 function script(name,args,cwd) {
   return spawnSync(windows?'powershell.exe':'bash',windows?['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',join(root,`scripts/${name}.ps1`),...args]:[join(root,`scripts/${name}.sh`),...args],{cwd,encoding:'utf8',timeout:60_000});
@@ -98,6 +98,14 @@ test('uninstall protocol drift refuses before any effect',()=>{
 });
 test('installed launcher works without the source checkout',async()=>{
   const f=await fixture();try{
+    if (windows) {
+      // Model a writable external volume where children inherit Modify, without WRITE_OWNER.
+      const acl = spawnSync('icacls.exe', [
+        f.tmp, '/inheritance:r', '/grant:r',
+        '*S-1-5-11:(OI)(CI)M', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+      ], {encoding:'utf8'});
+      assert.equal(acl.status, 0, acl.stderr);
+    }
     const path=join(f.control,`uninstall.${suffix}`);
     const args=f.args.slice(2);
     const result=spawnSync(windows?'powershell.exe':'bash',windows?['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path,...args,flag('Yes')]:[path,...args,flag('Yes')],{cwd:f.directory,encoding:'utf8',timeout:60_000});

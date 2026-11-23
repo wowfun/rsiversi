@@ -96,7 +96,10 @@ $exitCode = 1
 try {
     $policy = New-Object Security.AccessControl.DirectorySecurity
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $policy.SetOwner($identity); $policy.SetAccessRuleProtection($true, $false)
+    $descriptor = [Security.AccessControl.DirectorySecurity]::new($temporary, [Security.AccessControl.AccessControlSections]::Owner)
+    $owner = $descriptor.GetOwner([Security.Principal.SecurityIdentifier])
+    if (!$owner.Equals($identity)) { $policy.SetOwner($identity) }
+    $policy.SetAccessRuleProtection($true, $false)
     foreach ($sid in @($identity.Value, 'S-1-5-18', 'S-1-5-32-544')) {
         $rule = New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
         $policy.AddAccessRule($rule)

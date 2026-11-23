@@ -89,6 +89,8 @@ done
 done
 progress "Preparing installation in $bin..."
 if [[ -z "$binary" ]]; then
+    target="${CARGO_TARGET_DIR:-$root/target}"
+    [[ "$target" = /* ]] || target="$root/$target"
     (
         cd -- "$root"
         progress 'Preparing release build...'
@@ -98,7 +100,7 @@ if [[ -z "$binary" ]]; then
             [[ "$declaration" =~ ^([A-Za-z_][A-Za-z0-9_\(\)]*)(=([a-z0-9_-]+(/[a-z0-9_-]+)*))?$ ]] || { echo 'Invalid build environment declaration.' >&2; exit 2; }
             key=${BASH_REMATCH[1]}; suffix=${BASH_REMATCH[3]:-}
             if [[ -n "$suffix" ]]; then
-                value="$root/target/rsi-build/$suffix"; mkdir -p -- "$value"
+                value="$target/rsi-build/$suffix"; mkdir -p -- "$value"
                 build_env+=("$key=$value")
             elif IFS= read -r -d '' value < <(printenv -0 -- "$key"); then build_env+=("$key=$value"); fi
         done < "$root/apps/devtools/build-environment.txt"
@@ -107,8 +109,6 @@ if [[ -z "$binary" ]]; then
         env -i "${build_env[@]}" cargo build --locked --release -p rsi-cli -p rsi-uninstall
         progress "Build completed in $((SECONDS - build_started))s."
     )
-    target="${CARGO_TARGET_DIR:-$root/target}"
-    [[ "$target" = /* ]] || target="$root/$target"
     binary="$target/release/rsi"
     uninstaller="$target/release/rsi-uninstall"
 else

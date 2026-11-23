@@ -17,7 +17,7 @@ const family = process.env.RSI_WEB_BUNDLE_ID ?? randomBytes(32).toString('hex');
 if (!/^[a-f0-9]{64}$/.test(family)) throw new Error('Invalid Web bundle identity');
 process.env.RSI_WEB_BUNDLE_ID = family;
 process.env.RSI_BUILD_FAMILY_SHA256 = family;
-const target = resolve(process.env.CARGO_TARGET_DIR ?? join(root, 'target'));
+const target = resolve(root, process.env.CARGO_TARGET_DIR || 'target');
 if (!output || !isAbsolute(output)) throw new Error("Provide an absolute empty output directory");
 const options = process.argv.slice(3);
 if (options.length > 1 || options.some(option => option !== "--dev")) {
