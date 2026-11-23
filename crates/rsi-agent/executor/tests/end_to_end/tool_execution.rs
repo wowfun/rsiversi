@@ -1384,6 +1384,7 @@ struct SecondApproval {
     pending: Notify,
     answer: Notify,
 }
+
 #[async_trait]
 impl Approval for SecondApproval {
     async fn ask(
@@ -1427,6 +1428,126 @@ fn assert_review_progress(facts: &[SessionFact], starts: &[&str], outcomes: &[(&
     }
     assert_eq!(started, starts);
     assert_eq!(settled, outcomes);
+}
+
+#[derive(Debug)]
+struct PrefixFaultTool {
+    store: Arc<MemoryStore>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ToolExecutor for PrefixFaultTool {
+    async fn prepare(
+        &self,
+        _: &Value,
+        execution: &ToolExecution,
+    ) -> ToolResultType<Option<rsi_tools_protocol::ToolProcess>> {
+        if execution.call_id == "a" {
+            self.store.fail_next_appends(2);
+        }
+        Ok(None)
+    }
+
+    async fn execute(&self, arguments: Value, _: ToolExecution) -> ToolResultType<ToolResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ToolResult::new(arguments, vec![], false)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_parallel_start_prefix_holds_all_bodies_until_the_store_recovers() {
+    use futures_util::StreamExt as _;
+    use std::time::Duration;
+    let stack = BaseStack::activate().await;
+    let tool = Arc::new(PrefixFaultTool {
+        store: stack.store.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let lease = stack
+        .tool_registrar
+        .register(ToolRegistration {
+            output: None,
+            definition: ToolDefinition::new("read", "read fixture", json!({"type":"object"}))
+                .unwrap()
+                .with_scheduling(ToolScheduling::ParallelSafe),
+            run_policy: rsi_tools_protocol::ToolRunPolicy::execution(Duration::from_secs(1)),
+            executor: tool.clone(),
+        })
+        .unwrap();
+    let provider = language_fixture(
+        &stack,
+        vec![
+            StartOutcome::Stream(tool_calls_script(&[
+                ("a", "read", "{}"),
+                ("b", "read", "{}"),
+            ])),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.prefix", provider.clone())
+        .await;
+    let executor = stack.activate_executor("prefix-fault").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let submitted = stack
+        .submit_fresh(&turns, "prefix-fault", "read both")
+        .await;
+    let id = &submitted.session_id;
+    let mut events = turns.observe(id, 0).await.unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.next().await {
+            if let rsi_agent_turn_protocol::TurnUpdate::Fact { fact, durable_seq } = event.unwrap()
+                && let SessionFactBody::ToolStarted { identity, .. } = fact.body()
+                && identity.call_id() == "b"
+            {
+                assert!(durable_seq < fact.seq());
+                return fact.seq();
+            }
+        }
+        panic!("missing live start for the second read")
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        stack
+            .store
+            .session_summary(id)
+            .await
+            .unwrap()
+            .durable_fact_seq
+            < end
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+
+    tokio::time::timeout(Duration::from_secs(5), turns.wait_idle(id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        turns.outcome(id, &submitted.turn_id).await.unwrap(),
+        Some(TurnOutcome::Completed)
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let history = stack
+        .store
+        .read_facts(id, 0, 64, FACT_PAGE_BYTES)
+        .await
+        .unwrap();
+    assert_review_progress(
+        &history.facts,
+        &["a", "b"],
+        &[("a", "result"), ("b", "result")],
+    );
+    drop((turns, events, lease));
+    stack.dispose(language, executor).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
