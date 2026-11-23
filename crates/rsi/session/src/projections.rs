@@ -10,6 +10,9 @@ use std::{sync::Arc, time::Duration};
 impl LocalSessionHandle {
     pub(super) fn projection_changed(&self) {
         self.projection_changes.send_replace(());
+        if let Some(lease) = &self.lease {
+            lease.changed(self);
+        }
     }
 
     async fn capture_projection(&self) -> Result<ProjectionSnapshot> {

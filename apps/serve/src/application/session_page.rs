@@ -163,7 +163,11 @@ impl rsi_extension::Handler for Directory {
                 () = stop.cancelled() => break Err(Error::Cancelled),
                 () = self.device.revoked.cancelled() => break Err(Error::Cancelled),
                 row = next => break match row {
-                    Some(Ok(())) => Ok(json!("all")),
+                    Some(Ok(change)) => Ok(match change {
+                        rsi_session_protocol::DirectoryChange::Catalog => json!("all"),
+                        rsi_session_protocol::DirectoryChange::SharedBlank(id) => json!({"blank":id}),
+                        rsi_session_protocol::DirectoryChange::RecheckSharedBlanks => json!({"blank":null}),
+                    }),
                     Some(Err(error)) => Err(Error::Remote(error.to_string())),
                     None => Err(Error::Cancelled),
                 },

@@ -831,28 +831,47 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         device: &rsi_api_protocol::AuthenticatedDevice,
     ) -> Result<Option<rsi_session_protocol::DirectoryChanges>> {
         use futures_util::StreamExt;
-        let Some(mut durable) = self
+        let mut durable = self
             .projection_service
             .watch_activity()
             .map_err(map_turn_error)?
-        else {
-            return Ok(None);
-        };
+            .unwrap_or_else(|| {
+                futures_util::stream::unfold(self.execution.clone(), |clock| async move {
+                    clock.sleep(std::time::Duration::from_secs(1)).await;
+                    Some(((), clock))
+                })
+                .boxed()
+            });
         let mut drafts = self.drafts.watch_membership();
+        let mut shared = self.drafts.watch_shared();
+        let caller = Self {
+            origin: rsi_api_protocol::CallOrigin::Device(device.clone()),
+            ..self.clone()
+        };
         let revoked = device.revoked.clone();
         let stopped = self.projection_stopped.clone();
         let mut visibility = self.visibility_changes();
         Ok(Some(Box::pin(async_stream::try_stream! {
             loop {
-                tokio::select! {
+                use rsi_session_protocol::DirectoryChange;
+                let change = tokio::select! {
                     biased;
                     () = revoked.cancelled() => break,
                     () = stopped.cancelled() => break,
-                    updated = drafts.changed() => if updated.is_err() { break; },
-                    updated = durable.next() => if updated.is_none() { break; },
-                    _ = visibility.next() => {},
-                }
-                yield ();
+                    updated = shared.recv() => match updated {
+                        Ok(hint) => {
+                            if caller.admit(&hint.location).is_err() ||
+                                !caller.protect_scope(hint.scope.as_ref()).is_ok_and(|token| token.is_none_or(|t| !t.is_cancelled())) { continue; }
+                            DirectoryChange::SharedBlank(hint.id)
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => DirectoryChange::RecheckSharedBlanks,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    updated = drafts.changed() => { if updated.is_err() { break; } DirectoryChange::Catalog },
+                    updated = durable.next() => { if updated.is_none() { break; } DirectoryChange::Catalog },
+                    _ = visibility.next() => DirectoryChange::Catalog,
+                };
+                yield change;
             }
         })))
     }
@@ -1126,7 +1145,7 @@ impl LocalSessionHandle {
             .expect("only an inactive final draft lease expires");
         if matches!(*state, HandleState::Fresh(_)) {
             let old = std::mem::replace(&mut *state, HandleState::Expired);
-            self.projection_changed();
+            self.projection_changes.send_replace(());
             drop(state);
             drop(old);
             if let Some(references) = &self.references {
@@ -2310,6 +2329,9 @@ impl SessionHandle for LocalSessionHandle {
         }))
     }
 
+    fn is_shared_blank(&self) -> bool {
+        self.lease.as_ref().is_some_and(|lease| lease.shared)
+    }
     fn retain_draft(&self) -> Result<Option<Box<dyn rsi_session_protocol::DraftOwner>>> {
         let _admission = self.admit()?;
         self.lifecycle.check()?;

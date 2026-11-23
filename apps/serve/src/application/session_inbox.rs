@@ -67,7 +67,7 @@ impl DraftOwners {
 }
 async fn capture(handle: &dyn rsi_session_protocol::SessionHandle) -> Result<Value> {
     match handle.draft_snapshot().await {
-        Ok(snapshot) => Ok(draft(&snapshot)),
+        Ok(snapshot) => Ok(draft(&snapshot, handle.is_shared_blank())),
         Err(rsi_session_protocol::SessionError::NotFound(_)) => {
             let state = handle.inspect().await.map_err(remote)?;
             Ok(durable(&state))
@@ -76,7 +76,7 @@ async fn capture(handle: &dyn rsi_session_protocol::SessionHandle) -> Result<Val
     }
 }
 
-fn draft(draft: &rsi_session_protocol::SessionDraftView) -> Value {
+fn draft(draft: &rsi_session_protocol::SessionDraftView, shared: bool) -> Value {
     let session = draft.header.session_id();
     let pending: Vec<_> = draft
         .command_inputs
@@ -87,7 +87,7 @@ fn draft(draft: &rsi_session_protocol::SessionDraftView) -> Value {
                     "delivery":input.delivery,"target":input.delivery,"message":input.message})
         })
         .collect();
-    json!({"kind":"draft","session_id":session,
+    json!({"kind":"draft","session_id":session,"shared":shared,
                     "revision":draft.revision,"pending":pending})
 }
 
@@ -389,7 +389,7 @@ mod tests {
             revision: 7,
             command_inputs: inputs,
         };
-        let captured = draft(&view);
+        let captured = draft(&view, false);
         assert_eq!(captured["kind"], "draft");
         assert_eq!(captured["revision"], 7);
         assert_eq!(

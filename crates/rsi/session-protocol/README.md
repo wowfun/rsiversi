@@ -303,6 +303,9 @@ At capacity, an unused shared blank can give up its preparation slot. Its
 catalog Header stays available for the next attachment. A live handle, retained
 owner, in-flight operation, changed draft revision or pending reference keeps
 the preparation. A full device can reclaim only its own slots.
+The directory also signals revisions and first publication of a shared blank to
+callers who can see it. Observing these changes does not retain the preparation.
+If the observer falls behind, it rechecks the shared blanks it is observing.
 An identical live retry does not repeat those reads, even if the registration
 is subsequently removed; a new draft with that unknown WorkspaceId fails.
 Dropping a create waiter does not cancel its service-owned preparation. Creating

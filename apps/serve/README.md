@@ -302,7 +302,8 @@ working directory is present for local execution only.
 local directory through Workspace ingress for the live device. An unplaced
 conversation uses the first visible registered local Workspace in insertion
 order. A Home without one requires an explicit directory. Creation returns
-the native draft identity, preset and creation-time list summary. Ordinary
+the native draft identity, preset, whether the identity was reused, and its
+creation-time list summary. Ordinary
 application conversations reserve their identity in the Host catalog before
 returning. Devices with access to that Workspace can discover an empty
 conversation after restart. Unsent composer text stays in the originating browser.

@@ -833,6 +833,10 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn draft_snapshot(&self) -> Result<SessionDraftView>;
     /// Observes draft revisions until publication (`None`), without extending draft lifetime.
     async fn observe_draft(&self) -> Result<DraftRevisionStream>;
+    /// Whether this preparation can be reopened from a shared catalog Header.
+    fn is_shared_blank(&self) -> bool {
+        false
+    }
     /// Retains an exact draft generation against idle expiry; Local-only, without execution authority.
     fn retain_draft(&self) -> Result<Option<Box<dyn DraftOwner>>> {
         Err(SessionError::Invalid(
@@ -1157,7 +1161,7 @@ pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
             "shared blank Sessions unavailable".into(),
         ))
     }
-    /// Subscribes before listing this caller's drafts and durable Sessions. Wakes carry no rows or authority.
+    /// Subscribes before listing this caller's drafts and durable Sessions. Hints grant no read authority.
     fn watch_directory(
         &self,
         _device: &rsi_api_protocol::AuthenticatedDevice,
@@ -1180,8 +1184,19 @@ pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Arc<dyn SessionHandle>>;
 }
 
+/// A directory or live shared preparation needs another authorized read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DirectoryChange {
+    /// Membership, activity or visibility may have changed.
+    Catalog,
+    /// One visible shared blank changed its revision or published a Turn.
+    SharedBlank(SessionId),
+    /// The reader missed shared-blank changes and must reconcile its own observations.
+    RecheckSharedBlanks,
+}
 /// Coalesced directory invalidations. An error or stream end retires the observation.
-pub type DirectoryChanges = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<()>> + Send>>;
+pub type DirectoryChanges =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<DirectoryChange>> + Send>>;
 
 /// Server-only creation authority; ordinary clients never publish this contract.
 #[derive(Debug)]

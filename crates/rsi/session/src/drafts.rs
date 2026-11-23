@@ -19,10 +19,18 @@ type Created = Result<Arc<LocalSessionHandle>>;
 
 pub(super) struct Drafts {
     membership: watch::Sender<()>,
+    changes: tokio::sync::broadcast::Sender<SharedBlankChange>,
     entries: Mutex<BTreeMap<SessionId, Arc<Entry>>>,
     execution: Execution,
     stopped: CancellationToken,
     tasks: TaskTracker,
+}
+
+#[derive(Clone)]
+pub(super) struct SharedBlankChange {
+    pub id: SessionId,
+    pub location: rsi_workspace_protocol::ExecutionLocation,
+    pub scope: Option<rsi_agent_session_protocol::SessionProtectionScope>,
 }
 
 impl fmt::Debug for Drafts {
@@ -148,6 +156,7 @@ impl Drafts {
     pub(super) fn new(execution: Execution) -> Arc<Self> {
         let drafts = Arc::new(Self {
             membership: watch::channel(()).0,
+            changes: tokio::sync::broadcast::Sender::new(DEVICE_CAPACITY),
             entries: Mutex::new(BTreeMap::new()),
             execution: execution.clone(),
             stopped: CancellationToken::new(),
@@ -177,6 +186,10 @@ impl Drafts {
 
     pub(super) fn watch_membership(&self) -> watch::Receiver<()> {
         self.membership.subscribe()
+    }
+
+    pub(super) fn watch_shared(&self) -> tokio::sync::broadcast::Receiver<SharedBlankChange> {
+        self.changes.subscribe()
     }
 
     pub(super) fn accepting(&self) -> Result<()> {
@@ -445,6 +458,18 @@ pub(super) struct DraftLease {
 }
 
 impl DraftLease {
+    pub(super) fn changed(&self, handle: &LocalSessionHandle) {
+        if self.shared
+            && let Some(drafts) = self.drafts.upgrade()
+            && drafts.changes.receiver_count() != 0
+        {
+            let _ = drafts.changes.send(SharedBlankChange {
+                id: handle.session_id.clone(),
+                location: handle.coordinates.location().clone(),
+                scope: handle.scope.clone(),
+            });
+        }
+    }
     pub(super) fn retain(&self) -> Result<Owner> {
         let drafts = self.drafts.upgrade().ok_or_else(expired)?;
         drafts.accepting()?;

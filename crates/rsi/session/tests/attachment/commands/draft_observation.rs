@@ -1,6 +1,6 @@
 use super::*;
 use futures_util::{FutureExt as _, StreamExt as _};
-use rsi_session_protocol::{DraftRelease, SessionDraftControl as _};
+use rsi_session_protocol::{DirectoryChange, DraftRelease, SessionDraftControl as _};
 use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
@@ -19,7 +19,10 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
         .create_from(request.clone(), CallOrigin::Device(device.clone()))
         .await
         .unwrap();
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     assert_eq!(
         fixture.service.device_drafts(&device).await.unwrap()[0].session_id,
         request.session_id
@@ -28,7 +31,10 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
         fixture.service.release_draft(&request.session_id),
         DraftRelease::Released
     );
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     assert!(
         fixture
             .service
@@ -45,7 +51,10 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
         )
         .await
         .unwrap();
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     tokio::time::advance(Duration::from_mins(61)).await;
     changes.next().await.unwrap().unwrap();
     assert!(
@@ -61,12 +70,33 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
     submit_text(external, "outside-input", "from Headless")
         .await
         .unwrap();
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     let scoped = fixture.service.scoped(CallOrigin::Device(device.clone()));
     let rows = scoped.list_recent(None, 10).await.unwrap();
     assert_eq!(
         rows.sessions[0].header.session_id().as_str(),
         "outside-this-device"
+    );
+    let shared = fixture
+        .service
+        .create_shared_blank(
+            Fixture::request("observed-shared"),
+            CallOrigin::Device(device.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(shared.is_shared_blank());
+    let id = shared.header().await.unwrap().session_id().clone();
+    let mut observed = fixture.service.watch_directory(&device).unwrap().unwrap();
+    submit_text(shared, "shared-input", "publish")
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.next().await.unwrap().unwrap(),
+        DirectoryChange::SharedBlank(id)
     );
     device.revoked.cancel();
     assert!(changes.next().await.is_none());
@@ -118,10 +148,16 @@ async fn directory_watch_rechecks_permissions_without_a_session_write() {
     assert!(changes.next().now_or_never().is_none());
     *policy.0.lock().unwrap() = Arc::new(());
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     execution.granted.store(true, Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(changes.next().now_or_never(), Some(Some(Ok(())))));
+    assert!(matches!(
+        changes.next().now_or_never(),
+        Some(Some(Ok(DirectoryChange::Catalog)))
+    ));
     assert!(tasks.next().now_or_never().is_none());
     device.revoked.cancel();
     assert!(tasks.next().await.is_none());

@@ -2,7 +2,7 @@ use super::Sessions;
 use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::{CreateSession, SelectDraftPreset, SessionError};
-use rsi_workspace_protocol::{ExecutionLocation, WorkspaceId, WorkspaceRegistry};
+use rsi_workspace_protocol::{ExecutionLocation, WorkspaceId, WorkspaceRecord, WorkspaceRegistry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -20,11 +20,11 @@ struct Input {
 }
 
 impl Input {
-    async fn workspace(&self, registry: &dyn WorkspaceRegistry) -> Result<WorkspaceId> {
+    async fn workspace(&self, registry: &dyn WorkspaceRegistry) -> Result<WorkspaceRecord> {
         match (&self.workspace, &self.cwd) {
             (Some(_), Some(_)) => Err(Error::Remote("Choose a Workspace or a directory".into())),
-            (Some(id), None) => Ok(registry.get(id).await.map_err(remote)?.id),
-            (None, Some(path)) => Ok(registry.get_or_create(path).await.map_err(remote)?.id),
+            (Some(id), None) => registry.get(id).await.map_err(remote),
+            (None, Some(path)) => registry.get_or_create(path).await.map_err(remote),
             (None, None) => {
                 let mut after = None;
                 loop {
@@ -34,7 +34,7 @@ impl Input {
                         .into_iter()
                         .find(|record| record.coordinates.location() == &ExecutionLocation::Local)
                     {
-                        return Ok(record.id);
+                        return Ok(record);
                     }
                     after = page.next;
                     if after.is_none() {
@@ -76,7 +76,6 @@ impl Sessions {
                 .await
                 .map_err(remote)?
                 .ok_or_else(|| Error::Remote("Workspace is not registered".into()))?
-                .id
         } else {
             input
                 .workspace(self.workspaces.scoped(origin.clone()).as_ref())
@@ -87,14 +86,8 @@ impl Sessions {
             match sessions.attach(&requested).await {
                 Ok(handle) => {
                     let header = handle.header().await.map_err(remote)?;
-                    let selected = self
-                        .workspaces
-                        .scoped(origin.clone())
-                        .get(&workspace)
-                        .await
-                        .map_err(remote)?;
                     if header.fork_origin().is_some()
-                        || header.coordinates() != &selected.coordinates
+                        || header.coordinates() != &workspace.coordinates
                     {
                         return Err(Error::Remote(
                             "Session belongs to another Workspace or Agent".into(),
@@ -117,7 +110,7 @@ impl Sessions {
                             self.routes
                                 .caller(&input.request)
                                 .map_err(|_| Error::Cancelled)?;
-                            return Ok(receipt(&draft.header));
+                            return Ok(receipt(&draft.header, true));
                         }
                         Err(SessionError::NotFound(_)) => {}
                         Err(error) => return Err(remote(error)),
@@ -131,7 +124,7 @@ impl Sessions {
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         let creation = CreateSession {
-            workspace_id: workspace,
+            workspace_id: workspace.id,
             session_id: id,
             agent_preset_id: input.preset,
             fork: input.fork,
@@ -146,15 +139,15 @@ impl Sessions {
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
-        Ok(receipt(&header))
+        Ok(receipt(&header, false))
     }
 }
 
-fn receipt(header: &rsi_agent_session_protocol::SessionHeader) -> Value {
+fn receipt(header: &rsi_agent_session_protocol::SessionHeader, reused: bool) -> Value {
     let blank = header
         .history_origin()
         .is_none_or(|origin| origin.effective_turns == 0);
-    json!({"id":header.session_id(),"preset":header.agent_preset_id(),
+    json!({"id":header.session_id(),"preset":header.agent_preset_id(),"reused":reused,
         "summary":{"id":header.session_id(),"cwd":header.canonical_cwd(),
             "createdAt":header.created_at_ms(),"updatedAt":header.created_at_ms(),"blank":blank,"running":false}})
 }
