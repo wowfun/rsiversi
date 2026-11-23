@@ -22,7 +22,7 @@ import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
 import { input, run, source, selection, useView, useSelected, type ArchiveActivity, type NavigationEntry } from "./bridge.ts";
 import {
-  navigationTitles, navigationAttention,
+  navigationTitles, navigationAttention, sessionWorkspaceGroup,
   GroupRestoration,
 } from "../navigation-presentation.js";
 
@@ -67,12 +67,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       [
         ...new Set(
           Object.values(value?.surfaces ?? {})
-            .map((surface) => {
-              if (surface?.kind !== "native") return;
-              const registration = surface.workspace.registration;
-              if (registration.status === "registered") return registration.id;
-              if (surface.draft && registration.status === "unregistered") return "other";
-            })
+            .map(surface => sessionWorkspaceGroup(surface, value?.navigation))
             .filter(Boolean),
         ),
       ].sort(),

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency} from '../navigation-presentation.js';
+import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency,sessionWorkspaceGroup} from '../navigation-presentation.js';
 test('conversation recency handles future clocks and minute/hour/day boundaries',()=>{
   const now=1_000_000_000;
   for(const [age,label] of [[-1,'now'],[59_999,'now'],[60_000,'1min'],[3_600_000,'1h'],[86_400_000,'1d']])assert.equal(conversationRecency(String(now-age),now),label);
@@ -40,4 +40,16 @@ test('group restoration bounds concurrent work and releases failed and completed
   await assert.rejects(gate.run('0',()=>Promise.reject(new Error('offline'))));
   await gate.run('0',async()=>{calls++;});
   assert.equal(calls,17);assert.equal(gate.pending.size,0);
+});
+
+test('the sidebar uses workspace membership for same-directory Agents, private drafts and forks',()=>{
+  const surface={kind:'native',session:'agent',draft:true,workspace:{registration:{status:'registered',id:'work'}}};
+  const navigation={entries:[{session:'chat',workspace:'work'},{session:'agent',workspace:null}],pins:[],groups:{}};
+  assert.equal(sessionWorkspaceGroup(surface,navigation),'other');
+  assert.equal(sessionWorkspaceGroup(surface,{...navigation,entries:[]}),undefined);
+  const fresh={...surface,session:'fresh',creation:{workspace_id:'work'}};
+  assert.equal(sessionWorkspaceGroup(fresh,navigation),'work');
+  const fork=source=>({...fresh,creation:{workspace_id:'work',fork:{source_session_id:source}}});
+  assert.equal(sessionWorkspaceGroup(fork('agent'),navigation),undefined);
+  assert.equal(sessionWorkspaceGroup(fork('chat'),navigation),'work');
 });

@@ -223,6 +223,16 @@ expire with the draft lease. Submission defers execution dependencies
 until the selected operation requires them; fresh publication serializes the
 one transition from draft to durable attachment. Each fresh publication freezes
 that retained payload, including its baseline digest, under the same admission.
+With Navigation mounted, publication of an ordinary native draft enrolls its
+identity in the registration selected by its creator. A manual fork inherits
+the source's explicit membership at preparation. Private frozen workflows and
+independently created plugin Agents do not enroll. The Session Store commits
+the conversation and Navigation commits the workspace account separately.
+If enrollment fails after publication, the accepted input remains addressable
+by its original identity. Message callers can reconcile that receipt. Reopening
+the live draft reservation retries enrollment without blocking access to the
+Session.
+
 The current Header belongs to the Fresh or Attached state. A handle retains only
 its Session identity separately, so preset changes cannot leave a second stale
 Header behind for binding or publication reconciliation.

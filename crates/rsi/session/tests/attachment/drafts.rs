@@ -1086,7 +1086,7 @@ async fn enumerating_device_drafts_is_private_and_does_not_renew_the_idle_lease(
     let drafts = service.device_drafts(&owner).await.unwrap();
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].session_id.as_str(), "blank");
-    assert_eq!(drafts[0].workspace_id, workspace);
+    assert_eq!(drafts[0].workspace_id.as_ref(), Some(&workspace));
     assert_eq!(drafts[0].inherited_turns, 0);
     assert!(service.device_drafts(&other).await.unwrap().is_empty());
     tokio::time::advance(std::time::Duration::from_mins(31)).await;

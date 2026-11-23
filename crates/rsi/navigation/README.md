@@ -1,25 +1,25 @@
 # rsi-navigation
 
-Workspace Session accounts have a shared Host order, independent of activity,
-pin/archive partitions and device-local view ordering. New durable members precede
-previously ordered members in descending creation-time/identity order; activity
-never moves them. An explicit move writes the selected Workspace's ordered
-identity references in its typed order record. Accounts are resolved
-against the current registration. A recreated directory has a new
-registration identity and cannot inherit its predecessor's explicit account.
-When an explicit move records the new account, the same commit removes its
-members' obsolete account references. A Session is retained in at most one saved
-account, without a cleanup task or a second durable identity map.
-Unknown or foreign members and anchors are rejected; self and already-positioned moves do not write or advance
-the metadata revision. Discoverable blank Sessions have the same Workspace
-membership, pin and archive operations as conversations with history.
-Durable membership remains owned by Session Store, so reads
-filter removed identities; writes prune obsolete references for their selected
-members without changing unrelated accounts.
-The document retains at most 8,192 order references within its existing 8 MiB bound.
-An absent order map means there are no explicit moves; empty maps are not stored.
-The ordinary Navigation writer owns commit, publication and draining after waiter
-loss. No JS registry, duplicated Session payload or separate order journal is used.
+Workspace membership is an explicit relationship between a registration and a
+Session. An execution directory identifies where the Agent operates. Sharing
+that directory does not enroll a plugin-created Agent in a chat workspace.
+Attaching a Session checks its stored execution coordinates and the caller's
+access, then prepends its ID to the registration's shared account. Repeated
+attachment leaves its order and the durable revision intact.
+
+The account stores one ordered list of Session IDs per registration. Position is
+independent of activity, pin and archive state, and device-local ordering.
+Moves require both the member and its anchor to belong to that registration.
+Self moves and already-positioned moves preserve the metadata revision. A
+replacement registration at the same directory starts empty. Explicit attachment
+removes the selected Session from a former registration in the same transaction.
+Discovery intersects the account with the caller's visible Store identities.
+Unattached identities remain available through authorized global and exact reads.
+A single coordinate can therefore contribute both registered and unattached rows.
+
+The Navigation writer commits membership and order changes before publication.
+It retains at most 8,192 references within the existing 8 MiB document bound.
+Empty account lists take no durable storage.
 
 Purge cleanup removes only the completed operation's selected Session metadata
 and account-order references.

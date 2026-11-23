@@ -377,6 +377,7 @@ impl Drafts {
                 .deadline
                 .clone();
             let lease = DraftLease {
+                enrolled: matches!(&request, DraftRequest::Private(_)) && service.frozen.is_none(),
                 shared,
                 drafts: Arc::downgrade(self),
                 entry: Arc::downgrade(&entry),
@@ -431,13 +432,13 @@ impl Drafts {
     pub(super) fn ready_for(
         &self,
         device: &rsi_api_protocol::DeviceId,
-    ) -> Vec<(rsi_workspace_protocol::WorkspaceId, Arc<LocalSessionHandle>)> {
+    ) -> Vec<Arc<LocalSessionHandle>> {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter_map(|entry| {
-                let DraftRequest::Private(request) = &entry.request else {
+                let DraftRequest::Private(_) = &entry.request else {
                     return None;
                 };
                 if entry.device.as_ref() != Some(device) || entry.expired() {
@@ -445,7 +446,7 @@ impl Drafts {
                 }
                 let ready = entry.result.borrow();
                 let handle = ready.as_ref()?.as_ref().ok()?;
-                (!handle.private_owner).then(|| (request.workspace_id.clone(), Arc::clone(handle)))
+                (!handle.private_owner).then(|| Arc::clone(handle))
             })
             .collect()
     }
@@ -465,12 +466,24 @@ async fn wait(mut receiver: watch::Receiver<Option<Created>>) -> Created {
 
 #[derive(Clone)]
 pub(super) struct DraftLease {
+    pub(super) enrolled: bool,
     pub(super) shared: bool,
     drafts: Weak<Drafts>,
     entry: Weak<Entry>,
 }
 
 impl DraftLease {
+    pub(super) fn workspace(&self) -> Option<rsi_workspace_protocol::WorkspaceId> {
+        if !self.enrolled {
+            return None;
+        }
+        let entry = self.entry.upgrade()?;
+        match &entry.request {
+            DraftRequest::Private(request) => Some(request.workspace_id.clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn changed(&self, handle: &LocalSessionHandle) {
         if self.shared
             && let Some(drafts) = self.drafts.upgrade()

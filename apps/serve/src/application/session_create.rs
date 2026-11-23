@@ -95,7 +95,11 @@ impl Sessions {
                         ));
                     }
                     match handle.draft_snapshot().await {
-                        Ok(_) if self.navigation.archived_sessions().contains(&requested) => {}
+                        Ok(_)
+                            if self.navigation.archived_sessions().contains(&requested)
+                                || input.workspace.as_ref().is_some_and(|workspace| {
+                                    !self.navigation.workspace_contains(workspace, &requested)
+                                }) => {}
                         Ok(mut draft) => {
                             if let Some(preset) = input.preset.as_ref()
                                 && draft.header.agent_preset_id() != preset
@@ -137,11 +141,25 @@ impl Sessions {
             sessions.create(creation).await
         } else {
             self.ingress
-                .create_shared_blank(creation, origin, claim)
+                .create_shared_blank(creation, origin.clone(), claim)
                 .await
         }
         .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
+        if let Some(workspace) = input.workspace {
+            let failure = |error| {
+                remote(format!(
+                    "Session '{}' was created but could not join Workspace '{}': {error}",
+                    header.session_id(),
+                    workspace
+                ))
+            };
+            self.navigation
+                .attach_workspace_session(origin, workspace.clone(), header.session_id().clone())
+                .map_err(&failure)?
+                .await
+                .map_err(failure)?;
+        }
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;

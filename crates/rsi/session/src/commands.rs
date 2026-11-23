@@ -478,7 +478,8 @@ impl LocalSessionHandle {
                     delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
                 })
                 .await;
-            self.reconcile_fresh_submission(&mut state, accepted.is_ok())
+            let enrollment = self
+                .reconcile_fresh_submission(&mut state, accepted.is_ok())
                 .await;
             drop(state);
             self.projection_changed();
@@ -491,6 +492,7 @@ impl LocalSessionHandle {
                 })
                 .await
                 .map_err(draft_error)?;
+            enrollment?;
             return SessionCommandReceipt::committed(1, &commit)
                 .map_err(|error| protocol_error(&error));
         }

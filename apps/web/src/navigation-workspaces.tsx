@@ -1,6 +1,6 @@
 import {WorkspaceHeader} from "./workspace-header.tsx";
 import { useMemo, useState, type ReactNode } from "react";
-import {visibleConversations} from '../navigation-presentation.js';
+import {sessionWorkspaceGroup, visibleConversations} from '../navigation-presentation.js';
 import {
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
@@ -45,6 +45,7 @@ export function WorkspaceNavigation({
   const selected = useSelected(value => value);
   const active = useView(value => {const surface=value?.surfaces[selected];return surface?.kind === "native" ? surface : undefined;});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const activeGroup = sessionWorkspaceGroup(active, nav);
   const group = (
     key: string,
     name: string,
@@ -71,11 +72,8 @@ export function WorkspaceNavigation({
         : savedPage;
     const visible = visibleConversations(page?.entries ?? [], expanded.has(key), active?.session);
     const remaining = (page?.entries.length ?? 0) - visible.length;
-    const registration = active?.workspace.registration;
-    const draftGroup = registration?.status === 'registered' ? registration.id :
-      registration?.status === 'unregistered' ? 'other' : undefined;
-    const showDraft = active?.draft && draftGroup === key && nav?.filter.archived !== true &&
-      !page?.entries.some(entry => entry.session === active.session);
+    const showDraft = active?.draft && active.creation && activeGroup === key &&
+      nav?.filter.archived !== true && !page?.entries.some(entry => entry.session === active.session);
     return (
       <section
         className="workspace-group"
@@ -85,7 +83,7 @@ export function WorkspaceNavigation({
       >
         <WorkspaceHeader record={record} name={name}
           className="workspace-row"
-          data-active={active?.workspace.registration.status === 'registered' && active.workspace.registration.id === key || undefined}
+          data-active={activeGroup === key || undefined}
           draggable={!!path && device.ready && completeWorkspaces}
           onDragStart={(event) => {
             event.stopPropagation();

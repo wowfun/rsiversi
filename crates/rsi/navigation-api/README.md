@@ -1,7 +1,8 @@
 # rsi-navigation-api
 
 Complete groups carry their execution coordinates and optional current registration
-ID together. An unregistered coordinate has no registration ID. Clients consume
+ID together. A member carries its registration only after explicit enrollment.
+One coordinate can have a registered group and a separate unattached group. Clients consume
 this mapping instead of deriving registration identities from paths.
 
 Wire version 9 exposes each complete member's `account_position`: its zero-based

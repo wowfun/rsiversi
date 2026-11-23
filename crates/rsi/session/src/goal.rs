@@ -215,9 +215,12 @@ impl GoalSession for LocalSessionHandle {
             .continuation_service()?
             .reserve_initial(lease, draft.freeze(), invocation, input)
             .await;
-        self.reconcile_fresh_submission(&mut state, result.is_ok())
+        let enrollment = self
+            .reconcile_fresh_submission(&mut state, result.is_ok())
             .await;
-        result.map_err(turn_error)
+        let receipt = result.map_err(turn_error)?;
+        enrollment.map_err(goal_error)?;
+        Ok(receipt)
     }
 
     async fn internal_command(

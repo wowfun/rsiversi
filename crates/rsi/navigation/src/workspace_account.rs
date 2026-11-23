@@ -2,7 +2,6 @@ use super::{
     ApiError, Arc, BoxFuture, CallOrigin, Document, DocumentChange, MetadataSize, Navigation,
     Result, SessionId, WorkspaceError, WorkspaceId, encoded_entry_bytes, storage_error,
 };
-use rsi_agent_store_protocol::{MAXIMUM_ORDER_MEMBERS, StoreOrderMember, StoreOrderSeed};
 use std::collections::HashSet;
 
 /// Outcome of a shared Workspace Session account move.
@@ -16,26 +15,6 @@ pub enum WorkspaceMoveOutcome {
     InvalidMember,
 }
 
-/// New members precede the saved subsequence; activity never participates.
-pub(super) fn account_order<'a>(
-    saved: &[SessionId],
-    members: impl Iterator<Item = (&'a SessionId, u64)>,
-) -> Vec<SessionId> {
-    let mut members = members.collect::<Vec<_>>();
-    members.sort_unstable_by(|(a, at), (b, bt)| bt.cmp(at).then_with(|| b.cmp(a)));
-    if saved.is_empty() {
-        return members.into_iter().map(|(id, _)| id.clone()).collect();
-    }
-    let saved_set = saved.iter().collect::<HashSet<_>>();
-    let visible = members.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
-    members
-        .iter()
-        .filter(|(id, _)| !saved_set.contains(id))
-        .map(|(id, _)| (*id).clone())
-        .chain(saved.iter().filter(|id| visible.contains(id)).cloned())
-        .collect()
-}
-
 pub(super) fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usize> {
     encoded_entry_bytes(
         id.as_str(),
@@ -47,13 +26,21 @@ pub(super) fn order_bytes(id: &WorkspaceId, members: &[SessionId]) -> Result<usi
 }
 
 impl Document {
+    pub(super) fn membership(
+        &self,
+        workspace: Option<WorkspaceId>,
+        session: &SessionId,
+    ) -> Option<WorkspaceId> {
+        workspace.filter(|id| {
+            self.workspace_orders
+                .get(id)
+                .is_some_and(|members| members.contains(session))
+        })
+    }
     pub(super) fn validate_orders(&self, accounting: &mut MetadataSize) -> Result<()> {
         let mut known = HashSet::new();
         for (id, order) in &self.workspace_orders {
-            if order.is_empty()
-                || order.len() > MAXIMUM_ORDER_MEMBERS
-                || order.iter().any(|id| !known.insert(id))
-            {
+            if order.is_empty() || order.iter().any(|id| !known.insert(id)) {
                 return Err(ApiError::Invalid(
                     "invalid Workspace Session account order".into(),
                 ));
@@ -126,6 +113,68 @@ impl Document {
 }
 
 impl Navigation {
+    /// Tests membership in this registration's committed account.
+    pub fn workspace_contains(&self, workspace: &WorkspaceId, session: &SessionId) -> bool {
+        self.document()
+            .workspace_orders
+            .get(workspace)
+            .is_some_and(|members| members.contains(session))
+    }
+
+    /// Attaches an authorized durable Session to the registration for its execution directory.
+    pub fn attach_workspace_session(
+        self: &Arc<Self>,
+        origin: CallOrigin,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<BoxFuture<'static, Result<()>>> {
+        self.run_mutation(move |owner| {
+            Box::pin(async move {
+                let _writer = owner
+                    .writer
+                    .acquire()
+                    .await
+                    .map_err(|_| ApiError::ShuttingDown)?;
+                let header = owner
+                    .metadata_header(&session)
+                    .await?
+                    .ok_or(ApiError::Unavailable)?;
+                let _admission = owner.admit_metadata(&header, &origin)?;
+                let registration =
+                    owner
+                        .workspace
+                        .get(&workspace)
+                        .await
+                        .map_err(|error| match error {
+                            WorkspaceError::Unknown(_) => {
+                                ApiError::Invalid("unknown Workspace".into())
+                            }
+                            _ => ApiError::Unavailable,
+                        })?;
+                if registration.coordinates != *header.coordinates() {
+                    return Err(ApiError::Invalid(
+                        "Session belongs to another directory".into(),
+                    ));
+                }
+                let current = owner.document();
+                let members = current
+                    .workspace_orders
+                    .get(&workspace)
+                    .map_or(&[][..], Vec::as_slice);
+                if members.contains(&session) {
+                    return Ok(());
+                }
+                let mut order = Vec::with_capacity(members.len() + 1);
+                order.push(session);
+                order.extend_from_slice(members);
+                let change = current.project_order(&workspace, order)?;
+                drop(current);
+                owner.publish(change).await?;
+                Ok(())
+            })
+        })
+    }
+
     /// Moves a durable Session inside its exact shared Workspace account.
     /// Uses the ordinary writer; an accepted commit survives loss of its waiter.
     ///
@@ -160,56 +209,42 @@ impl Navigation {
                 {
                     return Err(ApiError::Unauthorized);
                 }
-                let StoreOrderSeed::Available { members, .. } = owner
-                    .store
-                    .session_order_seed(visibility.locations(), Some(&record.coordinates))
-                    .await
-                    .map_err(|_| ApiError::Unavailable)?
-                else {
-                    return Err(ApiError::Capacity);
+                let current = owner.document();
+                let Some(members) = current.workspace_orders.get(&workspace) else {
+                    return Ok(WorkspaceMoveOutcome::InvalidMember);
                 };
                 let mut admissions = [None, None];
                 for (index, id) in std::iter::once(&session)
                     .chain(before.as_ref().filter(|id| *id != &session))
                     .enumerate()
                 {
-                    if !members.iter().any(|member| &member.session == id) {
+                    if !members.contains(id) {
                         return Ok(WorkspaceMoveOutcome::InvalidMember);
                     }
                     let Some(header) = owner.metadata_header(id).await? else {
                         return Ok(WorkspaceMoveOutcome::InvalidMember);
                     };
+                    if header.coordinates() != &record.coordinates {
+                        return Ok(WorkspaceMoveOutcome::InvalidMember);
+                    }
                     // The retained authority must cover the commit, not only the membership read.
                     admissions[index] = Some(owner.admit_metadata(&header, &origin)?);
                 }
                 if before.as_ref() == Some(&session) {
                     return Ok(WorkspaceMoveOutcome::Applied);
                 }
-                let current = owner.document();
-                let mut order = account_order(
-                    current
-                        .workspace_orders
-                        .get(&workspace)
-                        .map_or(&[], Vec::as_slice),
-                    members.iter().map(
-                        |StoreOrderMember {
-                             session,
-                             created_at_ms,
-                             ..
-                         }| (session, *created_at_ms),
-                    ),
-                );
-                let from = order
+                let from = members
                     .iter()
                     .position(|id| id == &session)
                     .expect("admitted account member");
-                let at = before.as_ref().map_or(order.len(), |anchor| {
-                    order
+                let at = before.as_ref().map_or(members.len(), |anchor| {
+                    members
                         .iter()
                         .position(|id| id == anchor)
                         .expect("admitted account anchor")
                 });
                 if from + 1 != at {
+                    let mut order = members.clone();
                     let session = order.remove(from);
                     order.insert(if at > from { at - 1 } else { at }, session);
                     let change = current.project_order(&workspace, order)?;

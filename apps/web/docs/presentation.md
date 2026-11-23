@@ -1026,3 +1026,5 @@ and trusted commands disabled. The first visible equation loads the renderer and
 stylesheet. Plain chats do not fetch them. While a reply streams, the equation
 remains readable as TeX. Copying a formula from a selection preserves its TeX
 delimiters.
+
+The workspace sidebar groups durable rows by their Host membership. It can display a locally created draft under its selected registration before publication. Opening an Agent by ID does not enroll it through its execution directory.

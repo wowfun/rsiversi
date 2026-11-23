@@ -1140,8 +1140,8 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
 pub struct DeviceDraft {
     /// An unpublished Session owned by the enumerated device.
     pub session_id: SessionId,
-    /// Exact registration selected at creation, independent of directory reuse.
-    pub workspace_id: WorkspaceId,
+    /// Explicit registration selected at creation or inherited from the fork source.
+    pub workspace_id: Option<WorkspaceId>,
     /// Actual draft location.
     pub coordinates: rsi_agent_session_protocol::ExecutionCoordinates,
     /// Time the draft was created.

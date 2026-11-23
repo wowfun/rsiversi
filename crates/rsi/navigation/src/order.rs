@@ -34,11 +34,9 @@ impl Navigation {
                 {
                     StoreOrderSeed::TooLarge => OrderMembership::TooLarge,
                     StoreOrderSeed::Available { members, groups } => {
-                        let mut account_members: Vec<Vec<(usize, u64)>> = Vec::new();
+                        let mut created = Vec::new();
                         let mut selected = Vec::new();
                         let mut leases = Vec::new();
-                        let mut remap = std::collections::BTreeMap::new();
-                        let mut visible_groups = Vec::new();
                         for member in members {
                             if !owner
                                 .retain_session_view(&member.session, &origin, &mut leases)
@@ -46,28 +44,12 @@ impl Navigation {
                             {
                                 continue;
                             }
-                            let group = if let Some(group) = remap.get(&member.group) {
-                                *group
-                            } else {
-                                let group = u16::try_from(visible_groups.len())
-                                    .map_err(|_| ApiError::Capacity)?;
-                                visible_groups.push(
-                                    groups
-                                        .get(usize::from(member.group))
-                                        .ok_or(ApiError::Unavailable)?
-                                        .clone(),
-                                );
-                                remap.insert(member.group, group);
-                                account_members.push(Vec::new());
-                                group
-                            };
-                            account_members[usize::from(group)]
-                                .push((selected.len(), member.created_at_ms));
+                            created.push(member.created_at_ms);
                             let metadata = document.records.get(&member.session);
                             selected.push(OrderMember {
                                 account_position: 0,
                                 last_activity_ms: member.last_activity_ms.to_string(),
-                                group,
+                                group: member.group,
                                 session: member.session,
                                 pinned: metadata.is_some_and(|row| row.pinned),
                                 partition_revision: metadata
@@ -77,12 +59,7 @@ impl Navigation {
                             });
                         }
                         let groups = owner
-                            .order_accounts(
-                                &document,
-                                visible_groups,
-                                &account_members,
-                                &mut selected,
-                            )
+                            .order_accounts(&document, &groups, &created, &mut selected)
                             .await?;
                         super::finish_scope(&origin, &leases)?;
                         OrderMembership::Available {
@@ -104,38 +81,65 @@ impl Navigation {
     async fn order_accounts(
         &self,
         document: &Document,
-        coordinates: Vec<rsi_agent_session_protocol::ExecutionCoordinates>,
-        account_members: &[Vec<(usize, u64)>],
+        coordinates: &[rsi_agent_session_protocol::ExecutionCoordinates],
+        created: &[u64],
         selected: &mut [OrderMember],
     ) -> Result<Vec<rsi_navigation_api::OrderGroup>> {
+        let mut visible_coordinates = Vec::new();
+        let mut selected_groups = std::collections::HashMap::new();
+        for member in selected.iter() {
+            selected_groups.entry(member.group).or_insert_with(|| {
+                let index = visible_coordinates.len();
+                visible_coordinates.push(&coordinates[usize::from(member.group)]);
+                index
+            });
+        }
         let registrations = self
-            .workspace_lookups(coordinates.iter().map(Some))
+            .workspace_lookups(visible_coordinates.into_iter().map(Some))
             .try_collect::<Vec<_>>()
             .await?;
-        let mut positions = std::collections::HashMap::with_capacity(selected.len());
-        let mut groups = Vec::with_capacity(coordinates.len());
-        for (group, (coordinates, id)) in coordinates.into_iter().zip(registrations).enumerate() {
-            let ids = super::workspace_account::account_order(
-                id.as_ref()
-                    .and_then(|id| document.workspace_orders.get(id))
-                    .map_or(&[], Vec::as_slice),
-                account_members[group]
-                    .iter()
-                    .map(|(index, created)| (&selected[*index].session, *created)),
-            );
-            groups.push(rsi_navigation_api::OrderGroup {
-                coordinates,
-                workspace: id,
-            });
-            positions.extend(ids.into_iter().enumerate().map(|(position, id)| {
-                (
-                    id,
-                    u16::try_from(position).expect("bounded order membership"),
-                )
-            }));
+        let mut positions = std::collections::HashMap::new();
+        for (index, registration) in registrations.iter().enumerate() {
+            if let Some(ids) = registration
+                .as_ref()
+                .and_then(|id| document.workspace_orders.get(id))
+            {
+                positions.extend(ids.iter().enumerate().map(|(rank, id)| (id, (index, rank))));
+            }
         }
-        for member in selected {
-            member.account_position = positions[&member.session];
+        let mut groups = Vec::new();
+        let mut indices = std::collections::HashMap::new();
+        let mut ranks = Vec::with_capacity(selected.len());
+        for (index, member) in selected.iter_mut().enumerate() {
+            let registered = selected_groups[&member.group];
+            let rank = positions
+                .get(&member.session)
+                .filter(|(account, _)| *account == registered)
+                .map(|(_, rank)| *rank);
+            let group = *indices
+                .entry((member.group, rank.is_some()))
+                .or_insert_with(|| {
+                    let group = u16::try_from(groups.len()).expect("bounded order membership");
+                    groups.push(rsi_navigation_api::OrderGroup {
+                        coordinates: coordinates[usize::from(member.group)].clone(),
+                        workspace: rank.and(registrations[registered].clone()),
+                    });
+                    group
+                });
+            member.group = group;
+            ranks.push((
+                group,
+                rank,
+                std::cmp::Reverse(created[index]),
+                std::cmp::Reverse(index),
+            ));
+        }
+        ranks.sort_unstable();
+        for account in ranks.chunk_by(|a, b| a.0 == b.0) {
+            for (position, (_, _, _, std::cmp::Reverse(index))) in account.iter().enumerate() {
+                selected[*index].account_position =
+                    u16::try_from(position).expect("bounded order membership");
+            }
         }
         Ok(groups)
     }
@@ -183,7 +187,7 @@ impl Navigation {
                         if let Some(row) = row.as_ref().filter(|row| {
                             visibility.locations().contains(row.coordinates.location())
                         }) {
-                            let workspace = workspace?;
+                            let workspace = document.membership(workspace?, &row.session_id);
                             Some(NavigationEntry {
                                 metadata: document
                                     .records

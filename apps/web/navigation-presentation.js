@@ -51,3 +51,22 @@ export function conversationRecency(timestamp, now=Date.now()) {
 export function visibleConversations(entries, expanded, selected) {
   return expanded ? entries : entries.filter((entry, index) => index < 5 || entry.session === selected);
 }
+
+export function sessionWorkspaceGroup(surface, navigation) {
+  if (surface?.kind !== 'native') return;
+  const find = id => {
+    const entry = navigation?.entries.find(row => row.session === id);
+    if (entry) return entry.workspace ?? 'other';
+    const pin = navigation?.pins.find(row => row.status === 'available' && row.entry.session === id);
+    if (pin) return pin.entry.workspace ?? 'other';
+    for (const group of Object.values(navigation?.groups ?? {})) {
+      if (group.entries.some(row => row.session === id))
+        return group.workspace.id ?? 'other';
+    }
+  };
+  const saved = find(surface.session);
+  if (saved !== undefined || !surface.draft || !surface.creation) return saved;
+  const {workspace_id, fork} = surface.creation;
+  if (fork) return find(fork.source_session_id) === workspace_id ? workspace_id : undefined;
+  return workspace_id;
+}

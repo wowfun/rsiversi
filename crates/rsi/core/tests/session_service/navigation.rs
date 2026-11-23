@@ -96,7 +96,7 @@ async fn archive_blocks_model_requests_from_other_handles_until_restored() {
             json!({"session":session,"expected_revision":revision,"metadata":SessionMetadata { archived, ..Default::default() }}),
         )
     };
-    change(true, "0").await.unwrap();
+    change(true, "1").await.unwrap();
     let admitted = requests.lock().unwrap().len();
     assert!(admitted > 0);
     run_message_to_terminal(&second, "from-open-window").await;
@@ -120,7 +120,15 @@ async fn archive_blocks_model_requests_from_other_handles_until_restored() {
     );
     run_message_to_terminal(&fork, "send-in-independent-fork").await;
     assert_eq!(requests.lock().unwrap().len(), admitted + 1);
-    change(false, "1").await.unwrap();
+    let members = query(&running, CallOrigin::Local, false).await;
+    assert!(
+        members
+            .entries
+            .iter()
+            .any(|entry| entry.session.as_str() == "independent-conversation"
+                && entry.workspace.is_some())
+    );
+    change(false, "3").await.unwrap();
     run_message_to_terminal(&second, "after-restore").await;
     assert_eq!(requests.lock().unwrap().len(), admitted + 2);
     assert!(running.shutdown().await.is_clean());
@@ -206,6 +214,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     let page = query(&running, origin.clone(), false).await;
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].workspace, Some(workspace.id.clone()));
+    assert_eq!(page.metadata_revision, "1");
     assert!(!page.can_archive);
     for action in ["archive", "stop_and_archive", "restore"] {
         assert!(matches!(
@@ -221,7 +230,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     }
     for stop_activity in [false, true] {
         assert!(matches!(wire(&running, origin.clone(), NavigationOperation::Replace,
-            json!({"session":session, "expected_revision":"0","metadata":metadata,"stop_activity":stop_activity})).await, Err(ApiError::Unauthorized)));
+            json!({"session":session, "expected_revision":"1","metadata":metadata,"stop_activity":stop_activity})).await, Err(ApiError::Unauthorized)));
     }
     let owner = running
         .device_administration()
@@ -241,11 +250,11 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         &running,
         managed,
         NavigationOperation::Replace,
-        json!({"session":session,"expected_revision":"0","metadata":metadata}),
+        json!({"session":session,"expected_revision":"1","metadata":metadata}),
     )
     .await
     .unwrap();
-    assert_eq!(receipt["revision"], "1");
+    assert_eq!(receipt["revision"], "2");
     assert!(
         query(&running, origin.clone(), false)
             .await
@@ -261,7 +270,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             &running,
             origin.clone(),
             NavigationOperation::Replace,
-            json!({"session":session,"expected_revision":"1","metadata":SessionMetadata::default()})
+            json!({"session":session,"expected_revision":"2","metadata":SessionMetadata::default()})
         )
         .await,
         Err(ApiError::Unauthorized)
@@ -273,7 +282,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             &running,
             origin,
             NavigationOperation::Replace,
-            json!({"session":session,"expected_revision":"0","metadata":metadata})
+            json!({"session":session,"expected_revision":"1","metadata":metadata})
         )
         .await,
         Err(ApiError::Invalid(_))
@@ -297,7 +306,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
             .await
             .unwrap();
     let restored = query(&running, CallOrigin::Local, true).await;
-    assert_eq!(restored.metadata_revision, "1");
+    assert_eq!(restored.metadata_revision, "2");
     assert_eq!(restored.entries[0].metadata, metadata);
     assert!(restored.entries[0].workspace.is_none());
     let handle = running
@@ -311,7 +320,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         &running,
         CallOrigin::Local,
         NavigationOperation::Replace,
-        json!({"session":session,"expected_revision":"1","metadata":SessionMetadata::default()}),
+        json!({"session":session,"expected_revision":"2","metadata":SessionMetadata::default()}),
     )
     .await
     .unwrap();
@@ -324,7 +333,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     );
     let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
     database.execute_batch("CREATE TRIGGER fixture_reject_navigation BEFORE INSERT ON rsi_storage_records WHEN NEW.domain = 'rsi.navigation' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
-    let request = json!({"session":session,"expected_revision":"2","metadata":metadata});
+    let request = json!({"session":session,"expected_revision":"3","metadata":metadata});
     assert!(matches!(
         wire(
             &running,
@@ -339,7 +348,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         query(&running, CallOrigin::Local, false)
             .await
             .metadata_revision,
-        "2"
+        "3"
     );
     database
         .execute_batch("DROP TRIGGER fixture_reject_navigation;")
@@ -352,7 +361,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
     )
     .await
     .unwrap();
-    assert_eq!(receipt["revision"], "3");
+    assert_eq!(receipt["revision"], "4");
     assert_eq!(
         query(&running, CallOrigin::Local, true).await.entries[0].metadata,
         metadata
@@ -367,7 +376,7 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         CallOrigin::Local,
         NavigationOperation::Replace,
         json!({
-            "session":session,"expected_revision":"3","metadata":renamed
+            "session":session,"expected_revision":"4","metadata":renamed
         }),
     )
     .await
@@ -383,10 +392,89 @@ async fn navigation_metadata_is_durable_without_rewriting_history_or_requiring_c
         .unwrap();
         assert_eq!(restored["metadata"]["title"], "Renamed elsewhere");
         assert_eq!(restored["metadata"]["archived"], false);
-        assert_eq!(restored["revision"], "5");
+        assert_eq!(restored["revision"], "6");
     }
     drop(database);
     drop(handle);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reopening_retries_workspace_enrollment_after_first_input_was_accepted() {
+    let (endpoint, requests, provider) = capturing_provider().await;
+    let fixture = fixture(&endpoint);
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let registration = running
+        .workspace_registry()
+        .unwrap()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    let service = running.session_service().unwrap();
+    let session = SessionId::new("partial-enrollment").unwrap();
+    let handle = service
+        .create(CreateSession {
+            session_id: session.clone(),
+            workspace_id: registration.id.clone(),
+            agent_preset_id: None,
+            fork: None,
+        })
+        .await
+        .unwrap();
+    let database = rusqlite::Connection::open(fixture.paths.state().join("base.sqlite3")).unwrap();
+    database.execute_batch("CREATE TRIGGER reject_enrollment BEFORE INSERT ON rsi_storage_records WHEN NEW.domain = 'rsi.navigation' BEGIN SELECT RAISE(ABORT,'fixture enrollment failure'); END;").unwrap();
+    let message_id = MessageId::new("original-input").unwrap();
+    let outcome = handle
+        .submit(SubmitInput {
+            origin: rsi_session_protocol::SubmissionOrigin::User,
+            attribution: None,
+            reasoning_effort: None,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+            message_id: message_id.clone(),
+            content: vec![SessionInput::Text {
+                text: "one input".into(),
+            }]
+            .try_into()
+            .unwrap(),
+            model: None,
+            sandbox: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(SessionError::MessageOutcomeUnknown {session: ref id, message: ref key})
+        if id == session.as_str() && key == message_id.as_str())
+    );
+    let receipt = handle.message_status(&message_id).await.unwrap();
+    wait_message_terminal(&handle, &receipt).await;
+    assert!(
+        query(&running, CallOrigin::Local, false).await.entries[0]
+            .workspace
+            .is_none()
+    );
+    database
+        .execute_batch("DROP TRIGGER reject_enrollment;")
+        .unwrap();
+    let reopened = service.attach(&session).await.unwrap();
+    assert_eq!(
+        reopened
+            .message_status(&message_id)
+            .await
+            .unwrap()
+            .message_id,
+        message_id
+    );
+    assert_eq!(
+        query(&running, CallOrigin::Local, false).await.entries[0]
+            .workspace
+            .as_ref(),
+        Some(&registration.id)
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    drop((reopened, handle, service, database));
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }

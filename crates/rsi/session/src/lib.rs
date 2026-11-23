@@ -434,7 +434,14 @@ impl LocalSessionService {
         if let Some(handle) = self.drafts.get(session_id).await? {
             let handle = self.bind_handle(&handle)?;
             match handle.header().await {
-                Ok(_) => return Ok(handle),
+                Ok(_) => {
+                    if handle.published.load(std::sync::atomic::Ordering::Acquire) {
+                        // A previous membership commit can fail after Store acceptance.
+                        // Reopening retries it without withholding an authorized Session.
+                        let _ = handle.finish_workspace_enrollment().await;
+                    }
+                    return Ok(handle);
+                }
                 Err(SessionError::NotFound(_)) => {}
                 Err(error) => return Err(error),
             }
@@ -607,7 +614,7 @@ impl LocalSessionService {
         request: &CreateSession,
         fork: &rsi_session_protocol::ForkDraft,
         coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
-        lease: drafts::DraftLease,
+        mut lease: drafts::DraftLease,
     ) -> Result<Arc<LocalSessionHandle>> {
         if self.frozen.is_some() {
             return Err(SessionError::Invalid(
@@ -615,6 +622,9 @@ impl LocalSessionService {
             ));
         }
         let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
+        lease.enrolled = self.navigation().is_some_and(|navigation| {
+            navigation.workspace_contains(&request.workspace_id, &fork.source_session_id)
+        });
         let source = self.read_summary(&fork.source_session_id).await?.header;
         if source.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
@@ -906,7 +916,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         let visible = scope.visibility()?;
         let mut protections = Vec::new();
         let mut rows = Vec::new();
-        for (workspace_id, handle) in self.drafts.ready_for(&device.id) {
+        for handle in self.drafts.ready_for(&device.id) {
             if !visible.locations().contains(handle.coordinates.location()) {
                 continue;
             }
@@ -932,7 +942,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
                 let header = draft.header();
                 rows.push(rsi_session_protocol::DeviceDraft {
                     session_id: header.session_id().clone(),
-                    workspace_id,
+                    workspace_id: lease.workspace(),
                     coordinates: header.coordinates().clone(),
                     created_at_ms: header.created_at_ms(),
                     inherited_turns: header
@@ -1174,19 +1184,23 @@ impl LocalSessionHandle {
         }
     }
 
-    async fn reconcile_fresh_submission(&self, state: &mut HandleState, accepted: bool) {
+    async fn reconcile_fresh_submission(
+        &self,
+        state: &mut HandleState,
+        accepted: bool,
+    ) -> Result<()> {
         let matching = if accepted {
             true
         } else {
             let Ok(header) = self.store.header(self.session_id()).await else {
-                return;
+                return Ok(());
             };
             state.header().is_ok_and(|candidate| candidate == &header)
         };
-        self.finish_fresh(state, matching);
+        self.finish_fresh(state, matching).await
     }
 
-    fn finish_fresh(&self, state: &mut HandleState, matching: bool) {
+    async fn finish_fresh(&self, state: &mut HandleState, matching: bool) -> Result<()> {
         if matching {
             let header = state
                 .header()
@@ -1198,10 +1212,42 @@ impl LocalSessionHandle {
         } else {
             *state = HandleState::Expired;
         }
-        if let Some(lease) = &self.lease {
+        self.projection_changed();
+        if matching {
+            self.finish_workspace_enrollment().await?;
+        } else if let Some(lease) = &self.lease {
             lease.published();
         }
-        self.projection_changed();
+        Ok(())
+    }
+
+    async fn finish_workspace_enrollment(&self) -> Result<()> {
+        let Some(lease) = &self.lease else {
+            return Ok(());
+        };
+        if let Some(workspace) = lease.workspace()
+            && let Some(navigation) = self
+                .plugin_context
+                .as_ref()
+                .and_then(|ctx| ctx.lookup_local::<rsi_navigation::NavigationContract>())
+        {
+            let failure = |error| {
+                SessionError::Backend(format!(
+                    "Session '{}' was published but could not join Workspace '{}': {error}",
+                    self.session_id, workspace
+                ))
+            };
+            let attach = navigation
+                .attach_workspace_session(
+                    self.origin.clone(),
+                    workspace.clone(),
+                    self.session_id.clone(),
+                )
+                .map_err(&failure)?;
+            attach.await.map_err(failure)?;
+        }
+        lease.published();
+        Ok(())
     }
 
     /// Serializes a fresh read with publication and returns whether Store history exists.
@@ -1218,7 +1264,7 @@ impl LocalSessionHandle {
             Err(error) => return Err(map_store_error(error)),
         };
         let matching = state.header().is_ok_and(|header| header == &durable);
-        self.finish_fresh(&mut state, matching);
+        self.finish_fresh(&mut state, matching).await?;
         if matching {
             Ok(true)
         } else {
@@ -1971,7 +2017,8 @@ impl SessionHandle for LocalSessionHandle {
                 delivery,
             })
             .await;
-        self.reconcile_fresh_submission(&mut state, result.is_ok())
+        let enrollment = self
+            .reconcile_fresh_submission(&mut state, result.is_ok())
             .await;
         if result.is_ok()
             && let Some(owner) = &self.references
@@ -1980,7 +2027,12 @@ impl SessionHandle for LocalSessionHandle {
                 owner.release_pending(self.session_id(), snapshot);
             }
         }
-        result.map_err(map_turn_error)
+        let receipt = result.map_err(map_turn_error)?;
+        enrollment.map_err(|_| SessionError::MessageOutcomeUnknown {
+            session: receipt.session_id.to_string(),
+            message: receipt.message_id.to_string(),
+        })?;
+        Ok(receipt)
     }
 
     async fn message_status(&self, message_id: &MessageId) -> Result<MessageReceipt> {
@@ -2126,9 +2178,12 @@ impl SessionHandle for LocalSessionHandle {
                 request: request.request,
             })
             .await;
-        self.reconcile_fresh_submission(&mut state, result.is_ok())
+        let enrollment = self
+            .reconcile_fresh_submission(&mut state, result.is_ok())
             .await;
-        result.map(TurnReceipt::from).map_err(map_turn_error)
+        let receipt = result.map(TurnReceipt::from).map_err(map_turn_error)?;
+        enrollment?;
+        Ok(receipt)
     }
 
     async fn wait_idle(&self) -> Result<()> {

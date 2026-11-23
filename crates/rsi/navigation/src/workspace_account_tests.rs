@@ -1,7 +1,68 @@
 use super::*;
 use rsi_navigation_api::{OrderMembership, OrderScope};
 
-async fn account(owner: &Arc<Navigation>) -> Vec<SessionId> {
+#[tokio::test]
+async fn attachment_enrolls_only_the_named_session_once() {
+    let mut owner = owner().await;
+    let record = workspace_record(
+        ExecutionCoordinates::new(
+            rsi_agent_session_protocol::ExecutionLocation::Local,
+            "/unregistered",
+        )
+        .unwrap(),
+    );
+    let workspace = record.id.clone();
+    let other = workspace_record(
+        ExecutionCoordinates::new(
+            rsi_agent_session_protocol::ExecutionLocation::Local,
+            "/other",
+        )
+        .unwrap(),
+    );
+    let other_id = other.id.clone();
+    Arc::get_mut(&mut owner).unwrap().workspace = Arc::new(Workspaces {
+        records: [(workspace.clone(), record), (other_id.clone(), other)].into(),
+        ..Default::default()
+    });
+    let first = SessionId::new("row-001").unwrap();
+    let sibling = SessionId::new("row-002").unwrap();
+    assert!(!owner.workspace_contains(&workspace, &first));
+    for _ in 0..2 {
+        owner
+            .attach_workspace_session(CallOrigin::Local, workspace.clone(), first.clone())
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(owner.workspace_contains(&workspace, &first));
+        assert_eq!(owner.metadata_revision(), 1);
+    }
+    assert!(!owner.workspace_contains(&workspace, &sibling));
+    assert!(
+        owner
+            .attach_workspace_session(CallOrigin::Local, other_id.clone(), first.clone())
+            .unwrap()
+            .await
+            .is_err()
+    );
+    assert!(!owner.workspace_contains(&other_id, &first));
+    assert_eq!(owner.metadata_revision(), 1);
+    owner.close().await;
+}
+
+async fn seed_members(
+    owner: &Navigation,
+    domain: &TestDomain,
+    workspace: &WorkspaceId,
+    members: Vec<SessionId>,
+) {
+    let mut document = Document::default();
+    document.workspace_orders.insert(workspace.clone(), members);
+    document.validate().unwrap();
+    domain.seed_document(&document).await;
+    owner.state.lock().unwrap().document = Arc::new(document);
+}
+
+async fn account(owner: &Arc<Navigation>, workspace: &WorkspaceId) -> Vec<SessionId> {
     let seed = owner
         .order_seed(
             &CallOrigin::Local,
@@ -16,9 +77,15 @@ async fn account(owner: &Arc<Navigation>) -> Vec<SessionId> {
         .unwrap()
         .await
         .unwrap();
-    let OrderMembership::Available { mut members, .. } = seed.membership else {
+    let OrderMembership::Available {
+        groups,
+        mut members,
+    } = seed.membership
+    else {
         panic!("bounded fixture");
     };
+    members
+        .retain(|member| groups[usize::from(member.group)].workspace.as_ref() == Some(workspace));
     members.sort_by_key(|member| member.account_position);
     members.into_iter().map(|member| member.session).collect()
 }
@@ -48,15 +115,15 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
             .unwrap()
     };
     let mut expected = (1..=300).rev().map(id).collect::<Vec<_>>();
-    assert_eq!(account(&owner).await, expected);
-    assert!(owner.document().workspace_orders.is_empty());
+    seed_members(&owner, &domain, &workspace, expected.clone()).await;
+    assert_eq!(account(&owner, &workspace).await, expected);
     assert_eq!(
         move_to(id(1), Some(id(299))).await.unwrap(),
         WorkspaceMoveOutcome::Applied
     );
     expected.retain(|entry| entry != &id(1));
     expected.insert(1, id(1));
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     let persisted = domain.take_document().unwrap();
     for (session, before) in [(id(1), Some(id(1))), (id(1), Some(id(299))), (id(2), None)] {
         assert_eq!(
@@ -94,7 +161,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
         })
         .await
         .unwrap();
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     owner
         .set_pin(CallOrigin::Local, id(1), true)
         .unwrap()
@@ -106,18 +173,24 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
         .unwrap()
         .await
         .unwrap();
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     let mut restored: Document = serde_json::from_value(persisted).unwrap();
     restored.validate().unwrap();
     owner.state.lock().unwrap().document = Arc::new(restored);
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     append_member(&owner, 301, "/unregistered").await;
+    assert_eq!(account(&owner, &workspace).await, expected);
+    owner
+        .attach_workspace_session(CallOrigin::Local, workspace.clone(), id(301))
+        .unwrap()
+        .await
+        .unwrap();
     expected.insert(0, id(301));
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     move_to(id(300), None).await.unwrap();
     expected.retain(|entry| entry != &id(300));
     expected.push(id(300));
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     owner.close().await;
 }
 
@@ -166,11 +239,6 @@ async fn append_member(owner: &Navigation, number: u64, path: &str) {
 async fn workspace_account_commit_failure_and_concurrent_moves_preserve_published_state() {
     let mut owner = owner().await;
     let domain = TestDomain::new(owner.domain.spec().clone()).await;
-    domain
-        .backend
-        .state
-        .reject_write
-        .store(true, std::sync::atomic::Ordering::SeqCst);
     let row = workspace_record(
         ExecutionCoordinates::new(
             rsi_agent_session_protocol::ExecutionLocation::Local,
@@ -191,9 +259,21 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
             .insert_workspace_session_before(CallOrigin::Local, workspace.clone(), session, before)
             .unwrap()
     };
-    let original = account(&owner).await;
+    seed_members(
+        &owner,
+        &domain,
+        &workspace,
+        (1..=300).rev().map(id).collect(),
+    )
+    .await;
+    domain
+        .backend
+        .state
+        .reject_write
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let original = account(&owner, &workspace).await;
     assert!(move_to(id(1), Some(id(300))).await.is_err());
-    assert_eq!(account(&owner).await, original);
+    assert_eq!(account(&owner, &workspace).await, original);
     assert_eq!(owner.metadata_revision(), 0);
     assert!(domain.document().is_none());
 
@@ -210,7 +290,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     assert_eq!(owner.metadata_revision(), 2);
     let mut expected = vec![id(1), id(300), id(2)];
     expected.extend((3..=299).rev().map(id));
-    assert_eq!(account(&owner).await, expected);
+    assert_eq!(account(&owner, &workspace).await, expected);
     let persisted = domain.take_document().unwrap();
     let mut restored: Document = serde_json::from_value(persisted).unwrap();
     restored.validate().unwrap();
@@ -258,13 +338,21 @@ fn workspace_account_document_bounds_and_accounting_match_serialized_bytes() {
             accounting.bytes(document.revision)
         );
     }
+    document.workspace_orders = [(
+        a.clone(),
+        (0..1025)
+            .map(|n| SessionId::new(format!("{n}")).unwrap())
+            .collect(),
+    )]
+    .into();
+    document.validate().unwrap();
     for orders in [
         [(a.clone(), vec![id.clone(), id.clone()])].into(),
         [(a.clone(), vec![id.clone()]), (b, vec![id.clone()])].into(),
         [(a.clone(), vec![])].into(),
         [(
             a,
-            (0..1025)
+            (0..8193)
                 .map(|n| SessionId::new(format!("{n}")).unwrap())
                 .collect(),
         )]
@@ -294,6 +382,13 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     });
     let first = SessionId::new("row-001").unwrap();
     let last = SessionId::new("row-300").unwrap();
+    seed_members(
+        &old,
+        &old_domain,
+        &old_id,
+        vec![last.clone(), first.clone()],
+    )
+    .await;
     old.insert_workspace_session_before(
         CallOrigin::Local,
         old_id.clone(),
@@ -320,7 +415,7 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
     restored.validate().unwrap();
     current_domain.seed_document(&restored).await;
     editable.state.lock().unwrap().document = Arc::new(restored);
-    assert_eq!(account(&current).await[0], last);
+    assert!(account(&current, &current_id).await.is_empty());
     assert_eq!(
         current
             .insert_workspace_session_before(CallOrigin::Local, old_id.clone(), first.clone(), None)
@@ -329,6 +424,13 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
             .unwrap(),
         WorkspaceMoveOutcome::UnknownWorkspace
     );
+    for member in [&first, &last] {
+        current
+            .attach_workspace_session(CallOrigin::Local, current_id.clone(), member.clone())
+            .unwrap()
+            .await
+            .unwrap();
+    }
     current
         .insert_workspace_session_before(
             CallOrigin::Local,
@@ -339,14 +441,14 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
         .unwrap()
         .await
         .unwrap();
-    assert_eq!(account(&current).await[0], first);
-    assert_eq!(current.metadata_revision(), 2);
+    assert_eq!(account(&current, &current_id).await[0], first);
+    assert_eq!(current.metadata_revision(), 4);
     assert!(!current.document().workspace_orders.contains_key(&old_id));
     assert_eq!(current.document().workspace_orders.len(), 1);
     let mut durable: Document =
         serde_json::from_value(serde_json::to_value(current.document().as_ref()).unwrap()).unwrap();
     durable.validate().unwrap();
-    assert_eq!(durable.workspace_orders[&current_id].len(), 300);
+    assert_eq!(durable.workspace_orders[&current_id].len(), 2);
     current.close().await;
 }
 

@@ -52,7 +52,7 @@ pub struct OrderMember {
 pub struct OrderGroup {
     /// Machine and canonical directory, independent of registration lifetime.
     pub coordinates: ExecutionCoordinates,
-    /// Current registered identity; absent for an unregistered directory.
+    /// Current registration of these members, absent for unattached Sessions.
     pub workspace: Option<rsi_workspace_protocol::WorkspaceId>,
 }
 /// Complete membership, or explicit capacity refusal.
@@ -61,7 +61,7 @@ pub struct OrderGroup {
 pub enum OrderMembership {
     /// Every identity in the scope, strictly ascending.
     Available {
-        /// Unique execution coordinate groups in first-member order.
+        /// Distinct coordinate and registration pairs in first-member order.
         groups: Vec<OrderGroup>,
         /// Reconcile all members before reading summary pages.
         members: Vec<OrderMember>,
@@ -256,7 +256,7 @@ fn valid_groups(
         || groups.len() > members.len()
         || groups
             .iter()
-            .map(|group| &group.coordinates)
+            .map(|group| (&group.coordinates, group.workspace.as_ref()))
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != groups.len()

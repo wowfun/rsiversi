@@ -471,7 +471,7 @@ impl Navigation {
             if !matches_query(&query, id, metadata, Some(path)) {
                 continue;
             }
-            let workspace = workspace?;
+            let workspace = document.membership(workspace?, id);
             if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
@@ -665,7 +665,7 @@ impl Navigation {
                     if !matches_query(&query, id, metadata, Some(path)) {
                         continue;
                     }
-                    let workspace = workspace?;
+                    let workspace = document.membership(workspace?, id);
                     if !filter.workspace.matches(workspace.as_ref()) {
                         continue;
                     }
