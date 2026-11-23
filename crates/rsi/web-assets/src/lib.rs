@@ -23,8 +23,8 @@ type AssetDirectory = PathBuf;
 
 mod pairing;
 pub use pairing::{
-    PairedWebAssetsFactory, VerifiedWebAssetsFactory, pairing_receipt,
-    pairing_receipt_with_document,
+    PairedWebAssetsFactory, VerifiedWebAssetsFactory, application_document_receipt,
+    pairing_receipt, pairing_receipt_with_document,
 };
 mod publication;
 mod manifest {

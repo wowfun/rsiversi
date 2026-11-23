@@ -117,11 +117,15 @@ this section once with the receipt, validates the ordinary filename/count bounds
 and verifies every byte before publication. With no explicit `files` configuration,
 this selects the complete optional application document without native application
 special cases. With explicit files, the declared closure and policy must agree.
-The fixed bootstrap set remains mandatory. `pairing_receipt_with_document` is the
-build-producer entry; `check_bundle --document JSON_PATH` consumes its bounded
-`files` array and `trusted_inline_styles` boolean before writing and checking the
-receipt. Document code, additional non-renderer assets and policy remain restart
-bound. Package signatures, when present, bind this receipt as an ordinary file.
+The native Web producer and `check_bundle --document JSON_PATH` require the full
+compiled bootstrap, including its Worker and WASM. An independently supplied
+application can use `check_bundle --application-document JSON_PATH` to declare
+every file it serves, including `index.html`. Its receipt has an empty
+`bootstrap` map and stores the complete hash map in `document.files`. Both
+producers use the same bounded file list, style policy, family identity and
+Desktop bridge descriptor. Exact-family native bootstrap fixtures require the
+compiled bootstrap. Document code, additional non-renderer assets and policy
+remain restart bound. Package signatures bind the receipt when present.
 
 The official application catalog and local Web adapter use
 `VerifiedWebAssetsFactory`, including custom application Profiles. It validates

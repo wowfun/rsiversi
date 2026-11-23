@@ -61,9 +61,18 @@ struct Document {
 }
 
 impl Receipt {
+    fn native_bootstrap(&self) -> &'static [&'static str] {
+        if self.bootstrap.is_empty() && self.document.is_some() {
+            &[]
+        } else {
+            BOOTSTRAP
+        }
+    }
+
     pub(super) fn configure(&self, config: &mut Config) -> AssetResult<()> {
         if let Some(document) = &self.document {
-            let declared: Vec<_> = BOOTSTRAP
+            let declared: Vec<_> = self
+                .native_bootstrap()
                 .iter()
                 .map(|s| (*s).to_owned())
                 .chain(document.files.keys().cloned())
@@ -193,6 +202,9 @@ pub(super) fn read(
             "receipt format or family mismatch (actual {actual})"
         )));
     }
+    if matches!(identity, Identity::Exact(_)) && receipt.native_bootstrap().is_empty() {
+        return Err(failure("expected a native bootstrap receipt".into()));
+    }
     Ok(receipt)
 }
 
@@ -201,10 +213,11 @@ pub(super) fn verify(
     files: &BTreeMap<String, HttpAsset>,
 ) -> AssetResult<rsi_api_protocol::ProtocolDescriptor> {
     let failure = |detail: String| AssetError::Invalid(format!("Web bundle: {detail}. {REBUILD}"));
-    if receipt.bootstrap.len() != BOOTSTRAP.len() {
+    let bootstrap = receipt.native_bootstrap();
+    if receipt.bootstrap.len() != bootstrap.len() {
         return Err(failure("bootstrap file set differs".into()));
     }
-    for name in BOOTSTRAP {
+    for name in bootstrap {
         let asset = files
             .get(&format!("/{name}"))
             .ok_or_else(|| failure(format!("missing bootstrap file {name}")))?;
@@ -260,6 +273,33 @@ pub fn pairing_receipt_with_document(
     desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
     document: Option<(Vec<String>, bool)>,
 ) -> AssetResult<Vec<u8>> {
+    build_receipt(directory, family, desktop_bridge, document, BOOTSTRAP)
+}
+
+/// Binds every file in a complete application document, including its own root.
+pub fn application_document_receipt(
+    directory: &Path,
+    family: &str,
+    desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+    files: Vec<String>,
+    trusted_inline_styles: bool,
+) -> AssetResult<Vec<u8>> {
+    build_receipt(
+        directory,
+        family,
+        desktop_bridge,
+        Some((files, trusted_inline_styles)),
+        &[],
+    )
+}
+
+fn build_receipt(
+    directory: &Path,
+    family: &str,
+    desktop_bridge: rsi_api_protocol::ProtocolDescriptor,
+    document: Option<(Vec<String>, bool)>,
+    bootstrap_files: &[&str],
+) -> AssetResult<Vec<u8>> {
     desktop_bridge
         .validate()
         .map_err(|e| AssetError::Invalid(e.to_string()))?;
@@ -271,14 +311,18 @@ pub fn pairing_receipt_with_document(
     if family.len() != 64 || !family.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(AssetError::Invalid("invalid build family digest".into()));
     }
+    let declare_document = document.is_some();
+    let (filenames, trusted_inline_styles) = document.unwrap_or_else(|| {
+        (
+            bootstrap_files.iter().map(|s| (*s).to_owned()).collect(),
+            false,
+        )
+    });
     let config = Config {
         directory: directory.to_owned(),
-        files: document.as_ref().map_or_else(
-            || BOOTSTRAP.iter().map(|s| (*s).to_owned()).collect(),
-            |(files, _)| files.clone(),
-        ),
+        files: filenames,
         watch: false,
-        trusted_inline_styles: document.as_ref().is_some_and(|(_, inline)| *inline),
+        trusted_inline_styles,
         pairing: None,
         discover_renderers: false,
     };
@@ -291,7 +335,7 @@ pub fn pairing_receipt_with_document(
         &rsi_api_protocol::ByteBudget::default(),
         None,
     )?;
-    if BOOTSTRAP
+    if bootstrap_files
         .iter()
         .any(|name| !files.files.contains_key(&format!("/{name}")))
     {
@@ -299,12 +343,12 @@ pub fn pairing_receipt_with_document(
             "document is missing a fixed bootstrap asset".into(),
         ));
     }
-    let document = document.map(|(_, trusted_inline_styles)| Document {
+    let document = declare_document.then(|| Document {
         trusted_inline_styles,
         files: files
             .files
             .iter()
-            .filter(|(path, _)| !BOOTSTRAP.contains(&path.trim_start_matches('/')))
+            .filter(|(path, _)| !bootstrap_files.contains(&path.trim_start_matches('/')))
             .map(|(path, asset)| {
                 (
                     path.trim_start_matches('/').to_owned(),
@@ -313,7 +357,7 @@ pub fn pairing_receipt_with_document(
             })
             .collect(),
     });
-    let bootstrap = BOOTSTRAP
+    let bootstrap = bootstrap_files
         .iter()
         .map(|name| {
             (

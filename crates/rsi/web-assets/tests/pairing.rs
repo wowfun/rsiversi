@@ -14,29 +14,66 @@ const FAMILY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 #[tokio::test]
 async fn declared_document_closure_is_verified_and_policy_changes_require_restart() {
-    let root = bundle();
-    renderer(root.path(), b"fixture renderer");
+    verify_document(false).await;
+}
+
+#[tokio::test]
+async fn complete_application_admits_only_its_files_and_keeps_the_desktop_protocol() {
+    verify_document(true).await;
+}
+
+async fn verify_document(independent: bool) {
+    let root = if independent {
+        tempfile::tempdir().unwrap()
+    } else {
+        bundle()
+    };
+    let mut declared = if independent {
+        std::fs::write(root.path().join("index.html"), b"application document").unwrap();
+        vec!["index.html".into()]
+    } else {
+        renderer(root.path(), b"fixture renderer");
+        files(root.path())
+    };
     std::fs::write(root.path().join("original.js"), b"original plugin").unwrap();
     std::fs::write(root.path().join("font.woff2"), b"font bytes").unwrap();
-    let mut declared = files(root.path());
     declared.extend(["original.js".into(), "font.woff2".into()]);
     let write = |inline| {
-        std::fs::write(
-            root.path().join("rsi-build.json"),
+        let bridge = rsi_api_protocol::ProtocolDescriptor {
+            name: "rsi.desktop.bridge".into(),
+            version: 5,
+        };
+        let receipt = if independent {
+            rsi_web_assets::application_document_receipt(
+                root.path(),
+                FAMILY,
+                bridge,
+                declared.clone(),
+                inline,
+            )
+        } else {
             rsi_web_assets::pairing_receipt_with_document(
                 root.path(),
                 FAMILY,
-                rsi_api_protocol::ProtocolDescriptor {
-                    name: "rsi.desktop.bridge".into(),
-                    version: 5,
-                },
+                bridge,
                 Some((declared.clone(), inline)),
             )
-            .unwrap(),
-        )
+        }
         .unwrap();
+        std::fs::write(root.path().join("rsi-build.json"), receipt).unwrap();
     };
     write(true);
+    if independent {
+        let (started, diagnostic) = start(root.path()).await;
+        assert_assets_unavailable(started).await;
+        assert!(
+            diagnostic
+                .take_diagnostic()
+                .unwrap()
+                .to_string()
+                .contains("native bootstrap receipt")
+        );
+    }
     let mut builder = HostBuilder::without_paths("document-closure");
     builder
         .register_local_contract::<HttpAssetsContract>()
@@ -62,6 +99,7 @@ async fn declared_document_closure_is_verified_and_policy_changes_require_restar
     };
     let running = host.start(profile()).await.unwrap();
     let assets = running.lookup_local::<HttpAssetsContract>().unwrap();
+    assert_eq!(assets.get("/worker.js").unwrap().is_some(), !independent);
     assert_eq!(
         assets.get("/font.woff2").unwrap().unwrap().kind.mime(),
         "font/woff2"
@@ -80,6 +118,7 @@ async fn declared_document_closure_is_verified_and_policy_changes_require_restar
         rsi_api_http::DocumentPolicy::TrustedExtensionApplication { .. }
     ));
     let control = running.lookup_local::<WebAssetControlContract>().unwrap();
+    assert_eq!(control.desktop_bridge().unwrap().unwrap().version, 5);
     let revision = control.revision().unwrap();
     write(false);
     let candidate = control

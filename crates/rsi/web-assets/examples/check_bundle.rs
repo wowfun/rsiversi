@@ -1,7 +1,7 @@
 use rsi_api_http::HttpAssetsContract;
 use rsi_host::{HostBuilder, Profile, ProfileEntry};
 use rsi_meta::UpdateMode;
-use rsi_web_assets::{WebAssetControlContract, WebAssetsFactory};
+use rsi_web_assets::{VerifiedWebAssetsFactory, WebAssetControlContract, WebAssetsFactory};
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(serde::Deserialize)]
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let document = match arguments.next() {
-        Some(flag) if flag == "--document" => {
+        Some(flag) if flag == "--document" || flag == "--application-document" => {
             use std::io::Read as _;
             let mut bytes = Vec::new();
             std::fs::File::open(PathBuf::from(
@@ -55,7 +55,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if bytes.len() > 32 * 1024 {
                 return Err("document JSON exceeds 32 KiB".into());
             }
-            Some(serde_json::from_slice::<Document>(&bytes)?)
+            Some((
+                serde_json::from_slice::<Document>(&bytes)?,
+                flag == "--application-document",
+            ))
         }
         Some(_) => return Err("unknown option".into()),
         None => None,
@@ -63,15 +66,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !directory.is_absolute() || arguments.next().is_some() {
         return Err("expected one absolute bundle directory".into());
     }
+    let paired = family.is_some();
     if let Some(family) = family {
-        let receipt = rsi_web_assets::pairing_receipt_with_document(
-            &directory,
-            &family,
-            bridge.expect("producer descriptor"),
-            document
-                .as_ref()
-                .map(|d| (d.files.clone(), d.trusted_inline_styles)),
-        )?;
+        let bridge = bridge.expect("producer descriptor");
+        let receipt = match document {
+            Some((document, true)) => rsi_web_assets::application_document_receipt(
+                &directory,
+                &family,
+                bridge,
+                document.files,
+                document.trusted_inline_styles,
+            ),
+            document => rsi_web_assets::pairing_receipt_with_document(
+                &directory,
+                &family,
+                bridge,
+                document.map(|(d, _)| (d.files, d.trusted_inline_styles)),
+            ),
+        }?;
         std::fs::write(directory.join("rsi-build.json"), receipt)?;
     }
     let mut host = HostBuilder::without_paths("bundle-check");
@@ -81,15 +93,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assets",
         "1",
         UpdateMode::RestartRequired,
-        Arc::new(WebAssetsFactory),
+        if paired {
+            Arc::new(VerifiedWebAssetsFactory)
+        } else {
+            Arc::new(WebAssetsFactory)
+        },
     )?;
     let running = host
         .build()?
         .start(Profile::new(vec![ProfileEntry::new(
             "assets",
             "assets",
-            if let Some(document) = document { serde_json::json!({"directory":directory,"files":document.files,"trusted_inline_styles":document.trusted_inline_styles}) }
-            else { serde_json::json!({"directory": directory}) },
+            serde_json::json!({"directory": directory}),
         )]))
         .await?;
     let bytes = running

@@ -479,11 +479,6 @@ impl AssetCandidate {
         if retiring_is_leased && current.leases.load(Ordering::Acquire) != 0 {
             return Err(AssetError::Capacity);
         }
-        if candidate.catalog.is_none() {
-            return Err(AssetError::Invalid(
-                "candidate has no renderer catalog".into(),
-            ));
-        }
         if candidate.desktop_bridge != current.desktop_bridge {
             return Err(AssetError::RestartRequired);
         }
@@ -497,6 +492,11 @@ impl AssetCandidate {
                     return Err(AssetError::RestartRequired);
                 }
             }
+        }
+        if candidate.catalog.is_none() {
+            return Err(AssetError::Invalid(
+                "candidate has no renderer catalog".into(),
+            ));
         }
         if !retiring_is_leased {
             state.retiring = Some(Arc::downgrade(current));
