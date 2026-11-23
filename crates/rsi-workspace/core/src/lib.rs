@@ -257,50 +257,7 @@ impl WorkspaceRegistry for Service {
         id: &WorkspaceId,
         name: rsi_workspace_protocol::WorkspaceName,
     ) -> Result<WorkspaceRecord> {
-        let commit = Arc::clone(&self.commit).lock_owned().await;
-        let state = self.state.read().await;
-        self.ensure_available()?;
-        let (order, current) = state
-            .records
-            .get(id)
-            .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
-        let permit = self.admit(current.coordinates.location())?;
-        let order = *order;
-        if current.name.as_ref() == Some(&name) {
-            return Ok(current.clone());
-        }
-        let mut record = current.clone();
-        record.name = Some(name);
-        record.renamed_at_ms = Some(unix_millis()?);
-        drop(state);
-        let value = DurableWorkspaceRecord {
-            order,
-            record: record.clone(),
-        };
-        let domain = self.domain.clone();
-        let state = self.state.clone();
-        let revision = self.revision.clone();
-        self.execution
-            .spawn(async move {
-                let (_commit, _permit) = (commit, permit);
-                domain
-                    .table::<DurableWorkspaceRecord>(RECORDS)
-                    .map_err(storage_error)?
-                    .put(record.id.as_str(), value)
-                    .await
-                    .map_err(storage_error)?;
-                state
-                    .write()
-                    .await
-                    .records
-                    .insert(record.id.clone(), (order, record.clone()));
-                revision.fetch_add(1, Ordering::Release);
-                Ok(record)
-            })
-            .await
-            .map_err(|error| {
-                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
-            })?
+        self.set_name(id, name, false).await
     }
 
     async fn status(&self, id: &WorkspaceId) -> Result<WorkspaceStatus> {
@@ -600,6 +557,70 @@ fn storage_meta(error: &StorageError) -> MetaError {
 }
 
 impl Service {
+    async fn set_name(
+        &self,
+        id: &WorkspaceId,
+        name: rsi_workspace_protocol::WorkspaceName,
+        distinct: bool,
+    ) -> Result<WorkspaceRecord> {
+        let commit = Arc::clone(&self.commit).lock_owned().await;
+        let state = self.state.read().await;
+        self.ensure_available()?;
+        let (order, current) = state
+            .records
+            .get(id)
+            .ok_or_else(|| WorkspaceError::Unknown(id.clone()))?;
+        let permit = self.admit(current.coordinates.location())?;
+        let order = *order;
+        if current.name.as_ref() == Some(&name)
+            || distinct && current.display_title() == name.as_str()
+        {
+            return Ok(current.clone());
+        }
+        if distinct {
+            let mut permissions = Permissions::new(self);
+            for (_, candidate) in state.records.values() {
+                if candidate.display_title() == name.as_str()
+                    && permissions.permits(candidate.coordinates.location())?
+                {
+                    return Err(WorkspaceError::NameConflict);
+                }
+            }
+        }
+        let mut record = current.clone();
+        record.name = Some(name);
+        record.renamed_at_ms = Some(unix_millis()?);
+        drop(state);
+        let value = DurableWorkspaceRecord {
+            order,
+            record: record.clone(),
+        };
+        let domain = self.domain.clone();
+        let state = self.state.clone();
+        let revision = self.revision.clone();
+        self.execution
+            .spawn(async move {
+                let (_commit, _permit) = (commit, permit);
+                domain
+                    .table::<DurableWorkspaceRecord>(RECORDS)
+                    .map_err(storage_error)?
+                    .put(record.id.as_str(), value)
+                    .await
+                    .map_err(storage_error)?;
+                state
+                    .write()
+                    .await
+                    .records
+                    .insert(record.id.clone(), (order, record.clone()));
+                revision.fetch_add(1, Ordering::Release);
+                Ok(record)
+            })
+            .await
+            .map_err(|error| {
+                WorkspaceError::Storage(format!("workspace commit task failed: {error}"))
+            })?
+    }
+
     async fn registration_coordinates(
         &self,
         location: &ExecutionLocation,
@@ -645,9 +666,7 @@ impl Service {
             return Ok((state.records[id].1.clone(), false));
         }
         if state.records.len() == MAXIMUM_WORKSPACES {
-            return Err(WorkspaceError::InvalidInput(
-                "workspace registry reached its capacity".into(),
-            ));
+            return Err(WorkspaceError::Capacity);
         }
         let mut bytes = [0_u8; 32];
         getrandom::fill(&mut bytes).map_err(|error| WorkspaceError::Storage(error.to_string()))?;
@@ -728,6 +747,20 @@ impl Service {
 }
 #[async_trait]
 impl WorkspaceIngress for Service {
+    async fn rename_distinct(
+        &self,
+        origin: CallOrigin,
+        id: &WorkspaceId,
+        name: rsi_workspace_protocol::WorkspaceName,
+    ) -> Result<WorkspaceRecord> {
+        Self {
+            origin,
+            ..self.clone()
+        }
+        .set_name(id, name, true)
+        .await
+    }
+
     async fn local_coordinates(
         &self,
         origin: CallOrigin,

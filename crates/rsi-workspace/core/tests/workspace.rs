@@ -42,6 +42,72 @@ async fn storage_runtime(path: &std::path::Path) -> Runtime {
 }
 
 #[tokio::test]
+async fn application_rename_claims_visible_titles_under_the_registration_commit() {
+    use rsi_api_protocol::CallOrigin;
+    use rsi_workspace_protocol::{WorkspaceError, WorkspaceIngressContract, WorkspaceName};
+    let temp = tempfile::tempdir().unwrap();
+    let root = rsi_workspace_protocol::canonical_native_path(temp.path().canonicalize().unwrap());
+    let state = root.join("state");
+    rsi_files_native_fs::create_absolute_directory_no_follow(&state).unwrap();
+    let runtime = storage_runtime(&state.join("store.sqlite3")).await;
+    runtime
+        .root()
+        .apply(
+            linked("workspaces", Arc::new(WorkspaceFactory)),
+            json!({"backend":"sqlite"}),
+        )
+        .await
+        .unwrap();
+    let ingress = runtime
+        .root()
+        .lookup_local::<WorkspaceIngressContract>()
+        .unwrap();
+    let registry = ingress.scoped(CallOrigin::Local);
+    let mut rows = Vec::new();
+    for folder in ["first", "second"] {
+        let path = root.join(folder);
+        fs::create_dir(&path).unwrap();
+        rows.push(registry.get_or_create(&path).await.unwrap());
+    }
+    let name = |value: &str| WorkspaceName::parse(value).unwrap();
+    assert_eq!(
+        ingress
+            .rename_distinct(CallOrigin::Local, &rows[0].id, name("first"))
+            .await
+            .unwrap(),
+        rows[0]
+    );
+    assert!(matches!(
+        ingress
+            .rename_distinct(CallOrigin::Local, &rows[0].id, name("second"))
+            .await,
+        Err(WorkspaceError::NameConflict)
+    ));
+    assert_eq!(ingress.directory_revision(), Some(2));
+    let (a, b) = tokio::join!(
+        ingress.rename_distinct(CallOrigin::Local, &rows[0].id, name("Shared")),
+        ingress.rename_distinct(CallOrigin::Local, &rows[1].id, name("Shared")),
+    );
+    assert!(matches!(
+        (&a, &b),
+        (Ok(_), Err(WorkspaceError::NameConflict)) | (Err(WorkspaceError::NameConflict), Ok(_))
+    ));
+    assert_eq!(ingress.directory_revision(), Some(3));
+    let other = if a.is_ok() { &rows[1].id } else { &rows[0].id };
+    registry.rename(other, name("Shared")).await.unwrap();
+    let revision = ingress.directory_revision();
+    assert_eq!(
+        ingress
+            .rename_distinct(CallOrigin::Local, other, name("Shared"))
+            .await
+            .unwrap()
+            .display_title(),
+        "Shared"
+    );
+    assert_eq!(ingress.directory_revision(), revision);
+}
+
+#[tokio::test]
 async fn registration_removal_can_retry_cleanup_after_the_registry_commit() {
     use rsi_workspace_protocol::{
         WorkspaceError, WorkspaceId, WorkspaceRegistrationCleanup,
@@ -1264,7 +1330,16 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
         scoped.get(&remote.id).await,
         Err(WorkspaceError::Api(ApiError::Unauthorized))
     );
-    assert_eq!(scoped.list(first.next, 1).await.unwrap().records, [local]);
+    assert_eq!(
+        scoped.list(first.next, 1).await.unwrap().records,
+        std::slice::from_ref(&local)
+    );
+    let hidden_title = rsi_workspace_protocol::WorkspaceName::parse("313").unwrap();
+    let renamed = ingress
+        .rename_distinct(device.clone(), &local.id, hidden_title)
+        .await
+        .unwrap();
+    assert_eq!(renamed.display_title(), "313");
     revoked.cancel();
     assert_eq!(
         scoped.list(None, 1).await,

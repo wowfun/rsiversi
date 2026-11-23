@@ -1,6 +1,25 @@
 use rsi_workspace_protocol::WorkspaceId;
 
 #[test]
+fn display_titles_use_the_registered_host_path_syntax() {
+    use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation, WorkspaceRecord};
+    for (path, title) in [
+        ("/", "/"),
+        ("/project", "project"),
+        (r"/project/one\two", r"one\two"),
+        (r"C:\", r"C:\"),
+        ("C:/", "C:/"),
+        (r"D:\work\项目", "项目"),
+        (r"\\server\share", "share"),
+        (r"\\?\UNC\server\share\project", "project"),
+    ] {
+        let coordinates = ExecutionCoordinates::new(ExecutionLocation::Local, path).unwrap();
+        let row = WorkspaceRecord::new(WorkspaceId::from_bytes([1; 32]), coordinates);
+        assert_eq!(row.display_title(), title);
+    }
+}
+
+#[test]
 fn workspace_identity_includes_the_machine_and_accepts_foreign_local_paths() {
     use rsi_workspace_protocol::{ExecutionCoordinates, ExecutionLocation};
     let local = ExecutionCoordinates::new(ExecutionLocation::Local, "/project").unwrap();

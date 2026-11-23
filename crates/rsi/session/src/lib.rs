@@ -2715,9 +2715,9 @@ fn map_workspace_error(error: &rsi_workspace_protocol::WorkspaceError) -> Sessio
     use rsi_workspace_protocol::WorkspaceError;
     match error {
         WorkspaceError::Api(error) => SessionError::Api(error.clone()),
-        WorkspaceError::InvalidInput(_) | WorkspaceError::Unknown(_) => {
-            SessionError::Invalid(error.to_string())
-        }
+        WorkspaceError::InvalidInput(_)
+        | WorkspaceError::Unknown(_)
+        | WorkspaceError::NameConflict => SessionError::Invalid(error.to_string()),
         WorkspaceError::Capacity => SessionError::Capacity,
         WorkspaceError::ShuttingDown => SessionError::ShuttingDown,
         WorkspaceError::Storage(_) | WorkspaceError::Corrupt(_) => {

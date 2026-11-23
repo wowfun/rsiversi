@@ -131,6 +131,11 @@ pub const MAXIMUM_WORKSPACE_PATH_BYTES: usize = rsi_workspace_path::MAXIMUM_HOST
 #[derive(schemars::JsonSchema)]
 pub struct WorkspaceName(String);
 impl WorkspaceName {
+    /// Returns the validated name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Validates a trimmed, bounded name at an input boundary.
     pub fn parse(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
@@ -223,6 +228,20 @@ pub struct WorkspaceRecord {
 }
 
 impl WorkspaceRecord {
+    /// Returns the display name using the registered host's path syntax.
+    pub fn display_title(&self) -> &str {
+        if let Some(name) = &self.name {
+            return name.as_str();
+        }
+        let path = self.coordinates.path();
+        let name = if path.starts_with('/') {
+            path.rsplit('/').next()
+        } else {
+            path.rsplit(['/', '\\']).next()
+        };
+        name.filter(|part| !part.is_empty()).unwrap_or(path)
+    }
+
     /// Associates an allocated registration identity with canonical coordinates.
     pub fn new(id: WorkspaceId, coordinates: ExecutionCoordinates) -> Self {
         Self {
@@ -307,6 +326,9 @@ pub enum WorkspaceError {
     /// Unknown registry identity.
     #[error("workspace `{0}` is not registered")]
     Unknown(WorkspaceId),
+    /// Another visible registration already displays the requested title.
+    #[error("workspace display name is already in use")]
+    NameConflict,
     /// Durable state is malformed or inconsistent.
     #[error("workspace registry is corrupt: {0}")]
     Corrupt(String),
@@ -404,6 +426,13 @@ pub trait WorkspaceIngress: fmt::Debug + Send + Sync + 'static {
         origin: rsi_api_protocol::CallOrigin,
         path: &Path,
     ) -> Result<(WorkspaceRecord, bool)>;
+    /// Renames a registration only when the proposed display title is available to this caller.
+    async fn rename_distinct(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        id: &WorkspaceId,
+        name: WorkspaceName,
+    ) -> Result<WorkspaceRecord>;
 }
 /// Server-only Workspace caller binding.
 #[derive(Debug)]

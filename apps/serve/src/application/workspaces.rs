@@ -3,7 +3,9 @@ use rsi_agent_session_protocol::SessionId;
 use rsi_extension::{Error, Result};
 use rsi_navigation::{ArchiveIntent, ArchiveOutcome};
 use rsi_session_protocol::RecentSessionCursor;
-use rsi_workspace_protocol::{WorkspaceCursor, WorkspaceId, WorkspaceName, WorkspaceRecord};
+use rsi_workspace_protocol::{
+    WorkspaceCursor, WorkspaceError, WorkspaceId, WorkspaceName, WorkspaceRecord,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -58,7 +60,7 @@ enum Operation {
     },
     Rename {
         id: WorkspaceId,
-        title: WorkspaceName,
+        title: String,
     },
     Delete {
         id: WorkspaceId,
@@ -140,27 +142,34 @@ impl Sessions {
             }
             Operation::Drafts { after } => self.workspace_drafts(&origin, after.as_ref()).await?,
             Operation::Default => self.default_workspace(origin).await?,
-            Operation::Rename { id, title } => {
-                let row = self
+            Operation::Rename { id, title } => match WorkspaceName::parse(title) {
+                Err(error) => json!({"status":"invalid_title","message":error.to_string()}),
+                Ok(name) => match self
                     .workspaces
-                    .scoped(origin.clone())
-                    .rename(&id, title)
+                    .rename_distinct(origin.clone(), &id, name)
                     .await
-                    .map_err(remote)?;
-                self.workspace_account(origin, &row).await?
-            }
+                {
+                    Ok(row) => self.workspace_account(origin, &row).await?,
+                    Err(WorkspaceError::Unknown(_)) => json!({"status":"unknown"}),
+                    Err(WorkspaceError::NameConflict) => json!({"status":"name_conflict"}),
+                    Err(error) => return Err(remote(error)),
+                },
+            },
             Operation::Create { path } => {
-                let (row, created) = self
-                    .workspaces
-                    .register_local(origin.clone(), &path)
-                    .await
-                    .map_err(remote)?;
-                let row = if created {
-                    record(&row, None)
-                } else {
-                    self.workspace_account(origin, &row).await?
-                };
-                json!({"record":row,"created":created})
+                match self.workspaces.register_local(origin.clone(), &path).await {
+                    Ok((row, created)) => {
+                        let row = if created {
+                            record(&row, None)
+                        } else {
+                            self.workspace_account(origin, &row).await?
+                        };
+                        json!({"record":row,"created":created})
+                    }
+                    Err(WorkspaceError::InvalidInput(message)) => {
+                        json!({"status":"invalid_path","message":message})
+                    }
+                    Err(error) => return Err(remote(error)),
+                }
             }
             Operation::Delete { id } => {
                 json!(
@@ -410,7 +419,7 @@ impl Sessions {
 }
 
 fn record(row: &WorkspaceRecord, account_time: Option<u64>) -> Value {
-    json!({"id":row.id,"path":row.coordinates.path(),"title":row.name,"created":row.created_at_ms,
+    json!({"id":row.id,"path":row.coordinates.path(),"title":row.display_title(),"created":row.created_at_ms,
         "updated":row.renamed_at_ms.or(row.created_at_ms).max(account_time)})
 }
 fn remote(error: impl std::fmt::Display) -> Error {

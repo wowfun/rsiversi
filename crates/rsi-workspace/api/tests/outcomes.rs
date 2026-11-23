@@ -220,6 +220,14 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
 
 #[async_trait]
 impl WorkspaceIngress for Provider {
+    async fn rename_distinct(
+        &self,
+        _: CallOrigin,
+        _: &WorkspaceId,
+        _: rsi_workspace_protocol::WorkspaceName,
+    ) -> Result<WorkspaceRecord> {
+        unreachable!("the registry wire API sets names directly")
+    }
     async fn local_coordinates(
         &self,
         _: CallOrigin,

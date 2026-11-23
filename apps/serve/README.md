@@ -25,6 +25,9 @@ position; Serve adds no duplicate wrapper and never erases a settled receipt.
 Application Workspace Session moves use Navigation's shared native account order.
 Workspace summaries report the latest committed registration or membership
 change. Reading a Workspace or chatting in an existing member preserves that time.
+Application rename returns the committed account or a distinct unknown-ID,
+invalid-title or occupied-title result. Creation distinguishes a rejected path
+from failures to commit or recover its account.
 The caller's actual location and Session protection authority cover the commit;
 the bridge owns only the DSH error and projection mapping.
 
@@ -95,7 +98,7 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
-host sends `application.open` with protocol 15, a private profile directory
+host sends `application.open` with protocol 16, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application

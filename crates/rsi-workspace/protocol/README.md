@@ -11,6 +11,12 @@ their creation time. Rename and deletion require the same location admission as
 registration and retain admitted commits through durable publication.
 Authenticated registration can return the record and whether this call
 created it. The registry decides that result under its existing commit lock.
+The application rename command compares the proposed title with the displayed
+titles of registrations visible to its caller. It commits only if the new
+title is available. Repeating the current title, including a directory's
+default title, preserves the record and revision. The default is the final
+directory component or the root path itself. The registry's direct name
+setter permits duplicate display names.
 
 Registrations carry mandatory validated execution coordinates. `WorkspaceId`
 identifies one registration lifetime; it is opaque and independent of the path.

@@ -129,6 +129,7 @@ pub(crate) enum Failure {
     ShuttingDown,
     InvalidInput,
     Unknown { id: WorkspaceId },
+    NameConflict,
     Corrupt,
 }
 pub(crate) fn result<T>(
@@ -141,6 +142,7 @@ pub(crate) fn result<T>(
             WorkspaceError::ShuttingDown => Failure::ShuttingDown,
             WorkspaceError::InvalidInput(_) => Failure::InvalidInput,
             WorkspaceError::Unknown(id) => Failure::Unknown { id },
+            WorkspaceError::NameConflict => Failure::NameConflict,
             WorkspaceError::Corrupt(_) => Failure::Corrupt,
             WorkspaceError::Storage(_) => {
                 return Err(ApiError::Backend(
@@ -158,6 +160,7 @@ impl From<Failure> for WorkspaceError {
             Failure::ShuttingDown => Self::ShuttingDown,
             Failure::InvalidInput => Self::InvalidInput("remote workspace rejected input".into()),
             Failure::Unknown { id } => Self::Unknown(id),
+            Failure::NameConflict => Self::NameConflict,
             Failure::Corrupt => Self::Corrupt("remote workspace state is invalid".into()),
         }
     }
