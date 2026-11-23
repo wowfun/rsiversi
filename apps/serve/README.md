@@ -310,7 +310,9 @@ conversation after restart. Unsent composer text stays in the originating browse
 The application
 can announce that accepted draft through its own list event contract without
 another catalog query. A requested blank draft can be reused;
-a used or archived root in the same Workspace opens a fresh identity.
+a used or archived root in the same Workspace opens a fresh identity. Without a
+requested identity, creation claims the supplied fresh ID exclusively. A
+collision leaves the existing conversation intact.
 Creation can also select a manual fork at an exact local terminal Turn.
 Serve derives its Workspace and preset from the admitted source. The draft
 starts an independent root and retains the native inherited cut.

@@ -1,5 +1,5 @@
 use super::*;
-use rsi_session_protocol::SessionIngress as _;
+use rsi_session_protocol::{DraftClaim, SessionIngress as _};
 
 #[tokio::test]
 async fn explicit_release_rejects_construction_and_expires_escaped_draft_handles() {
@@ -212,7 +212,7 @@ async fn shared_blank_restores_its_selected_preset_for_another_authorized_device
     let first = start();
     let input = request(directory.path(), "shared-blank");
     let handle = first
-        .create_shared_blank(input.clone(), device(1))
+        .create_shared_blank(input.clone(), device(1), DraftClaim::JoinIdentical)
         .await
         .unwrap();
     let draft = handle.draft_snapshot().await.unwrap();
@@ -258,11 +258,67 @@ fn request(_path: &Path, id: impl Into<String>) -> CreateSession {
 }
 
 #[tokio::test]
+async fn exclusive_blank_claim_rejects_a_contender_during_preparation_and_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let prepare = Preparation::new(true);
+    let first = service_with_store(directory.path(), prepare.clone(), store.clone());
+    let input = request(directory.path(), "plugin-owned");
+    let pending = tokio::spawn({
+        let service = first.clone();
+        let input = input.clone();
+        async move {
+            service
+                .create_shared_blank(input, device(1), DraftClaim::Exclusive)
+                .await
+        }
+    });
+    prepare.entered.acquire().await.unwrap().forget();
+    assert!(matches!(
+        first
+            .create_shared_blank(input.clone(), device(2), DraftClaim::Exclusive)
+            .await,
+        Err(SessionError::Invalid(_))
+    ));
+    prepare.release.as_ref().unwrap().add_permits(1);
+    let original = pending.await.unwrap().unwrap().header().await.unwrap();
+    let joined = first
+        .create_shared_blank(input.clone(), device(2), DraftClaim::JoinIdentical)
+        .await
+        .unwrap();
+    assert_eq!(joined.header().await.unwrap(), original);
+    first.stop().await.unwrap();
+    let cold = service_with_store(directory.path(), Preparation::new(false), store);
+    assert!(matches!(
+        cold.create_shared_blank(input.clone(), device(2), DraftClaim::Exclusive)
+            .await,
+        Err(SessionError::Invalid(_))
+    ));
+    assert_eq!(
+        cold.scoped(device(2))
+            .attach(&input.session_id)
+            .await
+            .unwrap()
+            .header()
+            .await
+            .unwrap(),
+        original
+    );
+    cold.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn full_device_reclaims_only_unused_shared_preparations() {
     let dir = tempfile::tempdir().unwrap();
     let preparation = Preparation::new(false);
     let service = service(dir.path(), preparation.clone());
-    let create = |id: String| service.create_shared_blank(request(dir.path(), id), device(1));
+    let create = |id: String| {
+        service.create_shared_blank(
+            request(dir.path(), id),
+            device(1),
+            DraftClaim::JoinIdentical,
+        )
+    };
     let private = request(dir.path(), "private");
     service
         .create_from(private.clone(), device(1))

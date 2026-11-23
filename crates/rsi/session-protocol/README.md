@@ -290,6 +290,11 @@ input shares one creation and composition pin; changing that input
 for the same identity returns `DraftConflict`. Published identities still
 require attach rather than create.
 
+Trusted ingress can reserve a shared blank for a caller that owns its new
+identity. This exclusive claim rejects an existing or in-progress draft,
+including an identical request. Workbench callers that explicitly request an
+existing blank can still join its preparation.
+
 The Session service owns at most 1,024 Creating/Ready drafts across every
 adapter. Creation reserves its slot before Workspace lookup, Settings or preset preparation.
 The same owner limits each authenticated device to 64 Creating/Ready drafts.

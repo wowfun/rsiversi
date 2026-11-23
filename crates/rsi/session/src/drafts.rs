@@ -2,7 +2,7 @@ use super::{LocalSessionHandle, LocalSessionService};
 use futures_util::FutureExt as _;
 use rsi_agent_session_protocol::{CommandRevision, SessionId};
 use rsi_meta::{Deadline, Execution};
-use rsi_session_protocol::{CreateSession, Result, SessionError};
+use rsi_session_protocol::{CreateSession, DraftClaim, Result, SessionError};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
@@ -302,6 +302,7 @@ impl Drafts {
         service: LocalSessionService,
         request: DraftRequest,
         device: Option<rsi_api_protocol::DeviceId>,
+        claim: DraftClaim,
     ) -> Created {
         self.accepting()?;
         self.prune();
@@ -315,6 +316,12 @@ impl Drafts {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.accepting()?;
             if let Some(entry) = entries.get(key.id()) {
+                if claim == DraftClaim::Exclusive {
+                    return Err(SessionError::Invalid(format!(
+                        "Session identity `{}` is already reserved",
+                        key.id()
+                    )));
+                }
                 if entry.request != key
                     && !(matches!(key, DraftRequest::Restore(_)) && entry.request.shared())
                 {

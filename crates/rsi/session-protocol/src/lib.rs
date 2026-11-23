@@ -1148,6 +1148,15 @@ pub struct DeviceDraft {
     pub inherited_turns: u64,
 }
 
+/// Whether draft admission can share an identity already reserved in this generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DraftClaim {
+    /// Join an identical in-flight or live preparation.
+    JoinIdentical,
+    /// Fail if another caller has already reserved the identity.
+    Exclusive,
+}
+
 /// Trusted server ingress to the same draft owner used by ordinary local callers.
 #[async_trait]
 pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
@@ -1156,6 +1165,7 @@ pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
         &self,
         _request: CreateSession,
         _origin: rsi_api_protocol::CallOrigin,
+        _claim: DraftClaim,
     ) -> Result<Arc<dyn SessionHandle>> {
         Err(SessionError::Invalid(
             "shared blank Sessions unavailable".into(),

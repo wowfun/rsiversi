@@ -85,6 +85,7 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
         .create_shared_blank(
             Fixture::request("observed-shared"),
             CallOrigin::Device(device.clone()),
+            rsi_session_protocol::DraftClaim::JoinIdentical,
         )
         .await
         .unwrap();

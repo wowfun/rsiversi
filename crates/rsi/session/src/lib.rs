@@ -47,7 +47,7 @@ pub use plugin::SessionFactory;
 use references::map_reference_error;
 
 use rsi_session_protocol::{
-    AgentSettingsSource, CreateSession, InteractionRetention, RecentSessionCursor,
+    AgentSettingsSource, CreateSession, DraftClaim, InteractionRetention, RecentSessionCursor,
     RecentSessionPage, Result, SessionApprovalControl, SessionError, SessionHandle,
     SessionHistoryPage, SessionInput, SessionObservationStream, SessionService, SessionSummary,
     SubmitDirectImage, SubmitInput, TurnReceipt, ValidatedSessionInput,
@@ -191,7 +191,12 @@ impl LocalSessionService {
         };
         let handle = self
             .drafts
-            .create(service, drafts::DraftRequest::Private(request), None)
+            .create(
+                service,
+                drafts::DraftRequest::Private(request),
+                None,
+                DraftClaim::JoinIdentical,
+            )
             .await?;
         if handle.header_snapshot().await?.as_ref() != &header || !handle.private_owner {
             return Err(SessionError::DraftConflict {
@@ -443,19 +448,29 @@ impl LocalSessionService {
         self.admit(summary.header.coordinates().location())?;
         if summary.is_blank() {
             return self
-                .open_draft(drafts::DraftRequest::Restore(Box::new(summary.header)))
+                .open_draft(
+                    drafts::DraftRequest::Restore(Box::new(summary.header)),
+                    DraftClaim::JoinIdentical,
+                )
                 .await;
         }
         self.handle_from_state(HandleState::Attached(Arc::new(summary.header)), None)
     }
 
-    async fn open_draft(&self, request: drafts::DraftRequest) -> Result<Arc<LocalSessionHandle>> {
+    async fn open_draft(
+        &self,
+        request: drafts::DraftRequest,
+        claim: DraftClaim,
+    ) -> Result<Arc<LocalSessionHandle>> {
         self.check_origin()?;
         let device = match &self.origin {
             rsi_api_protocol::CallOrigin::Local => None,
             rsi_api_protocol::CallOrigin::Device(device) => Some(device.id.clone()),
         };
-        let handle = self.drafts.create(self.clone(), request, device).await?;
+        let handle = self
+            .drafts
+            .create(self.clone(), request, device, claim)
+            .await?;
         self.bind_handle(&handle)
     }
 
@@ -749,7 +764,10 @@ impl SessionService for LocalSessionService {
     }
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
         Ok(self
-            .open_draft(drafts::DraftRequest::Private(request))
+            .open_draft(
+                drafts::DraftRequest::Private(request),
+                DraftClaim::JoinIdentical,
+            )
             .await?)
     }
 
@@ -812,6 +830,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         &self,
         request: CreateSession,
         origin: rsi_api_protocol::CallOrigin,
+        claim: DraftClaim,
     ) -> Result<Arc<dyn SessionHandle>> {
         if request.fork.is_some() {
             return Err(SessionError::Invalid(
@@ -823,7 +842,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
             ..self.clone()
         };
         Ok(scoped
-            .open_draft(drafts::DraftRequest::Shared(request))
+            .open_draft(drafts::DraftRequest::Shared(request), claim)
             .await?)
     }
     fn watch_directory(

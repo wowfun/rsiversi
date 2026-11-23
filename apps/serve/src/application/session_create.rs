@@ -1,7 +1,7 @@
 use super::Sessions;
 use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::{CreateSession, SelectDraftPreset, SessionError};
+use rsi_session_protocol::{CreateSession, DraftClaim, SelectDraftPreset, SessionError};
 use rsi_workspace_protocol::{ExecutionLocation, WorkspaceId, WorkspaceRecord, WorkspaceRegistry};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -82,6 +82,7 @@ impl Sessions {
                 .await?
         };
         let mut id = input.fresh;
+        let mut claim = DraftClaim::Exclusive;
         if let Some(requested) = input.requested {
             match sessions.attach(&requested).await {
                 Ok(handle) => {
@@ -116,7 +117,10 @@ impl Sessions {
                         Err(error) => return Err(remote(error)),
                     }
                 }
-                Err(SessionError::NotFound(_)) => id = requested,
+                Err(SessionError::NotFound(_)) => {
+                    id = requested;
+                    claim = DraftClaim::JoinIdentical;
+                }
                 Err(error) => return Err(remote(error)),
             }
         }
@@ -132,7 +136,9 @@ impl Sessions {
         let handle = if creation.fork.is_some() {
             sessions.create(creation).await
         } else {
-            self.ingress.create_shared_blank(creation, origin).await
+            self.ingress
+                .create_shared_blank(creation, origin, claim)
+                .await
         }
         .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
