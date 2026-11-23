@@ -393,9 +393,9 @@ first message publishes them into the durable Navigation catalog.
 
 The selected application opens one directory observation before paginating.
 Its owner callback waits for coalesced changes until the application retires.
-Workspace registration and Navigation metadata changes wake Workspace readers.
-Session changes also wake the Session catalog. Providers without a directory
-revision require periodic Workspace reads.
+Workspace registration and Navigation metadata commits wake Workspace readers
+directly. Session changes also wake the Session catalog. The directory uses a
+periodic refresh only for a provider that cannot notify it of changes.
 An explicit `application.submit` attaches the addressed Session with the
 live browser request. It uses the caller's durable message ID,
 validated ordered content and native mailbox delivery mode. Success returns

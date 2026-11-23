@@ -407,8 +407,8 @@ impl LocalContract for WorkspaceRegistrationCleanupContract {
 /// Trusted authenticated ingress; a scoped view retains its caller, never a serialized grant.
 #[async_trait]
 pub trait WorkspaceIngress: fmt::Debug + Send + Sync + 'static {
-    /// Process-local revision of published registrations. Unversioned providers require reconciliation.
-    fn directory_revision(&self) -> Option<u64> {
+    /// Subscribes to committed registration revisions before reading a caller-scoped baseline.
+    fn directory_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         None
     }
     /// Binds a view to exactly the caller authenticated by its transport.

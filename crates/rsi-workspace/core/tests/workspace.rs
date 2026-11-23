@@ -83,7 +83,8 @@ async fn application_rename_claims_visible_titles_under_the_registration_commit(
             .await,
         Err(WorkspaceError::NameConflict)
     ));
-    assert_eq!(ingress.directory_revision(), Some(2));
+    let mut changes = ingress.directory_changes().unwrap();
+    assert_eq!(*changes.borrow(), 2);
     let (a, b) = tokio::join!(
         ingress.rename_distinct(CallOrigin::Local, &rows[0].id, name("Shared")),
         ingress.rename_distinct(CallOrigin::Local, &rows[1].id, name("Shared")),
@@ -92,10 +93,11 @@ async fn application_rename_claims_visible_titles_under_the_registration_commit(
         (&a, &b),
         (Ok(_), Err(WorkspaceError::NameConflict)) | (Err(WorkspaceError::NameConflict), Ok(_))
     ));
-    assert_eq!(ingress.directory_revision(), Some(3));
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(*changes.borrow_and_update(), 3);
     let other = if a.is_ok() { &rows[1].id } else { &rows[0].id };
     registry.rename(other, name("Shared")).await.unwrap();
-    let revision = ingress.directory_revision();
+    let revision = *changes.borrow_and_update();
     assert_eq!(
         ingress
             .rename_distinct(CallOrigin::Local, other, name("Shared"))
@@ -104,7 +106,8 @@ async fn application_rename_claims_visible_titles_under_the_registration_commit(
             .display_title(),
         "Shared"
     );
-    assert_eq!(ingress.directory_revision(), revision);
+    assert_eq!(*changes.borrow(), revision);
+    assert!(!changes.has_changed().unwrap());
 }
 
 #[tokio::test]
@@ -257,10 +260,11 @@ async fn cursor_survives_deletion_of_highest_orders_and_registry_restart() {
         .root()
         .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
         .unwrap();
-    assert_eq!(ingress.directory_revision(), Some(3));
+    let changes = ingress.directory_changes().unwrap();
+    assert_eq!(*changes.borrow(), 3);
     assert!(registry.delete_registration(&second.id).await.unwrap());
     assert!(registry.delete_registration(&third.id).await.unwrap());
-    assert_eq!(ingress.directory_revision(), Some(5));
+    assert_eq!(*changes.borrow(), 5);
     drop(ingress);
     drop(registry);
     assert!(fiber.dispose().await.is_clean());
@@ -376,7 +380,8 @@ async fn display_order_survives_restart_without_changing_creation_cursors() {
         .root()
         .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
         .unwrap();
-    let revision = ingress.directory_revision();
+    let changes = ingress.directory_changes().unwrap();
+    let revision = *changes.borrow();
     for (id, before) in [(first, Some(second)), (second, Some(second)), (third, None)] {
         assert_eq!(registry.insert_before(id, before).await.unwrap().ids, ids);
     }
@@ -389,7 +394,7 @@ async fn display_order_survives_restart_without_changing_creation_cursors() {
             ))
         );
     }
-    assert_eq!(ingress.directory_revision(), revision);
+    assert_eq!(*changes.borrow(), revision);
     drop(ingress);
     drop(registry);
     assert!(fiber.dispose().await.is_clean());
@@ -821,7 +826,8 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
         .root()
         .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
         .unwrap();
-    assert_eq!(ingress.directory_revision(), Some(1));
+    let changes = ingress.directory_changes().unwrap();
+    assert_eq!(*changes.borrow(), 1);
     let kept = registry
         .rename(
             &original.id,
@@ -837,7 +843,7 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
         .await
         .unwrap();
     assert_eq!(unchanged, kept);
-    assert_eq!(ingress.directory_revision(), Some(2));
+    assert_eq!(*changes.borrow(), 2);
     assert_eq!(
         registry
             .get_or_create(&temporary.path().join("kept"))
@@ -862,7 +868,7 @@ async fn registration_is_atomic_and_invalid_allocation_is_rejected() {
             .is_err()
     );
     assert_eq!(registry.get(&kept.id).await.unwrap(), kept);
-    assert_eq!(ingress.directory_revision(), Some(2));
+    assert_eq!(*changes.borrow(), 2);
     drop(ingress);
     assert_eq!(
         registry
@@ -1354,7 +1360,8 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     let workspace_path = temporary.path().join("concurrent-registration");
     fs::create_dir(&workspace_path).unwrap();
     let local = rsi_api_protocol::CallOrigin::Local;
-    let revision = ingress.directory_revision();
+    let changes = ingress.directory_changes().unwrap();
+    let revision = *changes.borrow();
     assert_eq!(
         ingress.local_coordinates(device, &workspace_path).await,
         Err(WorkspaceError::Api(ApiError::Unauthorized))
@@ -1371,7 +1378,7 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
         .local_coordinates(local.clone(), &workspace_path)
         .await
         .unwrap();
-    assert_eq!(ingress.directory_revision(), revision);
+    assert_eq!(*changes.borrow(), revision);
     assert!(
         ingress
             .scoped(local)

@@ -102,9 +102,69 @@ struct Directory {
 }
 struct DirectoryWatch {
     sessions: Option<rsi_session_protocol::DirectoryChanges>,
-    workspaces: Option<u64>,
-    navigation: u64,
-    tick: tokio::time::Interval,
+    workspaces: Option<tokio::sync::watch::Receiver<u64>>,
+    navigation: tokio::sync::watch::Receiver<()>,
+    fallback: Option<tokio::time::Interval>,
+}
+
+async fn when_present<F: Future>(future: Option<F>) -> F::Output {
+    match future {
+        Some(future) => future.await,
+        None => std::future::pending().await,
+    }
+}
+
+impl DirectoryWatch {
+    fn new(
+        sessions: Option<rsi_session_protocol::DirectoryChanges>,
+        workspaces: Option<tokio::sync::watch::Receiver<u64>>,
+        navigation: tokio::sync::watch::Receiver<()>,
+    ) -> Self {
+        let fallback = (sessions.is_none() || workspaces.is_none()).then(|| {
+            let period = std::time::Duration::from_secs(1);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval
+        });
+        Self {
+            sessions,
+            workspaces,
+            navigation,
+            fallback,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Value> {
+        use futures_util::StreamExt;
+        let refresh_sessions = self.sessions.is_none();
+        tokio::select! {
+            row = when_present(self.sessions.as_mut().map(|stream| stream.next())) => match row {
+                Some(Ok(change)) => Ok(match change {
+                    rsi_session_protocol::DirectoryChange::Catalog => json!("all"),
+                    rsi_session_protocol::DirectoryChange::SharedBlank(id) => json!({"blank":id}),
+                    rsi_session_protocol::DirectoryChange::RecheckSharedBlanks => json!({"blank":null}),
+                }),
+                Some(Err(error)) => Err(Error::Remote(error.to_string())),
+                None => Err(Error::Cancelled),
+            },
+            result = when_present(self.workspaces.as_mut().map(|changes| changes.changed())) => {
+                result.map_err(|_| Error::Cancelled)?;
+                self.navigation.mark_unchanged();
+                Ok(json!("workspace"))
+            },
+            result = self.navigation.changed() => {
+                result.map_err(|_| Error::Cancelled)?;
+                if let Some(changes) = &mut self.workspaces {
+                    changes.mark_unchanged();
+                }
+                Ok(json!("workspace"))
+            },
+            _ = when_present(self.fallback.as_mut().map(|interval| interval.tick())) => {
+                Ok(if refresh_sessions { json!("all") } else { json!("workspace") })
+            },
+        }
+    }
 }
 impl std::fmt::Debug for Directory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -120,7 +180,6 @@ impl rsi_extension::Handler for Directory {
         payload: Value,
         stop: tokio_util::sync::CancellationToken,
     ) -> Result<Value> {
-        use futures_util::StreamExt;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Request {
@@ -138,50 +197,19 @@ impl rsi_extension::Handler for Directory {
                 .ingress
                 .watch_directory(&self.device)
                 .map_err(|e| Error::Remote(e.to_string()))?;
-            let interval = std::time::Duration::from_secs(1);
-            let mut tick =
-                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            *changes = Some(DirectoryWatch {
+            *changes = Some(DirectoryWatch::new(
                 sessions,
-                tick,
-                workspaces: self.workspaces.directory_revision(),
-                navigation: self.navigation.metadata_revision(),
-            });
+                self.workspaces.directory_changes(),
+                self.navigation.metadata_changes(),
+            ));
             return Ok(Value::Null);
         }
         let watch = changes.as_mut().ok_or(Error::Protocol)?;
-        let result = loop {
-            let next = async {
-                match &mut watch.sessions {
-                    Some(stream) => stream.next().await,
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! {
-                biased;
-                () = stop.cancelled() => break Err(Error::Cancelled),
-                () = self.device.revoked.cancelled() => break Err(Error::Cancelled),
-                row = next => break match row {
-                    Some(Ok(change)) => Ok(match change {
-                        rsi_session_protocol::DirectoryChange::Catalog => json!("all"),
-                        rsi_session_protocol::DirectoryChange::SharedBlank(id) => json!({"blank":id}),
-                        rsi_session_protocol::DirectoryChange::RecheckSharedBlanks => json!({"blank":null}),
-                    }),
-                    Some(Err(error)) => Err(Error::Remote(error.to_string())),
-                    None => Err(Error::Cancelled),
-                },
-                _ = watch.tick.tick() => {
-                    let workspaces = self.workspaces.directory_revision();
-                    let navigation = self.navigation.metadata_revision();
-                    if watch.sessions.is_none() { break Ok(json!("all")); }
-                    if workspaces.is_none() || watch.workspaces != workspaces || watch.navigation != navigation {
-                        watch.workspaces = workspaces;
-                        watch.navigation = navigation;
-                        break Ok(json!("workspace"));
-                    }
-                }
-            }
+        let result = tokio::select! {
+            biased;
+            () = stop.cancelled() => Err(Error::Cancelled),
+            () = self.device.revoked.cancelled() => Err(Error::Cancelled),
+            result = watch.next() => result,
         };
         if result.is_err() {
             changes.take();
@@ -196,6 +224,44 @@ mod tests {
     use rsi_agent_session_protocol::{
         AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId,
     };
+
+    #[tokio::test]
+    async fn directory_coalesces_commits_and_preserves_the_session_observation() {
+        use futures_util::FutureExt;
+        let (workspaces, registrations) = tokio::sync::watch::channel(0);
+        let (navigation, metadata) = tokio::sync::watch::channel(());
+        let mut watch = DirectoryWatch::new(
+            Some(Box::pin(futures_util::stream::pending())),
+            Some(registrations),
+            metadata,
+        );
+        assert!(watch.fallback.is_none());
+        assert!(watch.next().now_or_never().is_none());
+        workspaces.send_replace(1);
+        navigation.send_replace(());
+        assert_eq!(watch.next().now_or_never().unwrap().unwrap(), "workspace");
+        assert!(watch.next().now_or_never().is_none());
+        navigation.send_replace(());
+        assert_eq!(watch.next().now_or_never().unwrap().unwrap(), "workspace");
+        watch.sessions = Some(Box::pin(futures_util::stream::iter([Ok(
+            rsi_session_protocol::DirectoryChange::RecheckSharedBlanks,
+        )])));
+        assert_eq!(watch.next().await.unwrap(), json!({"blank":null}));
+        assert!(matches!(watch.next().await, Err(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn directory_reconciles_providers_without_observations() {
+        let (navigation, _) = tokio::sync::watch::channel(());
+        for sessions_missing in [false, true] {
+            let sessions =
+                (!sessions_missing).then(|| Box::pin(futures_util::stream::pending()) as _);
+            let mut watch = DirectoryWatch::new(sessions, None, navigation.subscribe());
+            watch.fallback.as_mut().unwrap().reset_immediately();
+            let expected = if sessions_missing { "all" } else { "workspace" };
+            assert_eq!(watch.next().await.unwrap(), expected);
+        }
+    }
 
     #[test]
     fn catalog_keeps_accepted_context_visible_before_the_first_turn() {

@@ -465,6 +465,7 @@ async fn owner() -> FixtureOwner {
         state: Mutex::new(State {
             document: Arc::new(document),
         }),
+        metadata_changes: tokio::sync::watch::channel(()).0,
         archive_changes: tokio::sync::watch::channel(()).0,
         writer: Arc::new(Semaphore::new(1)),
         admission: Admission::new(
@@ -1142,7 +1143,7 @@ async fn pin_intents_keep_pin_order_and_skip_redundant_writes() {
         (first.unwrap(), retry.unwrap()),
         (PinOutcome::Applied, PinOutcome::Applied)
     );
-    assert_eq!(owner.metadata_revision(), 1);
+    assert_eq!(owner.document().revision, 1);
     assert_eq!(pin(&older, true).await.unwrap(), PinOutcome::Applied);
     let pins = owner
         .pinned(CallOrigin::Local, NavigationFilter::default())
@@ -1429,7 +1430,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
             .is_err()
     );
     assert!(domain.document().is_none());
-    assert_eq!(owner.metadata_revision(), 7);
+    assert_eq!(owner.document().revision, 7);
     owner
         .replace(
             CallOrigin::Local,
@@ -1441,7 +1442,7 @@ async fn missing_unpinned_metadata_can_be_cleared_with_revision_cas() {
         .await
         .unwrap();
     assert!(owner.state.lock().unwrap().document.records.is_empty());
-    assert_eq!(owner.metadata_revision(), 8);
+    assert_eq!(owner.document().revision, 8);
     let saved: Document = serde_json::from_value(domain.document().unwrap()).unwrap();
     assert!(saved.records.is_empty());
     assert_eq!(saved.revision, 8);

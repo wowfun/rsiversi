@@ -226,15 +226,4 @@ impl Navigation {
             .document
             .clone()
     }
-    /// Current partition metadata revision, without retaining or scanning the document.
-    ///
-    /// # Panics
-    /// Panics if a prior Navigation writer poisoned the metadata lock.
-    pub fn metadata_revision(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("navigation state poisoned")
-            .document
-            .revision
-    }
 }

@@ -309,11 +309,17 @@ pub struct Navigation {
     workspace: Arc<dyn WorkspaceRegistry>,
     epoch: HostEpoch,
     state: Mutex<State>,
+    metadata_changes: tokio::sync::watch::Sender<()>,
     archive_changes: tokio::sync::watch::Sender<()>,
     writer: Arc<Semaphore>,
     admission: Arc<Admission>,
 }
 impl Navigation {
+    /// Subscribes to committed metadata changes, including workspace membership and order.
+    pub fn metadata_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.metadata_changes.subscribe()
+    }
+
     /// Subscribes to committed archive membership changes, including purges.
     pub fn archive_changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.archive_changes.subscribe()
@@ -968,6 +974,7 @@ impl Navigation {
                 != next.as_ref().is_some_and(|row| row.archived)
         });
         change.apply(Arc::make_mut(&mut state.document));
+        self.metadata_changes.send_replace(());
         if archive_changed {
             self.archive_changes.send_replace(());
         }
@@ -1142,6 +1149,7 @@ impl PluginFactory for NavigationFactory {
             state: Mutex::new(State {
                 document: Arc::new(document),
             }),
+            metadata_changes: tokio::sync::watch::channel(()).0,
             archive_changes: tokio::sync::watch::channel(()).0,
             writer: Arc::new(Semaphore::new(1)),
             admission: Admission::new(8, plan.context().runtime().execution().clone()),

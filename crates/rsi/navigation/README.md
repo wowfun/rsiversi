@@ -75,6 +75,8 @@ validates its projected accounting before writing.
 Cold validation seeds exact record-object byte and pin counts. An edit measures
 only the old and new entry and projects the revision envelope before publication.
 Only affected records and the revision are encoded and committed in one batch.
+Directory observers receive a coalesced notification after the updated metadata
+is visible. Archive observers wake only when archive membership changes.
 Publication follows durability. Readers retain immutable snapshots; a concurrent
 reader can require a copy of the in-memory index at publication, but an uncontended
 edit does not clone that index. Failed writes publish no part of the change.

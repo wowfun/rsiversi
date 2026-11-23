@@ -31,14 +31,19 @@ async fn attachment_enrolls_only_the_named_session_once() {
     let first = SessionId::new("row-001").unwrap();
     let sibling = SessionId::new("row-002").unwrap();
     assert!(!owner.workspace_contains(&workspace, &first));
-    for _ in 0..2 {
+    let mut directory = owner.metadata_changes();
+    let archive = owner.archive_changes();
+    for first_attachment in [true, false] {
         owner
             .attach_workspace_session(CallOrigin::Local, workspace.clone(), first.clone())
             .unwrap()
             .await
             .unwrap();
         assert!(owner.workspace_contains(&workspace, &first));
-        assert_eq!(owner.metadata_revision(), 1);
+        assert_eq!(owner.document().revision, 1);
+        assert_eq!(directory.has_changed().unwrap(), first_attachment);
+        directory.borrow_and_update();
+        assert!(!archive.has_changed().unwrap());
     }
     assert!(!owner.workspace_contains(&workspace, &sibling));
     assert!(
@@ -73,7 +78,7 @@ async fn attachment_enrolls_only_the_named_session_once() {
             .0
             .is_empty()
     );
-    assert_eq!(owner.metadata_revision(), 1);
+    assert_eq!(owner.document().revision, 1);
     owner.close().await;
 }
 
@@ -251,7 +256,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
             WorkspaceMoveOutcome::Applied(row.clone())
         );
     }
-    assert_eq!(owner.metadata_revision(), 1);
+    assert_eq!(owner.document().revision, 1);
     assert!(domain.document().is_none());
     append_member(&owner, 999, "/foreign").await;
     for (session, before) in [(id(999), None), (id(1), Some(id(999))), (id(998), None)] {
@@ -260,7 +265,7 @@ async fn workspace_account_moves_survive_activity_partitions_and_restore() {
             WorkspaceMoveOutcome::InvalidMember
         );
     }
-    assert_eq!(owner.metadata_revision(), 1);
+    assert_eq!(owner.document().revision, 1);
     owner
         .store
         .append(AppendBatch {
@@ -394,7 +399,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
     let original = account(&owner, &workspace).await;
     assert!(move_to(id(1), Some(id(300))).await.is_err());
     assert_eq!(account(&owner, &workspace).await, original);
-    assert_eq!(owner.metadata_revision(), 0);
+    assert_eq!(owner.document().revision, 0);
     assert!(domain.document().is_none());
 
     domain
@@ -407,7 +412,7 @@ async fn workspace_account_commit_failure_and_concurrent_moves_preserve_publishe
         tokio::join!(move_to(id(1), Some(id(300))), move_to(id(2), Some(id(299))));
     assert_eq!(first.unwrap(), WorkspaceMoveOutcome::Applied(row.clone()));
     assert_eq!(second.unwrap(), WorkspaceMoveOutcome::Applied(row));
-    assert_eq!(owner.metadata_revision(), 2);
+    assert_eq!(owner.document().revision, 2);
     let mut expected = vec![id(1), id(300), id(2)];
     expected.extend((3..=299).rev().map(id));
     assert_eq!(account(&owner, &workspace).await, expected);
@@ -597,7 +602,7 @@ async fn recreated_workspace_cannot_inherit_or_duplicate_deleted_account() {
         .await
         .unwrap();
     assert_eq!(account(&current, &current_id).await[0], first);
-    assert_eq!(current.metadata_revision(), 4);
+    assert_eq!(current.document().revision, 4);
     assert!(!current.document().workspace_orders.contains_key(&old_id));
     assert_eq!(current.document().workspace_orders.len(), 1);
     let mut durable: Document =

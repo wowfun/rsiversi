@@ -45,6 +45,11 @@ locations before pagination or seed bounds. Read authorization does not require 
 live SSH connection. Revocation denies new operations; an admitted bounded commit
 retains its permit until settlement, including after its waiter disappears.
 
+The native ingress publishes a process-local revision after registering,
+renaming, reordering or removing a workspace. Observers subscribe before
+reading their caller-scoped view. Multiple committed changes can coalesce.
+Failed and idempotent operations leave the observed revision unchanged.
+
 Registration takes an explicit location and an absolute target path. SSH
 canonicalization and status use a single caller-bound Execution lease; no remote
 path reaches the Service filesystem. Failure to contact the target is unavailable,

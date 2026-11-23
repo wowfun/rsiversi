@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -85,7 +85,7 @@ struct Service {
     origin: CallOrigin,
     domain: Domain,
     state: Arc<RwLock<RegistryData>>,
-    revision: Arc<AtomicU64>,
+    revision: tokio::sync::watch::Sender<u64>,
     commit: Arc<Mutex<()>>,
     execution: Execution,
     closed: Arc<AtomicBool>,
@@ -153,7 +153,7 @@ impl WorkspaceRegistry for Service {
                     .await
                     .map_err(storage_error)?;
                 state.write().await.display_order = next;
-                revision.fetch_add(1, Ordering::Release);
+                revision.send_modify(|value| *value = value.wrapping_add(1));
                 Ok(result)
             })
             .await
@@ -336,7 +336,7 @@ impl WorkspaceRegistry for Service {
                 state.coordinates.remove(&coordinates);
                 state.order.remove(&order);
                 state.display_order.retain(|position| *position != order);
-                revision.fetch_add(1, Ordering::Release);
+                revision.send_modify(|value| *value = value.wrapping_add(1));
                 drop(state);
                 drop(commit);
                 forget_registration(&context, &id).await?;
@@ -396,7 +396,7 @@ impl PluginFactory for WorkspaceFactory {
             origin: CallOrigin::Local,
             domain,
             state: Arc::new(RwLock::new(state)),
-            revision: Arc::default(),
+            revision: tokio::sync::watch::channel(0).0,
             commit: Arc::new(Mutex::new(())),
             execution: plan.context().runtime().execution().clone(),
             closed: Arc::new(AtomicBool::new(false)),
@@ -612,7 +612,7 @@ impl Service {
                     .await
                     .records
                     .insert(record.id.clone(), (order, record.clone()));
-                revision.fetch_add(1, Ordering::Release);
+                revision.send_modify(|value| *value = value.wrapping_add(1));
                 Ok(record)
             })
             .await
@@ -719,7 +719,7 @@ impl Service {
                 state.coordinates.insert(key, id.clone());
                 state.records.insert(id, (order, record.clone()));
                 state.display_order.insert(0, order);
-                revision.fetch_add(1, Ordering::Release);
+                revision.send_modify(|value| *value = value.wrapping_add(1));
                 Ok((record, true))
             })
             .await
@@ -775,8 +775,8 @@ impl WorkspaceIngress for Service {
             .registration_coordinates(&ExecutionLocation::Local, path)
             .await
     }
-    fn directory_revision(&self) -> Option<u64> {
-        Some(self.revision.load(Ordering::Acquire))
+    fn directory_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.revision.subscribe())
     }
     async fn register_local(
         &self,
