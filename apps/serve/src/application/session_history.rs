@@ -357,9 +357,16 @@ async fn open_history(
     parent: Option<&SessionId>,
     metadata_only: bool,
 ) -> Result<Value> {
-    let metadata = metadata_snapshot(service, session, parent).await?;
-    if metadata_only || !metadata.is_null() {
-        return Ok(metadata);
+    if let Some(summary) = find_summary(service, session, parent).await? {
+        if metadata_only || !summary.is_blank() {
+            return Ok(stored_history(
+                &summary.header,
+                summary.durable_fact_seq,
+                summary.durable_control_seq,
+            ));
+        }
+    } else if metadata_only {
+        return Ok(Value::Null);
     }
     let Some(handle) = find_handle(service, session, parent).await? else {
         return Ok(Value::Null);
@@ -444,21 +451,6 @@ async fn check_parent(
         ));
     }
     Ok(())
-}
-
-async fn metadata_snapshot(
-    service: &dyn SessionService,
-    session: &SessionId,
-    parent: Option<&SessionId>,
-) -> Result<Value> {
-    let Some(summary) = find_summary(service, session, parent).await? else {
-        return Ok(Value::Null);
-    };
-    Ok(stored_history(
-        &summary.header,
-        summary.durable_fact_seq,
-        summary.durable_control_seq,
-    ))
 }
 
 pub(super) fn stored_history(header: &SessionHeader, fact_seq: u64, control_seq: u64) -> Value {

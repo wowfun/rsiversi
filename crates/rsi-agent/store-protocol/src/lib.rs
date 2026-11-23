@@ -1852,11 +1852,62 @@ pub struct StoreRecentSession {
 }
 
 impl StoreRecentSession {
+    /// A catalogued identity whose first Agent admission has not happened yet.
+    pub fn is_blank(&self) -> bool {
+        self.durable_fact_seq == 0 && self.durable_control_seq == 0
+    }
+
     /// Returns the exact cursor selecting rows after this summary.
     pub fn cursor(&self) -> StoreRecentSessionCursor {
         StoreRecentSessionCursor {
             created_at_ms: self.header.created_at_ms(),
             session_id: self.header.session_id().clone(),
+        }
+    }
+}
+
+/// Atomic catalog transition before the first Agent admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlankWrite {
+    /// Record the proposed root at both watermarks zero.
+    Insert,
+    /// The same blank Header is already durable.
+    Keep,
+    /// The saved predecessor permits changing its preset.
+    SelectPreset,
+}
+
+impl BlankWrite {
+    /// Compares the ordinary root and its preset while the Store owns its writer.
+    pub fn compare(
+        saved: Option<(&SessionHeader, bool)>,
+        header: &SessionHeader,
+        previous: Option<&rsi_agent_session_protocol::AgentPresetId>,
+    ) -> Result<Self> {
+        if header.history_origin().is_some()
+            || header.execution_owner().is_some()
+            || header.protection().is_some()
+        {
+            return Err(StoreError::Invalid(
+                "only ordinary root Sessions can reserve a blank Header".into(),
+            ));
+        }
+        match saved {
+            None if previous.is_none() => Ok(Self::Insert),
+            Some((prior, true)) if prior == header => Ok(Self::Keep),
+            Some((prior, true))
+                if Some(prior.agent_preset_id()) == previous
+                    && prior
+                        .clone()
+                        .with_agent_preset_id(header.agent_preset_id().clone())
+                        .map_err(|error| StoreError::Invalid(error.to_string()))?
+                        == *header =>
+            {
+                Ok(Self::SelectPreset)
+            }
+            _ => Err(StoreError::Invalid(
+                "Session no longer has the expected blank Header".into(),
+            )),
         }
     }
 }
@@ -2027,6 +2078,14 @@ impl fmt::Debug for SessionValidationLease {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
+    /// Registers an ordinary blank or changes only its preset from the saved predecessor.
+    async fn save_blank(
+        &self,
+        _header: SessionHeader,
+        _previous_preset: Option<rsi_agent_session_protocol::AgentPresetId>,
+    ) -> Result<()> {
+        Err(StoreError::Unsupported("shared blank Sessions".into()))
+    }
     /// Explicit optional maintenance capability; absence is Unsupported, never implicit deletion.
     fn maintenance(&self) -> Option<&dyn StoreMaintenance> {
         None

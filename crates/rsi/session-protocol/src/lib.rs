@@ -1147,6 +1147,16 @@ pub struct DeviceDraft {
 /// Trusted server ingress to the same draft owner used by ordinary local callers.
 #[async_trait]
 pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
+    /// Creates a discoverable ordinary blank under the caller's Workspace authority.
+    async fn create_shared_blank(
+        &self,
+        _request: CreateSession,
+        _origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        Err(SessionError::Invalid(
+            "shared blank Sessions unavailable".into(),
+        ))
+    }
     /// Subscribes before listing this caller's drafts and durable Sessions. Wakes carry no rows or authority.
     fn watch_directory(
         &self,

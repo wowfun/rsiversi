@@ -179,12 +179,20 @@ impl AgentComposition for Preparation {
 }
 
 fn service(path: &Path, preparation: Arc<dyn AgentComposition>) -> Arc<LocalSessionService> {
+    service_with_store(path, preparation, Arc::new(MemoryStore::new()))
+}
+
+fn service_with_store(
+    path: &Path,
+    preparation: Arc<dyn AgentComposition>,
+    store: Arc<MemoryStore>,
+) -> Arc<LocalSessionService> {
     Arc::new(LocalSessionService::new(
         rsi_meta::Execution::native(tokio::runtime::Handle::current()),
         Arc::new(UnavailableCommands),
         Arc::new(UnavailableProjections),
         Arc::new(UnavailableTurns::default()),
-        Arc::new(MemoryStore::new()),
+        store,
         rsi_agent_context::ContextBudget::default(),
         preparation,
         Arc::new(AvailableWorkspace::at(path)),
@@ -194,6 +202,50 @@ fn service(path: &Path, preparation: Arc<dyn AgentComposition>) -> Arc<LocalSess
         Arc::new(UnavailableMedia),
         Arc::new(NoApprovalControl),
     ))
+}
+
+#[tokio::test]
+async fn shared_blank_restores_its_selected_preset_for_another_authorized_device() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let start = || service_with_store(directory.path(), Preparation::new(false), store.clone());
+    let first = start();
+    let input = request(directory.path(), "shared-blank");
+    let handle = first
+        .create_shared_blank(input.clone(), device(1))
+        .await
+        .unwrap();
+    let draft = handle.draft_snapshot().await.unwrap();
+    let changed = handle
+        .select_preset(rsi_session_protocol::SelectDraftPreset {
+            preset_id: AgentPresetId::new("selected").unwrap(),
+            expected_revision: draft.revision,
+        })
+        .await
+        .unwrap();
+    let private = request(directory.path(), "private");
+    first.create_from(private.clone(), device(1)).await.unwrap();
+    first.stop().await.unwrap();
+    let cold = start();
+    let reader = cold.scoped(device(2));
+    let rows = reader.list_recent(None, 8).await.unwrap().sessions;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].header, changed.header);
+    assert!(rows[0].is_blank());
+    let handle = reader.attach(&input.session_id).await.unwrap();
+    let restored = handle.draft_snapshot().await.unwrap();
+    assert_eq!(restored.header, changed.header);
+    assert!(restored.command_inputs.is_empty());
+    assert!(matches!(
+        reader.attach(&private.session_id).await,
+        Err(SessionError::NotFound(_))
+    ));
+    let revoked = device(3);
+    if let rsi_api_protocol::CallOrigin::Device(device) = &revoked {
+        device.revoked.cancel();
+    }
+    assert!(cold.scoped(revoked).list_recent(None, 8).await.is_err());
+    cold.stop().await.unwrap();
 }
 
 fn request(_path: &Path, id: impl Into<String>) -> CreateSession {

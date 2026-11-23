@@ -884,7 +884,7 @@ impl Navigation {
         let mut visible = Vec::new();
         let mut leases = Vec::new();
         for (id, record) in document.records.iter().filter(|(_, row)| row.archived) {
-            let Some(header) = visible_header(self.store.header(id).await)? else {
+            let Some(header) = self.metadata_header(id).await? else {
                 continue;
             };
             if visibility
@@ -1180,7 +1180,12 @@ impl Navigation {
         id: &SessionId,
     ) -> Result<Option<rsi_agent_session_protocol::SessionHeader>> {
         use rsi_agent_store_protocol::StoreError;
-        match self.store.header(id).await {
+        match self
+            .store
+            .session_summary(id)
+            .await
+            .map(|summary| summary.header)
+        {
             Err(StoreError::ReadCapacity | StoreError::ValidationBusy) => Err(ApiError::Capacity),
             result => visible_header(result),
         }
@@ -1192,7 +1197,7 @@ impl Navigation {
         origin: &CallOrigin,
         leases: &mut Vec<tokio_util::sync::CancellationToken>,
     ) -> Result<bool> {
-        let Some(header) = visible_header(self.store.header(id).await)? else {
+        let Some(header) = self.metadata_header(id).await? else {
             return Ok(false);
         };
         self.retain_header_view(&header, origin, leases)

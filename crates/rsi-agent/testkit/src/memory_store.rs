@@ -20,6 +20,44 @@ use rsi_agent_session_protocol::SessionFactBody;
 use rsi_agent_store_protocol::MailboxRead;
 use rsi_agent_store_protocol::admit_page_record;
 
+impl MemorySession {
+    fn blank(header: SessionHeader) -> Self {
+        Self {
+            last_activity_ms: header.created_at_ms(),
+            header,
+            inbox_paused: false,
+            checkpoint: None,
+            fact_prefix_digest: EMPTY_FACT_PREFIX_DIGEST,
+            control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
+            facts: Vec::new(),
+            turns: BTreeMap::new(),
+            controls: Vec::new(),
+            control_fact_cursors: Vec::new(),
+            last_settled_control_seq: 0,
+            model_coordinates: BTreeSet::new(),
+            programs: BTreeMap::new(),
+            domain_versions: BTreeMap::new(),
+            domain_removals: BTreeMap::new(),
+            generation_selections: BTreeSet::new(),
+            queue_mutations: BTreeMap::new(),
+            domain_requests: BTreeMap::new(),
+            domain_usage: BTreeMap::new(),
+        }
+    }
+    fn is_blank(&self) -> bool {
+        self.facts.is_empty() && self.controls.is_empty()
+    }
+    fn admit_header(&self, supplied: Option<&SessionHeader>) -> Result<()> {
+        if supplied == self.is_blank().then_some(&self.header) {
+            Ok(())
+        } else {
+            Err(StoreError::Invalid(
+                "creation Header differs from the reserved or published Session".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 #[tokio::test]
 async fn retention_checks_metadata_while_reads_authenticate_bytes() {
@@ -65,6 +103,37 @@ fn feedback_at(
 
 #[async_trait]
 impl SessionStore for MemoryStore {
+    async fn save_blank(
+        &self,
+        header: SessionHeader,
+        previous_preset: Option<rsi_agent_session_protocol::AgentPresetId>,
+    ) -> Result<()> {
+        use rsi_agent_store_protocol::BlankWrite;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = header.session_id().clone();
+        let saved = state.sessions.get_mut(&id);
+        match BlankWrite::compare(
+            saved.as_ref().map(|row| (&row.header, row.is_blank())),
+            &header,
+            previous_preset.as_ref(),
+        )? {
+            BlankWrite::Keep => {}
+            BlankWrite::SelectPreset => saved.expect("matched blank Session").header = header,
+            BlankWrite::Insert => {
+                state
+                    .recent_sessions
+                    .insert((header.created_at_ms(), id.clone()));
+                state
+                    .sessions
+                    .insert(id.clone(), MemorySession::blank(header));
+                index_activity(&mut state, &id, None);
+            }
+        }
+        Ok(())
+    }
     async fn read_message_feedback(
         &self,
         id: &SessionId,
@@ -580,11 +649,7 @@ impl SessionStore for MemoryStore {
                     actual,
                 });
             }
-            if batch.header.is_some() {
-                return Err(StoreError::Invalid(
-                    "existing session cannot replace its immutable header".into(),
-                ));
-            }
+            session.admit_header(batch.header.as_ref())?;
             let (turn_updates, fact_prefix_digest) = index_appended_turns(
                 &batch.session_id,
                 &session.facts,
@@ -643,25 +708,12 @@ impl SessionStore for MemoryStore {
             state.sessions.insert(
                 batch.session_id.clone(),
                 MemorySession {
-                    inbox_paused: false,
                     last_activity_ms: activity,
-                    header,
                     model_coordinates,
                     facts: batch.facts,
                     turns,
                     fact_prefix_digest,
-                    checkpoint: None,
-                    controls: Vec::new(),
-                    control_fact_cursors: Vec::new(),
-                    programs: BTreeMap::new(),
-                    last_settled_control_seq: 0,
-                    control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
-                    domain_versions: BTreeMap::new(),
-                    domain_removals: BTreeMap::new(),
-                    generation_selections: BTreeSet::new(),
-                    queue_mutations: BTreeMap::new(),
-                    domain_requests: BTreeMap::new(),
-                    domain_usage: BTreeMap::new(),
+                    ..MemorySession::blank(header)
                 },
             );
             index_activity(&mut state, &batch.session_id, None);
@@ -774,6 +826,7 @@ impl SessionStore for MemoryStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .sessions
             .get(session_id)
+            .filter(|session| !session.is_blank())
             .map(|session| session.header.clone())
             .ok_or_else(|| StoreError::NotFound(session_id.as_str().into()))
     }
@@ -2395,11 +2448,7 @@ fn apply_atomic_memory_append(
         .checked_add(1)
         .ok_or_else(|| StoreError::Invalid("Fact sequence is exhausted".into()))?;
     if let Some(session) = state.sessions.get_mut(&session_id) {
-        if append.header.is_some() {
-            return Err(StoreError::Invalid(
-                "existing session cannot replace its immutable Header".into(),
-            ));
-        }
+        session.admit_header(append.header.as_ref())?;
         let actual_fact = session.facts.last().map_or(0, |fact| fact.seq());
         let actual_control = session.controls.last().map_or(0, AgentControlRecord::seq);
         if actual_fact != append.expected_fact_seq {
@@ -2479,9 +2528,7 @@ fn apply_atomic_memory_append(
         state.sessions.insert(
             session_id.clone(),
             MemorySession {
-                inbox_paused: false,
                 last_activity_ms: activity,
-                header,
                 model_coordinates,
                 control_fact_cursors: vec![
                     append
@@ -2493,17 +2540,9 @@ fn apply_atomic_memory_append(
                 facts: append.facts,
                 turns,
                 fact_prefix_digest: fact_digest,
-                checkpoint: None,
                 controls: append.controls.clone(),
-                programs: BTreeMap::new(),
-                last_settled_control_seq: 0,
                 control_prefix_digest: control_digest,
-                domain_versions: BTreeMap::new(),
-                domain_removals: BTreeMap::new(),
-                generation_selections: BTreeSet::new(),
-                queue_mutations: BTreeMap::new(),
-                domain_requests: BTreeMap::new(),
-                domain_usage: BTreeMap::new(),
+                ..MemorySession::blank(header)
             },
         );
     }

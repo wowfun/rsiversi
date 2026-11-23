@@ -582,6 +582,13 @@ pub struct PreparedDraftPreset {
     baseline: DomainBaseline,
 }
 
+impl PreparedDraftPreset {
+    /// Header to persist when this selection changes a discoverable blank.
+    pub fn header(&self) -> &SessionHeader {
+        &self.header
+    }
+}
+
 impl AgentSessionDraft {
     /// Returns the exact command inputs held by this draft revision.
     pub fn command_inputs(&self) -> &[PreparedCommandInput] {

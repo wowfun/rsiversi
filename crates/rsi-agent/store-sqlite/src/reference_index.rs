@@ -102,6 +102,20 @@ impl<'a> Writer<'a> {
     pub(super) fn header(&self, header: &SessionHeader) -> Result<String> {
         self.encode("header", 0, header, header_references(header))
     }
+    /// A preset ID carries no durable edge. Preserve every other Header field and edge.
+    pub(super) fn changed_preset(&self, previous: &str, header: &SessionHeader) -> Result<String> {
+        let encoded = super::encode_json("header", header)?;
+        let updated = self.connection.execute(
+            "UPDATE reference_records SET sha256=?2 WHERE session_id=?1 AND stream='header' AND seq=0 AND sha256=?3",
+            params![self.id.as_str(), digest(&encoded), digest(previous)],
+        ).map_err(sql_error)?;
+        if updated != 1 {
+            return Err(StoreError::Corrupt(
+                "blank Header reference digest disagrees".into(),
+            ));
+        }
+        Ok(encoded)
+    }
     pub(super) fn fact(&self, fact: &SessionFact) -> Result<String> {
         self.encode("fact", fact.seq(), fact, fact_references(fact))
     }
@@ -133,7 +147,12 @@ fn verify(
         .query_row(
             "SELECT CASE length(sha256) WHEN 32 THEN sha256=?4 ELSE 0 END
              FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
-            params![id.as_str(), stream, sqlite_u64("reference sequence", seq)?, hash],
+            params![
+                id.as_str(),
+                stream,
+                sqlite_u64("reference sequence", seq)?,
+                hash
+            ],
             |row| row.get::<_, bool>(0),
         )
         .optional()

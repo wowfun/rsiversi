@@ -3,6 +3,14 @@ use super::*;
 use rsi_session_protocol::{CreateSession, RecentSessionCursor, RecentSessionPage, SessionError};
 use std::sync::Arc;
 
+async fn metadata_snapshot(
+    service: &dyn SessionService,
+    session: &SessionId,
+    parent: Option<&SessionId>,
+) -> Result<Value> {
+    open_history(service, session, parent, true).await
+}
+
 #[derive(Debug)]
 struct MetadataService {
     rows: Vec<rsi_session_protocol::SessionSummary>,

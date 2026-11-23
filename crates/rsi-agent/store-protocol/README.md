@@ -24,6 +24,14 @@ from the same Store snapshot. Shared Workspace account order uses creation time;
 activity-based views retain the separate activity value. Neither requires loading
 transcript bodies or a second timestamp record.
 
+`save_blank` reserves an ordinary root Header for discovery. Summary, membership
+and maintenance include the reservation at Fact and control watermarks zero.
+Execution's immutable `header` becomes available with the first accepted suffix,
+which must supply the reserved Header. A blank preset change compares the
+previous Header before updating its selection. Retirement fences the same
+identity throughout. No Fact, control, command input or model request is
+created by registration.
+
 `session_summary` reads one durable Session's Header, activity timestamp and
 Fact/control watermarks from one metadata snapshot. It returns the same
 `StoreRecentSession` value used by recent listings, without loading transcript

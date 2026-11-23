@@ -109,19 +109,24 @@ fn atomic_append_prefixes(
             Ok((EMPTY_FACT_PREFIX_DIGEST, EMPTY_CONTROL_PREFIX_DIGEST))
         }
         (None, None) => Err(StoreError::NotFound(append.session_id.to_string())),
-        (Some(_), Some(_)) => Err(StoreError::Invalid(
-            "existing session cannot replace its immutable Header".into(),
-        )),
-        (Some(row), None) => Ok((
-            decode_sha256(
-                "Fact-prefix digest",
-                super::text::borrowed_text(row, 2, 64).map_err(sql_error)?,
-            )?,
-            decode_sha256(
-                "control-prefix digest",
-                super::text::borrowed_text(row, 3, 64).map_err(sql_error)?,
-            )?,
-        )),
+        (Some(row), header) => {
+            admit_existing_header(
+                transaction,
+                &append.session_id,
+                actual_fact == 0 && actual_control == 0,
+                header,
+            )?;
+            Ok((
+                decode_sha256(
+                    "Fact-prefix digest",
+                    super::text::borrowed_text(row, 2, 64).map_err(sql_error)?,
+                )?,
+                decode_sha256(
+                    "control-prefix digest",
+                    super::text::borrowed_text(row, 3, 64).map_err(sql_error)?,
+                )?,
+            ))
+        }
     }
 }
 
@@ -1155,14 +1160,14 @@ pub(super) fn admit_append(
 ) -> Result<()> {
     let existing = transaction
         .query_row(
-            "SELECT durable_seq FROM sessions WHERE session_id = ?1",
+            "SELECT durable_seq, control_seq FROM sessions WHERE session_id = ?1",
             [batch.session_id.as_str()],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()
         .map_err(sql_error)?;
     let actual = existing
-        .map(|value| decode_u64("durable_seq", value))
+        .map(|(value, _)| decode_u64("durable_seq", value))
         .transpose()?
         .unwrap_or(0);
     if actual != batch.expected_seq {
@@ -1174,14 +1179,31 @@ pub(super) fn admit_append(
     match (existing, batch.header.as_ref()) {
         (None, Some(header)) => insert_session(transaction, header, references),
         (None, None) => Err(StoreError::NotFound(batch.session_id.as_str().into())),
-        (Some(_), Some(_)) => Err(StoreError::Invalid(
-            "existing session cannot replace its immutable header".into(),
-        )),
-        (Some(_), None) => Ok(()),
+        (Some((fact, control)), header) => admit_existing_header(
+            transaction,
+            &batch.session_id,
+            fact == 0 && control == 0,
+            header,
+        ),
     }
 }
 
-fn insert_session(
+fn admit_existing_header(
+    transaction: &Transaction<'_>,
+    id: &SessionId,
+    blank: bool,
+    header: Option<&SessionHeader>,
+) -> Result<()> {
+    match (blank, header) {
+        (false, None) => Ok(()),
+        (true, Some(header)) if read_session_header_row(transaction, id)?.0 == *header => Ok(()),
+        _ => Err(StoreError::Invalid(
+            "creation Header differs from the reserved or published Session".into(),
+        )),
+    }
+}
+
+pub(super) fn insert_session(
     transaction: &Transaction<'_>,
     header: &SessionHeader,
     references: &super::reference_index::Writer<'_>,

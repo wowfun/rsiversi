@@ -101,6 +101,7 @@ impl Sessions {
                         ));
                     }
                     match handle.draft_snapshot().await {
+                        Ok(_) if self.navigation.archived_sessions().contains(&requested) => {}
                         Ok(mut draft) => {
                             if let Some(preset) = input.preset.as_ref()
                                 && draft.header.agent_preset_id() != preset
@@ -129,15 +130,18 @@ impl Sessions {
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
-        let handle = sessions
-            .create(CreateSession {
-                workspace_id: workspace,
-                session_id: id,
-                agent_preset_id: input.preset,
-                fork: input.fork,
-            })
-            .await
-            .map_err(remote)?;
+        let creation = CreateSession {
+            workspace_id: workspace,
+            session_id: id,
+            agent_preset_id: input.preset,
+            fork: input.fork,
+        };
+        let handle = if creation.fork.is_some() {
+            sessions.create(creation).await
+        } else {
+            self.ingress.create_shared_blank(creation, origin).await
+        }
+        .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
         self.routes
             .caller(&input.request)

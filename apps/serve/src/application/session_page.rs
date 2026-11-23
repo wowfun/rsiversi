@@ -59,7 +59,7 @@ impl Sessions {
 fn catalog_item(summary: &SessionSummary, running: bool) -> Value {
     let header = &summary.header;
     let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
-        "blank":summary.durable_fact_seq==0 && summary.durable_control_seq==0,"running":running});
+        "blank":summary.is_blank(),"running":running});
     if let Some(origin) = header.fork_origin() {
         item["parent"] = json!(origin.history.parent_session_id);
     }

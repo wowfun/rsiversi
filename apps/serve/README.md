@@ -302,11 +302,14 @@ working directory is present for local execution only.
 local directory through Workspace ingress for the live device. An unplaced
 conversation uses the first visible registered local Workspace in insertion
 order. A Home without one requires an explicit directory. Creation returns
-the native draft identity, preset and creation-time list summary. The application
+the native draft identity, preset and creation-time list summary. Ordinary
+application conversations reserve their identity in the Host catalog before
+returning. Devices with access to that Workspace can discover an empty
+conversation after restart. Unsent composer text stays in the originating browser.
+The application
 can announce that accepted draft through its own list event contract without
 another catalog query. A requested blank draft can be reused;
-a used root in the same Workspace opens a fresh identity. Only submission
-publishes a draft to durable history.
+a used or archived root in the same Workspace opens a fresh identity.
 Creation can also select a manual fork at an exact local terminal Turn.
 Serve derives its Workspace and preset from the admitted source. The draft
 starts an independent root and retains the native inherited cut.

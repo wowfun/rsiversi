@@ -189,7 +189,10 @@ impl LocalSessionService {
             session_id: header.session_id().clone(),
             agent_preset_id: Some(header.agent_preset_id().clone()),
         };
-        let handle = self.drafts.create(service, request, None).await?;
+        let handle = self
+            .drafts
+            .create(service, drafts::DraftRequest::Private(request), None)
+            .await?;
         if handle.header_snapshot().await?.as_ref() != &header || !handle.private_owner {
             return Err(SessionError::DraftConflict {
                 session: header.session_id().to_string(),
@@ -431,14 +434,29 @@ impl LocalSessionService {
                 Err(error) => return Err(error),
             }
         }
-        let header = self
+        let summary = self
             .store
-            .header(session_id)
+            .session_summary(session_id)
             .await
             .map_err(map_store_error)?;
-        self.protect_header(&header)?;
-        self.admit(header.coordinates().location())?;
-        self.handle_from_state(HandleState::Attached(Arc::new(header)), None)
+        self.protect_header(&summary.header)?;
+        self.admit(summary.header.coordinates().location())?;
+        if summary.is_blank() {
+            return self
+                .open_draft(drafts::DraftRequest::Restore(Box::new(summary.header)))
+                .await;
+        }
+        self.handle_from_state(HandleState::Attached(Arc::new(summary.header)), None)
+    }
+
+    async fn open_draft(&self, request: drafts::DraftRequest) -> Result<Arc<LocalSessionHandle>> {
+        self.check_origin()?;
+        let device = match &self.origin {
+            rsi_api_protocol::CallOrigin::Local => None,
+            rsi_api_protocol::CallOrigin::Device(device) => Some(device.id.clone()),
+        };
+        let handle = self.drafts.create(self.clone(), request, device).await?;
+        self.bind_handle(&handle)
     }
 
     /// Stops draft admission and waits for service-owned preparation and sweeping.
@@ -461,9 +479,18 @@ impl LocalSessionService {
 
     async fn prepare_draft(
         &self,
-        request: CreateSession,
+        request: drafts::DraftRequest,
         lease: drafts::DraftLease,
     ) -> Result<Arc<LocalSessionHandle>> {
+        let request = match request {
+            drafts::DraftRequest::Restore(header) => {
+                workflow::require_preset(self.workflow.as_deref(), header.agent_preset_id())?;
+                return self
+                    .compose_draft(*header, self.composition.clone(), lease, false)
+                    .await;
+            }
+            drafts::DraftRequest::Private(input) | drafts::DraftRequest::Shared(input) => input,
+        };
         let workspace = self
             .workspace
             .get(&request.workspace_id)
@@ -492,7 +519,7 @@ impl LocalSessionService {
             .validate()
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
         let session_id = request.session_id;
-        match self.store.header(&session_id).await {
+        match self.store.session_summary(&session_id).await {
             Ok(_) => {
                 return Err(SessionError::Invalid(format!(
                     "Session identity `{session_id}` already exists in the durable Store"
@@ -526,6 +553,18 @@ impl LocalSessionService {
             }
             None => (header, Arc::clone(&self.composition)),
         };
+        let register = lease.shared;
+        self.compose_draft(header, composition, lease, register)
+            .await
+    }
+
+    async fn compose_draft(
+        &self,
+        header: SessionHeader,
+        composition: Arc<dyn AgentComposition>,
+        lease: drafts::DraftLease,
+        register: bool,
+    ) -> Result<Arc<LocalSessionHandle>> {
         let draft = AgentSessionDraft::new(header, composition)
             .await
             .map_err(|error| {
@@ -539,6 +578,12 @@ impl LocalSessionService {
                     _ => SessionError::Backend(error.to_string()),
                 }
             })?;
+        if register {
+            self.store
+                .save_blank(draft.header().clone(), None)
+                .await
+                .map_err(map_store_error)?;
+        }
         self.handle_from_state(HandleState::Fresh(Box::new(draft)), Some(lease))
     }
 
@@ -564,7 +609,7 @@ impl LocalSessionService {
                 "fork workspace must match its source".into(),
             ));
         }
-        match self.store.header(&request.session_id).await {
+        match self.store.session_summary(&request.session_id).await {
             Ok(_) => {
                 return Err(SessionError::Invalid(
                     "fork target Session already exists".into(),
@@ -703,15 +748,9 @@ impl SessionService for LocalSessionService {
         self.collect_activity().await
     }
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>> {
-        self.check_origin()?;
-        self.drafts.accepting()?;
-        let device = match &self.origin {
-            rsi_api_protocol::CallOrigin::Local => None,
-            rsi_api_protocol::CallOrigin::Device(device) => Some(device.id.clone()),
-        };
-        let handle = self.drafts.create(self.clone(), request, device).await?;
-        self.bind_handle(&handle)
-            .map(|handle| handle as Arc<dyn SessionHandle>)
+        Ok(self
+            .open_draft(drafts::DraftRequest::Private(request))
+            .await?)
     }
 
     async fn attach(&self, session_id: &SessionId) -> Result<Arc<dyn SessionHandle>> {
@@ -769,6 +808,24 @@ impl SessionService for LocalSessionService {
 
 #[async_trait]
 impl rsi_session_protocol::SessionIngress for LocalSessionService {
+    async fn create_shared_blank(
+        &self,
+        request: CreateSession,
+        origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        if request.fork.is_some() {
+            return Err(SessionError::Invalid(
+                "shared blank must be an ordinary Session".into(),
+            ));
+        }
+        let scoped = Self {
+            origin,
+            ..self.clone()
+        };
+        Ok(scoped
+            .open_draft(drafts::DraftRequest::Shared(request))
+            .await?)
+    }
     fn watch_directory(
         &self,
         device: &rsi_api_protocol::AuthenticatedDevice,

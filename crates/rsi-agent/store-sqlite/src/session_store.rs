@@ -91,6 +91,43 @@ fn live_watermarks(
 #[async_trait]
 #[allow(clippy::too_many_lines)] // The trait implementation keeps each Store seam explicit.
 impl SessionStore for SqliteStore {
+    async fn save_blank(
+        &self,
+        header: SessionHeader,
+        previous_preset: Option<rsi_agent_session_protocol::AgentPresetId>,
+    ) -> Result<()> {
+        use rsi_agent_store_protocol::BlankWrite;
+        self.with_writer(move |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let id = header.session_id();
+            let references = reference_index::Writer::new(&tx, id)?;
+            let saved = match validation::read_session_header_source(&tx, id) {
+                Ok(record) => Some(record),
+                Err(StoreError::NotFound(_)) => None,
+                Err(error) => return Err(error),
+            };
+            match BlankWrite::compare(
+                saved.as_ref().map(|(row, _)| (&row.header, row.is_blank())),
+                &header,
+                previous_preset.as_ref(),
+            )? {
+                BlankWrite::Insert => append::insert_session(&tx, &header, &references)?,
+                BlankWrite::Keep => {}
+                BlankWrite::SelectPreset => {
+                    let (_, previous) = saved.expect("a preset change matched a stored Header");
+                    tx.execute(
+                        "UPDATE sessions SET header_json=?2 WHERE session_id=?1",
+                        params![id.as_str(), references.changed_preset(&previous, &header)?],
+                    )
+                    .map_err(sql_error)?;
+                }
+            }
+            tx.commit().map_err(sql_error)
+        })
+        .await
+    }
     async fn read_message_feedback(
         &self,
         id: &SessionId,
@@ -479,9 +516,11 @@ impl SessionStore for SqliteStore {
     }
 
     async fn header(&self, session_id: &SessionId) -> Result<SessionHeader> {
-        self.read_summary_row(session_id)
-            .await
-            .map(|row| row.header)
+        let row = self.read_summary_row(session_id).await?;
+        if row.is_blank() {
+            return Err(StoreError::NotFound(session_id.to_string()));
+        }
+        Ok(row.header)
     }
 
     async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession> {

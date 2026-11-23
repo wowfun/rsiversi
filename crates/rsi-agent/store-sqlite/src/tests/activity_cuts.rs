@@ -1,5 +1,48 @@
 use super::*;
 
+#[tokio::test]
+async fn blank_reservation_survives_restart_and_fences_first_publication() {
+    let root = private_tempdir();
+    let first = test_header("shared-blank");
+    let selected = first
+        .clone()
+        .with_agent_preset_id(AgentPresetId::new("second").unwrap())
+        .unwrap();
+    let id = first.session_id();
+    let store = SqliteStore::open(root.path()).unwrap();
+    store.save_blank(first.clone(), None).await.unwrap();
+    store
+        .save_blank(selected.clone(), Some(first.agent_preset_id().clone()))
+        .await
+        .unwrap();
+    drop(store);
+    let store = SqliteStore::open(root.path()).unwrap();
+    let summary = store.session_summary(id).await.unwrap();
+    assert!(summary.is_blank());
+    assert_eq!(summary.header, selected);
+    assert!(matches!(
+        store.header(id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    let append = |header| AppendBatch {
+        session_id: id.clone(),
+        expected_seq: 0,
+        header,
+        facts: vec![Arc::new(test_fact(1))],
+    };
+    assert!(store.append(append(None)).await.is_err());
+    assert!(store.append(append(Some(first.clone()))).await.is_err());
+    store.append(append(Some(selected.clone()))).await.unwrap();
+    assert_eq!(store.header(id).await.unwrap(), selected);
+    assert!(
+        store
+            .save_blank(first.clone(), Some(selected.agent_preset_id().clone()))
+            .await
+            .is_err()
+    );
+    store.validate_session(id).await.unwrap();
+}
+
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn cold_session_summary_returns_header_and_cuts_in_one_metadata_read() {

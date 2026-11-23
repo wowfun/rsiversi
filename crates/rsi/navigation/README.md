@@ -11,7 +11,9 @@ When an explicit move records the new account, the same commit removes its
 members' obsolete account references. A Session is retained in at most one saved
 account, without a cleanup task or a second durable identity map.
 Unknown or foreign members and anchors are rejected; self and already-positioned moves do not write or advance
-the metadata revision. Durable membership remains owned by Session Store, so reads
+the metadata revision. Discoverable blank Sessions have the same Workspace
+membership, pin and archive operations as conversations with history.
+Durable membership remains owned by Session Store, so reads
 filter removed identities; writes prune obsolete references for their selected
 members without changing unrelated accounts.
 The document retains at most 8,192 order references within its existing 8 MiB bound.

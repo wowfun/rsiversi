@@ -105,16 +105,14 @@ impl DraftCommands {
             let cancellation = self.stopped.child_token();
             self.tasks.spawn(async move {
                 let _activity = activity;
-                let call = std::panic::AssertUnwindSafe(handle.run_preset_selection(request)).catch_unwind();
-                let result = tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => Err(SessionError::ShuttingDown),
-                    result = tokio::time::timeout(std::time::Duration::from_secs(30), call) => match result {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(_)) => Err(SessionError::Backend("preset preparation panicked".into())),
-                        Err(_) => Err(SessionError::Invalid("preset preparation exceeded its deadline".into())),
-                    }
-                };
+                let result = std::panic::AssertUnwindSafe(
+                    handle.run_preset_selection(request, cancellation),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(SessionError::Backend("preset preparation panicked".into()))
+                });
                 let _ = sender.send(result);
             });
         }
@@ -264,16 +262,20 @@ impl LocalSessionHandle {
         .await
     }
 
-    async fn run_preset_selection(&self, request: SelectDraftPreset) -> Result<SessionDraftView> {
+    async fn run_preset_selection(
+        &self,
+        request: SelectDraftPreset,
+        cancellation: CancellationToken,
+    ) -> Result<SessionDraftView> {
         super::workflow::require_preset(self.workflow.as_deref(), &request.preset_id)?;
-        self.reconcile_fresh_read().await?;
-        let preparation = {
+        let expected = CommandRevision::Draft {
+            revision: request.expected_revision,
+        };
+        let prepare = async {
+            self.reconcile_fresh_read().await?;
             let state = self.state.lock().await;
             let HandleState::Fresh(draft) = &*state else {
                 return Err(SessionError::NotFound("unpublished draft".into()));
-            };
-            let expected = CommandRevision::Draft {
-                revision: request.expected_revision,
             };
             if draft.revision() != expected {
                 return Err(SessionError::CommandRevisionConflict {
@@ -281,16 +283,39 @@ impl LocalSessionHandle {
                     actual: draft.revision(),
                 });
             }
-            draft.prepare_preset_selection(request.preset_id)
+            let prepare = draft.prepare_preset_selection(request.preset_id);
+            drop(state);
+            let prepared = prepare
+                .await
+                .map_err(|error| SessionError::Invalid(error.to_string()))?;
+            self.reconcile_fresh_read().await?;
+            Ok((prepared, self.state.lock().await))
         };
-        let prepared = preparation
-            .await
-            .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        self.reconcile_fresh_read().await?;
-        let mut state = self.state.lock().await;
+        let (prepared, mut state) = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(SessionError::ShuttingDown),
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), prepare) =>
+                result.map_err(|_| SessionError::Invalid("preset preparation exceeded its deadline".into()))??,
+        };
         let HandleState::Fresh(draft) = &mut *state else {
             return Err(SessionError::NotFound("unpublished draft".into()));
         };
+        if self.lease.as_ref().is_some_and(|lease| lease.shared) {
+            if draft.revision() != expected {
+                return Err(SessionError::CommandRevisionConflict {
+                    expected,
+                    actual: draft.revision(),
+                });
+            }
+            // Finish the admitted Store comparison and the live selection together under this lock.
+            self.store
+                .save_blank(
+                    prepared.header().clone(),
+                    Some(draft.header().agent_preset_id().clone()),
+                )
+                .await
+                .map_err(super::map_store_error)?;
+        }
         draft
             .apply_preset_selection(prepared)
             .map_err(draft_error)?;

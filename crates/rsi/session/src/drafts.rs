@@ -32,10 +32,38 @@ impl fmt::Debug for Drafts {
 }
 
 struct Entry {
-    request: CreateSession,
+    request: DraftRequest<SessionId>,
     device: Option<rsi_api_protocol::DeviceId>,
     state: Mutex<LeaseState>,
     result: watch::Sender<Option<Created>>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) enum DraftRequest<T = Box<rsi_agent_session_protocol::SessionHeader>> {
+    Private(CreateSession),
+    Shared(CreateSession),
+    Restore(T),
+}
+
+impl DraftRequest {
+    fn key(&self) -> DraftRequest<SessionId> {
+        match self {
+            Self::Private(input) => DraftRequest::Private(input.clone()),
+            Self::Shared(input) => DraftRequest::Shared(input.clone()),
+            Self::Restore(header) => DraftRequest::Restore(header.session_id().clone()),
+        }
+    }
+}
+impl DraftRequest<SessionId> {
+    fn id(&self) -> &SessionId {
+        match self {
+            Self::Private(request) | Self::Shared(request) => &request.session_id,
+            Self::Restore(id) => id,
+        }
+    }
+    fn shared(&self) -> bool {
+        !matches!(self, Self::Private(_))
+    }
 }
 
 struct LeaseState {
@@ -47,7 +75,8 @@ struct LeaseState {
 
 impl Entry {
     fn is_catalog_draft(&self) -> bool {
-        self.device.is_some()
+        !self.request.shared()
+            && self.device.is_some()
             && matches!(&*self.result.borrow(), Some(Ok(handle)) if !handle.private_owner && !handle.published.load(std::sync::atomic::Ordering::Acquire))
     }
 
@@ -206,10 +235,10 @@ impl Drafts {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if entries
-                .get(&entry.request.session_id)
+                .get(entry.request.id())
                 .is_some_and(|current| Arc::ptr_eq(current, entry))
             {
-                entries.remove(&entry.request.session_id)
+                entries.remove(entry.request.id())
             } else {
                 None
             }
@@ -222,21 +251,25 @@ impl Drafts {
     pub(super) async fn create(
         self: &Arc<Self>,
         service: LocalSessionService,
-        request: CreateSession,
+        request: DraftRequest,
         device: Option<rsi_api_protocol::DeviceId>,
     ) -> Created {
         self.accepting()?;
         self.prune();
+        let key = request.key();
+        let shared = key.shared();
         let (entry, owner) = {
             let mut entries = self
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.accepting()?;
-            if let Some(entry) = entries.get(&request.session_id) {
-                if entry.request != request {
+            if let Some(entry) = entries.get(key.id()) {
+                if entry.request != key
+                    && !(matches!(key, DraftRequest::Restore(_)) && entry.request.shared())
+                {
                     return Err(SessionError::DraftConflict {
-                        session: request.session_id.to_string(),
+                        session: key.id().to_string(),
                     });
                 }
                 (entry.clone(), false)
@@ -254,7 +287,7 @@ impl Drafts {
                 }
                 let (result, _) = watch::channel(None);
                 let entry = Arc::new(Entry {
-                    request: request.clone(),
+                    request: key,
                     device,
                     state: Mutex::new(LeaseState {
                         deadline: self.execution.deadline_after(IDLE),
@@ -264,7 +297,7 @@ impl Drafts {
                     }),
                     result,
                 });
-                entries.insert(request.session_id.clone(), entry.clone());
+                entries.insert(entry.request.id().clone(), entry.clone());
                 (entry, true)
             }
         };
@@ -278,6 +311,7 @@ impl Drafts {
                 .deadline
                 .clone();
             let lease = DraftLease {
+                shared,
                 drafts: Arc::downgrade(self),
                 entry: Arc::downgrade(&entry),
             };
@@ -297,7 +331,7 @@ impl Drafts {
                 entry.result.send_replace(Some(result));
                 if failed || drafts.stopped.is_cancelled() {
                     drafts.remove(&entry);
-                } else if entry.is_catalog_draft() {
+                } else if matches!(entry.request, DraftRequest::Shared(_)) || entry.is_catalog_draft() {
                     drafts.membership.send_replace(());
                 }
             })));
@@ -336,7 +370,9 @@ impl Drafts {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .filter(|entry| entry.device.as_ref() == Some(device) && !entry.expired())
+            .filter(|entry| {
+                !entry.request.shared() && entry.device.as_ref() == Some(device) && !entry.expired()
+            })
             .filter_map(|entry| entry.result.borrow().as_ref()?.as_ref().ok().cloned())
             .filter(|handle| !handle.private_owner)
             .collect()
@@ -357,6 +393,7 @@ async fn wait(mut receiver: watch::Receiver<Option<Created>>) -> Created {
 
 #[derive(Clone)]
 pub(super) struct DraftLease {
+    pub(super) shared: bool,
     drafts: Weak<Drafts>,
     entry: Weak<Entry>,
 }
