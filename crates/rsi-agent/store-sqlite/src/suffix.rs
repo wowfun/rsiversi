@@ -49,7 +49,7 @@ impl SqliteStore {
             }
             if let Some(&(first, _)) = admitted.last() {
                 // The read transaction keeps the admitted lengths and body range atomic.
-                let mut statement = transaction.prepare(fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq >= ?2 AND f.seq <= ?3 ORDER BY f.seq ASC")).map_err(sql_error)?;
+                let mut statement = transaction.prepare_cached(fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq >= ?2 AND f.seq <= ?3 ORDER BY f.seq ASC")).map_err(sql_error)?;
                 let mut rows = statement.query(params![session_id.as_str(), first, through, i64::try_from(MAXIMUM_SESSION_FACT_BYTES).expect("bounded Fact length")]).map_err(sql_error)?;
                 for (seq, length) in admitted.into_iter().rev() {
                     let row = rows.next().map_err(sql_error)?.ok_or_else(|| StoreError::Corrupt("missing admitted suffix Fact".into()))?;

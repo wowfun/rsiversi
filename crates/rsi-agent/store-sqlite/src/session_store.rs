@@ -689,7 +689,7 @@ impl SessionStore for SqliteStore {
                 }
                 let page = {
                     let mut statement = transaction
-                        .prepare(
+                        .prepare_cached(
                             fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq > ?2 AND f.seq <= ?5 ORDER BY f.seq LIMIT ?3"),
                         )
                         .map_err(sql_error)?;
@@ -919,7 +919,7 @@ impl SessionStore for SqliteStore {
             }
             let page = {
                 let mut statement = transaction
-                    .prepare(
+                    .prepare_cached(
                         fact_rows!("?4", "WHERE f.session_id = ?1 AND f.seq < ?2
                          ORDER BY f.seq DESC LIMIT ?3"),
                     )
@@ -1028,7 +1028,7 @@ impl SessionStore for SqliteStore {
                 .map_err(|_| StoreError::Invalid("turn read limit exceeds SQLite".into()))?;
             let page = {
                 let mut statement = transaction
-                    .prepare(
+                    .prepare_cached(
                         fact_rows!("?5", "WHERE f.session_id = ?1 AND f.turn_id = ?2 AND f.seq > ?3
                      ORDER BY f.seq LIMIT ?4"),
                     )

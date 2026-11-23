@@ -51,7 +51,7 @@ pub(super) fn read_with<T>(
     visit: impl FnOnce(SessionFact, &str) -> Result<T>,
 ) -> Result<T> {
     let mut statement = connection
-        .prepare(fact_rows!("?3", "WHERE f.session_id=?1 AND f.seq=?2"))
+        .prepare_cached(fact_rows!("?3", "WHERE f.session_id=?1 AND f.seq=?2"))
         .map_err(sql_error)?;
     let mut rows = statement
         .query(params![

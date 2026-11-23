@@ -65,7 +65,9 @@ window and suffix admission, and cold validation checks their indexed lengths
 against reconstructed Facts. Physical JSON lengths are bounded before allocation.
 Page and single-Fact reads borrow bounded physical JSON and indexed text from
 the current SQLite row through validation and coverage hashing. The returned
-logical Fact owns its decoded contents.
+logical Fact owns its decoded contents. Pooled connections reuse the prepared
+SQL for single-Fact, forward, reverse, per-Turn and suffix reads. Each call
+binds its own Session, coordinates and byte limit.
 Prefix fingerprints remain logical. Reference coverage stores the 32 SHA-256
 bytes of each physical record in the primary tree keyed by Session, stream and
 sequence. Verification compares this digest and the logical reference edges.
