@@ -34,6 +34,8 @@ Authenticated ingress can enumerate the calling device's ready, unpublished
 draft locations in the current Host generation. Preparing, expired, private,
 published and other devices' drafts are absent. This view has the per-device
 draft admission bound and does not enter the durable recent Session catalog.
+Each draft carries the exact Workspace registration selected at creation.
+Deleting and registering the same directory again does not transfer that draft.
 Each row includes the count of completed turns retained by its immutable
 inherited-history selection. A nonempty inherited conversation is distinct from
 an empty unpublished draft; enumeration reads that count from the Header rather

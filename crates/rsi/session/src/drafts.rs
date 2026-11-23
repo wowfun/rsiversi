@@ -431,16 +431,22 @@ impl Drafts {
     pub(super) fn ready_for(
         &self,
         device: &rsi_api_protocol::DeviceId,
-    ) -> Vec<Arc<LocalSessionHandle>> {
+    ) -> Vec<(rsi_workspace_protocol::WorkspaceId, Arc<LocalSessionHandle>)> {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .filter(|entry| {
-                !entry.request.shared() && entry.device.as_ref() == Some(device) && !entry.expired()
+            .filter_map(|entry| {
+                let DraftRequest::Private(request) = &entry.request else {
+                    return None;
+                };
+                if entry.device.as_ref() != Some(device) || entry.expired() {
+                    return None;
+                }
+                let ready = entry.result.borrow();
+                let handle = ready.as_ref()?.as_ref().ok()?;
+                (!handle.private_owner).then(|| (request.workspace_id.clone(), Arc::clone(handle)))
             })
-            .filter_map(|entry| entry.result.borrow().as_ref()?.as_ref().ok().cloned())
-            .filter(|handle| !handle.private_owner)
             .collect()
     }
 }

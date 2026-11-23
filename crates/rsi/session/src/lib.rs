@@ -906,7 +906,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
         let visible = scope.visibility()?;
         let mut protections = Vec::new();
         let mut rows = Vec::new();
-        for handle in self.drafts.ready_for(&device.id) {
+        for (workspace_id, handle) in self.drafts.ready_for(&device.id) {
             if !visible.locations().contains(handle.coordinates.location()) {
                 continue;
             }
@@ -932,6 +932,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
                 let header = draft.header();
                 rows.push(rsi_session_protocol::DeviceDraft {
                     session_id: header.session_id().clone(),
+                    workspace_id,
                     coordinates: header.coordinates().clone(),
                     created_at_ms: header.created_at_ms(),
                     inherited_turns: header
