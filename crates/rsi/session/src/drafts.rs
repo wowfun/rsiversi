@@ -49,7 +49,8 @@ struct Entry {
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum DraftRequest<T = Box<rsi_agent_session_protocol::SessionHeader>> {
     Private(CreateSession),
-    Shared(CreateSession),
+    Shared(rsi_session_protocol::BlankSession),
+    Fork(SessionId, rsi_session_protocol::ForkDraft),
     Restore(T),
 }
 
@@ -58,6 +59,7 @@ impl DraftRequest {
         match self {
             Self::Private(input) => DraftRequest::Private(input.clone()),
             Self::Shared(input) => DraftRequest::Shared(input.clone()),
+            Self::Fork(id, fork) => DraftRequest::Fork(id.clone(), fork.clone()),
             Self::Restore(header) => DraftRequest::Restore(header.session_id().clone()),
         }
     }
@@ -65,12 +67,14 @@ impl DraftRequest {
 impl DraftRequest<SessionId> {
     fn id(&self) -> &SessionId {
         match self {
-            Self::Private(request) | Self::Shared(request) => &request.session_id,
+            Self::Private(request) => &request.session_id,
+            Self::Shared(request) => &request.session_id,
+            Self::Fork(id, _) => id,
             Self::Restore(id) => id,
         }
     }
     fn shared(&self) -> bool {
-        !matches!(self, Self::Private(_))
+        matches!(self, Self::Shared(_) | Self::Restore(_))
     }
 }
 
@@ -377,7 +381,7 @@ impl Drafts {
                 .deadline
                 .clone();
             let lease = DraftLease {
-                enrolled: matches!(&request, DraftRequest::Private(_)) && service.frozen.is_none(),
+                enrollment: None,
                 shared,
                 drafts: Arc::downgrade(self),
                 entry: Arc::downgrade(&entry),
@@ -438,9 +442,9 @@ impl Drafts {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter_map(|entry| {
-                let DraftRequest::Private(_) = &entry.request else {
+                if entry.request.shared() {
                     return None;
-                };
+                }
                 if entry.device.as_ref() != Some(device) || entry.expired() {
                     return None;
                 }
@@ -466,22 +470,16 @@ async fn wait(mut receiver: watch::Receiver<Option<Created>>) -> Created {
 
 #[derive(Clone)]
 pub(super) struct DraftLease {
-    pub(super) enrolled: bool,
+    pub(super) enrollment: Option<rsi_workspace_protocol::WorkspaceId>,
     pub(super) shared: bool,
     drafts: Weak<Drafts>,
     entry: Weak<Entry>,
 }
 
 impl DraftLease {
-    pub(super) fn workspace(&self) -> Option<rsi_workspace_protocol::WorkspaceId> {
-        if !self.enrolled {
-            return None;
-        }
-        let entry = self.entry.upgrade()?;
-        match &entry.request {
-            DraftRequest::Private(request) => Some(request.workspace_id.clone()),
-            _ => None,
-        }
+    pub(super) fn workspace(&self) -> Option<&rsi_workspace_protocol::WorkspaceId> {
+        self.entry.upgrade()?;
+        self.enrollment.as_ref()
     }
 
     pub(super) fn changed(&self, handle: &LocalSessionHandle) {

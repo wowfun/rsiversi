@@ -335,8 +335,9 @@ It uses the Workspace registry for creating, renaming and deleting
 registrations. Creation returns the registry's atomic inserted flag.
 An application chat creation with an explicit Workspace ID attaches its Session
 to that registration. Reusing a requested blank requires membership of the
-selected Workspace. A root Agent created with only a cwd keeps its separate
-Session identity.
+selected Workspace. Creating a Session with only a cwd resolves that directory
+under the caller's execution authority. The Workspace catalog changes only on
+explicit registration.
 The application can also list the browser owner's unpublished draft
 locations. Both creation receipts and draft listings mark a draft nonblank when
 its immutable selection retains completed history, including before first input.

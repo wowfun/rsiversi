@@ -210,12 +210,15 @@ async fn shared_blank_restores_its_selected_preset_for_another_authorized_device
     let store = Arc::new(MemoryStore::new());
     let start = || service_with_store(directory.path(), Preparation::new(false), store.clone());
     let first = start();
-    let input = request(directory.path(), "shared-blank");
+    let unregistered = directory.path().join("sdk-directory");
+    std::fs::create_dir(&unregistered).unwrap();
+    let input = shared_blank(&unregistered, "shared-blank");
     let handle = first
         .create_shared_blank(input.clone(), device(1), DraftClaim::JoinIdentical)
         .await
         .unwrap();
     let draft = handle.draft_snapshot().await.unwrap();
+    assert_eq!(draft.header.coordinates(), &input.coordinates);
     let changed = handle
         .select_preset(rsi_session_protocol::SelectDraftPreset {
             preset_id: AgentPresetId::new("selected").unwrap(),
@@ -263,7 +266,7 @@ async fn exclusive_blank_claim_rejects_a_contender_during_preparation_and_after_
     let store = Arc::new(MemoryStore::new());
     let prepare = Preparation::new(true);
     let first = service_with_store(directory.path(), prepare.clone(), store.clone());
-    let input = request(directory.path(), "plugin-owned");
+    let input = shared_blank(directory.path(), "plugin-owned");
     let pending = tokio::spawn({
         let service = first.clone();
         let input = input.clone();
@@ -314,7 +317,7 @@ async fn full_device_reclaims_only_unused_shared_preparations() {
     let service = service(dir.path(), preparation.clone());
     let create = |id: String| {
         service.create_shared_blank(
-            request(dir.path(), id),
+            shared_blank(dir.path(), id),
             device(1),
             DraftClaim::JoinIdentical,
         )

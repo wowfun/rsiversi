@@ -51,6 +51,9 @@ path reaches the Service filesystem. Failure to contact the target is unavailabl
 never evidence that a directory is missing. Native canonicalization stays with
 Workspace's native filesystem boundary. Registrations contain no reusable grant.
 
+Trusted application ingress can resolve a local directory under the same
+caller admission and filesystem checks without writing a registration.
+
 Workspace's API plugins own their versioned request DTOs, operation bounds and
 client proxy. The version-5 endpoint consumes trusted ingress and the API registrar; the client
 publishes the same Workspace contract over a negotiated connection. Generic

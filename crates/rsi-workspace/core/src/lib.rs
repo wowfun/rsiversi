@@ -716,6 +716,20 @@ impl Service {
 }
 #[async_trait]
 impl WorkspaceIngress for Service {
+    async fn local_coordinates(
+        &self,
+        origin: CallOrigin,
+        path: &Path,
+    ) -> Result<ExecutionCoordinates> {
+        let scoped = Self {
+            origin,
+            ..self.clone()
+        };
+        let _permit = scoped.admit(&ExecutionLocation::Local)?;
+        scoped
+            .registration_coordinates(&ExecutionLocation::Local, path)
+            .await
+    }
     fn directory_revision(&self) -> Option<u64> {
         Some(self.revision.load(Ordering::Acquire))
     }

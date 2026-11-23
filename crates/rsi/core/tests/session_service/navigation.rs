@@ -37,6 +37,111 @@ async fn query(running: &RunningRsi, origin: CallOrigin, archived: bool) -> Navi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_agent_and_fork_survive_restart_without_registering_their_directory() {
+    use rsi_agent_session_protocol::{ForkPoint, ForkTurnSelection, TurnOutcome};
+    use rsi_session_protocol::{BlankSession, DraftClaim, ForkDraft, SessionIngressContract};
+    use rsi_workspace_protocol::{WorkspaceIngressContract, WorkspaceKey};
+
+    let (endpoint, provider) = provider().await;
+    let fixture = fixture(&endpoint);
+    let source = SessionId::new("unregistered-agent").unwrap();
+    let fork = SessionId::new("unregistered-fork").unwrap();
+    {
+        let host = composition(fixture.paths.clone())
+            .build()
+            .unwrap()
+            .start_file(&fixture.profile)
+            .await
+            .unwrap();
+        crate::product::ready(&host).await;
+        let workspaces = host.lookup_local::<WorkspaceIngressContract>().unwrap();
+        let coordinates = workspaces
+            .local_coordinates(CallOrigin::Local, &fixture.workspace)
+            .await
+            .unwrap();
+        let ingress = host.lookup_local::<SessionIngressContract>().unwrap();
+        let agent = ingress
+            .create_shared_blank(
+                BlankSession {
+                    session_id: source.clone(),
+                    coordinates: coordinates.clone(),
+                    agent_preset_id: None,
+                },
+                CallOrigin::Local,
+                DraftClaim::Exclusive,
+            )
+            .await
+            .unwrap();
+        run_message_to_terminal(&agent, "detached-agent-turn").await;
+        let history = agent.history_before(None, 128).await.unwrap();
+        let turn = history
+            .facts
+            .iter()
+            .find_map(|fact| match fact.body() {
+                SessionFactBody::TurnTerminal {
+                    turn_id,
+                    outcome: TurnOutcome::Completed,
+                    ..
+                } => Some(turn_id),
+                _ => None,
+            })
+            .unwrap();
+        let child = ingress
+            .fork_from(
+                fork.clone(),
+                ForkDraft {
+                    source_session_id: source.clone(),
+                    point: ForkPoint::through(turn),
+                    turns: ForkTurnSelection::All,
+                },
+                CallOrigin::Local,
+            )
+            .await
+            .unwrap();
+        run_message_to_terminal(&child, "detached-fork-turn").await;
+        assert_eq!(child.header().await.unwrap().coordinates(), &coordinates);
+        assert!(
+            workspaces
+                .scoped(CallOrigin::Local)
+                .find(&WorkspaceKey::from_coordinates(&coordinates))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(host.shutdown().await.is_clean());
+    }
+    let running =
+        RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &host_profile(&fixture))
+            .await
+            .unwrap();
+    let service = running.session_service().unwrap();
+    for id in [&source, &fork] {
+        assert_eq!(
+            service
+                .attach(id)
+                .await
+                .unwrap()
+                .header()
+                .await
+                .unwrap()
+                .session_id(),
+            id
+        );
+    }
+    running
+        .workspace_registry()
+        .unwrap()
+        .get_or_create(&fixture.workspace)
+        .await
+        .unwrap();
+    let rows = query(&running, CallOrigin::Local, false).await.entries;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|entry| entry.workspace.is_none()));
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn archive_blocks_model_requests_from_other_handles_until_restored() {
     use rsi_agent_session_protocol::{ForkPoint, ForkTurnSelection, TurnOutcome};
 

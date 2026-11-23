@@ -840,6 +840,19 @@ fn workspace_id() -> WorkspaceId {
     WorkspaceId::parse("a".repeat(64)).unwrap()
 }
 
+fn shared_blank(path: &Path, id: impl Into<String>) -> rsi_session_protocol::BlankSession {
+    let path = rsi_workspace_protocol::canonical_native_path(path.canonicalize().unwrap());
+    rsi_session_protocol::BlankSession {
+        coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
+            rsi_workspace_protocol::ExecutionLocation::Local,
+            path.to_str().unwrap(),
+        )
+        .unwrap(),
+        session_id: SessionId::new(id).unwrap(),
+        agent_preset_id: None,
+    }
+}
+
 #[async_trait]
 impl WorkspaceRegistry for AvailableWorkspace {
     async fn find(

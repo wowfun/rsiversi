@@ -1,8 +1,10 @@
 use super::Sessions;
 use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::{CreateSession, DraftClaim, SelectDraftPreset, SessionError};
-use rsi_workspace_protocol::{ExecutionLocation, WorkspaceId, WorkspaceRecord, WorkspaceRegistry};
+use rsi_session_protocol::{BlankSession, DraftClaim, SelectDraftPreset, SessionError};
+use rsi_workspace_protocol::{
+    ExecutionCoordinates, ExecutionLocation, WorkspaceId, WorkspaceIngress,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -20,12 +22,25 @@ struct Input {
 }
 
 impl Input {
-    async fn workspace(&self, registry: &dyn WorkspaceRegistry) -> Result<WorkspaceRecord> {
+    async fn coordinates(
+        &self,
+        ingress: &dyn WorkspaceIngress,
+        origin: &rsi_api_protocol::CallOrigin,
+    ) -> Result<ExecutionCoordinates> {
         match (&self.workspace, &self.cwd) {
             (Some(_), Some(_)) => Err(Error::Remote("Choose a Workspace or a directory".into())),
-            (Some(id), None) => registry.get(id).await.map_err(remote),
-            (None, Some(path)) => registry.get_or_create(path).await.map_err(remote),
+            (Some(id), None) => Ok(ingress
+                .scoped(origin.clone())
+                .get(id)
+                .await
+                .map_err(remote)?
+                .coordinates),
+            (None, Some(path)) => ingress
+                .local_coordinates(origin.clone(), path)
+                .await
+                .map_err(remote),
             (None, None) => {
+                let registry = ingress.scoped(origin.clone());
                 let mut after = None;
                 loop {
                     let page = registry.list(after, 64).await.map_err(remote)?;
@@ -34,7 +49,7 @@ impl Input {
                         .into_iter()
                         .find(|record| record.coordinates.location() == &ExecutionLocation::Local)
                     {
-                        return Ok(record);
+                        return Ok(record.coordinates);
                     }
                     after = page.next;
                     if after.is_none() {
@@ -55,8 +70,7 @@ impl Sessions {
             .routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
-        let sessions = self.ingress.scoped(origin.clone());
-        let workspace = if let Some(fork) = &input.fork {
+        if let Some(fork) = input.fork {
             if input.requested.is_some()
                 || input.workspace.is_some()
                 || input.cwd.is_some()
@@ -64,32 +78,26 @@ impl Sessions {
             {
                 return Err(Error::Protocol);
             }
-            let source = sessions
-                .read_summary(&fork.source_session_id)
+            let handle = self
+                .ingress
+                .fork_from(input.fresh, fork, origin)
                 .await
                 .map_err(remote)?;
-            self.workspaces
-                .scoped(origin.clone())
-                .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
-                    source.header.coordinates(),
-                ))
-                .await
-                .map_err(remote)?
-                .ok_or_else(|| Error::Remote("Workspace is not registered".into()))?
-        } else {
-            input
-                .workspace(self.workspaces.scoped(origin.clone()).as_ref())
-                .await?
-        };
+            let header = handle.header().await.map_err(remote)?;
+            self.routes
+                .caller(&input.request)
+                .map_err(|_| Error::Cancelled)?;
+            return Ok(receipt(&header, false));
+        }
+        let coordinates = input.coordinates(self.workspaces.as_ref(), &origin).await?;
+        let sessions = self.ingress.scoped(origin.clone());
         let mut id = input.fresh;
         let mut claim = DraftClaim::Exclusive;
         if let Some(requested) = input.requested {
             match sessions.attach(&requested).await {
                 Ok(handle) => {
                     let header = handle.header().await.map_err(remote)?;
-                    if header.fork_origin().is_some()
-                        || header.coordinates() != &workspace.coordinates
-                    {
+                    if header.fork_origin().is_some() || header.coordinates() != &coordinates {
                         return Err(Error::Remote(
                             "Session belongs to another Workspace or Agent".into(),
                         ));
@@ -131,20 +139,16 @@ impl Sessions {
         self.routes
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
-        let creation = CreateSession {
-            workspace_id: workspace.id,
+        let creation = BlankSession {
+            coordinates,
             session_id: id,
             agent_preset_id: input.preset,
-            fork: input.fork,
         };
-        let handle = if creation.fork.is_some() {
-            sessions.create(creation).await
-        } else {
-            self.ingress
-                .create_shared_blank(creation, origin.clone(), claim)
-                .await
-        }
-        .map_err(remote)?;
+        let handle = self
+            .ingress
+            .create_shared_blank(creation, origin.clone(), claim)
+            .await
+            .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
         if let Some(workspace) = input.workspace {
             let failure = |error| {

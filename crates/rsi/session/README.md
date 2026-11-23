@@ -216,7 +216,8 @@ constructed native-only service without that capability rejects SSH coordinates.
 creation resolves a registered WorkspaceId, freezes the canonical workspace and settings,
 rejects a durable identity collision and retains the actual Agent draft payload,
 including typed initial states and its preset generation. Trusted application
-ingress can also create an ordinary shared blank. A cold attachment restores its
+ingress can also create an ordinary shared blank at caller-resolved canonical
+execution coordinates. A Workspace registration is optional. A cold attachment restores its
 saved Header and composes its preset on demand. Changing that draft's preset
 updates the saved selection. Held command inputs and their live revisions
 expire with the draft lease. Submission defers execution dependencies
@@ -226,8 +227,10 @@ that retained payload, including its baseline digest, under the same admission.
 With Navigation mounted, publication of an ordinary native draft enrolls its
 identity in the registration selected by its creator. A manual fork inherits
 the source's explicit membership at preparation. Private frozen workflows and
-independently created plugin Agents do not enroll. The Session Store commits
-the conversation and Navigation commits the workspace account separately.
+independently created plugin Agents do not enroll. An application fork uses its
+authorized source's directory, including when that directory is unregistered.
+The Session Store commits the conversation and Navigation commits the workspace
+account separately.
 If enrollment fails after publication, the accepted input remains addressable
 by its original identity. Message callers can reconcile that receipt. Reopening
 the live draft reservation retries enrollment without blocking access to the

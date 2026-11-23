@@ -368,6 +368,12 @@ pub trait WorkspaceIngress: fmt::Debug + Send + Sync + 'static {
     /// Binds a view to exactly the caller authenticated by its transport.
     fn scoped(&self, origin: rsi_api_protocol::CallOrigin)
     -> std::sync::Arc<dyn WorkspaceRegistry>;
+    /// Resolves a local directory under the caller's authority without registering it.
+    async fn local_coordinates(
+        &self,
+        origin: rsi_api_protocol::CallOrigin,
+        path: &Path,
+    ) -> Result<ExecutionCoordinates>;
     /// Registers a local path and reports whether this call inserted its record.
     async fn register_local(
         &self,

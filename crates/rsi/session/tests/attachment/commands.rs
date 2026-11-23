@@ -129,7 +129,7 @@ struct Fixture {
     workers: rsi_agent_kernel::KernelWorkers,
     callback: Arc<Toggle>,
     composition: Arc<Composition>,
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     _lease: rsi_meta::RegistrationLease,
 }
 
@@ -240,7 +240,7 @@ impl Fixture {
             workers,
             callback,
             composition,
-            _directory: directory,
+            directory,
             _lease: lease,
         }
     }

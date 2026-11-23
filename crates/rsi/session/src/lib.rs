@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{AgentComposition, AgentSessionDraft};
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentMessageContent, AgentMessageSource, MAXIMUM_FACTS_PER_READ, MessageId,
-    MessageOptions, SessionHeader, SessionId,
+    AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, MAXIMUM_FACTS_PER_READ,
+    MessageId, MessageOptions, SessionHeader, SessionId,
 };
 use rsi_agent_store_protocol::{
     MAXIMUM_SESSIONS_PER_READ, SessionStore, StoreError, StoreRecentSessionCursor,
@@ -502,7 +502,7 @@ impl LocalSessionService {
     async fn prepare_draft(
         &self,
         request: drafts::DraftRequest,
-        lease: drafts::DraftLease,
+        mut lease: drafts::DraftLease,
     ) -> Result<Arc<LocalSessionHandle>> {
         let request = match request {
             drafts::DraftRequest::Restore(header) => {
@@ -511,19 +511,38 @@ impl LocalSessionService {
                     .compose_draft(*header, self.composition.clone(), lease, false)
                     .await;
             }
-            drafts::DraftRequest::Private(input) | drafts::DraftRequest::Shared(input) => input,
+            drafts::DraftRequest::Shared(input) => input,
+            drafts::DraftRequest::Fork(id, fork) => {
+                return self.prepare_fork_draft(id, None, fork, None, lease).await;
+            }
+            drafts::DraftRequest::Private(input) => {
+                let workspace = self
+                    .workspace
+                    .get(&input.workspace_id)
+                    .await
+                    .map_err(|error| map_workspace_error(&error))?;
+                if let Some(fork) = input.fork {
+                    return self
+                        .prepare_fork_draft(
+                            input.session_id,
+                            input.agent_preset_id,
+                            fork,
+                            Some(workspace),
+                            lease,
+                        )
+                        .await;
+                }
+                if self.frozen.is_none() {
+                    lease.enrollment = Some(input.workspace_id);
+                }
+                rsi_session_protocol::BlankSession {
+                    session_id: input.session_id,
+                    coordinates: workspace.coordinates,
+                    agent_preset_id: input.agent_preset_id,
+                }
+            }
         };
-        let workspace = self
-            .workspace
-            .get(&request.workspace_id)
-            .await
-            .map_err(|error| map_workspace_error(&error))?;
-        let _admission = self.admit(workspace.coordinates.location())?;
-        if let Some(fork) = &request.fork {
-            return self
-                .prepare_fork_draft(&request, fork, &workspace.coordinates, lease)
-                .await;
-        }
+        let _admission = self.admit(request.coordinates.location())?;
         let agent_preset_id = match request.agent_preset_id {
             Some(id) => id,
             None => self
@@ -553,7 +572,7 @@ impl LocalSessionService {
         let header = SessionHeader::new(
             session_id,
             now_ms()?,
-            workspace.coordinates,
+            request.coordinates,
             agent_preset_id,
             settings,
         )
@@ -611,9 +630,10 @@ impl LocalSessionService {
 
     async fn prepare_fork_draft(
         &self,
-        request: &CreateSession,
-        fork: &rsi_session_protocol::ForkDraft,
-        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
+        session_id: SessionId,
+        preset: Option<AgentPresetId>,
+        fork: rsi_session_protocol::ForkDraft,
+        workspace: Option<rsi_workspace_protocol::WorkspaceRecord>,
         mut lease: drafts::DraftLease,
     ) -> Result<Arc<LocalSessionHandle>> {
         if self.frozen.is_some() {
@@ -622,19 +642,35 @@ impl LocalSessionService {
             ));
         }
         let source_lifetime = self.lifecycles.attach(&fork.source_session_id)?.hard()?;
-        lease.enrolled = self.navigation().is_some_and(|navigation| {
-            navigation.workspace_contains(&request.workspace_id, &fork.source_session_id)
-        });
         let source = self.read_summary(&fork.source_session_id).await?.header;
         if source.protection().is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
-        if source.coordinates() != coordinates {
+        let _admission = self.admit(source.coordinates().location())?;
+        if workspace
+            .as_ref()
+            .is_some_and(|record| record.coordinates != *source.coordinates())
+        {
             return Err(SessionError::Invalid(
                 "fork workspace must match its source".into(),
             ));
         }
-        match self.store.session_summary(&request.session_id).await {
+        if let Some(navigation) = self.navigation() {
+            let registration = match workspace {
+                Some(record) => Some(record),
+                None => self
+                    .workspace
+                    .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                        source.coordinates(),
+                    ))
+                    .await
+                    .map_err(|error| map_workspace_error(&error))?,
+            };
+            lease.enrollment = registration
+                .map(|record| record.id)
+                .filter(|id| navigation.workspace_contains(id, &fork.source_session_id));
+        }
+        match self.store.session_summary(&session_id).await {
             Ok(_) => {
                 return Err(SessionError::Invalid(
                     "fork target Session already exists".into(),
@@ -643,10 +679,7 @@ impl LocalSessionService {
             Err(StoreError::NotFound(_)) => {}
             Err(error) => return Err(map_store_error(error)),
         }
-        let preset = request
-            .agent_preset_id
-            .clone()
-            .unwrap_or_else(|| source.agent_preset_id().clone());
+        let preset = preset.unwrap_or_else(|| source.agent_preset_id().clone());
         workflow::require_preset(self.workflow.as_deref(), &preset)?;
         let caller_revoked = match &self.origin {
             rsi_api_protocol::CallOrigin::Local => tokio_util::sync::CancellationToken::new(),
@@ -656,17 +689,17 @@ impl LocalSessionService {
             .turns
             .prepare_fork(rsi_agent_turn_protocol::PrepareFork {
                 source,
-                session_id: request.session_id.clone(),
+                session_id,
                 created_at_ms: now_ms()?,
                 agent_preset_id: preset,
-                point: fork.point.clone(),
-                turns: fork.turns.clone(),
+                point: fork.point,
+                turns: fork.turns,
                 cancellation: caller_revoked,
             })
             .await;
         self.check_origin()?;
         let prepared = prepared.map_err(map_turn_error)?;
-        let _admission = self.admit(coordinates.location())?;
+        let _admission = self.admit(prepared.header().coordinates().location())?;
         let mut baseline = prepared.baseline().clone();
         baseline.retain(Arc::new(source_lifetime));
         let prepared = prepared
@@ -836,17 +869,29 @@ impl SessionService for LocalSessionService {
 
 #[async_trait]
 impl rsi_session_protocol::SessionIngress for LocalSessionService {
+    async fn fork_from(
+        &self,
+        session: SessionId,
+        fork: rsi_session_protocol::ForkDraft,
+        origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        let scoped = Self {
+            origin,
+            ..self.clone()
+        };
+        Ok(scoped
+            .open_draft(
+                drafts::DraftRequest::Fork(session, fork),
+                DraftClaim::JoinIdentical,
+            )
+            .await?)
+    }
     async fn create_shared_blank(
         &self,
-        request: CreateSession,
+        request: rsi_session_protocol::BlankSession,
         origin: rsi_api_protocol::CallOrigin,
         claim: DraftClaim,
     ) -> Result<Arc<dyn SessionHandle>> {
-        if request.fork.is_some() {
-            return Err(SessionError::Invalid(
-                "shared blank must be an ordinary Session".into(),
-            ));
-        }
         let scoped = Self {
             origin,
             ..self.clone()
@@ -942,7 +987,7 @@ impl rsi_session_protocol::SessionIngress for LocalSessionService {
                 let header = draft.header();
                 rows.push(rsi_session_protocol::DeviceDraft {
                     session_id: header.session_id().clone(),
-                    workspace_id: lease.workspace(),
+                    workspace_id: lease.workspace().cloned(),
                     coordinates: header.coordinates().clone(),
                     created_at_ms: header.created_at_ms(),
                     inherited_turns: header

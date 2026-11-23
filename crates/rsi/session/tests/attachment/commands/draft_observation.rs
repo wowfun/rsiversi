@@ -83,7 +83,7 @@ async fn directory_watch_observes_device_drafts_and_external_publication() {
     let shared = fixture
         .service
         .create_shared_blank(
-            Fixture::request("observed-shared"),
+            shared_blank(fixture.directory.path(), "observed-shared"),
             CallOrigin::Device(device.clone()),
             rsi_session_protocol::DraftClaim::JoinIdentical,
         )

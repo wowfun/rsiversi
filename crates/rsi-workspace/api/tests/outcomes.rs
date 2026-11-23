@@ -218,6 +218,13 @@ async fn commit_result_loss_and_invalid_registration_reply_stay_unknown_without_
 
 #[async_trait]
 impl WorkspaceIngress for Provider {
+    async fn local_coordinates(
+        &self,
+        _: CallOrigin,
+        _: &Path,
+    ) -> Result<rsi_workspace_protocol::ExecutionCoordinates> {
+        unreachable!("the Workspace wire API does not resolve application directories")
+    }
     fn scoped(&self, _: CallOrigin) -> Arc<dyn WorkspaceRegistry> {
         Arc::new(self.clone())
     }

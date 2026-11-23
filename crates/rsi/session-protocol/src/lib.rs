@@ -1159,18 +1159,40 @@ pub enum DraftClaim {
     Exclusive,
 }
 
+/// Ordinary Session preparation at an already resolved execution directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlankSession {
+    /// Identity reserved through preparation and durable publication.
+    pub session_id: SessionId,
+    /// Directory canonicalized by the registered location or its filesystem owner.
+    pub coordinates: rsi_agent_session_protocol::ExecutionCoordinates,
+    /// Explicit preset or the current catalog default.
+    pub agent_preset_id: Option<AgentPresetId>,
+}
+
 /// Trusted server ingress to the same draft owner used by ordinary local callers.
 #[async_trait]
 pub trait SessionIngress: fmt::Debug + Send + Sync + 'static {
-    /// Creates a discoverable ordinary blank under the caller's Workspace authority.
+    /// Creates a discoverable ordinary blank under the caller's execution authority.
     async fn create_shared_blank(
         &self,
-        _request: CreateSession,
+        _request: BlankSession,
         _origin: rsi_api_protocol::CallOrigin,
         _claim: DraftClaim,
     ) -> Result<Arc<dyn SessionHandle>> {
         Err(SessionError::Invalid(
             "shared blank Sessions unavailable".into(),
+        ))
+    }
+    /// Prepares an independent fork in its source directory under the caller's authority.
+    async fn fork_from(
+        &self,
+        _session: SessionId,
+        _fork: ForkDraft,
+        _origin: rsi_api_protocol::CallOrigin,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        Err(SessionError::Invalid(
+            "application forks unavailable".into(),
         ))
     }
     /// Subscribes before listing this caller's drafts and durable Sessions. Hints grant no read authority.

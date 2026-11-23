@@ -1113,14 +1113,15 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
             .unwrap();
     }
     let revoked = tokio_util::sync::CancellationToken::new();
-    let scoped = runtime
+    let device = CallOrigin::Device(AuthenticatedDevice {
+        id: DeviceId::from_bytes([7; 16]),
+        revoked: revoked.clone(),
+    });
+    let ingress = runtime
         .root()
         .lookup_local::<WorkspaceIngressContract>()
-        .unwrap()
-        .scoped(CallOrigin::Device(AuthenticatedDevice {
-            id: DeviceId::from_bytes([7; 16]),
-            revoked: revoked.clone(),
-        }));
+        .unwrap();
+    let scoped = ingress.scoped(device.clone());
     let page = scoped.list(None, 1).await.unwrap();
     page.validate(None, 1).unwrap();
     assert_eq!(page.records.as_slice(), std::slice::from_ref(&local));
@@ -1183,10 +1184,35 @@ async fn scoped_registry_filters_before_paging_and_seed_budget_and_rechecks_revo
     assert!(local_path.is_dir());
     let workspace_path = temporary.path().join("concurrent-registration");
     fs::create_dir(&workspace_path).unwrap();
-    let ingress = runtime
-        .root()
-        .lookup_local::<rsi_workspace_protocol::WorkspaceIngressContract>()
+    let local = rsi_api_protocol::CallOrigin::Local;
+    let revision = ingress.directory_revision();
+    assert_eq!(
+        ingress.local_coordinates(device, &workspace_path).await,
+        Err(WorkspaceError::Api(ApiError::Unauthorized))
+    );
+    let file = temporary.path().join("a-file");
+    fs::write(&file, b"").unwrap();
+    assert!(
+        ingress
+            .local_coordinates(local.clone(), &file)
+            .await
+            .is_err()
+    );
+    let coordinates = ingress
+        .local_coordinates(local.clone(), &workspace_path)
+        .await
         .unwrap();
+    assert_eq!(ingress.directory_revision(), revision);
+    assert!(
+        ingress
+            .scoped(local)
+            .find(&rsi_workspace_protocol::WorkspaceKey::from_coordinates(
+                &coordinates
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
     let (one, two) = tokio::join!(
         ingress.register_local(rsi_api_protocol::CallOrigin::Local, &workspace_path),
         ingress.register_local(rsi_api_protocol::CallOrigin::Local, &workspace_path)
