@@ -305,6 +305,7 @@ async fn separately_authenticated_browsers_forward_as_one_owner() {
                 "cookie:",
                 "x-rsi-expected-device:",
                 "x-rsi-upstream-device:",
+                "x-rsi-upstream-owner:",
             ] {
                 assert!(!text.contains(header));
             }

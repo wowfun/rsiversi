@@ -51,6 +51,8 @@ struct Config {
     process: ConfigValue,
     importer: Option<Importer>,
     #[serde(default)]
+    host_desktop: bool,
+    #[serde(default)]
     tools: bool,
     #[serde(default)]
     replace_preset_tools: std::collections::BTreeSet<String>,
@@ -598,7 +600,24 @@ impl PluginFactory for Factory {
         })
     }
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let config: Config = plan.take_state()?;
+        let mut config: Config = plan.take_state()?;
+        if config.host_desktop {
+            let environment = config.process["environment"]
+                .as_object_mut()
+                .expect("prepare validated the package process environment");
+            for &name in desktop_environment_names() {
+                if let Ok(value) = std::env::var(name) {
+                    environment.entry(name).or_insert_with(|| value.into());
+                }
+            }
+            if let Some(home) = rsi::capture_standard_home().map_err(failure)?
+                && let Some(path) = home.to_str()
+            {
+                environment
+                    .entry("RSI_HOST_HOME")
+                    .or_insert_with(|| path.into());
+            }
+        }
         let paths = self.0.clone();
         let profile = self
             .0
@@ -683,6 +702,25 @@ impl PluginFactory for Factory {
                 upstream,
             }))?;
         Ok(())
+    }
+}
+
+fn desktop_environment_names() -> &'static [&'static str] {
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            "SSH_TTY",
+            "SSH_CONNECTION",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ]
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        &["SSH_TTY", "SSH_CONNECTION"]
     }
 }
 

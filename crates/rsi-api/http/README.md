@@ -274,7 +274,8 @@ The native listener supplies an opaque request handle alongside the admitted
 device. For TCP requests the private upstream receives the configured public
 origin and the accepted socket peer in `x-rsi-upstream-origin` and
 `x-rsi-upstream-peer`. The listener replaces incoming forwarding metadata
-before adding these values. Native callbacks can resolve the original credential for Host-owner actions and the shared principal for domain operations. The handle resolves only while the response body or upgraded
+before adding these values. It includes `x-rsi-upstream-owner: 1` when the
+authenticated device is the configured browser owner. Native callbacks can resolve the original credential for Host-owner actions and the shared principal for domain operations. The handle resolves only while the response body or upgraded
 socket is alive. Revocation and process retirement invalidate the handle.
 The connection deadline bounds opening the private socket. Once forwarded,
 an installation can take as long as its application operation permits. Device

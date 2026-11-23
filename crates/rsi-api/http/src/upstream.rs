@@ -482,12 +482,18 @@ impl ApplicationUpstream {
         let device = state
             .access
             .application_device(incoming.headers(), safe_read, upgrade)?;
-        let slot =
-            Arc::new(self.open_browser_callback(&device, Some(state.browser_principal().await?))?);
+        let principal = state.browser_principal().await?;
+        let is_owner = state.browser_owner.is_some() && device.id == principal;
+        let slot = Arc::new(self.open_browser_callback(&device, Some(principal))?);
         delivery.admit(rsi_api_protocol::ApiAdmission::new(slot.clone()));
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut incoming));
         let (mut parts, body) = incoming.into_parts();
         self.prepare_request(&mut parts, state, upgrade, peer)?;
+        if is_owner {
+            parts
+                .headers
+                .insert("x-rsi-upstream-owner", HeaderValue::from_static("1"));
+        }
         parts.headers.insert(
             "x-rsi-upstream-request",
             slot.id.parse().map_err(|_| ApiError::Unavailable)?,

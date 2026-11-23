@@ -98,6 +98,12 @@ A Service Profile can select an application process with
 asset selection as the browser), a private `profile` name, and a `process`
 using the installed package process descriptor. One supervised process owns
 the application's routes across local browser attachments. At activation the
+optional `host_desktop` setting supplies the operating-system home as
+`RSI_HOST_HOME` and the inherited SSH launch indicators `SSH_TTY` and
+`SSH_CONNECTION`. On Linux it also supplies `DISPLAY`, `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, `XAUTHORITY` and `DBUS_SESSION_BUS_ADDRESS` for native
+choosers. Explicit process environment values take precedence. The Host
+resolves these values in memory for the running application. The
 host sends `application.open` with protocol 16, a private profile directory
 and a random upstream key over the generation's private process connection.
 The opening payload also supplies an opaque `owner` callback handle. Native
