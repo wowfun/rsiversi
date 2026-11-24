@@ -48,6 +48,8 @@ Application controls carry an immutable request identity and expected revision.
 A trusted application may supply the millisecond timestamp it assigned to a
 Goal change. The native command receipt binds this timestamp to the action.
 The Store records its own commit time.
+The controller validates the invocation at admission and transfers it to the
+Session. A lost reply can be reconciled only with the original request's digest.
 After control admission, shutdown, panic or timeout can leave its command outcome
 unknown; callers retain that original identity and reconcile its receipt.
 Only a successful create/resume receipt matching the latest captured revision

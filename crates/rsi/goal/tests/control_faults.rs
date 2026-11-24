@@ -29,6 +29,7 @@ struct LostCommand {
     release: Semaphore,
     queried: Semaphore,
     committed: AtomicBool,
+    receipt: Option<SessionCommandReceipt>,
 }
 impl LostCommand {
     fn new(gated: bool) -> Arc<Self> {
@@ -40,6 +41,7 @@ impl LostCommand {
             release: Semaphore::new(0),
             queried: Semaphore::new(0),
             committed: AtomicBool::new(false),
+            receipt: None,
         })
     }
 }
@@ -72,6 +74,9 @@ impl GoalSession for LostCommand {
         _: &DomainRequestId,
     ) -> GoalResult<Option<SessionCommandReceipt>> {
         self.queried.add_permits(1);
+        if let Some(receipt) = &self.receipt {
+            return Ok(Some(receipt.clone()));
+        }
         Err(GoalError::Backend("fixture receipt read failed".into()))
     }
     async fn snapshot(&self) -> GoalResult<GoalSnapshot> {
@@ -142,6 +147,26 @@ fn request() -> GoalControl {
             max_rounds: Some(2),
         },
     }
+}
+
+#[tokio::test]
+async fn a_recovered_receipt_must_match_the_original_publication_time() {
+    let service = GoalService::default();
+    let mut session = LostCommand::new(false);
+    let mut action = request();
+    action.published_at_ms = Some(10.try_into().unwrap());
+    let receipt =
+        SessionCommandReceipt::draft_changed(&action.invocation().unwrap(), "a".repeat(64))
+            .unwrap();
+    Arc::get_mut(&mut session).unwrap().receipt = Some(receipt);
+    action.published_at_ms = Some(11.try_into().unwrap());
+    assert!(matches!(
+        service.control(session.clone(), action).await,
+        Err(GoalError::Conflict)
+    ));
+    assert_eq!(session.calls.load(Ordering::SeqCst), 1);
+    disarmed(&service, &session);
+    service.stop().await.unwrap();
 }
 
 #[tokio::test]

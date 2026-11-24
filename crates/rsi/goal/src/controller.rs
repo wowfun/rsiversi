@@ -7,7 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use rsi_agent_goal::{GoalAction, GoalPhase};
-use rsi_agent_session_protocol::{DomainRequestId, SessionId};
+use rsi_agent_session_protocol::{DomainRequestId, SessionCommandInvocation, SessionId};
 use rsi_agent_turn_protocol::{
     ContinuationBinding, ContinuationLease, MessageState, SessionContinuationsContract,
     TurnServiceContract,
@@ -177,9 +177,9 @@ impl GoalService {
         &self,
         owner: &Arc<Owner>,
         session: Arc<dyn GoalSession>,
-        request: GoalControl,
+        request: &GoalControl,
+        invocation: SessionCommandInvocation,
     ) -> GoalResult<GoalControlReceipt> {
-        let invocation = request.invocation()?;
         let starts = matches!(
             request.action,
             GoalAction::Create { .. } | GoalAction::Resume { .. }
@@ -214,11 +214,12 @@ impl GoalService {
             }
             return Err(GoalError::Conflict);
         }
-        let receipt = match session.application_command(invocation.clone()).await {
+        let receipt = match session.application_command(invocation).await {
             Ok(receipt) => receipt,
             Err(error) => match session.command_status(&request.request_id).await {
                 Ok(Some(receipt))
-                    if receipt.invocation_sha256() == invocation.digest().map_err(invalid)? =>
+                    if receipt.invocation_sha256()
+                        == request.invocation()?.digest().map_err(invalid)? =>
                 {
                     receipt
                 }
@@ -536,7 +537,7 @@ impl GoalController for GoalService {
         session: Arc<dyn GoalSession>,
         request: GoalControl,
     ) -> GoalResult<GoalControlReceipt> {
-        request.invocation()?;
+        let invocation = request.invocation()?;
         let permit = self
             .inner
             .operations
@@ -554,15 +555,14 @@ impl GoalController for GoalService {
             let owner = self.owner(session.session_id())?;
             self.inner.tasks.spawn(async move {
                 let _permit = permit;
-                let request_id = request.request_id.to_string();
-                let call = std::panic::AssertUnwindSafe(controller.control_owned(&owner, session, request)).catch_unwind();
+                let unknown = || Err(GoalError::OutcomeUnknown(request.request_id.to_string()));
+                let call = std::panic::AssertUnwindSafe(controller.control_owned(&owner, session, &request, invocation)).catch_unwind();
                 let result = tokio::select! {
                     biased;
-                    () = controller.inner.stopped.cancelled() => Err(GoalError::OutcomeUnknown(request_id.clone())),
+                    () = controller.inner.stopped.cancelled() => unknown(),
                     result = tokio::time::timeout(std::time::Duration::from_secs(30), call) => match result {
                         Ok(Ok(result)) => result,
-                        Ok(Err(_)) => Err(GoalError::OutcomeUnknown(request_id.clone())),
-                        Err(_) => Err(GoalError::OutcomeUnknown(request_id)),
+                        Ok(Err(_)) | Err(_) => unknown(),
                     }
                 };
                 let _ = sender.send(result);
