@@ -437,6 +437,7 @@ async fn exercise_frozen_protected_goal(fail_after_report: bool) {
     assert!(
         local
             .control_goal(rsi_goal::GoalControl {
+                published_at_ms: None,
                 request_id: rsi_agent_session_protocol::DomainRequestId::new("forbidden-resume")
                     .unwrap(),
                 expected_revision: local.commands().await.unwrap().revision(),

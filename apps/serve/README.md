@@ -87,7 +87,9 @@ it never redirects those operations to a colliding parent service registration.
 Host command execution uses the original request credential. Command discovery and receipt lookup use the interactive Session caller. The model picker delegates a typed model selection.
 For a durable edit the trusted application can use the command `prepare`
 operation to obtain the canonical revision even before the first prompt. Its
-request credential must have Host owner authority. Ordinary `list` reads do
+request credential must have Host owner authority. Supplying an observed draft
+revision publishes only that exact draft and returns the final baseline control
+position, including any pending inputs. Ordinary `list` reads do
 not publish a draft. The trusted application's Goal operation forwards the exact control identity and expected
 revision to the Session's Goal controller. Its receipt covers the durable command and the
 live driver's status.
@@ -528,7 +530,13 @@ fragments of one JSON event array. Pages contain at most 64 control records,
 normally within that ordinary page budget; one larger record uses its exact
 Store-reported size. Non-projected records still advance the returned watermark.
 Pages expose model-selection commits with their Store-owned Fact anchors;
-the native model-selection codec resolves complete replacements. A wait returns
+the native model-selection codec resolves complete replacements. The same
+control position carries any change to the Goal domain. Its public summary
+contains the current identity, objective, phase, round cap and stopping reason.
+A null current value clears the previous Goal. An application-authored command
+can carry its original publication time in addition to the Store timestamp.
+Control history omits frozen round input
+and model reports from this summary. A wait returns
 a coherent pair of current watermarks after either stream advances.
 Fact reads supply an exclusive `after_seq` and inclusive captured `through_seq`.
 They return contiguous pages of at most 512 Facts, within the same ordinary

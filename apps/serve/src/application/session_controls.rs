@@ -14,11 +14,14 @@ struct ControlEvent<'a> {
     time: u64,
     #[serde(flatten)]
     body: ControlBody<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal: Option<GoalChange<'a>>,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ControlBody<'a> {
+    Goal,
     WorkingDirectoryChanged {
         cwd: &'a str,
     },
@@ -47,6 +50,82 @@ enum ControlBody<'a> {
         #[serde(flatten)]
         origin: Option<CommandOrigin<'a>>,
     },
+}
+
+/// A change can share its Store position with the baseline model selection.
+#[derive(Serialize)]
+struct GoalChange<'a> {
+    current: Option<GoalSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<GoalCommand<'a>>,
+}
+
+#[derive(Serialize)]
+struct GoalSummary {
+    id: rsi_agent_session_protocol::DomainRequestId,
+    objective: String,
+    phase: rsi_agent_goal::GoalPhase,
+    max_rounds: u64,
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GoalCommand<'a> {
+    request_id: &'a rsi_agent_session_protocol::DomainRequestId,
+    action: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published_at_ms: Option<u64>,
+}
+
+fn goal_change(commit: &DomainStateCommit) -> Result<Option<GoalChange<'_>>> {
+    use rsi_agent_goal::{GOAL_COMMAND, GOAL_DOMAIN, GoalState};
+    // Reservation charges and unverified model reports do not change the public phase.
+    if matches!(
+        commit.source(),
+        DomainMutationSource::Turn { .. }
+            | DomainMutationSource::Continuation {
+                reservation: Some(_),
+                ..
+            }
+    ) {
+        return Ok(None);
+    }
+    let update = commit
+        .updates()
+        .iter()
+        .find(|u| u.snapshot().identity().id() == GOAL_DOMAIN);
+    let current = if let Some(update) = update {
+        let state = GoalState::decode(update.snapshot()).map_err(Error::Remote)?;
+        if commit.source().is_initial() && state.goal.is_none() {
+            return Ok(None);
+        }
+        state.goal.map(|goal| GoalSummary {
+            id: goal.id,
+            objective: goal.objective,
+            phase: goal.phase,
+            max_rounds: goal.max_rounds,
+            reason: goal.reason,
+        })
+    } else if commit.removed().iter().any(|id| id.id() == GOAL_DOMAIN) {
+        None
+    } else {
+        return Ok(None);
+    };
+    let command = match commit.source() {
+        DomainMutationSource::Command { invocation }
+            if invocation.command.as_str() == GOAL_COMMAND =>
+        {
+            Some(GoalCommand {
+                request_id: &invocation.request_id,
+                published_at_ms: invocation.arguments.value()["published_at_ms"].as_u64(),
+                action: invocation.arguments.value()["action"]
+                    .as_str()
+                    .ok_or(Error::Protocol)?,
+            })
+        }
+        _ => None,
+    };
+    Ok(Some(GoalChange { current, command }))
 }
 
 #[derive(Serialize)]
@@ -115,23 +194,30 @@ fn project_control<'a>(
     record: &'a AgentControlRecord,
     anchor: u64,
 ) -> Result<Option<ControlEvent<'a>>> {
+    let mut goal = None;
     let body =
         if let Some(value) = mailbox_event(record.body()) {
             value
         } else if let Body::WorkingDirectoryChanged { cwd } = record.body() {
             ControlBody::WorkingDirectoryChanged { cwd }
         } else if let Body::DomainStateCommitted { commit } = record.body() {
-            let Some(update) = commit.updates().iter().find(|update| {
+            goal = goal_change(commit)?;
+            if let Some(update) = commit.updates().iter().find(|update| {
                 update.snapshot().identity().id() == rsi_agent_model_selection::DOMAIN
-            }) else {
+            }) {
+                ControlBody::Model {
+                    selection: rsi_agent_model_selection::resolve_selection(
+                        header,
+                        Some(update.snapshot()),
+                        None,
+                    )
+                    .map_err(|error| Error::Remote(error.to_string()))?,
+                    origin: command_origin(record.seq(), commit)?,
+                }
+            } else if goal.is_some() {
+                ControlBody::Goal
+            } else {
                 return Ok(None);
-            };
-            let selection =
-                rsi_agent_model_selection::resolve_selection(header, Some(update.snapshot()), None)
-                    .map_err(|error| Error::Remote(error.to_string()))?;
-            ControlBody::Model {
-                selection,
-                origin: command_origin(record.seq(), commit)?,
             }
         } else {
             return Ok(None);
@@ -141,6 +227,7 @@ fn project_control<'a>(
         after_fact_seq: anchor,
         time: record.timestamp_ms(),
         body,
+        goal,
     }))
 }
 

@@ -235,6 +235,46 @@ pub enum GoalAction {
     },
 }
 
+/// Original application publication time in milliseconds, representable by all clients.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "u64")]
+pub struct GoalPublicationTime(u64);
+
+impl TryFrom<u64> for GoalPublicationTime {
+    type Error = &'static str;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value > (1 << 53) - 1 {
+            return Err("Goal publication time exceeds the client integer range");
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Arguments bound by the native application command receipt.
+#[derive(Deserialize)]
+pub(crate) struct GoalCommandArguments {
+    #[serde(rename = "published_at_ms")]
+    _published_at: Option<GoalPublicationTime>,
+    #[serde(flatten)]
+    pub action: GoalAction,
+}
+
+#[test]
+fn published_goal_action_checks_authored_time_and_retains_strict_action_fields() {
+    let action = serde_json::json!({"action":"pause","id":"goal","published_at_ms":0});
+    assert!(matches!(
+        GoalCommandArguments::deserialize(&action).unwrap().action,
+        GoalAction::Pause { .. }
+    ));
+    let mut bad = action.clone();
+    bad["published_at_ms"] = serde_json::json!(1u64 << 53);
+    assert!(GoalCommandArguments::deserialize(&bad).is_err());
+    let mut bad = action;
+    bad["unrecognized"] = true.into();
+    assert!(GoalCommandArguments::deserialize(&bad).is_err());
+}
+
 impl GoalState {
     /// Decodes the exact Goal codec from an opaque durable domain snapshot.
     ///
@@ -246,8 +286,8 @@ impl GoalState {
         {
             return Err("Goal domain codec is unavailable".into());
         }
-        let state: Self = serde_json::from_value(snapshot.state().value().clone())
-            .map_err(|error| error.to_string())?;
+        let state =
+            Self::deserialize(snapshot.state().value()).map_err(|error| error.to_string())?;
         state.validate()?;
         Ok(state)
     }

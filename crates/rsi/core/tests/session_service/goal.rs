@@ -110,6 +110,7 @@ async fn cancel_uncharged_draft_or_published_goal_without_provider_spend() {
 async fn start(handle: &Arc<dyn SessionHandle>, rounds: u64) -> rsi_goal::GoalControlReceipt {
     handle
         .control_goal(GoalControl {
+            published_at_ms: None,
             request_id: DomainRequestId::new("create-goal").unwrap(),
             expected_revision: handle.commands().await.unwrap().revision(),
             action: GoalAction::Create {
@@ -447,6 +448,7 @@ async fn entered(gate: &Gate) {
 async fn control(handle: &Arc<dyn SessionHandle>, id: &str, action: GoalAction) {
     handle
         .control_goal(GoalControl {
+            published_at_ms: None,
             request_id: DomainRequestId::new(id).unwrap(),
             expected_revision: handle.commands().await.unwrap().revision(),
             action,
@@ -516,19 +518,42 @@ async fn application_goal_edits_on_a_blank_keep_receipts_and_start_no_turn() {
         .unwrap();
     let handle = create(&running, &fixture, "blank-goal").await;
     let id = handle.header().await.unwrap().session_id().clone();
+    let CommandRevision::Draft { revision: draft } = handle.commands().await.unwrap().revision()
+    else {
+        panic!("new session must still be a draft");
+    };
     assert!(matches!(
-        handle.commands().await.unwrap().revision(),
-        CommandRevision::Draft { .. }
+        handle.prepare_application_commands(Some(draft + 1)).await,
+        Err(
+            rsi_session_protocol::SessionError::CommandRevisionConflict {
+                actual: CommandRevision::Draft { .. },
+                ..
+            }
+        )
     ));
-    let (first, other) = tokio::join!(
-        handle.prepare_application_commands(),
-        handle.prepare_application_commands()
+    let (first, second) = tokio::join!(
+        handle.prepare_application_commands(Some(draft)),
+        handle.prepare_application_commands(Some(draft))
     );
-    let revision = first.unwrap();
-    assert_eq!(revision, other.unwrap());
+    let (revision, duplicate) = match (first, second) {
+        (Ok(revision), Err(error)) | (Err(error), Ok(revision)) => (revision, error),
+        result => panic!("one caller must publish the observed draft: {result:?}"),
+    };
+    assert!(matches!(
+        duplicate,
+        rsi_session_protocol::SessionError::CommandRevisionConflict {
+            actual: CommandRevision::Durable { .. },
+            ..
+        }
+    ));
+    assert_eq!(
+        revision,
+        handle.prepare_application_commands(None).await.unwrap()
+    );
     assert_eq!(revision, CommandRevision::Durable { control_seq: 1 });
     let goal_id = DomainRequestId::new("draft-review").unwrap();
     let create = GoalControl {
+        published_at_ms: Some(10.try_into().unwrap()),
         expected_revision: revision,
         request_id: DomainRequestId::new("create-review").unwrap(),
         action: GoalAction::Create {
@@ -538,11 +563,25 @@ async fn application_goal_edits_on_a_blank_keep_receipts_and_start_no_turn() {
             max_rounds: Some(2),
         },
     };
-    let created = handle
-        .execute_command(create.invocation().unwrap())
-        .await
-        .unwrap();
+    let typed = create.invocation().unwrap();
+    let wire = rsi_agent_session_protocol::SessionCommandInvocation {
+        arguments: rsi_agent_session_protocol::CommandArguments::new(serde_json::json!({
+            "action":"create","id":"draft-review","objective":"Review a draft",
+            "constraints":"","max_rounds":2,"published_at_ms":10
+        }))
+        .unwrap(),
+        ..typed.clone()
+    };
+    assert_eq!(wire.digest().unwrap(), typed.digest().unwrap());
+    let created = handle.execute_command(wire).await.unwrap();
+    assert!(matches!(
+        handle.control_goal(create.clone()).await,
+        Err(rsi_session_protocol::SessionError::Api(
+            rsi_api_protocol::ApiError::Unauthorized
+        ))
+    ));
     let complete = GoalControl {
+        published_at_ms: Some(12.try_into().unwrap()),
         expected_revision: created.revision(),
         request_id: DomainRequestId::new("complete-review").unwrap(),
         action: GoalAction::Complete {
@@ -557,6 +596,16 @@ async fn application_goal_edits_on_a_blank_keep_receipts_and_start_no_turn() {
         .await
         .unwrap();
     assert!(!done.live.armed);
+    assert_eq!(
+        done.command.invocation_sha256(),
+        complete.invocation().unwrap().digest().unwrap()
+    );
+    let mut altered = complete.clone();
+    altered.published_at_ms = Some(11.try_into().unwrap());
+    assert_ne!(
+        done.command.invocation_sha256(),
+        altered.invocation().unwrap().digest().unwrap()
+    );
     assert!(running.shutdown().await.is_clean());
     drop(handle);
     let reopened = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
@@ -603,6 +652,7 @@ async fn explicit_completion_preserves_the_running_round_and_survives_reattachme
         source: source.clone(),
     };
     let request = GoalControl {
+        published_at_ms: None,
         request_id: DomainRequestId::new("completion").unwrap(),
         expected_revision: stale,
         action,
@@ -865,6 +915,7 @@ async fn remote_stale_cancel_is_known_rejection_and_fresh_cancel_settles_exact_r
     let request_id = DomainRequestId::new("stale-cancel").unwrap();
     let rejected = handle
         .control_goal(GoalControl {
+            published_at_ms: None,
             request_id: request_id.clone(),
             expected_revision: rsi_agent_session_protocol::CommandRevision::Durable {
                 control_seq: 1,

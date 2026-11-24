@@ -132,6 +132,7 @@ impl GoalSession for LostCommand {
 }
 fn request() -> GoalControl {
     GoalControl {
+        published_at_ms: None,
         request_id: DomainRequestId::new("original-control").unwrap(),
         expected_revision: CommandRevision::Draft { revision: 0 },
         action: GoalAction::Create {

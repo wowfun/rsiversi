@@ -25,6 +25,9 @@ pub struct GoalControl {
     pub expected_revision: CommandRevision,
     /// Bounded explicit state action.
     pub action: GoalAction,
+    /// Wall-clock timestamp assigned to the change by the trusted application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at_ms: Option<rsi_agent_goal::GoalPublicationTime>,
 }
 
 impl GoalControl {
@@ -45,14 +48,24 @@ impl GoalControl {
     /// Rejects arguments exceeding the command protocol's bound.
     pub fn invocation(&self) -> GoalResult<SessionCommandInvocation> {
         use rsi_agent_session_protocol::{CommandArguments, ContributionId};
+        #[derive(Serialize)]
+        struct Arguments<'a> {
+            #[serde(flatten)]
+            action: &'a GoalAction,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            published_at_ms: Option<rsi_agent_goal::GoalPublicationTime>,
+        }
         Ok(SessionCommandInvocation {
             command: ContributionId::new(rsi_agent_goal::GOAL_COMMAND)
                 .map_err(|error| GoalError::Invalid(error.to_string()))?,
             request_id: self.request_id.clone(),
             expected_revision: self.expected_revision,
             arguments: CommandArguments::new(
-                serde_json::to_value(&self.action)
-                    .map_err(|error| GoalError::Invalid(error.to_string()))?,
+                serde_json::to_value(Arguments {
+                    action: &self.action,
+                    published_at_ms: self.published_at_ms,
+                })
+                .map_err(|error| GoalError::Invalid(error.to_string()))?,
             )
             .map_err(|error| GoalError::Invalid(error.to_string()))?,
         })

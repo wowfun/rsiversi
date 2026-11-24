@@ -862,9 +862,10 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
     /// Lists the pinned command catalog and exact draft or durable predecessor.
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView>;
-    /// Owner application preparing a durable edit, including before the first input.
+    /// Prepares a durable edit, optionally requiring the exact unpublished draft.
     async fn prepare_application_commands(
         &self,
+        _expected_draft_revision: Option<u64>,
     ) -> Result<rsi_agent_session_protocol::CommandRevision> {
         Err(SessionError::NotFound(
             "application command preparation".into(),

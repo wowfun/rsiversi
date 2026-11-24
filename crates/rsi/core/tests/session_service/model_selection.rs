@@ -153,6 +153,7 @@ async fn exercise(scenario: Scenario) {
         if scenario == Scenario::Goal {
             task_handle
                 .control_goal(rsi_goal::GoalControl {
+                    published_at_ms: None,
                     request_id: DomainRequestId::new("create-selection-goal").unwrap(),
                     expected_revision: task_handle.commands().await.unwrap().revision(),
                     action: rsi_agent_goal::GoalAction::Create {

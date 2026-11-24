@@ -1763,7 +1763,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
-        if request.claims_plugin_completion() {
+        if request.claims_plugin_completion() || request.published_at_ms.is_some() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
         self.dispatch_goal(request).await
@@ -1823,12 +1823,23 @@ impl SessionHandle for LocalSessionHandle {
     }
     async fn prepare_application_commands(
         &self,
+        expected_draft_revision: Option<u64>,
     ) -> Result<rsi_agent_session_protocol::CommandRevision> {
+        use rsi_agent_session_protocol::CommandRevision;
         self.require_host_owner()?;
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         let mut state = self.state.lock().await;
+        let expected = expected_draft_revision.map(|revision| CommandRevision::Draft { revision });
         let control_seq = if let HandleState::Fresh(draft) = &*state {
+            if let Some(expected) = expected
+                && draft.revision() != expected
+            {
+                return Err(SessionError::CommandRevisionConflict {
+                    expected,
+                    actual: draft.revision(),
+                });
+            }
             let seq = self
                 .commands
                 .publish_baseline(draft.freeze())
@@ -1839,13 +1850,21 @@ impl SessionHandle for LocalSessionHandle {
         } else {
             state.header()?;
             drop(state);
-            self.store
+            let control_seq = self
+                .store
                 .read_watermarks(self.session_id())
                 .await
                 .map_err(map_store_error)?
-                .durable_control_seq
+                .durable_control_seq;
+            if let Some(expected) = expected {
+                return Err(SessionError::CommandRevisionConflict {
+                    expected,
+                    actual: CommandRevision::Durable { control_seq },
+                });
+            }
+            control_seq
         };
-        Ok(rsi_agent_session_protocol::CommandRevision::Durable { control_seq })
+        Ok(CommandRevision::Durable { control_seq })
     }
     async fn message_feedback(
         &self,

@@ -2,6 +2,88 @@ use super::*;
 use serde_json::{Value, json};
 
 #[test]
+fn goal_history_contains_the_completed_state_without_copying_the_reserved_prompt() {
+    use rsi_agent_goal::{GOAL_CODEC_VERSION, GOAL_DOMAIN, GoalAction, GoalCompleter, GoalState};
+    use rsi_agent_session_protocol::{
+        DomainIdentity, DomainRequestId, DomainRevision, DomainSnapshot, DomainStateUpdate,
+        DomainStateValue,
+    };
+    let update = |previous, state: &GoalState| {
+        DomainStateUpdate::new(
+            DomainRevision::new(previous),
+            DomainSnapshot::new(
+                DomainIdentity::new(GOAL_DOMAIN, GOAL_CODEC_VERSION).unwrap(),
+                DomainStateValue::new(json!(state)).unwrap(),
+            ),
+        )
+        .unwrap()
+    };
+    let baseline = |state: &GoalState| {
+        DomainStateCommit::new(None, DomainMutationSource::Baseline, vec![update(0, state)])
+            .unwrap()
+    };
+    let mut state = GoalState::default();
+    assert!(goal_change(&baseline(&state)).unwrap().is_none());
+    let id = DomainRequestId::new("goal-1").unwrap();
+    state
+        .apply(
+            GoalAction::Create {
+                id: id.clone(),
+                objective: "Review the draft".into(),
+                constraints: "only in the round prompt".into(),
+                max_rounds: Some(2),
+            },
+            2,
+            true,
+        )
+        .unwrap();
+    state.goal.as_mut().unwrap().reserve().unwrap();
+    state
+        .apply(
+            GoalAction::Complete {
+                id,
+                source: GoalCompleter::Owner,
+            },
+            2,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(goal_change(&baseline(&state)).unwrap()).unwrap(),
+        json!({"current":{"id":"goal-1","objective":"Review the draft","phase":"completed","max_rounds":2,"reason":null}})
+    );
+    let invocation = SessionCommandInvocation {
+        command: rsi_agent_session_protocol::ContributionId::new(rsi_agent_goal::GOAL_COMMAND)
+            .unwrap(),
+        request_id: DomainRequestId::new("finish").unwrap(),
+        expected_revision: rsi_agent_session_protocol::CommandRevision::Durable { control_seq: 3 },
+        arguments: rsi_agent_session_protocol::CommandArguments::new(json!({
+            "action":"complete","id":"goal-1","source":{"kind":"owner"},"published_at_ms":12
+        }))
+        .unwrap(),
+    };
+    let commit = DomainStateCommit::new(
+        Some(invocation.request_id.clone()),
+        DomainMutationSource::Command { invocation },
+        vec![update(1, &state)],
+    )
+    .unwrap();
+    let encoded = serde_json::to_value(ControlEvent {
+        seq: 4,
+        after_fact_seq: 0,
+        time: 15,
+        body: ControlBody::Goal,
+        goal: goal_change(&commit).unwrap(),
+    })
+    .unwrap();
+    assert_eq!(encoded["time"], 15);
+    assert_eq!(
+        encoded["goal"]["command"],
+        json!({"action":"complete","request_id":"finish","published_at_ms":12})
+    );
+}
+
+#[test]
 fn model_command_origin_distinguishes_identical_values_and_aggregate_baselines() {
     use rsi_agent_session_protocol::{
         CommandArguments, CommandRevision, ContributionId, DomainIdentity, DomainRequestId,
@@ -37,6 +119,7 @@ fn model_command_origin_distinguishes_identical_values_and_aggregate_baselines()
             seq: 4,
             after_fact_seq: 7,
             time: 10,
+            goal: None,
             body: ControlBody::Model {
                 selection: serde_json::from_value(update.snapshot().state().value().clone())
                     .unwrap(),

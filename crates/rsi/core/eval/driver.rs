@@ -379,6 +379,7 @@ async fn exercise(
     let receipt = infrastructure(
         "Goal control",
         handle.control_goal(GoalControl {
+            published_at_ms: None,
             request_id: request.request_id,
             expected_revision: revision,
             action: GoalAction::Create {

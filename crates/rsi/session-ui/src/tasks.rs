@@ -166,6 +166,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
                 label,
                 GoalInput::Control {
                     request: GoalControl {
+                        published_at_ms: None,
                         request_id: identity()?,
                         expected_revision: revision,
                         action,
@@ -290,6 +291,7 @@ impl UiAction for GoalAction {
                         control_requested = true;
                         controller
                             .control_goal(GoalControl {
+                                published_at_ms: None,
                                 request_id: request,
                                 expected_revision: revision,
                                 action: Control::Create {

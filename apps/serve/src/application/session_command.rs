@@ -8,7 +8,9 @@ use serde_json::Value;
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     List,
-    Prepare,
+    Prepare {
+        expected_draft_revision: Option<u64>,
+    },
     Execute {
         invocation: SessionCommandInvocation,
     },
@@ -31,7 +33,7 @@ impl BoundSessions {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         let handle = if matches!(
             input.operation,
-            Operation::Prepare | Operation::Execute { .. } | Operation::Goal { .. }
+            Operation::Prepare { .. } | Operation::Execute { .. } | Operation::Goal { .. }
         ) {
             self.interactive_credential_handle(&input.request, &input.session_id)
                 .await?
@@ -41,9 +43,11 @@ impl BoundSessions {
         };
         let reply = match input.operation {
             Operation::List => serde_json::to_value(handle.commands().await.map_err(remote)?),
-            Operation::Prepare => serde_json::to_value(
+            Operation::Prepare {
+                expected_draft_revision,
+            } => serde_json::to_value(
                 handle
-                    .prepare_application_commands()
+                    .prepare_application_commands(expected_draft_revision)
                     .await
                     .map_err(remote)?,
             ),

@@ -1,5 +1,5 @@
 use crate::{
-    GOAL_COMMAND, GOAL_DOMAIN, GOAL_PROJECTION, GOAL_RESERVE, GOAL_SETTLE, GoalAction, GoalState,
+    GOAL_COMMAND, GOAL_DOMAIN, GOAL_PROJECTION, GOAL_RESERVE, GOAL_SETTLE, GoalState,
     RoundSettlement, report::ReportTool,
 };
 use async_trait::async_trait;
@@ -110,8 +110,9 @@ impl SessionCommand for Command {
         match self.operation {
             Operation::Application => state
                 .apply(
-                    serde_json::from_value::<GoalAction>(arguments.value().clone())
-                        .map_err(invalid)?,
+                    crate::state::GoalCommandArguments::deserialize(arguments.value())
+                        .map_err(invalid)?
+                        .action,
                     self.plugin.default_max_rounds,
                     matches!(context.revision, CommandRevision::Draft { .. }),
                 )

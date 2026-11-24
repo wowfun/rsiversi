@@ -45,6 +45,9 @@ the existing Session path, and supplies canonical domain/message/Turn reads.
 The controller holds that bridge during execution. It never imports the standard
 Session implementation, and the Agent Goal plugin never imports this controller.
 Application controls carry an immutable request identity and expected revision.
+A trusted application may supply the millisecond timestamp it assigned to a
+Goal change. The native command receipt binds this timestamp to the action.
+The Store records its own commit time.
 After control admission, shutdown, panic or timeout can leave its command outcome
 unknown; callers retain that original identity and reconcile its receipt.
 Only a successful create/resume receipt matching the latest captured revision
