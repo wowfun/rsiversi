@@ -304,6 +304,7 @@ async fn roster_keeps_first_root_winners_and_visible_broken_rows() {
         None,
     );
     write_preset(&configured, "broken", None, Some("name = \"Broken\"\n"));
+    write_preset(&user, "broken", Some("format = 1\n"), None);
     write_preset(
         &user,
         "mine",
@@ -317,7 +318,31 @@ async fn roster_keeps_first_root_winners_and_visible_broken_rows() {
         .with_user_root(&user);
     let catalog = AgentPresetCatalog::new(config).unwrap();
 
+    #[cfg(target_os = "linux")]
+    let shadow = {
+        use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+        let fd = inotify::init(CreateFlags::CLOEXEC | CreateFlags::NONBLOCK).unwrap();
+        inotify::add_watch(&fd, configured.join("standard"), WatchFlags::OPEN).unwrap();
+        fd
+    };
     let roster = catalog.roster().await.unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let mut events = [0_u8; 512];
+        let during_listing = rustix::io::read(&shadow, &mut events[..]);
+        fs::File::open(configured.join("standard").join(COMPOSITION_FILE)).unwrap();
+        match rustix::io::read(&shadow, &mut events[..]) {
+            Ok(_) => assert_eq!(
+                during_listing,
+                Err(rustix::io::Errno::AGAIN),
+                "listing opened a file in the shadowed preset"
+            ),
+            Err(rustix::io::Errno::AGAIN) => {
+                eprintln!("the fixture filesystem does not report file opens through inotify");
+            }
+            Err(error) => panic!("reading the file-open control: {error}"),
+        }
+    }
     assert!(roster.authorable);
     assert_eq!(
         roster

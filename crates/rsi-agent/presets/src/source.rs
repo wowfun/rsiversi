@@ -83,7 +83,7 @@ mod tests {
                         format!("'{selected}'")
                     };
                     std::fs::write(&path, format!("format = 1\n[[steps]]\nkind = 'group'\nid = 'scope'\n[steps.isolation]\n{lane} = [{value}]\n[[steps.nodes]]\nkind = 'plugin'\nid = 'leaf'\nplugin = 'test.child'\n")).unwrap();
-                    let result = compiler.compile(&path);
+                    let result = compiler.compile_shared(&path);
                     assert_eq!(result.is_ok(), known, "{lane} named={named}: {result:?}");
                 }
             }
@@ -134,14 +134,6 @@ impl AgentPresetProfileCompiler {
         self.event_markers = events.into_iter().collect();
         self.compiled = Arc::default();
         self
-    }
-
-    pub(crate) fn compile(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> std::result::Result<ProfileCandidate, String> {
-        self.compile_shared(path.as_ref())
-            .map(|candidate| (*candidate).clone())
     }
 
     pub(crate) fn compile_shared(

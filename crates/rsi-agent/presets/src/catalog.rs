@@ -272,11 +272,6 @@ struct MetadataWire {
 }
 
 #[derive(Clone, Debug)]
-struct DiscoveredPreset {
-    row: AgentPresetRow,
-}
-
-#[derive(Clone, Debug)]
 struct ResolvedPreset {
     id: AgentPresetId,
     source: AgentPresetSource,
@@ -427,12 +422,39 @@ impl AgentPresetCatalog {
     /// scan exceeds [`MAX_ROSTER_ROWS`].
     pub async fn roster(&self) -> Result<AgentPresetRoster> {
         let default = self.default_id().await?;
-        let mut presets = self.discover()?;
-        for preset in &mut presets {
-            preset.row.is_default = preset.row.id == default;
+        let mut ids = BTreeSet::new();
+        let mut presets = Vec::new();
+        let mut examined = 0;
+        for root in &self.roots {
+            let start = presets.len();
+            scan_root(root, &mut examined, |id, path| {
+                if !ids.insert(id.clone()) {
+                    return;
+                }
+                let metadata = read_metadata(&path.join(METADATA_FILE));
+                let health = match self.compiler.compile_shared(&path.join(COMPOSITION_FILE)) {
+                    Ok(_) => AgentPresetHealth::Healthy,
+                    Err(reason) => AgentPresetHealth::Broken { reason },
+                };
+                let row = AgentPresetRow {
+                    is_default: id == default,
+                    id,
+                    source: root.source,
+                    trust: root.trust,
+                    name: metadata.name,
+                    description: metadata.description,
+                    health,
+                };
+                presets.push((metadata.order.unwrap_or(i64::MAX), row));
+            })?;
+            presets[start..].sort_unstable_by(|(left_order, left), (right_order, right)| {
+                left_order
+                    .cmp(right_order)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
         }
         Ok(AgentPresetRoster {
-            presets: presets.into_iter().map(|preset| preset.row).collect(),
+            presets: presets.into_iter().map(|(_, row)| row).collect(),
             authorable: self.user_root.is_some(),
         })
     }
@@ -500,8 +522,7 @@ impl AgentPresetCatalog {
     /// Returns a bounded redacted [`PresetError::BrokenPreset`] when the
     /// selected source or one of its transitive includes no longer compiles.
     pub fn compile(&self, id: &AgentPresetId) -> Result<ProfileCandidate> {
-        self.compile_shared(id)
-            .map(|candidate| (*candidate).clone())
+        self.compile_shared(id).map(Arc::unwrap_or_clone)
     }
 
     /// Reuses an immutable compiled tree only after checking its exact source bytes.
@@ -701,23 +722,6 @@ impl AgentPresetCatalog {
         }
         Ok(ids.into_iter().collect())
     }
-
-    fn discover(&self) -> Result<Vec<DiscoveredPreset>> {
-        let mut found = Vec::new();
-        let mut ids = BTreeSet::new();
-        let mut examined = 0_usize;
-        for root in &self.roots {
-            for preset in scan_root(root, &self.compiler, &mut examined)? {
-                if ids.insert(preset.row.id.clone()) {
-                    found.push(preset);
-                }
-            }
-        }
-        for preset in &mut found {
-            preset.row.is_default = preset.row.id == self.base_default;
-        }
-        Ok(found)
-    }
 }
 
 fn resolve_in_root(root: &RootSpec, id: &AgentPresetId) -> Result<Option<ResolvedPreset>> {
@@ -775,13 +779,13 @@ fn validate_root_path(path: &Path) -> Result<()> {
 
 fn scan_root(
     root: &RootSpec,
-    compiler: &AgentPresetProfileCompiler,
     examined: &mut usize,
-) -> Result<Vec<DiscoveredPreset>> {
+    mut visit: impl FnMut(AgentPresetId, &Path),
+) -> Result<()> {
     if let Some(id) = &root.exact_id {
         let metadata = match fs::symlink_metadata(&root.path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(io_error("inspect preset row", &root.path, error)),
         };
         *examined = examined.saturating_add(1);
@@ -796,16 +800,12 @@ fn scan_root(
                 root.path.display()
             )));
         }
-        return Ok(vec![discovered_preset(
-            root,
-            id.clone(),
-            &root.path,
-            compiler,
-        )]);
+        visit(id.clone(), &root.path);
+        return Ok(());
     }
     let root_metadata = match fs::symlink_metadata(&root.path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(io_error("inspect root", &root.path, error)),
     };
     if !root_metadata.file_type().is_dir() {
@@ -816,7 +816,6 @@ fn scan_root(
     }
     let entries =
         fs::read_dir(&root.path).map_err(|error| io_error("read root", &root.path, error))?;
-    let mut presets = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| io_error("read root entry", &root.path, error))?;
         *examined = examined.saturating_add(1);
@@ -835,61 +834,11 @@ fn scan_root(
         let file_type = entry
             .file_type()
             .map_err(|error| io_error("inspect preset row", &path, error))?;
-        if !file_type.is_dir() {
-            continue;
+        if file_type.is_dir() {
+            visit(id, &path);
         }
-        let metadata = read_metadata(&path.join(METADATA_FILE));
-        let health = composition_health(&path.join(COMPOSITION_FILE), compiler);
-        presets.push((
-            metadata.order,
-            DiscoveredPreset {
-                row: AgentPresetRow {
-                    id,
-                    source: root.source,
-                    trust: root.trust,
-                    is_default: false,
-                    name: metadata.name,
-                    description: metadata.description,
-                    health,
-                },
-            },
-        ));
     }
-    presets.sort_by(|(left_order, left), (right_order, right)| {
-        left_order
-            .unwrap_or(i64::MAX)
-            .cmp(&right_order.unwrap_or(i64::MAX))
-            .then_with(|| left.row.id.cmp(&right.row.id))
-    });
-    Ok(presets.into_iter().map(|(_, preset)| preset).collect())
-}
-
-fn discovered_preset(
-    root: &RootSpec,
-    id: AgentPresetId,
-    path: &Path,
-    compiler: &AgentPresetProfileCompiler,
-) -> DiscoveredPreset {
-    let metadata = read_metadata(&path.join(METADATA_FILE));
-    let health = composition_health(&path.join(COMPOSITION_FILE), compiler);
-    DiscoveredPreset {
-        row: AgentPresetRow {
-            id,
-            source: root.source,
-            trust: root.trust,
-            is_default: false,
-            name: metadata.name,
-            description: metadata.description,
-            health,
-        },
-    }
-}
-
-fn composition_health(path: &Path, compiler: &AgentPresetProfileCompiler) -> AgentPresetHealth {
-    match compiler.compile(path) {
-        Ok(_) => AgentPresetHealth::Healthy,
-        Err(reason) => AgentPresetHealth::Broken { reason },
-    }
+    Ok(())
 }
 
 fn read_metadata(path: &Path) -> Metadata {

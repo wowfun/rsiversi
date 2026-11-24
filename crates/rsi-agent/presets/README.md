@@ -17,8 +17,10 @@ Agent presets. A preset is one directory named by a validated `AgentPresetId`,
 with a required regular, no-follow `agent.profile.toml` and optional bounded
 `preset.toml` display metadata. Explicit roster discovery is fresh on every
 call. It scans system authority, configured roots in declaration order, and an
-optional user root in that precedence order; the first row for an id wins even
-when it is broken. System authority may be either a root or one exact injected
+optional user root in that precedence order. The first directory for an id
+supplies its metadata and composition, even when the composition is broken.
+Shadowed entries count toward the scan limit without opening their files.
+System authority may be either a root or one exact injected
 id/directory pair; an exact pair never discovers or grants System trust to a
 sibling directory. Selection probes only the exact `<root>/<id>` path in the
 same precedence order and stops at the first real directory. It does not
