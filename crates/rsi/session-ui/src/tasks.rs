@@ -25,6 +25,34 @@ fn field(label: &str, value: impl Into<String>) -> UiElement {
         value: value.into(),
     }
 }
+
+fn goal_evidence(elements: &mut Vec<UiElement>, goal: &rsi_agent_goal::Goal) {
+    if let Some(reason) = &goal.reason
+        && goal
+            .report
+            .as_ref()
+            .is_none_or(|report| &report.evidence != reason)
+    {
+        elements.push(text(reason));
+    }
+    if let Some(source) = &goal.completed_by {
+        let source = match source {
+            rsi_agent_goal::GoalCompleter::Owner => "Host owner",
+            rsi_agent_goal::GoalCompleter::Plugin { name } => name,
+        };
+        elements.push(field("Completed by", source));
+    }
+    if let Some(report) = &goal.report {
+        elements.push(field(
+            "Model report",
+            format!(
+                "{:?} · Turn {}\n{}",
+                report.kind, report.source_turn, report.evidence
+            ),
+        ));
+    }
+}
+
 fn view(title: &str, elements: Vec<UiElement>) -> UiView {
     UiView {
         title: title.into(),
@@ -130,25 +158,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         if !goal.constraints.is_empty() {
             elements.push(field("Constraints", &goal.constraints));
         }
-        if let Some(reason) = &goal.reason {
-            elements.push(text(reason));
-        }
-        if let Some(source) = &goal.completed_by {
-            let source = match source {
-                rsi_agent_goal::GoalCompleter::Owner => "Host owner",
-                rsi_agent_goal::GoalCompleter::Plugin { name } => name,
-            };
-            elements.push(field("Completed by", source));
-        }
-        if let Some(report) = &goal.report {
-            elements.push(field(
-                "Model report",
-                format!(
-                    "{:?} · Turn {}\n{}",
-                    report.kind, report.source_turn, report.evidence
-                ),
-            ));
-        }
+        goal_evidence(&mut elements, goal);
     }
     if let rsi_client::GoalControlState::Pending(pending) = &control {
         elements.push(text(format!("Control outcome is unresolved. Request {}. Check its receipt before sending another control.", pending.request_id)));
@@ -412,5 +422,58 @@ impl UiAction for JobsAction {
                 result = async { jobs_view(controller(target.context())?.as_ref(), request).await } => result,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod goal_card_tests {
+    use super::*;
+    use rsi_agent_goal::{GoalReport, GoalReportKind, RoundOutcome, RoundSettlement};
+    use rsi_agent_session_protocol::TurnId;
+
+    #[test]
+    fn the_card_displays_each_reason_once_and_keeps_the_model_report_source() {
+        for outcome in [RoundOutcome::Completed, RoundOutcome::Failed] {
+            let mut state = GoalState::default();
+            state
+                .apply(
+                    Control::Create {
+                        id: DomainRequestId::new("goal").unwrap(),
+                        objective: "Review the draft".into(),
+                        constraints: String::new(),
+                        max_rounds: Some(2),
+                    },
+                    2,
+                    false,
+                )
+                .unwrap();
+            let goal = state.goal.as_mut().unwrap();
+            goal.reserve().unwrap();
+            let message = goal.reservation.as_ref().unwrap().message_id.clone();
+            let turn = TurnId::new("review-turn").unwrap();
+            goal.record_report(GoalReport {
+                kind: GoalReportKind::Blocked,
+                evidence: "Awaiting the editor".into(),
+                source_turn: turn.clone(),
+            })
+            .unwrap();
+            goal.settle(
+                &message,
+                RoundSettlement::Turn {
+                    turn_id: turn,
+                    outcome,
+                },
+            )
+            .unwrap();
+            let mut elements = Vec::new();
+            goal_evidence(&mut elements, goal);
+            let visible = serde_json::to_string(&elements).unwrap();
+            assert_eq!(visible.matches("Awaiting the editor").count(), 1);
+            assert!(visible.contains("Blocked · Turn review-turn"));
+            assert_eq!(
+                visible.contains("its model report is unverified"),
+                outcome == RoundOutcome::Failed
+            );
+        }
     }
 }

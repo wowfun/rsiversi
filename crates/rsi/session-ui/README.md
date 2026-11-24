@@ -43,7 +43,10 @@ Goal and current-Turn Jobs are separate contributed surfaces. The target watches
 the controller's existing projection cache and its one live Goal observer, then
 invalidates only this target's presentations. The Goal card decodes and validates
 the cached projection directly. Goal shows durable phase, allocated
-rounds, model report and process-local driving separately. An explicit completion
+rounds, model report and process-local driving separately. When the stopping
+reason repeats the model's report, the card shows the text once with the report's
+source Turn. A distinct controller reason and a model claim both remain visible.
+An explicit completion
 names the Host owner or the plugin that made the decision. Create requires an
 explicit positive round cap; Pause leaves claimed work running, Cancel targets
 the automatic round, and Resume never resets allocations. An active, armed Goal
