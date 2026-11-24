@@ -7589,6 +7589,7 @@ dependencies = [
  "rsi-api-protocol",
  "rsi-application",
  "rsi-approval-protocol",
+ "rsi-configuration-api",
  "rsi-credentials-protocol",
  "rsi-dev-control",
  "rsi-execution-protocol",

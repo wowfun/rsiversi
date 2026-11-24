@@ -376,6 +376,15 @@ consumer. The request reply carries the final batch when it fits inline.
 Cancelling the request or retiring the process ends the stream.
 These calls use the configured Host provider and credentials and create no
 Session, Turn, retry schedule, or stored model transcript.
+`application.presets` reads the Host's current Agent preset catalog or the
+exact composition document through the configuration API with the initiating
+caller's grant. A read spanning extension frames retains one result for that
+request. It releases the result after its final fragment, cancellation or
+request retirement. A native preset's source is the TOML accepted by the Host.
+Selecting a preset targets the existing Session's interactive handle. Only a
+blank draft accepts a change. The switch uses its current revision and never
+creates a replacement Session.
+
 `application.model.select` executes the Session's pinned model-selection command
 with a caller-supplied request identity and the current command revision. The
 existing command validates route and effort support and commits the choice.

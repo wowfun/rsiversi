@@ -8,6 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum Identity {
+    Presets(Option<rsi_agent_session_protocol::AgentPresetId>),
     Capture {
         session: SessionId,
         parent: Option<SessionId>,
@@ -67,7 +68,12 @@ impl Pages {
         identity: Identity,
         load: impl Future<Output = Result<(u64, String)>>,
     ) -> Result<Value> {
-        let key = resource_key("history", reader)?;
+        let kind = if matches!(identity, Identity::Presets(_)) {
+            "presets"
+        } else {
+            "history"
+        };
+        let key = resource_key(kind, reader)?;
         if offset == 0 {
             // The application queues before issuing RPCs. Waiting here would
             // consume slots needed to finish or close already retained pages.

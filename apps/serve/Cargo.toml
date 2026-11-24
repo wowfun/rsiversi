@@ -44,6 +44,7 @@ futures-util.workspace = true
 rsi-application = { path = "../../crates/rsi/application" }
 rsi-api-http = { path = "../../crates/rsi-api/http" }
 rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
+rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
 rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 serde_json.workspace = true

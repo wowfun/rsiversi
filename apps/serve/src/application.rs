@@ -14,6 +14,7 @@ mod language;
 #[cfg(test)]
 mod lease_tests;
 mod model_catalog;
+mod presets;
 mod session_capture;
 mod session_command;
 mod session_commands;
@@ -326,6 +327,7 @@ impl Sessions {
                 "application.session",
                 "application.sessions",
                 "application.models",
+                "application.presets",
                 "application.language",
                 "application.model.select",
                 "application.command",
@@ -368,6 +370,7 @@ impl rsi_extension::Handler for BoundSessions {
                     "application.create"=>self.create(payload).await,
                     "application.workspaces"=>self.workspace_operation(payload).await,
                     "application.models"=>self.model_catalog(payload).await,
+                    "application.presets"=>self.presets(payload).await,
                     "application.language"=>self.language(payload,&stop).await,
                     "application.model.select"=>self.select_model(payload).await,
                     "application.command"=>self.command(payload).await,

@@ -191,6 +191,72 @@ async fn continuation_preserves_parent_authority_and_rejects_revoked_callers() {
 }
 
 #[tokio::test]
+async fn preset_documents_bind_the_id_and_share_capacity_with_history() {
+    let reader = FragmentReader::new();
+    let preset = |name| {
+        Identity::Presets(Some(
+            rsi_agent_session_protocol::AgentPresetId::new(name).unwrap(),
+        ))
+    };
+    let body = "界".repeat(400_000);
+    let first = reader
+        .read("page", 0, preset("standard"), async {
+            Ok((0, body.clone()))
+        })
+        .await
+        .unwrap();
+    let offset = usize::try_from(first["next_offset"].as_u64().unwrap()).unwrap();
+    assert!(offset < body.len());
+    assert!(matches!(
+        reader
+            .read("page", offset, preset("other"), async {
+                panic!("unexpected document reload")
+            })
+            .await,
+        Err(Error::Protocol)
+    ));
+    let history = Identity::Capture {
+        session: SessionId::new("one").unwrap(),
+        parent: None,
+        fact: 0,
+        control: 0,
+    };
+    reader
+        .read("page", 0, history, async { Ok((1, body.clone())) })
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader
+            .read("third", 0, Identity::Presets(None), async {
+                panic!("unexpected catalog load")
+            })
+            .await,
+        Err(Error::Capacity)
+    ));
+    let last = reader
+        .read("page", offset, preset("standard"), async {
+            panic!("unexpected document reload")
+        })
+        .await
+        .unwrap();
+    assert_eq!(last["total_bytes"], last["next_offset"]);
+    assert_eq!(
+        format!(
+            "{}{}",
+            first["json"].as_str().unwrap(),
+            last["json"].as_str().unwrap()
+        ),
+        body
+    );
+    reader
+        .read("third", 0, Identity::Presets(None), async {
+            Ok((0, "[]".into()))
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn control_only_capture_fragments_bind_both_positions_without_recapturing() {
     let reader = FragmentReader::new();
     let identity = |fact, control| Identity::Capture {
