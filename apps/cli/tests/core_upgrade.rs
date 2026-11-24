@@ -458,6 +458,34 @@ fn same_build_in_another_prefix_does_not_own_a_shared_host_but_purge_stops_it() 
 }
 
 #[test]
+fn detached_host_checks_its_own_image_before_claiming_the_installation() {
+    let fixture = Fixture::new();
+    let layout = fixture.managed();
+    fixture.success(&["config", "init"]);
+    let origin = rsi_installation::origin::for_executable(&fixture.executable)
+        .unwrap()
+        .unwrap();
+    assert_eq!(origin.prefix, layout.prefix);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture.executable)
+        .unwrap()
+        .write_all(b"unrecorded executable overlay")
+        .unwrap();
+
+    let started = fixture.success(&["host", "start"]);
+    assert!(!String::from_utf8_lossy(&started.stderr).contains("provenance unavailable"));
+    assert!(fixture.metadata().installation.is_none());
+    let paths = rsi_service_host::ServiceHostPaths::from_host_paths(&fixture.paths).unwrap();
+    assert!(
+        std::fs::read_to_string(paths.owner_log())
+            .unwrap()
+            .contains("installation origin does not match this executable")
+    );
+    fixture.success(&["host", "stop"]);
+}
+
+#[test]
 fn stale_host_stop_does_not_claim_it_stopped_a_process() {
     let fixture = Fixture::new();
     fixture.success(&["config", "init"]);

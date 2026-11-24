@@ -557,7 +557,10 @@ pub(super) async fn start_host_coordinated(
     let origin = match source {
         Some(source) => rsi_installation::origin::for_executable(source)
             .map_err(|error| RsiError::Boot(error.to_string()))?,
-        None => rsi_service_host::installation_origin().cloned(),
+        None => rsi_installation::origin::launch_hint().unwrap_or_else(|error| {
+            eprintln!("Installation provenance unavailable: {error}");
+            None
+        }),
     };
     let executable = super::host_runtime::publish_before(paths, source, deadline.into_std())?;
     let mut command = std::process::Command::new(&executable.path);

@@ -1,12 +1,12 @@
 # rsi-service-host
 
 Startup provenance may identify a validated installation id and canonical prefix.
-The launcher registers a deferred resolver: admission runs once when provenance
-is needed for Host creation/publication, not for ordinary command parsing or queries.
-When launching an upgraded or recovered executable, admission uses that selected
-source artifact rather than the parent process's old image.
-It remains distinct from home authority and executable digest: two installations
-can share all three homes and a build. Lifecycle consumers preserve older metadata
+An ordinary launcher forwards the claimed installation id and prefix to its child.
+The process publishing owner metadata verifies its own executable against that
+installation's record on first use. Upgrade and recovery also verify the selected
+source artifact before launching it.
+Two installations can share all three homes and a build. Lifecycle consumers
+distinguish them by the admitted installation identity. They preserve older metadata
 without provenance and require explicit consent before assuming its origin.
 Reusable graceful-stop coordination fences the process start token, never silently
 escalates to force, and reports PID and operating-system recovery guidance.
