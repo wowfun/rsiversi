@@ -39,6 +39,8 @@ registration; an uncertain write must be reconciled explicitly. Setup forms
 remain bound to the revision the operator reviewed. The confirmed document and the
 selected model's description supply the new default to starting composers.
 A failed default write leaves the accepted Session selection usable.
+Choosing a default assigns only its preset ID or the model and reasoning-effort
+pair. Other fields retain their user or composition source.
 
 Setup exposes typed snapshots to native consumers and the same redacted JSON
 projection to GUI consumers. Discovery candidates are ephemeral and never imply

@@ -1,4 +1,4 @@
-use crate::wire::{Clear, Failure, List, Operation, Read, Replace};
+use crate::wire::{Clear, Failure, List, Operation, Read, Replace, SetFields};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiClient, ApiClientContract, ApiError, call_json};
 use rsi_meta::{ActivationPlan, ConfigValue, PluginFactory, PreparedActivation};
@@ -118,6 +118,26 @@ impl SettingsAccess for SettingsClient {
                 namespace: namespace.into(),
                 expected: expected.clone(),
                 value,
+            },
+        )
+        .await
+    }
+    async fn set_fields(
+        &self,
+        namespace: &str,
+        expected: &SettingsVersion,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<SettingsSnapshot> {
+        validate_namespace(namespace)?;
+        validate_section(&fields)?;
+        self.call(
+            Operation::SetFields,
+            namespace,
+            Some(expected),
+            &SetFields {
+                namespace: namespace.into(),
+                expected: expected.clone(),
+                fields,
             },
         )
         .await

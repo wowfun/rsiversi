@@ -20,11 +20,12 @@ restart reads the durable state. Admitted writes are retained by the plugin
 when their response waiter is dropped. Unknown outcomes must be reconciled with
 the Local grant snapshot; callers never automatically replay mutations.
 
-The Settings API holds a grant lease throughout its existing replace/clear
-operation. Granted remote callers may edit `rsi.agent`, select an existing default
+The Settings API holds a grant lease throughout each mutation.
+Granted remote callers may edit `rsi.agent`, select an existing default
 through `rsi.agent-presets` while preserving its roots, and edit
-`rsi.client`. Clearing preset settings is Local-only because it can
-change roots. Other namespaces remain Local-only. Namespace validation, exact
+`rsi.client`, `rsi.mcp`, and `rsi.retrieval`. Clearing preset settings is Local-only because it can
+change roots. For a field assignment on the preset namespace a device can set
+only `default`. Other namespaces require a Local caller. Namespace validation, exact
 registration identity and revision CAS still belong to Settings. Endpoint and
 provider forms use the same grant admission when composed by their owning plugin.
 

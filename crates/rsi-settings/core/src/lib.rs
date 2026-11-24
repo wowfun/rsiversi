@@ -265,6 +265,31 @@ impl SettingsAccess for Service {
         let scope = self.resolve_scope(namespace, Some(expected))?;
         scope.clear(expected.revision).await
     }
+    async fn set_fields(
+        &self,
+        namespace: &str,
+        expected: &SettingsVersion,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<SettingsSnapshot> {
+        let scope = self.resolve_scope(namespace, Some(expected))?;
+        scope
+            .update(expected.revision, |raw| {
+                let mut section = match raw {
+                    None => serde_json::Map::new(),
+                    Some(Value::Object(section)) => section.clone(),
+                    Some(_) => {
+                        return Err(SettingsError::InvalidInput(
+                            "field assignment requires an object section".into(),
+                        ));
+                    }
+                };
+                section.extend(fields);
+                let section = Value::Object(section);
+                validate_section(&section)?;
+                Ok(Some(section))
+            })
+            .await
+    }
 }
 
 impl Service {
@@ -321,11 +346,7 @@ impl Service {
         unreachable!("last CAS attempt returns its result")
     }
 
-    fn resolve_scope(
-        &self,
-        namespace: &str,
-        expected: Option<&SettingsVersion>,
-    ) -> Result<Arc<dyn SettingsScope>> {
+    fn resolve_scope(&self, namespace: &str, expected: Option<&SettingsVersion>) -> Result<Scope> {
         validate_namespace(namespace)?;
         let state = self
             .state
@@ -340,19 +361,19 @@ impl Service {
         if expected.is_some_and(|version| version.scope_id != entry.scope_id) {
             return Err(SettingsError::StaleRegistration(namespace.into()));
         }
-        Ok(Arc::new(Scope {
+        Ok(Scope {
             namespace: namespace.into(),
             registration: entry.registration,
             provider: self.provider.clone(),
             state: Arc::downgrade(&self.state),
-        }))
+        })
     }
 }
 
 #[async_trait]
 impl Settings for Service {
     fn scope(&self, namespace: &str) -> Result<Arc<dyn SettingsScope>> {
-        self.resolve_scope(namespace, None)
+        Ok(Arc::new(self.resolve_scope(namespace, None)?))
     }
 
     async fn register_migrating(
@@ -559,7 +580,7 @@ impl SettingsScope for Scope {
 
     async fn replace(&self, expected_revision: u64, value: Value) -> Result<SettingsSnapshot> {
         validate_section(&value)?;
-        self.update(expected_revision, Some(value)).await
+        self.update(expected_revision, |_| Ok(Some(value))).await
     }
 
     async fn user_value(&self, field: Option<&str>) -> Result<(SettingsVersion, Option<Value>)> {
@@ -588,7 +609,7 @@ impl SettingsScope for Scope {
     }
 
     async fn clear(&self, expected_revision: u64) -> Result<SettingsSnapshot> {
-        self.update(expected_revision, None).await
+        self.update(expected_revision, |_| Ok(None)).await
     }
 }
 
@@ -614,7 +635,7 @@ impl Scope {
     async fn update(
         &self,
         expected_revision: u64,
-        replacement: Option<Value>,
+        edit: impl FnOnce(Option<&Value>) -> Result<Option<Value>> + Send,
     ) -> Result<SettingsSnapshot> {
         if !self.provider.writable() {
             return Err(SettingsError::ReadOnly);
@@ -647,6 +668,7 @@ impl Scope {
                 Arc::clone(&entry.validator),
             )
         };
+        let replacement = edit(raw.as_ref())?;
         let resolved = resolve(&defaults, &base, replacement.as_ref());
         validate_section(&resolved)?;
         validator.validate(&resolved)?;

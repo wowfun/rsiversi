@@ -16,16 +16,19 @@ pub enum Operation {
     Read,
     /// Replace operation.
     Replace,
+    /// Set individual top-level fields.
+    SetFields,
     /// Clear operation.
     Clear,
 }
 impl Operation {
     /// All operation identities owned by this protocol.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::List,
         Self::Describe,
         Self::Read,
         Self::Replace,
+        Self::SetFields,
         Self::Clear,
     ];
     /// Local request and response policy for this operation.
@@ -38,6 +41,7 @@ impl Operation {
             Self::Describe => ("describe", OperationEffect::Read),
             Self::Read => ("read", OperationEffect::Read),
             Self::Replace => ("replace", OperationEffect::Mutation),
+            Self::SetFields => ("set_fields", OperationEffect::Mutation),
             Self::Clear => ("clear", OperationEffect::Mutation),
         };
         OperationSpec {
@@ -47,7 +51,7 @@ impl Operation {
             effect,
             access: rsi_api_protocol::OperationAccess::Authenticated,
             encoding: RequestEncoding::Json,
-            maximum_request_bytes: if matches!(self, Self::Replace) {
+            maximum_request_bytes: if matches!(self, Self::Replace | Self::SetFields) {
                 8 * 1024 * 1024
             } else {
                 1024
@@ -73,6 +77,13 @@ pub(crate) struct Replace {
     pub namespace: String,
     pub expected: SettingsVersion,
     pub value: Value,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetFields {
+    pub namespace: String,
+    pub expected: SettingsVersion,
+    pub fields: serde_json::Map<String, Value>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

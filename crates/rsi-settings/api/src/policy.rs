@@ -8,16 +8,26 @@ use std::{fmt, sync::Arc};
 pub trait SettingsMutationLease: fmt::Debug + Send + Sync + 'static {}
 impl<T: fmt::Debug + Send + Sync + 'static> SettingsMutationLease for T {}
 
+/// The concrete edit a caller requests on one registered namespace.
+#[derive(Debug)]
+pub enum SettingsMutation<'a> {
+    /// Replace the complete raw section.
+    Replace(&'a Value),
+    /// Assign only these top-level fields.
+    SetFields(&'a serde_json::Map<String, Value>),
+    /// Remove the complete raw section.
+    Clear,
+}
+
 /// Application-supplied mutation policy; discovery and reads grant no write authority.
 #[async_trait]
 pub trait SettingsMutationPolicy: fmt::Debug + Send + Sync + 'static {
-    /// Admits one replacement or clear using authenticated transport identity.
-    /// `None` means clear; a returned lease lives through durable completion.
+    /// Admits one edit using authenticated transport identity through durable completion.
     async fn admit(
         &self,
         origin: &CallOrigin,
         namespace: &str,
-        replacement: Option<&Value>,
+        mutation: SettingsMutation<'_>,
     ) -> Result<Box<dyn SettingsMutationLease>>;
 }
 
@@ -38,7 +48,7 @@ impl SettingsMutationPolicy for LocalSettingsPolicy {
         &self,
         origin: &CallOrigin,
         _: &str,
-        _: Option<&Value>,
+        _: SettingsMutation<'_>,
     ) -> Result<Box<dyn SettingsMutationLease>> {
         match origin {
             CallOrigin::Local => Ok(Box::new(())),

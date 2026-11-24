@@ -103,9 +103,17 @@ impl SettingsAccess for DefaultSettings {
     }
     async fn replace(
         &self,
+        _: &str,
+        _: &SettingsVersion,
+        _: Value,
+    ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        panic!("Setup must leave unrelated fields in their original layer")
+    }
+    async fn set_fields(
+        &self,
         namespace: &str,
         expected: &SettingsVersion,
-        value: Value,
+        fields: serde_json::Map<String, Value>,
     ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
         assert_eq!(namespace, "rsi.agent");
         let mut agent = self.0.lock().unwrap();
@@ -117,7 +125,11 @@ impl SettingsAccess for DefaultSettings {
             });
         }
         agent.revision += 1;
-        agent.value = value;
+        assert_eq!(fields.len(), 2);
+        assert!(
+            fields.contains_key("default_model") && fields.contains_key("default_reasoning_effort")
+        );
+        agent.value.as_object_mut().unwrap().extend(fields);
         Ok(agent.clone())
     }
     async fn clear(
@@ -247,7 +259,7 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
         },
         operations: vec![
             rsi_settings_api::Operation::Read.spec(),
-            rsi_settings_api::Operation::Replace.spec(),
+            rsi_settings_api::Operation::SetFields.spec(),
         ],
         result: Mutex::new(None),
         writes: 0.into(),
@@ -322,6 +334,14 @@ async fn confirmed_composer_selections_queue_in_order_and_keep_other_settings() 
 struct NoSettings(AtomicUsize);
 #[async_trait::async_trait]
 impl SettingsAccess for NoSettings {
+    async fn set_fields(
+        &self,
+        _: &str,
+        _: &SettingsVersion,
+        _: serde_json::Map<String, Value>,
+    ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        unreachable!()
+    }
     async fn list(&self, _: Option<&str>, _: usize) -> rsi_settings_protocol::Result<SettingsPage> {
         unreachable!()
     }

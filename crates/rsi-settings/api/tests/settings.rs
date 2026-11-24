@@ -207,6 +207,49 @@ async fn assert_discovery(access: &dyn SettingsAccess) -> SettingsDescription {
 }
 
 #[tokio::test]
+async fn field_assignment_preserves_inheritance_and_replaces_one_user_property() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("settings.json");
+    std::fs::write(&path, br#"{"ui":{"keep":true,"selected":{"old":5}}}"#).unwrap();
+    let server = server(&path).await;
+    let settings = server.root().lookup_local::<SettingsContract>().unwrap();
+    let registration = settings.register(spec()).unwrap();
+    let dispatch = server.root().lookup_local::<ApiDispatchContract>().unwrap();
+    let (client, _plugin) = client_composition(dispatch).await;
+    let access = client
+        .root()
+        .lookup_local::<SettingsAccessContract>()
+        .unwrap();
+    let version = registration.scope.get().unwrap().version();
+    let fields = [
+        ("selected".into(), json!({"new":7})),
+        ("optional".into(), Value::Null),
+    ];
+    let updated = access
+        .set_fields("ui", &version, fields.into_iter().collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        updated.value,
+        json!({"enabled":true,"keep":true,"selected":{"new":7},"optional":null})
+    );
+    assert!(matches!(
+        access.set_fields("ui", &version, Default::default()).await,
+        Err(SettingsError::Conflict { .. })
+    ));
+    let invalid = [("enabled".into(), json!("yes"))].into_iter().collect();
+    assert!(matches!(
+        access.set_fields("ui", &updated.version(), invalid).await,
+        Err(SettingsError::InvalidInput(_))
+    ));
+    let durable: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        durable["ui"],
+        json!({"keep":true,"selected":{"new":7},"optional":null})
+    );
+}
+
+#[tokio::test]
 async fn native_file_and_namespace_api_preserve_cas_last_good_state_and_scope_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("settings.json");

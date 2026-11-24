@@ -249,6 +249,13 @@ pub trait SettingsAccess: fmt::Debug + Send + Sync + 'static {
         expected: &SettingsVersion,
         value: Value,
     ) -> Result<SettingsSnapshot>;
+    /// Assigns top-level fields in the raw user section under the same registration and revision CAS.
+    async fn set_fields(
+        &self,
+        namespace: &str,
+        expected: &SettingsVersion,
+        fields: serde_json::Map<String, Value>,
+    ) -> Result<SettingsSnapshot>;
     /// Clears that namespace under registration and revision CAS.
     async fn clear(&self, namespace: &str, expected: &SettingsVersion) -> Result<SettingsSnapshot>;
 }
@@ -363,7 +370,7 @@ pub fn validate_namespace(namespace: &str) -> Result<()> {
 }
 
 /// Validates and returns the encoded size of one raw section.
-pub fn validate_section(value: &Value) -> Result<usize> {
+pub fn validate_section(value: &impl Serialize) -> Result<usize> {
     rsi_api_protocol::measure_json(value, MAXIMUM_SETTINGS_SECTION_BYTES).map_err(|_| {
         SettingsError::InvalidInput(format!(
             "settings section cannot encode within {MAXIMUM_SETTINGS_SECTION_BYTES} bytes"

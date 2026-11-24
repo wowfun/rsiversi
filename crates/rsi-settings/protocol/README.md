@@ -10,6 +10,11 @@ its original registration identity: retirement makes it stale even if a new
 owner registers the same name. Reads and CAS writes share the owner's validator
 and last committed value.
 
+A field assignment writes the named top-level properties to the current raw user
+object in one revision. Omitted properties keep their existing layer. A supplied
+object replaces that whole property and JSON null is a value. An absent section
+starts empty. Assigning fields to a scalar or array section fails validation.
+
 The package contains no files, environment access, plugin lifecycle, or global
 registry.
 

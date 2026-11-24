@@ -202,6 +202,14 @@ impl Fixture {
 }
 #[async_trait]
 impl SettingsAccess for Fixture {
+    async fn set_fields(
+        &self,
+        _: &str,
+        _: &SettingsVersion,
+        _: serde_json::Map<String, serde_json::Value>,
+    ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+        unreachable!()
+    }
     async fn list(
         &self,
         after: Option<&str>,

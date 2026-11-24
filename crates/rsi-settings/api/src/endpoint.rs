@@ -1,4 +1,5 @@
-use crate::wire::{Clear, List, Operation, Read, Replace, result};
+use crate::SettingsMutation;
+use crate::wire::{Clear, List, Operation, Read, Replace, SetFields, result};
 use async_trait::async_trait;
 use rsi_api_protocol::{ApiRegistrar, ApiRegistrarContract, ApiRegistration, json_handler};
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
@@ -51,11 +52,38 @@ impl SettingsApi {
                 let policy = replace_policy.clone();
                 async move {
                     let _admission = policy
-                        .admit(&context.origin, &input.namespace, Some(&input.value))
+                        .admit(
+                            &context.origin,
+                            &input.namespace,
+                            SettingsMutation::Replace(&input.value),
+                        )
                         .await?;
                     result(
                         service
                             .replace(&input.namespace, &input.expected, input.value)
+                            .await,
+                    )
+                }
+            }),
+        )?);
+        let service = settings.clone();
+        let field_policy = policy.clone();
+        registrations.push(registrar.register(
+            Operation::SetFields.spec(),
+            json_handler(move |context, input: SetFields| {
+                let service = service.clone();
+                let policy = field_policy.clone();
+                async move {
+                    let _admission = policy
+                        .admit(
+                            &context.origin,
+                            &input.namespace,
+                            SettingsMutation::SetFields(&input.fields),
+                        )
+                        .await?;
+                    result(
+                        service
+                            .set_fields(&input.namespace, &input.expected, input.fields)
                             .await,
                     )
                 }
@@ -68,7 +96,7 @@ impl SettingsApi {
                 let policy = policy.clone();
                 async move {
                     let _admission = policy
-                        .admit(&context.origin, &input.namespace, None)
+                        .admit(&context.origin, &input.namespace, SettingsMutation::Clear)
                         .await?;
                     result(service.clear(&input.namespace, &input.expected).await)
                 }

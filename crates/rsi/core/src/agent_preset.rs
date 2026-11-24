@@ -10,7 +10,7 @@ use rsi_meta_profile::{ProfileCompiler, ProfileEnvironment, ProfileLimits};
 use rsi_settings_protocol::{
     SettingsContract, SettingsError, SettingsProviderContract, SettingsScope, SettingsVersion,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ const CATALOG_FACTORY: &str = "rsi.agent.preset-catalog";
 const SETTINGS_LOCAL_FACTORY: &str = "rsi.settings.local";
 const SETTINGS_CORE_FACTORY: &str = "rsi.settings";
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RootTrustWire {
     System,
@@ -63,7 +63,7 @@ impl From<RootTrustWire> for AgentPresetTrust {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RootWire {
     path: PathBuf,
@@ -71,7 +71,7 @@ struct RootWire {
     trust: RootTrustWire,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsWire {
     #[serde(rename = "default")]
@@ -425,7 +425,7 @@ async fn boot_settings_host(
 }
 
 fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
-    let wire: SettingsWire = serde_json::from_value(value.clone())
+    let wire = SettingsWire::deserialize(value)
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
     if wire.roots.len() > MAX_ROOTS {
         return Err(SettingsError::InvalidInput(format!(

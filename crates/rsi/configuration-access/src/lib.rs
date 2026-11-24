@@ -14,13 +14,12 @@ use rsi_meta::{
     PreparedActivation,
 };
 use rsi_settings_api::{
-    SettingsMutationLease, SettingsMutationPolicy, SettingsMutationPolicyContract,
+    SettingsMutation, SettingsMutationLease, SettingsMutationPolicy, SettingsMutationPolicyContract,
 };
 use rsi_settings_protocol::{SettingsAccess, SettingsAccessContract};
 use rsi_storage_domain::storage_error;
 use rsi_storage_domain::{Domain, DomainFacilityContract, DomainSpec, Schema};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -379,26 +378,31 @@ impl SettingsMutationPolicy for ConfigurationAccess {
         &self,
         origin: &CallOrigin,
         namespace: &str,
-        replacement: Option<&Value>,
+        mutation: SettingsMutation<'_>,
     ) -> Result<Box<dyn SettingsMutationLease>> {
         let lease = self.admit(origin)?;
         if matches!(origin, CallOrigin::Device(_)) {
             match namespace {
                 "rsi.agent" | "rsi.client" | "rsi.mcp" | "rsi.retrieval" => {}
-                "rsi.agent-presets" => {
-                    let value = replacement.ok_or(ApiError::Unauthorized)?;
-                    let current = self
-                        .settings
-                        .read(namespace)
-                        .await
-                        .map_err(|_| ApiError::Unavailable)?;
-                    let fields = value.as_object().ok_or(ApiError::Unauthorized)?;
-                    if fields.keys().any(|key| key != "default" && key != "roots")
-                        || value.get("roots") != current.value.get("roots")
-                    {
-                        return Err(ApiError::Unauthorized);
+                "rsi.agent-presets" => match mutation {
+                    SettingsMutation::SetFields(fields)
+                        if fields.keys().all(|key| key == "default") => {}
+                    SettingsMutation::Replace(value) => {
+                        let fields = value.as_object().ok_or(ApiError::Unauthorized)?;
+                        if fields.keys().any(|key| key != "default" && key != "roots") {
+                            return Err(ApiError::Unauthorized);
+                        }
+                        let current = self
+                            .settings
+                            .read(namespace)
+                            .await
+                            .map_err(|_| ApiError::Unavailable)?;
+                        if fields.get("roots") != current.value.get("roots") {
+                            return Err(ApiError::Unauthorized);
+                        }
                     }
-                }
+                    _ => return Err(ApiError::Unauthorized),
+                },
                 _ => return Err(ApiError::Unauthorized),
             }
         }

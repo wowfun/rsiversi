@@ -7,7 +7,7 @@ use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
 use rsi_settings_protocol::{SettingsContract, SettingsMetadata, SettingsSpec, ValidateWith};
 use rsi_storage::StorageError;
 use rsi_storage_testkit::{BackendFactory, MemoryBackend};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
@@ -345,12 +345,27 @@ async fn existing_settings_wire_cannot_bypass_grants_or_change_preset_roots() {
                 false,
             ),
             ("rsi.agent-presets", "clear", Value::Null, false),
+            (
+                "rsi.agent-presets",
+                "set_fields",
+                json!({"default":"another"}),
+                granted,
+            ),
+            (
+                "rsi.agent-presets",
+                "set_fields",
+                json!({"roots":[]}),
+                false,
+            ),
+            ("rsi.agent-presets", "set_fields", json!({"other":1}), false),
             ("rsi.other", "replace", json!({}), false),
         ] {
             let before = settings.read(namespace).await.unwrap();
             let mut input = json!({"namespace":namespace,"expected":before.version()});
             if name == "replace" {
                 input["value"] = value;
+            } else if name == "set_fields" {
+                input["fields"] = value;
             }
             let input = ByteBudget::default()
                 .encode(&input, 8 * 1024 * 1024)
@@ -360,6 +375,7 @@ async fn existing_settings_wire_cannot_bypass_grants_or_change_preset_roots() {
                     &match name {
                         "replace" => rsi_settings_api::Operation::Replace,
                         "clear" => rsi_settings_api::Operation::Clear,
+                        "set_fields" => rsi_settings_api::Operation::SetFields,
                         _ => unreachable!(),
                     }
                     .spec()

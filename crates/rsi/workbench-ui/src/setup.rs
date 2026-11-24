@@ -225,7 +225,7 @@ impl SetupFeature {
         let selected = |settings: &Value| {
             settings["default_model"] == model && settings["default_reasoning_effort"] == effort
         };
-        let (mut version, mut document) = {
+        let (mut version, mut needs_write) = {
             let state = self.state.lock().expect("setup view poisoned");
             if !state.view.settings_writable {
                 return Ok(false);
@@ -235,15 +235,22 @@ impl SetupFeature {
                     .agent_version
                     .clone()
                     .ok_or("Setup has not been loaded")?,
-                state.view.agent.clone(),
+                !selected(&state.view.agent),
             )
         };
         let mut refreshed = false;
         let snapshot = loop {
-            if !selected(&document) {
-                document["default_model"] = model.clone();
-                document["default_reasoning_effort"] = effort.clone();
-                let result = self.settings.replace("rsi.agent", &version, document).await;
+            if needs_write {
+                let fields = [
+                    ("default_model".into(), model.clone()),
+                    ("default_reasoning_effort".into(), effort.clone()),
+                ]
+                .into_iter()
+                .collect();
+                let result = self
+                    .settings
+                    .set_fields("rsi.agent", &version, fields)
+                    .await;
                 if refreshed || !matches!(result, Err(SettingsError::Conflict { .. })) {
                     self.settings_receipt("default_model", &result);
                     break result.map_err(error)?;
@@ -257,7 +264,7 @@ impl SetupFeature {
                 break current;
             }
             version = current.version();
-            document = current.value;
+            needs_write = true;
             refreshed = true;
         };
         let version = snapshot.version();
@@ -521,7 +528,7 @@ impl SetupFeature {
         state.view.providers_writable = providers.is_some()
             && available(rsi_configuration_api::ProvidersOperation::Replace.spec());
         state.view.settings_writable =
-            agent.is_some() && available(rsi_settings_api::Operation::Replace.spec());
+            agent.is_some() && available(rsi_settings_api::Operation::SetFields.spec());
         if !state.view.credentials_available {
             state.view.credential = None;
         }
@@ -636,29 +643,24 @@ impl SetupFeature {
         value: Value,
         extra: Option<(&str, Value)>,
     ) -> Result<()> {
-        let (version, mut replacement) = {
+        let version = {
             let state = self.state.lock().expect("setup view poisoned");
             if state.view.ticket != ticket {
                 return Err("Setup changed; refresh before selecting a default".into());
             }
-            let (version, document) = if namespace == "rsi.agent" {
-                (&state.agent_version, &state.view.agent)
+            let version = if namespace == "rsi.agent" {
+                &state.agent_version
             } else {
-                (&state.presets_version, &state.view.presets)
+                &state.presets_version
             };
-            (
-                version.clone().ok_or("Setup has not been loaded")?,
-                document.clone(),
-            )
+            version.clone().ok_or("Setup has not been loaded")?
         };
-        replacement[field] = value;
+        let mut fields = serde_json::Map::new();
+        fields.insert(field.into(), value);
         if let Some((key, value)) = extra {
-            replacement[key] = value;
+            fields.insert(key.into(), value);
         }
-        let result = self
-            .settings
-            .replace(namespace, &version, replacement)
-            .await;
+        let result = self.settings.set_fields(namespace, &version, fields).await;
         self.settings_receipt(field, &result);
         result.map_err(error)?;
         self.refresh().await

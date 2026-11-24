@@ -726,6 +726,14 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl SettingsAccess for Settings {
+        async fn set_fields(
+            &self,
+            _: &str,
+            _: &SettingsVersion,
+            _: serde_json::Map<String, serde_json::Value>,
+        ) -> rsi_settings_protocol::Result<SettingsSnapshot> {
+            unreachable!()
+        }
         async fn read(&self, _: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
             Ok(SettingsSnapshot {
                 scope_id: SettingsScopeId::parse("a".repeat(32)).unwrap(),

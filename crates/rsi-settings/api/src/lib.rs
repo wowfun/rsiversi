@@ -11,7 +11,7 @@ mod wire;
 pub use client::{SettingsClient, SettingsClientFactory};
 pub use endpoint::{SettingsApi, SettingsApiFactory};
 pub use policy::{
-    LocalSettingsPolicy, SettingsMutationLease, SettingsMutationPolicy,
+    LocalSettingsPolicy, SettingsMutation, SettingsMutationLease, SettingsMutationPolicy,
     SettingsMutationPolicyContract,
 };
 pub use wire::Operation;
