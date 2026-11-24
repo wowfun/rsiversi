@@ -42,11 +42,13 @@ No history card recaptures its source or accepts a caller-supplied CAS digest.
 Goal and current-Turn Jobs are separate contributed surfaces. The target watches
 the controller's existing projection cache and its one live Goal observer, then
 invalidates only this target's presentations. Goal shows durable phase, allocated
-rounds, model report and process-local driving separately. Create requires an
+rounds, model report and process-local driving separately. An explicit completion
+names the Host owner or the plugin that made the decision. Create requires an
 explicit positive round cap; Pause leaves claimed work running, Cancel targets
 the automatic round, and Resume never resets allocations. An active, armed Goal
 offers Pause. A paused or disarmed Goal with a remaining or unsettled round offers
-Resume. Unknown controls keep
+Resume. The owner can mark an active, paused or blocked Goal complete while its
+current round finishes. Unknown controls keep
 their exact identity and expose receipt checking without automatic resubmission.
 Known control rejections remain visible across live and durable refreshes until
 the next explicit control. Live Disarmed alone does not prove that the independent

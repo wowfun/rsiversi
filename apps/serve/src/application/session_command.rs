@@ -8,8 +8,12 @@ use serde_json::Value;
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     List,
+    Prepare,
     Execute {
         invocation: SessionCommandInvocation,
+    },
+    Goal {
+        control: rsi_goal::GoalControl,
     },
     Status {
         request_id: DomainRequestId,
@@ -25,7 +29,10 @@ struct Input {
 impl BoundSessions {
     pub(super) async fn command(&self, payload: Value) -> Result<Value> {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let handle = if matches!(input.operation, Operation::Execute { .. }) {
+        let handle = if matches!(
+            input.operation,
+            Operation::Prepare | Operation::Execute { .. } | Operation::Goal { .. }
+        ) {
             self.interactive_credential_handle(&input.request, &input.session_id)
                 .await?
         } else {
@@ -34,9 +41,21 @@ impl BoundSessions {
         };
         let reply = match input.operation {
             Operation::List => serde_json::to_value(handle.commands().await.map_err(remote)?),
+            Operation::Prepare => serde_json::to_value(
+                handle
+                    .prepare_application_commands()
+                    .await
+                    .map_err(remote)?,
+            ),
             Operation::Execute { invocation } => {
                 serde_json::to_value(handle.execute_command(invocation).await.map_err(remote)?)
             }
+            Operation::Goal { control } => serde_json::to_value(
+                handle
+                    .control_application_goal(control)
+                    .await
+                    .map_err(remote)?,
+            ),
             Operation::Status { request_id } => {
                 serde_json::to_value(handle.command_status(&request_id).await.map_err(remote)?)
             }

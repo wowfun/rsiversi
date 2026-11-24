@@ -43,6 +43,22 @@ pub struct SettleGoal {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GoalFactory;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Config {
+    default_max_rounds: u64,
+    domain_only: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_max_rounds: crate::DEFAULT_MAX_ROUNDS,
+            domain_only: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct GoalPlugin {
     pub(crate) state: DomainHandle<GoalState>,
@@ -196,31 +212,26 @@ impl SessionProjection for GoalPlugin {
 #[async_trait]
 impl PluginFactory for GoalFactory {
     fn prepare(&self, desired: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Config {
-            #[serde(default = "default_max_rounds")]
-            default_max_rounds: u64,
-        }
-        fn default_max_rounds() -> u64 {
-            crate::DEFAULT_MAX_ROUNDS
-        }
-        let rounds = if desired.is_null() {
-            crate::DEFAULT_MAX_ROUNDS
+        let config = if desired.is_null() {
+            Config::default()
         } else {
             serde_json::from_value::<Config>(desired.clone())
                 .map_err(|error| MetaError::InvalidInput(error.to_string()))?
-                .default_max_rounds
         };
-        crate::validate_max_rounds(rounds).map_err(MetaError::InvalidInput)?;
-        Ok(PreparedActivation::with_state(desired.clone(), rounds, 8)
+        crate::validate_max_rounds(config.default_max_rounds).map_err(MetaError::InvalidInput)?;
+        let domain_only = config.domain_only;
+        let plan = PreparedActivation::with_state(desired.clone(), config, size_of::<Config>())
             .requiring_local::<DomainRegistrarContract>()
-            .requiring_local::<ContributionRegistrarContract>()
-            .requiring_local::<ToolRegistrarContract>())
+            .requiring_local::<ContributionRegistrarContract>();
+        Ok(if domain_only {
+            plan
+        } else {
+            plan.requiring_local::<ToolRegistrarContract>()
+        })
     }
     #[allow(clippy::too_many_lines)] // Registration leases share one rollback scope.
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
-        let default_max_rounds: u64 = plan.take_state()?;
+        let config: Config = plan.take_state()?;
         let definition = DomainDefinition::new(
             DomainIdentity::new(GOAL_DOMAIN, crate::GOAL_CODEC_VERSION).map_err(activation)?,
             &GoalState::default(),
@@ -234,7 +245,7 @@ impl PluginFactory for GoalFactory {
             .map_err(activation)?;
         let plugin = Arc::new(GoalPlugin {
             state,
-            default_max_rounds,
+            default_max_rounds: config.default_max_rounds,
         });
         let registrar = plan.local::<ContributionRegistrarContract>()?;
         let mut leases = Vec::new();
@@ -275,21 +286,7 @@ impl PluginFactory for GoalFactory {
                     .map_err(activation)?,
             );
         }
-        for (id, kind) in [
-            (
-                "rsi.goal.context",
-                ContributionKind::Context(plugin.clone()),
-            ),
-            (
-                "rsi.goal.report",
-                ContributionKind::PostTool(plugin.clone()),
-            ),
-            (
-                "rsi.goal.report-policy",
-                ContributionKind::ToolPolicy(plugin.clone()),
-            ),
-            (GOAL_PROJECTION, ContributionKind::Projection(plugin)),
-        ] {
+        let mut register = |id, kind| -> rsi_meta::Result<()> {
             leases.push(
                 registrar
                     .register(
@@ -302,24 +299,47 @@ impl PluginFactory for GoalFactory {
                     )
                     .map_err(activation)?,
             );
-        }
-        let definition = crate::report::definition().map_err(activation)?;
-        let tool_lease = plan
-            .local::<ToolRegistrarContract>()?
-            .register_batch(vec![ToolRegistration {
-                output: None,
-                definition,
-                executor: Arc::new(ReportTool),
-                run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
-                    std::time::Duration::from_secs(1),
-                ),
-            }])
-            .map_err(activation)?;
+            Ok(())
+        };
+        register(
+            GOAL_PROJECTION,
+            ContributionKind::Projection(plugin.clone()),
+        )?;
+        let tool_lease = if config.domain_only {
+            None
+        } else {
+            register(
+                "rsi.goal.context",
+                ContributionKind::Context(plugin.clone()),
+            )?;
+            register(
+                "rsi.goal.report",
+                ContributionKind::PostTool(plugin.clone()),
+            )?;
+            register(
+                "rsi.goal.report-policy",
+                ContributionKind::ToolPolicy(plugin),
+            )?;
+            Some(
+                plan.local::<ToolRegistrarContract>()?
+                    .register_batch(vec![ToolRegistration {
+                        output: None,
+                        definition: crate::report::definition().map_err(activation)?,
+                        executor: Arc::new(ReportTool),
+                        run_policy: rsi_tools_protocol::ToolRunPolicy::execution(
+                            std::time::Duration::from_secs(1),
+                        ),
+                    }])
+                    .map_err(activation)?,
+            )
+        };
         plan.defer(
             "withdraw Goal contributions",
             Box::new(move || {
                 Box::pin(async move {
-                    tool_lease.retire().map_err(|error| error.to_string())?;
+                    if let Some(tool_lease) = tool_lease {
+                        tool_lease.retire().map_err(|error| error.to_string())?;
+                    }
                     drop(leases);
                     drop(domain_lease);
                     Ok(())

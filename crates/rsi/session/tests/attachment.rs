@@ -2554,6 +2554,12 @@ impl rsi_agent_turn_protocol::SessionProjections for UnavailableProjections {
 }
 #[async_trait]
 impl rsi_agent_turn_protocol::SessionCommands for UnavailableCommands {
+    async fn publish_baseline(
+        &self,
+        _: rsi_agent_composition_protocol::PreparedFreshSession,
+    ) -> rsi_agent_turn_protocol::Result<u64> {
+        panic!("unexpected command baseline publication")
+    }
     async fn list(
         &self,
         _: rsi_agent_turn_protocol::PreparedResumeSession,

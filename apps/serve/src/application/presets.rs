@@ -73,6 +73,7 @@ impl rsi_agent_composition::ApplicationPresetSource for Source {
                 "rsi.agent.model-selection",
                 Value::Null,
             ),
+            rsi_host::ProfileEntry::new("goal", "rsi.agent.goal", json!({"domain_only":true})),
         ])))
     }
 }

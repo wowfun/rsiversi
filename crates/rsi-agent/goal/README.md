@@ -7,6 +7,14 @@ The Host controller owns live continuation authority and aggregate driving.
 `GOAL_DOMAIN` and `GOAL_CODEC_VERSION` define the exact durable identity used by
 registration, snapshot decoding and consumers that admit Goal continuations.
 
+An application preset can set `domain_only = true` when it supplies the model's
+Goal tools and prompt. The native domain, commands and projection remain
+available to all clients. In this mode the factory does not register native
+model context, tool policy, report processing or the `report_goal` tool.
+The frozen round input carries the objective, constraints, round number and
+request for verified progress. The selected preset tells the model how to
+report a result through its own Goal tools.
+
 A Goal freezes its resolved positive safe-integer round maximum (at most
 9,007,199,254,740,991). Omitted creation limits use the Goal plugin default,
 256 unless configured otherwise. There is no aggregate Turn allowance. Round
@@ -15,7 +23,11 @@ Busy admission changes neither the allocated count nor the live lease. Resume
 preserves that count. Each reservation freezes its deterministic message identity,
 complete input and digest; uncertain acknowledgement cannot allocate a new round.
 
-Application commands create, resume, pause or cancel state. Internal reserve
+Application commands create, resume, pause, cancel or explicitly complete a Goal.
+Explicit completion records its source, disarms future rounds and preserves any
+already claimed round for settlement. Its subsequent outcome cannot reopen the
+Goal. Model reports and their verification remain independent of this decision.
+Internal reserve
 and settle commands require continuation dispatch and are absent from ordinary
 command discovery. Their callbacks remain pure proposals under exact domain CAS.
 Reserve rejects an authenticated input differing from its deterministic proposed

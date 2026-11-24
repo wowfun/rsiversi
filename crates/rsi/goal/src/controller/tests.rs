@@ -230,10 +230,6 @@ async fn driver_fixture(
         .unwrap(),
     )
     .unwrap();
-    let domain = DomainSnapshot::new(
-        DomainIdentity::new(rsi_agent_goal::GOAL_DOMAIN, 2).unwrap(),
-        DomainStateValue::new(serde_json::json!({})).unwrap(),
-    );
     let mut state = GoalState::default();
     state
         .apply(
@@ -247,6 +243,14 @@ async fn driver_fixture(
             draft,
         )
         .unwrap();
+    let domain = DomainSnapshot::new(
+        DomainIdentity::new(
+            rsi_agent_goal::GOAL_DOMAIN,
+            rsi_agent_goal::GOAL_CODEC_VERSION,
+        )
+        .unwrap(),
+        DomainStateValue::new(serde_json::to_value(&state).unwrap()).unwrap(),
+    );
     let snapshot = GoalSnapshot {
         header: header.clone(),
         revision: if draft {

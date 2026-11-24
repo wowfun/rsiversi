@@ -11,6 +11,11 @@ use std::fmt;
 /// Trusted process-local command service; transports add their own authentication.
 #[async_trait]
 pub trait SessionCommands: fmt::Debug + Send + Sync + 'static {
+    /// Publishes a pinned fresh command baseline and returns its durable control watermark.
+    async fn publish_baseline(
+        &self,
+        session: rsi_agent_composition_protocol::PreparedFreshSession,
+    ) -> Result<u64>;
     /// Lists commands from the exact generation selected by this resume authority.
     async fn list(&self, session: PreparedResumeSession) -> Result<SessionCommandsView>;
     /// Executes one immutable request through bounded callback and atomic commit admission.

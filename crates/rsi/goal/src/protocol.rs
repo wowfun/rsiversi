@@ -28,6 +28,17 @@ pub struct GoalControl {
 }
 
 impl GoalControl {
+    /// A remote operator cannot establish the identity of a running plugin.
+    pub fn claims_plugin_completion(&self) -> bool {
+        matches!(
+            self.action,
+            GoalAction::Complete {
+                source: rsi_agent_goal::GoalCompleter::Plugin { .. },
+                ..
+            }
+        )
+    }
+
     /// Constructs the exact ordinary domain invocation for receipt authentication.
     ///
     /// # Errors

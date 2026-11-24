@@ -1763,21 +1763,16 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
-        if matches!(request.action, rsi_agent_goal::GoalAction::Cancel { .. }) {
-            self.require_host_owner()?;
+        if request.claims_plugin_completion() {
+            return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
-        let _admission = self.admit_mutation()?;
-        let _activity = self.begin_activity()?;
-        let request_id = request.request_id.clone();
-        self.goals
-            .as_ref()
-            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
-            .control(Arc::new(self.clone()), request)
-            .await
-            .map_err(|error| match error {
-                rsi_goal::GoalError::Conflict => SessionError::CommandConflict { request_id },
-                other => goal::session_error(other),
-            })
+        self.dispatch_goal(request).await
+    }
+    async fn control_application_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> Result<rsi_goal::GoalControlReceipt> {
+        self.dispatch_goal(request).await
     }
     async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
         let _admission = self.admit()?;
@@ -1825,6 +1820,32 @@ impl SessionHandle for LocalSessionHandle {
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView> {
         let _admission = self.admit()?;
         self.list_commands().await
+    }
+    async fn prepare_application_commands(
+        &self,
+    ) -> Result<rsi_agent_session_protocol::CommandRevision> {
+        self.require_host_owner()?;
+        let _admission = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        let mut state = self.state.lock().await;
+        let control_seq = if let HandleState::Fresh(draft) = &*state {
+            let seq = self
+                .commands
+                .publish_baseline(draft.freeze())
+                .await
+                .map_err(map_turn_error)?;
+            self.finish_fresh(&mut state, true).await?;
+            seq
+        } else {
+            state.header()?;
+            drop(state);
+            self.store
+                .read_watermarks(self.session_id())
+                .await
+                .map_err(map_store_error)?
+                .durable_control_seq
+        };
+        Ok(rsi_agent_session_protocol::CommandRevision::Durable { control_seq })
     }
     async fn message_feedback(
         &self,
@@ -1933,6 +1954,13 @@ impl SessionHandle for LocalSessionHandle {
         invocation: rsi_agent_session_protocol::SessionCommandInvocation,
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
         self.require_host_owner()?;
+        if invocation.command.as_str() == rsi_agent_goal::GOAL_COMMAND
+            && invocation.arguments.value()["action"] == "complete"
+        {
+            return Err(SessionError::Invalid(
+                "Complete the Goal through its controller".into(),
+            ));
+        }
         let _admission = self.admit_mutation()?;
         self.dispatch_command(invocation).await
     }

@@ -31,6 +31,8 @@ identity; the controller does not fabricate a persisted blocked state.
 
 Pause revokes before pending-only discard and lets an already claimed Turn
 finish. Cancel also targets the exact automatic message or claimed Turn.
+Explicit completion checks the caller's expected revision before disarming a
+live driver. A stale completion leaves the current owner's lease intact.
 Ordinary waking input has priority at acceptance and claim. Driver state is
 separate from the pure durable Goal projection and is explicitly unavailable
 after its owning Host generation ends.

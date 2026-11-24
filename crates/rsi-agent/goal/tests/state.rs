@@ -35,6 +35,62 @@ fn terminal(outcome: RoundOutcome) -> RoundSettlement {
 }
 
 #[test]
+fn plugin_completion_stops_rounds_without_verifying_or_replacing_the_model_report() {
+    let mut untouched = create(2, false);
+    let before = untouched.clone();
+    assert!(
+        untouched
+            .apply(
+                GoalAction::Complete {
+                    id: id("task"),
+                    source: rsi_agent_goal::GoalCompleter::Plugin {
+                        name: String::new()
+                    },
+                },
+                2,
+                false
+            )
+            .is_err()
+    );
+    assert_eq!(untouched, before);
+    let plugin = rsi_agent_goal::GoalCompleter::Plugin {
+        name: "@fixture/goal".into(),
+    };
+    for disposition in [
+        RoundOutcome::Failed,
+        RoundOutcome::Cancelled,
+        RoundOutcome::Completed,
+    ] {
+        let mut state = reserved(2);
+        report(&mut state, GoalReportKind::Blocked);
+        state
+            .apply(
+                GoalAction::Complete {
+                    id: id("task"),
+                    source: plugin.clone(),
+                },
+                2,
+                false,
+            )
+            .unwrap();
+        let goal = state.goal.as_mut().unwrap();
+        assert!(goal.verified_report().is_none());
+        assert!(goal.reserve().is_err());
+        let message = goal.reservation.as_ref().unwrap().message_id.clone();
+        goal.settle(&message, terminal(disposition)).unwrap();
+        assert_eq!(goal.phase, GoalPhase::Completed);
+        assert_eq!(goal.completed_by.as_ref(), Some(&plugin));
+        assert_eq!(
+            goal.verified_report().is_some(),
+            disposition == RoundOutcome::Completed
+        );
+        assert_eq!(goal.report.as_ref().unwrap().kind, GoalReportKind::Blocked);
+        assert_eq!(goal.allocated_rounds, 1);
+        state.validate().unwrap();
+    }
+}
+
+#[test]
 fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
     let mut state = create(1, true);
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
@@ -78,6 +134,10 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     assert_eq!(goal.allocated_rounds, 0);
     goal.reserve().unwrap();
     let reservation = goal.reservation.clone().unwrap();
+    assert!(reservation.input.contains(&goal.objective));
+    assert!(reservation.input.contains(&goal.constraints));
+    assert!(reservation.input.contains("round 1/2"));
+    assert!(!reservation.input.contains("report_goal"));
     assert!(goal.reserve().is_err());
     assert_eq!(goal.reservation.as_ref().unwrap(), &reservation);
     let encoded = serde_json::to_vec(&state).unwrap();

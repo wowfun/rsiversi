@@ -192,7 +192,16 @@ read from durable history.
 
 The optional Goal capability exposes explicit `control_goal`, current
 `goal_status`, and coalesced `observe_goal` on the attached Session. Controls bind
-an immutable command request identity and expected revision. Live state is a
+an immutable command request identity and expected revision. Explicit completion
+uses the controller so that the same operation stops future rounds. A device
+may submit an owner completion only with the Host owner credential. Ordinary
+Session handles reject claimed plugin attribution from both local UI and remote
+operators. The trusted Host application uses the process-local
+`control_application_goal` entry point for its Cordis caller. Before the first
+durable edit to a fresh session an owner application may call
+`prepare_application_commands` to publish the existing draft baseline and
+obtain its canonical command revision. Ordinary discovery is read-only.
+Live state is a
 bounded process-local observation, separate from the pure durable Goal projection.
 History, status, projection and receipt reads never arm a Goal. An absent Host
 controller is reported as unavailable instead of inferring execution from state.

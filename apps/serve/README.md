@@ -85,6 +85,12 @@ generation. Closing or retiring a local registration reports that owner's state;
 it never redirects those operations to a colliding parent service registration.
 
 Host command execution uses the original request credential. Command discovery and receipt lookup use the interactive Session caller. The model picker delegates a typed model selection.
+For a durable edit the trusted application can use the command `prepare`
+operation to obtain the canonical revision even before the first prompt. Its
+request credential must have Host owner authority. Ordinary `list` reads do
+not publish a draft. The trusted application's Goal operation forwards the exact control identity and expected
+revision to the Session's Goal controller. Its receipt covers the durable command and the
+live driver's status.
 
 ## Resident product listeners
 
@@ -400,7 +406,8 @@ display metadata or enumerating sibling presets.
 With `presets = true` and `tools = true`, the selected process answers exact
 `application.preset.resolve` requests for its own declarations over the active
 duplex connection. It supplies their activation status. The Host contributes the
-model context builder and the Session model-selection domain. The application
+model context builder and the Session model-selection and Goal domains. The Goal
+domain exposes the same native controls and projection to other clients. The application
 supplies its scoped request inputs and Tools. This source is available for local workspaces.
 Applications read and change the default for new Sessions through the Host's
 `rsi.agent-presets` Settings namespace. The callback returns the effective ID,

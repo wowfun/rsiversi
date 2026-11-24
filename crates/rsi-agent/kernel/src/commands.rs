@@ -60,6 +60,54 @@ impl Drop for CommandGuard {
 
 #[async_trait]
 impl SessionCommands for AgentKernel {
+    async fn publish_baseline(&self, fresh: PreparedFreshSession) -> TurnResult<u64> {
+        let header = fresh.header();
+        let id = header.session_id();
+        let admission = self.inner.submission_admission.acquire(id).await?;
+        match self.inner.store.session_summary(id).await {
+            Ok(summary) => {
+                if &summary.header != header {
+                    return Err(TurnError::Invalid("command baseline header changed".into()));
+                }
+                if !summary.is_blank() {
+                    self.validate_fresh_baseline(&fresh).await?;
+                    return Ok(summary.durable_control_seq);
+                }
+            }
+            Err(StoreError::NotFound(_)) => {}
+            Err(error) => return Err(turn_store_error(error)),
+        }
+        if fresh.first_command_task().is_some() {
+            return Err(TurnError::Invalid(
+                "a waking command requires Turn admission".into(),
+            ));
+        }
+        let append = AtomicSessionAppend {
+            session_id: id.clone(),
+            expected_fact_seq: 0,
+            expected_control_seq: 0,
+            header: Some(header.clone()),
+            facts: Vec::new(),
+            controls: lifecycle::initial_controls(&fresh)?,
+        };
+        let control_seq = append.controls.len() as u64;
+        let kernel = self.clone();
+        self.owned_commit(async move {
+            let _admission = admission;
+            kernel
+                .inner
+                .commit_agent(AtomicAgentCommit {
+                    sessions: vec![append],
+                    required_active_activations: Vec::new(),
+                    quiescent_descendants_of: None,
+                })
+                .await
+                .map_err(turn_store_error)?;
+            Ok(control_seq)
+        })
+        .await
+    }
+
     async fn list(&self, session: PreparedResumeSession) -> TurnResult<SessionCommandsView> {
         let (header, composition) = self.inner.resume_issuer.inspect(&session)?;
         let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)

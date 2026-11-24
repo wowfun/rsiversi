@@ -62,14 +62,10 @@ impl AgentKernel {
             }
             _ => None,
         });
-        let controls = initial_controls(prepared)?;
-        let expected = controls.first().and_then(|record| match record.body() {
-            AgentControlRecordBody::DomainStateCommitted { commit } => {
-                Some(commit.request_sha256())
-            }
-            _ => None,
-        });
-        if stored != expected {
+        let expected = prepared
+            .initial_commit()
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        if stored != Some(expected.request_sha256()) {
             return Err(TurnError::Invalid(
                 "fresh submission baseline disagrees with the durable session".into(),
             ));

@@ -278,6 +278,11 @@ the same idle transaction. Busy is a retryable deferral that preserves authority
 and budget; the idle wait is advisory and final admission rechecks activity.
 
 `SessionCommands` is an independent Local service published by the same Kernel.
+An application preparing a durable edit can publish its pinned fresh baseline
+through this service. It commits any held inputs with their existing delivery
+semantics. It starts no Turn. Repeating preparation for the same Header and
+initial commit digest returns the current durable control watermark. The digest
+covers the generation, domain states and staged command inputs.
 Listing and execution consume Kernel-issued resume authority, retaining the
 resident or validated cold generation. Query reads the canonical request receipt
 without executing a callback. Execution joins an identical in-flight request,

@@ -5,6 +5,25 @@ use rsi_agent_composition_protocol::{
 };
 use std::time::Duration;
 
+#[tokio::test]
+async fn simultaneous_command_preparation_publishes_one_baseline_and_no_facts() {
+    use rsi_agent_turn_protocol::SessionCommands;
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let header = header("command-baseline");
+    let prepare = || match fresh(header.clone()) {
+        SubmitSession::Fresh(prepared) => kernel.publish_baseline(prepared),
+        _ => unreachable!(),
+    };
+    let (first, second) = tokio::join!(prepare(), prepare());
+    assert_eq!(first.unwrap(), 1);
+    assert_eq!(second.unwrap(), 1);
+    let summary = store.session_summary(header.session_id()).await.unwrap();
+    assert_eq!(summary.header, header);
+    assert_eq!(summary.durable_fact_seq, 0);
+    assert_eq!(summary.durable_control_seq, 1);
+}
+
 #[derive(Debug)]
 struct Observer {
     store: Arc<dyn SessionStore>,

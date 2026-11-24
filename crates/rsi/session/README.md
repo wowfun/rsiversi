@@ -219,8 +219,12 @@ including typed initial states and its preset generation. Trusted application
 ingress can also create an ordinary shared blank at caller-resolved canonical
 execution coordinates. A Workspace registration is optional. A cold attachment restores its
 saved Header and composes its preset on demand. Changing that draft's preset
-updates the saved selection. Held command inputs and their live revisions
-expire with the draft lease. Submission defers execution dependencies
+updates the saved selection. Unpublished held inputs and live draft revisions
+expire with the draft lease. An owner application's durable command preparation
+publishes the selected baseline and its held inputs under the same session
+admission as the first prompt. The caller receives a durable revision for
+its edit, and a cold attachment can read the eventual receipt without a Turn.
+Submission defers execution dependencies
 until the selected operation requires them; fresh publication serializes the
 one transition from draft to durable attachment. Each fresh publication freezes
 that retained payload, including its baseline digest, under the same admission.

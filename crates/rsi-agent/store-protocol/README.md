@@ -235,8 +235,10 @@ binding before either stream changes; cold validation checks the canonical
 Fact interval again. A retry cannot change Facts while retaining the same
 domain request identity. Baselines and external commands do not claim Turn Facts.
 
-The initial generation selection is control one of the atomic fresh Header and
-first acceptance commit, including an empty Domain set. Generation adoption can
+The initial generation selection is control one of the atomic fresh Header
+commit, including an empty Domain set. A durable command can start with the
+selection alone. A first input publishes its acceptance with the selection.
+Generation adoption can
 introduce and explicitly remove Domains. Ordinary mutations require an existing
 matching codec and exact predecessor revision. Same request identity with
 different content conflicts. Querying a committed request recovers the exact

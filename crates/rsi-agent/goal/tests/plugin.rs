@@ -36,11 +36,14 @@ fn linked(id: &str, factory: impl PluginFactory) -> ResolvedFactory {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_config("").await
+    }
+    async fn with_config(config: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let presets_root = temp.path().join("presets");
         let preset = presets_root.join("fixture");
         std::fs::create_dir_all(&preset).unwrap();
-        std::fs::write(preset.join("agent.profile.toml"), "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"fixture.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"plan\"\nplugin = \"fixture.goal\"\n").unwrap();
+        std::fs::write(preset.join("agent.profile.toml"), format!("format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"fixture.context\"\n[[steps]]\nkind = \"plugin\"\nid = \"goal\"\nplugin = \"fixture.goal\"\n{config}")).unwrap();
         for name in ["config", "state", "cache"] {
             std::fs::create_dir_all(temp.path().join(name)).unwrap();
         }
@@ -123,6 +126,17 @@ impl Fixture {
     async fn stop(self) {
         assert!(self.runtime.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn application_preset_keeps_native_goal_commands_and_projection_with_its_own_model_tools() {
+    let fixture = Fixture::with_config("config = {domain_only=true}").await;
+    let mut draft = fixture.draft().await;
+    assert!(draft.composition().tools().definitions().is_empty());
+    create(&mut draft).await;
+    assert_eq!(view(&draft).await["goal"]["id"], "goal-task");
+    drop(draft);
+    fixture.stop().await;
 }
 
 async fn create(draft: &mut AgentSessionDraft) {

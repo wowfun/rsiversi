@@ -88,6 +88,87 @@ async fn late_goal_control_and_reconciliation_replies_preserve_observed_driver_s
 }
 
 #[tokio::test]
+async fn owner_can_complete_a_goal_without_a_model_report() {
+    let (runtime, backend, app) = fixture().await;
+    backend.host_owner.store(true, Ordering::SeqCst);
+    backend.task_panels.enabled.store(true, Ordering::SeqCst);
+    backend
+        .task_panels
+        .state
+        .lock()
+        .unwrap()
+        .apply(
+            GoalAction::Create {
+                id: DomainRequestId::new("review").unwrap(),
+                objective: "Review the draft".into(),
+                constraints: String::new(),
+                max_rounds: Some(2),
+            },
+            2,
+            true,
+        )
+        .unwrap();
+    backend.task_panels.changed.send_replace(1);
+    let session = view(&app)["surfaces"]["main"]["session"].clone();
+    app.command(&json!({"action":"open","pane":"main","session":session}).to_string())
+        .await
+        .unwrap();
+    app.command(&open(&app, "goal")).await.unwrap();
+    until(|| detail(&app).to_string().contains("Mark complete")).await;
+    let finish = crate::ui::button(&detail(&app), Some("Mark complete"));
+    app.command(&finish.to_string()).await.unwrap();
+    until(|| detail(&app).to_string().contains("Completed by")).await;
+    let panel = detail(&app).to_string();
+    assert!(panel.contains("Host owner") && !panel.contains("Model report"));
+    assert!(!panel.contains("Mark complete"));
+    assert_eq!(backend.task_panels.controls.lock().unwrap().len(), 1);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn goal_panel_names_the_completing_plugin_without_a_model_report() {
+    let (runtime, backend, app) = prepared().await;
+    let id = DomainRequestId::new("plugin-decided").unwrap();
+    {
+        let mut state = backend.task_panels.state.lock().unwrap();
+        state
+            .apply(
+                GoalAction::Create {
+                    id: id.clone(),
+                    objective: "Review the draft".into(),
+                    constraints: String::new(),
+                    max_rounds: Some(2),
+                },
+                2,
+                true,
+            )
+            .unwrap();
+        state
+            .apply(
+                GoalAction::Complete {
+                    id,
+                    source: rsi_agent_goal::GoalCompleter::Plugin {
+                        name: "@fixture/goal-review".into(),
+                    },
+                },
+                2,
+                true,
+            )
+            .unwrap();
+    }
+    backend.task_panels.changed.send_replace(2);
+    app.command(&open(&app, "goal")).await.unwrap();
+    until(|| detail(&app).to_string().contains("@fixture/goal-review")).await;
+    let panel = detail(&app).to_string();
+    assert!(
+        panel.contains("Completed by") && panel.contains("Completed") && panel.contains("0 / 2")
+    );
+    assert!(!panel.contains("Model report") && !panel.contains("Resume Goal"));
+    assert!(backend.task_panels.controls.lock().unwrap().is_empty());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn goal_form_requires_a_cap_and_unknown_control_queries_without_replaying() {
     let (runtime, backend, app) = prepared().await;
     app.command(&open(&app, "goal")).await.unwrap();

@@ -17,6 +17,31 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 impl LocalSessionHandle {
+    pub(super) async fn dispatch_goal(
+        &self,
+        request: rsi_goal::GoalControl,
+    ) -> super::Result<rsi_goal::GoalControlReceipt> {
+        use rsi_agent_goal::GoalAction;
+        if matches!(
+            request.action,
+            GoalAction::Cancel { .. } | GoalAction::Complete { .. }
+        ) {
+            self.require_host_owner()?;
+        }
+        let _admission = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        let request_id = request.request_id.clone();
+        self.goals
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
+            .control(Arc::new(self.clone()), request)
+            .await
+            .map_err(|error| match error {
+                GoalError::Conflict => SessionError::CommandConflict { request_id },
+                other => session_error(other),
+            })
+    }
+
     fn continuation_service(&self) -> GoalResult<&Arc<dyn SessionContinuations>> {
         self.continuations.as_ref().ok_or(GoalError::Unavailable)
     }

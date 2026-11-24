@@ -133,6 +133,13 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         if let Some(reason) = &goal.reason {
             elements.push(text(reason));
         }
+        if let Some(source) = &goal.completed_by {
+            let source = match source {
+                rsi_agent_goal::GoalCompleter::Owner => "Host owner",
+                rsi_agent_goal::GoalCompleter::Plugin { name } => name,
+            };
+            elements.push(field("Completed by", source));
+        }
         if let Some(report) = &goal.report {
             elements.push(field(
                 "Model report",
@@ -183,6 +190,13 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
             )?;
         }
         if controller.is_host_owner().await.unwrap_or(false) {
+            control(
+                "Mark complete",
+                Control::Complete {
+                    id: goal.id.clone(),
+                    source: rsi_agent_goal::GoalCompleter::Owner,
+                },
+            )?;
             control(
                 "Cancel automatic round",
                 Control::Cancel {

@@ -819,6 +819,14 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
         let _ = request;
         Err(SessionError::NotFound("Goal controller".into()))
     }
+    /// Controls a Goal on behalf of a trusted Host application that authenticates its plugin caller.
+    /// Portable Session clients expose only ordinary operator controls.
+    async fn control_application_goal(
+        &self,
+        _request: rsi_goal::GoalControl,
+    ) -> Result<rsi_goal::GoalControlReceipt> {
+        Err(SessionError::NotFound("application Goal controller".into()))
+    }
     /// Reads current process-local Goal driving independently of its durable projection.
     async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
         Err(SessionError::NotFound("Goal controller".into()))
@@ -854,6 +862,14 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
     /// Lists the pinned command catalog and exact draft or durable predecessor.
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView>;
+    /// Owner application preparing a durable edit, including before the first input.
+    async fn prepare_application_commands(
+        &self,
+    ) -> Result<rsi_agent_session_protocol::CommandRevision> {
+        Err(SessionError::NotFound(
+            "application command preparation".into(),
+        ))
+    }
     /// Executes one frozen logical invocation; no callback is implicitly replayed.
     async fn execute_command(
         &self,

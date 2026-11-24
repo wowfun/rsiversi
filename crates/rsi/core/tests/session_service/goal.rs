@@ -508,6 +508,156 @@ async fn pause_keeps_claimed_round_running_then_resume_preserves_allocation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn application_goal_edits_on_a_blank_keep_receipts_and_start_no_turn() {
+    use rsi_agent_session_protocol::CommandRevision;
+    let (fixture, gate, provider) = gated().await;
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "blank-goal").await;
+    let id = handle.header().await.unwrap().session_id().clone();
+    assert!(matches!(
+        handle.commands().await.unwrap().revision(),
+        CommandRevision::Draft { .. }
+    ));
+    let (first, other) = tokio::join!(
+        handle.prepare_application_commands(),
+        handle.prepare_application_commands()
+    );
+    let revision = first.unwrap();
+    assert_eq!(revision, other.unwrap());
+    assert_eq!(revision, CommandRevision::Durable { control_seq: 1 });
+    let goal_id = DomainRequestId::new("draft-review").unwrap();
+    let create = GoalControl {
+        expected_revision: revision,
+        request_id: DomainRequestId::new("create-review").unwrap(),
+        action: GoalAction::Create {
+            id: goal_id.clone(),
+            objective: "Review a draft".into(),
+            constraints: String::new(),
+            max_rounds: Some(2),
+        },
+    };
+    let created = handle
+        .execute_command(create.invocation().unwrap())
+        .await
+        .unwrap();
+    let complete = GoalControl {
+        expected_revision: created.revision(),
+        request_id: DomainRequestId::new("complete-review").unwrap(),
+        action: GoalAction::Complete {
+            id: goal_id,
+            source: rsi_agent_goal::GoalCompleter::Plugin {
+                name: "@fixture/review".into(),
+            },
+        },
+    };
+    let done = handle
+        .control_application_goal(complete.clone())
+        .await
+        .unwrap();
+    assert!(!done.live.armed);
+    assert!(running.shutdown().await.is_clean());
+    drop(handle);
+    let reopened = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = reopened
+        .session_service()
+        .unwrap()
+        .attach(&id)
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.command_status(&create.request_id).await.unwrap(),
+        Some(created)
+    );
+    assert_eq!(
+        handle.command_status(&complete.request_id).await.unwrap(),
+        Some(done.command)
+    );
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.phase, GoalPhase::Completed);
+    assert_eq!(goal.allocated_rounds, 0);
+    assert!(goal.report.is_none());
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(reopened.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_completion_preserves_the_running_round_and_survives_reattachment() {
+    let (fixture, gate, provider) = gated().await;
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "plugin-complete").await;
+    let stale = handle.commands().await.unwrap().revision();
+    start(&handle, 3).await;
+    entered(&gate).await;
+    let source = rsi_agent_goal::GoalCompleter::Plugin {
+        name: "@fixture/complete".into(),
+    };
+    let action = GoalAction::Complete {
+        id: DomainRequestId::new("test-goal").unwrap(),
+        source: source.clone(),
+    };
+    let request = GoalControl {
+        request_id: DomainRequestId::new("completion").unwrap(),
+        expected_revision: stale,
+        action,
+    };
+    assert!(matches!(
+        handle.control_goal(request.clone()).await,
+        Err(rsi_session_protocol::SessionError::Api(
+            rsi_api_protocol::ApiError::Unauthorized
+        ))
+    ));
+    assert!(
+        handle
+            .control_application_goal(request.clone())
+            .await
+            .is_err()
+    );
+    assert!(handle.goal_status().await.unwrap().armed);
+    handle
+        .control_application_goal(GoalControl {
+            request_id: DomainRequestId::new("complete-current").unwrap(),
+            expected_revision: handle.commands().await.unwrap().revision(),
+            ..request
+        })
+        .await
+        .unwrap();
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.phase, GoalPhase::Completed);
+    assert!(goal.unsettled());
+    assert!(goal.report.is_none());
+    gate.release.notify_one();
+    assert!(!stopped(&handle).await.armed);
+    let session_id = handle.header().await.unwrap().session_id().clone();
+    drop(handle);
+    assert!(running.shutdown().await.is_clean());
+    let reopened = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = reopened
+        .session_service()
+        .unwrap()
+        .attach(&session_id)
+        .await
+        .unwrap();
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.phase, GoalPhase::Completed);
+    assert_eq!(goal.completed_by, Some(source));
+    assert_eq!(goal.allocated_rounds, 1);
+    assert!(!goal.unsettled());
+    assert!(goal.verified_report().is_none());
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(reopened.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_targets_claimed_goal_and_settles_without_another_round() {
     let (fixture, gate, provider) = gated().await;
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
@@ -680,6 +830,13 @@ async fn remote_stale_cancel_is_known_rejection_and_fresh_cancel_settles_exact_r
             }),
         ),
         (
+            rsi_session_api::Operation::GoalControl,
+            serde_json::json!({
+                "request_id":"viewer-complete", "expected_revision":{"kind":"durable","control_seq":1},
+                "action":{"action":"complete","id":"test-goal","source":{"kind":"owner"}}
+            }),
+        ),
+        (
             rsi_session_api::Operation::CancelWorkflow,
             serde_json::json!("viewer-run"),
         ),
@@ -689,6 +846,14 @@ async fn remote_stale_cancel_is_known_rejection_and_fresh_cancel_settles_exact_r
             Err(rsi_api_protocol::ApiError::Unauthorized)
         ));
     }
+    assert!(matches!(
+        session_wire(&daemon.running, rsi_api_protocol::CallOrigin::Local, rsi_session_api::Operation::GoalControl,
+            &target, serde_json::json!({
+                "request_id":"unattributed", "expected_revision":handle.commands().await.unwrap().revision(),
+                "action":{"action":"complete","id":"test-goal","source":{"kind":"plugin","name":"some-package"}}
+            })).await,
+        Err(rsi_api_protocol::ApiError::Unauthorized)
+    ));
     assert!(handle.goal_status().await.unwrap().armed);
     assert!(
         handle

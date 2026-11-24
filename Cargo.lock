@@ -7600,6 +7600,7 @@ dependencies = [
  "rsi-extension",
  "rsi-extension-agent",
  "rsi-files-native-fs",
+ "rsi-goal",
  "rsi-host",
  "rsi-meta",
  "rsi-navigation",

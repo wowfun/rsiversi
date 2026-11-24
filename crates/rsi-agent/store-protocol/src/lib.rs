@@ -532,6 +532,9 @@ impl AtomicSessionAppend {
                     }
                 }
                 if commit.source().is_initial() {
+                    let standalone_selection = commit.source().is_generation()
+                        && self.controls.len() == 1
+                        && self.facts.is_empty();
                     let acceptance = self.facts.iter().any(|fact| {
                         matches!(
                             fact.body(),
@@ -545,8 +548,11 @@ impl AtomicSessionAppend {
                             AgentControlRecordBody::MessageAccepted { .. }
                         )
                     });
-                    if self.header.is_none() || record.seq() != 1 || !acceptance {
-                        return Err(StoreError::Invalid("domain baseline requires the fresh Header and first acceptance at control one".into()));
+                    if self.header.is_none()
+                        || record.seq() != 1
+                        || !(standalone_selection || acceptance)
+                    {
+                        return Err(StoreError::Invalid("control one of the fresh Header requires a standalone generation selection or first acceptance".into()));
                     }
                 }
                 if let Some(request) = commit.request_id()

@@ -36,6 +36,34 @@ pub struct Goal {
     pub reservation: Option<GoalReservation>,
     /// Latest model claim, including its source Turn even when unverified.
     pub report: Option<GoalReport>,
+    /// Authority declaring explicit completion, independent of any model report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_by: Option<GoalCompleter>,
+}
+
+/// Source of an explicit completion decision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub enum GoalCompleter {
+    /// The Host operator requested completion.
+    Owner,
+    /// A trusted application identifies the Cordis entry invoking the public Goal service.
+    Plugin {
+        /// Loader package or module name.
+        name: String,
+    },
+}
+
+impl GoalCompleter {
+    fn validate(&self) -> Result<(), String> {
+        if let Self::Plugin { name } = self
+            && (name.is_empty() || name.len() > 256 || !name.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            return Err("invalid completing plugin identity".into());
+        }
+        Ok(())
+    }
 }
 
 /// Durable phase, never a live lease indicator.
@@ -49,7 +77,7 @@ pub enum GoalPhase {
     Paused,
     /// Execution failure, model blocker or allocation cap requires user action.
     Blocked,
-    /// A completion claim's exact source Turn canonically completed.
+    /// An explicit completion was accepted or a reported completion was verified.
     Completed,
 }
 
@@ -198,6 +226,13 @@ pub enum GoalAction {
         /// Exact current Goal identity.
         id: DomainRequestId,
     },
+    /// Mark a live, paused or blocked Goal complete and stop further allocations.
+    Complete {
+        /// Exact current Goal identity.
+        id: DomainRequestId,
+        /// Decision source established by the calling application.
+        source: GoalCompleter,
+    },
 }
 
 impl GoalState {
@@ -260,6 +295,7 @@ impl GoalState {
                     reason: None,
                     reservation: None,
                     report: None,
+                    completed_by: None,
                 };
                 goal.validate()?;
                 self.goal = Some(goal);
@@ -274,6 +310,16 @@ impl GoalState {
                 }
                 goal.phase = GoalPhase::Active;
                 goal.reason = None;
+            }
+            GoalAction::Complete { id, source } => {
+                source.validate()?;
+                let goal = self.current_mut(&id)?;
+                if goal.phase == GoalPhase::Completed {
+                    return Err("the Goal is already complete".into());
+                }
+                goal.phase = GoalPhase::Completed;
+                goal.reason = None;
+                goal.completed_by = Some(source);
             }
             GoalAction::Pause { id } | GoalAction::Cancel { id } => {
                 let goal = self.current_mut(&id)?;
@@ -337,7 +383,12 @@ impl Goal {
                 return Err("Goal reservation does not match frozen task and round".into());
             }
         }
-        if self.phase == GoalPhase::Completed && !self.verified_completion() {
+        if let Some(source) = &self.completed_by {
+            if self.phase != GoalPhase::Completed {
+                return Err("explicit completion requires a completed Goal".into());
+            }
+            source.validate()?;
+        } else if self.phase == GoalPhase::Completed && !self.verified_completion() {
             return Err("completed Goal lacks a matching successful source Turn".into());
         }
         Ok(())
@@ -380,7 +431,7 @@ impl Goal {
         let message_id = MessageId::new(format!("goal-{:x}", Sha256::digest(identity)))
             .map_err(|error| error.to_string())?;
         let input = format!(
-            "Continue Goal {}. Automatic round {round}/{}.\nObjective:\n{}\nConstraints:\n{}\nWork toward the objective. Report completion with concrete evidence using report_goal, or report blocked/pause with a reason. The report does not override a failed Turn.",
+            "Continue Goal {}. Automatic round {round}/{}.\nObjective:\n{}\nConstraints:\n{}\nCheck current results. Verify the whole objective before marking it complete. Leave unfinished work active. Follow the configured Goal tool policy for blockers.",
             self.id, self.max_rounds, self.objective, self.constraints
         );
         Ok(GoalReservation {
@@ -428,6 +479,9 @@ impl Goal {
             };
         }
         reservation.settlement = Some(settlement.clone());
+        if self.completed_by.is_some() {
+            return self.validate();
+        }
         match settlement {
             RoundSettlement::Abandoned => {
                 self.phase = GoalPhase::Paused;
@@ -581,10 +635,46 @@ rsi_persistence_testkit::payload_contract!(
         goal.phase = GoalPhase::Completed;
         samples.push(state);
 
+        for source in [
+            GoalCompleter::Owner,
+            GoalCompleter::Plugin {
+                name: "@fixture/goal".into(),
+            },
+        ] {
+            let mut explicit = samples[1].clone();
+            explicit
+                .apply(
+                    GoalAction::Complete {
+                        id: DomainRequestId::new("fixture").unwrap(),
+                        source,
+                    },
+                    3,
+                    false,
+                )
+                .unwrap();
+            samples.push(explicit);
+        }
+
         let samples: Vec<GoalState> = samples;
         for sample in &samples {
             sample.validate().unwrap();
         }
         samples
+    },
+    |path, version| {
+        use rsi_agent_session_protocol::{DomainIdentity, DomainSnapshot, DomainStateValue};
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for sample in fixture["payload"]["samples"].as_array().unwrap() {
+            let value = serde_json::from_str(sample.as_str().unwrap()).unwrap();
+            let snapshot = DomainSnapshot::new(
+                DomainIdentity::new(crate::GOAL_DOMAIN, version).unwrap(),
+                DomainStateValue::new(value).unwrap(),
+            );
+            assert_eq!(
+                GoalState::decode(&snapshot).unwrap_err(),
+                "Goal domain codec is unavailable"
+            );
+        }
     }
 );

@@ -23,6 +23,7 @@ rsi-packages = { path = "../../crates/rsi/packages" }
 rsi-extension = { path = "../../crates/rsi-extension/core" }
 rsi-extension-agent = { path = "../../crates/rsi-extension/agent" }
 rsi-session-protocol = { path = "../../crates/rsi/session-protocol" }
+rsi-goal = { path = "../../crates/rsi/goal" }
 rsi-approval-protocol = { path = "../../crates/rsi-approval/protocol" }
 rsi-user-questions-protocol = { path = "../../crates/rsi-user-questions/protocol" }
 rsi-workspace-protocol = { path = "../../crates/rsi-workspace/protocol" }
