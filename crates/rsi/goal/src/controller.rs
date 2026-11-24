@@ -185,9 +185,13 @@ impl GoalService {
             GoalAction::Create { .. } | GoalAction::Resume { .. }
         );
         let cancel = matches!(request.action, GoalAction::Cancel { .. });
-        let completes = matches!(request.action, GoalAction::Complete { .. });
+        let stopped_phase = match request.action {
+            GoalAction::Complete { .. } => Some(GoalPhase::Completed),
+            GoalAction::Block { .. } => Some(GoalPhase::Blocked),
+            _ => None,
+        };
         if !starts
-            && !completes
+            && stopped_phase.is_none()
             && let Some(live) = owner.live()
             && live.lease.binding().owner == *action_id(&request.action)
         {
@@ -262,12 +266,12 @@ impl GoalService {
                         pending: Arc::default(),
                     },
                 )?;
-            } else if !completes
-                || snapshot.state.goal.as_ref().is_some_and(|goal| {
-                    &goal.id == action_id(&request.action) && goal.phase == GoalPhase::Completed
+            } else if stopped_phase.is_none_or(|phase| {
+                snapshot.state.goal.as_ref().is_some_and(|goal| {
+                    &goal.id == action_id(&request.action) && goal.phase == phase
                 })
-            {
-                if completes
+            }) {
+                if stopped_phase.is_some()
                     && let Some(live) = owner.live()
                     && live.lease.binding().owner == *action_id(&request.action)
                 {
@@ -655,6 +659,7 @@ fn action_id(action: &GoalAction) -> &DomainRequestId {
         | GoalAction::Resume { id }
         | GoalAction::Pause { id }
         | GoalAction::Cancel { id }
+        | GoalAction::Block { id, .. }
         | GoalAction::Complete { id, .. } => id,
     }
 }

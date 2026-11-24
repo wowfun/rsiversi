@@ -34,6 +34,9 @@ pub struct Goal {
     pub phase: GoalPhase,
     /// Bounded human-readable stopping explanation.
     pub reason: Option<String>,
+    /// Stable code supplied by the policy that explicitly blocked this Goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_code: Option<String>,
     /// Latest allocation only; older allocations remain in durable controls.
     pub reservation: Option<GoalReservation>,
     /// Latest model claim, including its source Turn even when unverified.
@@ -120,9 +123,6 @@ pub struct GoalReservation {
     pub message_id: MessageId,
     /// Deterministic internal reserve receipt, absent only for the staged first baseline.
     pub request_id: Option<DomainRequestId>,
-    /// Frozen text until a canonical message owns it, including after abandonment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
     /// SHA-256 of the exact UTF-8 input.
     pub input_sha256: String,
     /// Absent while acceptance, claim or terminal outcome remains unresolved.
@@ -240,6 +240,15 @@ pub enum GoalAction {
         /// Exact current Goal identity.
         id: DomainRequestId,
     },
+    /// A trusted policy stops future allocation at its observed revision.
+    Block {
+        /// Exact current Goal identity.
+        id: DomainRequestId,
+        /// Stable lower-kebab-case category.
+        code: String,
+        /// Trimmed explanation displayed to the user.
+        message: String,
+    },
     /// Mark a live, paused or blocked Goal complete and stop further allocations.
     Complete {
         /// Exact current Goal identity.
@@ -347,6 +356,7 @@ impl GoalState {
                     allocated_rounds: 0,
                     phase: GoalPhase::Active,
                     reason: None,
+                    block_code: None,
                     reservation: None,
                     report: None,
                     completed_by: None,
@@ -365,6 +375,19 @@ impl GoalState {
                 }
                 goal.phase = GoalPhase::Active;
                 goal.reason = None;
+                goal.block_code = None;
+            }
+            GoalAction::Block { id, code, message } => {
+                let goal = self.current_mut(&id)?;
+                if goal.phase != GoalPhase::Active {
+                    return Err("only an active Goal can be blocked".into());
+                }
+                goal.validate()?;
+                goal.validate_block(&code, &message)?;
+                goal.phase = GoalPhase::Blocked;
+                goal.reason = Some(message);
+                goal.block_code = Some(code);
+                return Ok(());
             }
             GoalAction::Complete { id, source } => {
                 source.validate()?;
@@ -374,6 +397,7 @@ impl GoalState {
                 }
                 goal.phase = GoalPhase::Completed;
                 goal.reason = None;
+                goal.block_code = None;
                 goal.completed_by = Some(source);
             }
             GoalAction::Pause { id } | GoalAction::Cancel { id } => {
@@ -410,15 +434,48 @@ impl GoalState {
 }
 
 impl Goal {
+    fn validate_block(&self, code: &str, message: &str) -> Result<(), String> {
+        if !code.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !code.split('-').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            })
+        {
+            return Err("Goal block code must be lower-kebab-case".into());
+        }
+        safe_text(message, 4096, false)?;
+        if message.trim() != message {
+            return Err("Goal block message must be trimmed".into());
+        }
+        // The other bounded fields use under 48 KiB even with maximal JSON escaping.
+        // Test exceptionally long policy codes against the actual view envelope.
+        if code.len() > rsi_agent_session_protocol::MAXIMUM_PROJECTION_VALUE_BYTES / 4 {
+            let mut value = serde_json::json!({"goal":self});
+            let goal = &mut value["goal"];
+            goal["phase"] = "blocked".into();
+            goal["reason"] = message.into();
+            goal["block_code"] = code.into();
+            if self.unsettled() {
+                // Space for a later model claim and settlement of the already admitted round.
+                let turn = "t".repeat(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES);
+                goal["report"] = serde_json::json!({
+                    "kind":"complete", "evidence":"\\".repeat(4096), "source_turn":turn
+                });
+                goal["reservation"]["settlement"] = serde_json::json!({
+                    "type":"turn", "outcome":"partial_failed", "turn_id":turn
+                });
+            }
+            rsi_agent_session_protocol::ProjectionValue::new(value).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
         self.validate_fields()?;
         if let Some(reservation) = &self.reservation {
             let expected = self.make_reservation(reservation.round)?;
-            let frozen_text = (!reservation
-                .settlement
-                .as_ref()
-                .is_some_and(RoundSettlement::has_accepted_message))
-            .then_some(expected.input.text.as_str());
             if reservation.round != self.allocated_rounds
                 || reservation.message_id != expected.input.message_id
                 || (reservation.request_id.is_none() && reservation.round != 1)
@@ -426,7 +483,6 @@ impl Goal {
                     .request_id
                     .as_ref()
                     .is_some_and(|id| id != &expected.request_id)
-                || reservation.input.as_deref() != frozen_text
                 || reservation.input_sha256 != expected.input_sha256
             {
                 return Err("Goal reservation does not match frozen task and round".into());
@@ -444,7 +500,14 @@ impl Goal {
         {
             return Err("invalid Goal allocation state".into());
         }
-        if let Some(reason) = &self.reason {
+        if let Some(code) = &self.block_code {
+            let message = self
+                .reason
+                .as_deref()
+                .filter(|_| self.phase == GoalPhase::Blocked)
+                .ok_or("an explicit blocker requires a blocked Goal with a reason")?;
+            self.validate_block(code, message)?;
+        } else if let Some(reason) = &self.reason {
             safe_text(reason, 4096, false)?;
         }
         if let Some(report) = &self.report {
@@ -472,7 +535,7 @@ impl Goal {
     ///
     /// # Errors
     /// Rejects stopped, already bound unresolved, exhausted or invalid Goal state.
-    pub fn reserve(&mut self) -> Result<(), String> {
+    pub fn reserve(&mut self) -> Result<String, String> {
         let prepared = self.next_reservation()?;
         let input = prepared.input;
         self.allocated_rounds = input.round;
@@ -480,12 +543,11 @@ impl Goal {
             round: input.round,
             message_id: input.message_id,
             request_id: Some(prepared.request_id),
-            input: Some(input.text),
             input_sha256: prepared.input_sha256,
             settlement: None,
         });
         self.report = None;
-        Ok(())
+        Ok(input.text)
     }
 
     /// Prepares one frozen input without modifying the current allocation or model report.
@@ -560,11 +622,9 @@ impl Goal {
                 Err("Goal settlement conflict".into())
             };
         }
-        if settlement.has_accepted_message() {
-            reservation.input = None;
-        }
         reservation.settlement = Some(settlement.clone());
         if self.completed_by.is_some()
+            || self.block_code.is_some()
             || (self.phase == GoalPhase::Paused
                 && matches!(settlement, RoundSettlement::Turn { .. })
                 && !self.verified_completion())
@@ -636,12 +696,6 @@ impl Goal {
     fn verified_completion(&self) -> bool {
         self.verified_report()
             .is_some_and(|report| report.kind == GoalReportKind::Complete)
-    }
-}
-
-impl RoundSettlement {
-    fn has_accepted_message(&self) -> bool {
-        matches!(self, Self::Discarded | Self::Turn { .. })
     }
 }
 
@@ -721,6 +775,20 @@ rsi_persistence_testkit::payload_contract!(
         )
         .unwrap();
         samples.push(state);
+
+        let mut blocked = samples[1].clone();
+        blocked
+            .apply(
+                GoalAction::Block {
+                    id: DomainRequestId::new("fixture").unwrap(),
+                    code: "needs-input".into(),
+                    message: "Choose a workspace".into(),
+                },
+                3,
+                false,
+            )
+            .unwrap();
+        samples.push(blocked);
 
         for source in [
             GoalCompleter::Owner,

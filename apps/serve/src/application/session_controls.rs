@@ -67,6 +67,8 @@ struct GoalSummary {
     phase: rsi_agent_goal::GoalPhase,
     max_rounds: u64,
     reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +107,7 @@ fn goal_change(commit: &DomainStateCommit) -> Result<Option<GoalChange<'_>>> {
             phase: goal.phase,
             max_rounds: goal.max_rounds,
             reason: goal.reason,
+            block_code: goal.block_code,
         })
     } else if commit.removed().iter().any(|id| id.id() == GOAL_DOMAIN) {
         None

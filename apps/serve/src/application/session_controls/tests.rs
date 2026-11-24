@@ -40,6 +40,20 @@ fn goal_history_contains_the_completed_state_without_copying_the_reserved_prompt
     state.goal.as_mut().unwrap().reserve().unwrap();
     state
         .apply(
+            GoalAction::Block {
+                id: id.clone(),
+                code: "needs-input".into(),
+                message: "Choose an account".into(),
+            },
+            2,
+            true,
+        )
+        .unwrap();
+    let blocked = serde_json::to_value(goal_change(&baseline(&state)).unwrap()).unwrap();
+    assert_eq!(blocked["current"]["block_code"], "needs-input");
+    assert_eq!(blocked["current"]["reason"], "Choose an account");
+    state
+        .apply(
             GoalAction::Complete {
                 id,
                 source: GoalCompleter::Owner,

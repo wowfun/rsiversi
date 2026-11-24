@@ -354,7 +354,7 @@ async fn a_maximum_escaped_blocker_survives_host_restart() {
     assert_eq!(goal.phase, GoalPhase::Blocked, "{:?}", goal.reason);
     assert_eq!(goal.allocated_rounds, 1);
     assert_eq!(goal.verified_report().unwrap().evidence, "\\".repeat(4096));
-    assert!(goal.reservation.as_ref().unwrap().input.is_none());
+    assert!(goal.reservation.as_ref().unwrap().settlement.is_some());
     drop(handle);
     assert!(running.shutdown().await.is_clean());
     provider.abort();
@@ -722,20 +722,46 @@ async fn application_disarm_keeps_the_claimed_turn_and_writes_no_goal_change() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_completion_preserves_the_running_round_and_survives_reattachment() {
+    authored_stop(
+        GoalAction::Complete {
+            id: DomainRequestId::new("test-goal").unwrap(),
+            source: rsi_agent_goal::GoalCompleter::Plugin {
+                name: "@fixture/complete".into(),
+            },
+        },
+        GoalPhase::Completed,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_block_preserves_the_running_round_and_survives_reattachment() {
+    authored_stop(
+        GoalAction::Block {
+            id: DomainRequestId::new("test-goal").unwrap(),
+            code: "needs-input".into(),
+            message: "Choose the destination".into(),
+        },
+        GoalPhase::Blocked,
+    )
+    .await;
+}
+
+async fn authored_stop(action: GoalAction, phase: GoalPhase) {
     let (fixture, gate, provider) = gated().await;
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
         .await
         .unwrap();
-    let handle = create(&running, &fixture, "plugin-complete").await;
+    let handle = create(&running, &fixture, "plugin-stop").await;
     let stale = handle.commands().await.unwrap().revision();
     start(&handle, 3).await;
     entered(&gate).await;
-    let source = rsi_agent_goal::GoalCompleter::Plugin {
-        name: "@fixture/complete".into(),
-    };
-    let action = GoalAction::Complete {
-        id: DomainRequestId::new("test-goal").unwrap(),
-        source: source.clone(),
+    let (source, code, reason) = match &action {
+        GoalAction::Complete { source, .. } => (Some(source.clone()), None, None),
+        GoalAction::Block { code, message, .. } => {
+            (None, Some(code.clone()), Some(message.clone()))
+        }
+        _ => unreachable!(),
     };
     let request = GoalControl {
         published_at_ms: None,
@@ -756,16 +782,21 @@ async fn explicit_completion_preserves_the_running_round_and_survives_reattachme
             .is_err()
     );
     assert!(handle.goal_status().await.unwrap().armed);
-    handle
-        .control_application_goal(GoalControl {
-            request_id: DomainRequestId::new("complete-current").unwrap(),
-            expected_revision: handle.commands().await.unwrap().revision(),
-            ..request
-        })
-        .await
-        .unwrap();
+    let current = GoalControl {
+        request_id: DomainRequestId::new("stop-current").unwrap(),
+        expected_revision: handle.commands().await.unwrap().revision(),
+        ..request
+    };
+    assert!(
+        handle
+            .execute_command(current.invocation().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(handle.goal_status().await.unwrap().armed);
+    handle.control_application_goal(current).await.unwrap();
     let goal = state(&handle).await.goal.unwrap();
-    assert_eq!(goal.phase, GoalPhase::Completed);
+    assert_eq!(goal.phase, phase);
     assert!(goal.unsettled());
     assert!(goal.report.is_none());
     gate.release.notify_one();
@@ -783,8 +814,10 @@ async fn explicit_completion_preserves_the_running_round_and_survives_reattachme
         .await
         .unwrap();
     let goal = state(&handle).await.goal.unwrap();
-    assert_eq!(goal.phase, GoalPhase::Completed);
-    assert_eq!(goal.completed_by, Some(source));
+    assert_eq!(goal.phase, phase);
+    assert_eq!(goal.completed_by, source);
+    assert_eq!(goal.block_code, code);
+    assert_eq!(goal.reason, reason);
     assert_eq!(goal.allocated_rounds, 1);
     assert!(!goal.unsettled());
     assert!(goal.verified_report().is_none());

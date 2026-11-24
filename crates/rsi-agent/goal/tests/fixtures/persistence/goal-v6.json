@@ -1,0 +1,373 @@
+{
+  "payload": {
+    "version": 6,
+    "schema": {
+      "root": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/0"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "goal"
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "objective": {
+              "type": "string"
+            },
+            "constraints": {
+              "type": "string"
+            },
+            "max_rounds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "allocated_rounds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "phase": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "block_code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reservation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/3"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "report": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/8"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "completed_by": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/10"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "objective",
+            "constraints",
+            "max_rounds",
+            "allocated_rounds",
+            "phase",
+            "reason",
+            "reservation",
+            "report"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "paused"
+            },
+            {
+              "type": "string",
+              "const": "blocked"
+            },
+            {
+              "type": "string",
+              "const": "completed"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "round": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "message_id": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/4"
+                }
+              ]
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input_sha256": {
+              "type": "string"
+            },
+            "settlement": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/5"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "round",
+            "message_id",
+            "request_id",
+            "input_sha256",
+            "settlement"
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "abandoned"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turn_id": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/6"
+                    }
+                  ]
+                },
+                "outcome": {
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/7"
+                    }
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "const": "turn"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "turn_id",
+                "outcome"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "string"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "completed"
+            },
+            {
+              "type": "string",
+              "const": "blocked"
+            },
+            {
+              "type": "string",
+              "const": "cancelled"
+            },
+            {
+              "type": "string",
+              "const": "failed"
+            },
+            {
+              "type": "string",
+              "const": "partial_failed"
+            },
+            {
+              "type": "string",
+              "const": "interrupted"
+            },
+            {
+              "type": "string",
+              "const": "max_tokens"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/9"
+                }
+              ]
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "source_turn": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/6"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "evidence",
+            "source_turn"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "complete"
+            },
+            {
+              "type": "string",
+              "const": "blocked"
+            },
+            {
+              "type": "string",
+              "const": "pause"
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "owner"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "plugin"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "name"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "{\"goal\":null}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":0,\"phase\":\"active\",\"reason\":null,\"reservation\":null,\"report\":null}}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":1,\"phase\":\"active\",\"reason\":null,\"reservation\":{\"round\":1,\"message_id\":\"goal-212a2039a8fb0cc71d7db13a5b199bc6a83da80d6132820a3c182a86af67845d\",\"request_id\":\"goal-reserve-e00fc12ec522da43db5ba29e323df93a4b4c2d1b676a8f89eebb1da0c957f433\",\"input_sha256\":\"1cb4ef021ada50855198df335956829aa22cdd50ef4acd9b855b3eddef84700b\",\"settlement\":null},\"report\":null}}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":1,\"phase\":\"completed\",\"reason\":\"validated\",\"reservation\":{\"round\":1,\"message_id\":\"goal-212a2039a8fb0cc71d7db13a5b199bc6a83da80d6132820a3c182a86af67845d\",\"request_id\":\"goal-reserve-e00fc12ec522da43db5ba29e323df93a4b4c2d1b676a8f89eebb1da0c957f433\",\"input_sha256\":\"1cb4ef021ada50855198df335956829aa22cdd50ef4acd9b855b3eddef84700b\",\"settlement\":{\"type\":\"turn\",\"turn_id\":\"turn\",\"outcome\":\"completed\"}},\"report\":{\"kind\":\"complete\",\"evidence\":\"validated\",\"source_turn\":\"turn\"}}}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":0,\"phase\":\"blocked\",\"reason\":\"Choose a workspace\",\"block_code\":\"needs-input\",\"reservation\":null,\"report\":null}}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":0,\"phase\":\"completed\",\"reason\":null,\"reservation\":null,\"report\":null,\"completed_by\":{\"kind\":\"owner\"}}}",
+      "{\"goal\":{\"id\":\"fixture\",\"objective\":\"Verify 中🦀\",\"constraints\":\"synthetic\",\"max_rounds\":3,\"allocated_rounds\":0,\"phase\":\"completed\",\"reason\":null,\"reservation\":null,\"report\":null,\"completed_by\":{\"kind\":\"plugin\",\"name\":\"@fixture/goal\"}}}"
+    ]
+  },
+  "sha256": "ffb043fc08af64dbde2b600215f37ab9f2117203b03776be5aa74a35c7c590d2"
+}

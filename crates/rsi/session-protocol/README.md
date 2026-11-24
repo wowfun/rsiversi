@@ -197,7 +197,9 @@ uses the controller so that the same operation stops future rounds. A device
 may submit an owner completion only with the Host owner credential. Ordinary
 Session handles reject claimed plugin attribution from both local UI and remote
 operators. The trusted Host application uses the process-local
-`control_application_goal` entry point for its Cordis caller. Before the first
+`control_application_goal` entry point for its Cordis caller. A plugin's
+explicit block uses the same entry point and carries its own code and message.
+Before the first
 durable edit to a fresh session an owner application may call
 `prepare_application_commands` to publish the existing draft baseline and
 obtain its canonical command revision. Ordinary discovery is read-only.

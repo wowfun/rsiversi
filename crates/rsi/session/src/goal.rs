@@ -24,7 +24,7 @@ impl LocalSessionHandle {
         use rsi_agent_goal::GoalAction;
         if matches!(
             request.action,
-            GoalAction::Cancel { .. } | GoalAction::Complete { .. }
+            GoalAction::Cancel { .. } | GoalAction::Complete { .. } | GoalAction::Block { .. }
         ) {
             self.require_host_owner()?;
         }

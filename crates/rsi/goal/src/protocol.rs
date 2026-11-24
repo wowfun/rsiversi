@@ -31,15 +31,17 @@ pub struct GoalControl {
 }
 
 impl GoalControl {
-    /// A remote operator cannot establish the identity of a running plugin.
-    pub fn claims_plugin_completion(&self) -> bool {
-        matches!(
-            self.action,
-            GoalAction::Complete {
-                source: rsi_agent_goal::GoalCompleter::Plugin { .. },
-                ..
-            }
-        )
+    /// Only the owning application can publish its time, policy blocker or plugin identity.
+    pub fn requires_application(&self) -> bool {
+        self.published_at_ms.is_some()
+            || matches!(
+                self.action,
+                GoalAction::Block { .. }
+                    | GoalAction::Complete {
+                        source: rsi_agent_goal::GoalCompleter::Plugin { .. },
+                        ..
+                    }
+            )
     }
 
     /// Constructs the exact ordinary domain invocation for receipt authentication.

@@ -20,17 +20,19 @@ A Goal freezes its resolved positive safe-integer round maximum (at most
 256 unless configured otherwise. There is no aggregate Turn allowance. Round
 reservation and input acceptance commit together, without refunds after acceptance.
 Busy admission changes neither the allocated count nor the live lease. Resume
-preserves that count. Each reservation freezes its deterministic message identity,
-complete input and digest; uncertain acknowledgement cannot allocate a new round.
-After a canonical Turn or pending-message discard, the reservation retains the
-message identity, input digest and settlement. The accepted Session message owns
-the frozen text. An unresolved or abandoned allocation retains its complete
-input because a canonical accepted message may still be absent.
+preserves that count. Each reservation records its deterministic message identity
+and input digest. Its exact input follows from the frozen objective, constraints,
+Goal identity, round and codec. A canonical accepted Session message owns its
+text. A lost acknowledgement cannot allocate a new round.
 Allocation constructs this reservation once. The reserve command compares the
 caller's owner, round, message identity and text with that frozen input. Reading
 a durable snapshot independently reconstructs the reservation to verify it.
 
-Application commands create, resume, pause, cancel or explicitly complete a Goal.
+Application commands create, resume, pause, cancel, block or explicitly complete a Goal.
+A trusted application can block an active Goal with a lower-kebab-case code
+and a normalized stopping explanation. The code and explanation survive
+settlement of an earlier round and cold recovery. Resume or completion clears
+the blocker. The existing command and projection byte limits apply.
 Explicit completion records its source, disarms future rounds and preserves any
 already claimed round for settlement. Its subsequent outcome cannot reopen the
 Goal. Model reports and their verification remain independent of this decision.

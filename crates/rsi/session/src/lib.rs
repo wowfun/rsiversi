@@ -1763,7 +1763,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
-        if request.claims_plugin_completion() || request.published_at_ms.is_some() {
+        if request.requires_application() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
         self.dispatch_goal(request).await
@@ -1985,10 +1985,13 @@ impl SessionHandle for LocalSessionHandle {
     ) -> Result<rsi_agent_session_protocol::SessionCommandReceipt> {
         self.require_host_owner()?;
         if invocation.command.as_str() == rsi_agent_goal::GOAL_COMMAND
-            && invocation.arguments.value()["action"] == "complete"
+            && matches!(
+                invocation.arguments.value()["action"].as_str(),
+                Some("complete" | "block")
+            )
         {
             return Err(SessionError::Invalid(
-                "Complete the Goal through its controller".into(),
+                "Use the Goal controller for this action".into(),
             ));
         }
         let _admission = self.admit_mutation()?;

@@ -35,6 +35,101 @@ fn terminal(outcome: RoundOutcome) -> RoundSettlement {
 }
 
 #[test]
+fn explicit_policy_block_survives_in_flight_work_and_clears_on_resume_or_completion() {
+    let block = |code: &str, message: &str| GoalAction::Block {
+        id: id("task"),
+        code: code.into(),
+        message: message.into(),
+    };
+    let mut state = reserved(2);
+    for (code, message) in [
+        ("A", "stop"),
+        ("bad-", "stop"),
+        ("a--1", "stop"),
+        ("2a", "stop"),
+        ("a_b", "stop"),
+        ("a", " "),
+        ("a", " padded "),
+    ] {
+        let before = state.clone();
+        assert!(state.apply(block(code, message), 2, false).is_err());
+        assert_eq!(state, before);
+    }
+    state
+        .apply(block("needs-2fa", "Choose an account."), 2, false)
+        .unwrap();
+    let before = state.clone();
+    assert!(
+        state
+            .apply(block("new", "Different message"), 2, false)
+            .is_err()
+    );
+    assert_eq!(state, before);
+    report(&mut state, GoalReportKind::Complete);
+    let goal = state.goal.as_mut().unwrap();
+    let message = goal.reservation.as_ref().unwrap().message_id.clone();
+    goal.settle(&message, terminal(RoundOutcome::Completed))
+        .unwrap();
+    assert_eq!(goal.phase, GoalPhase::Blocked);
+    assert_eq!(goal.block_code.as_deref(), Some("needs-2fa"));
+    assert_eq!(goal.reason.as_deref(), Some("Choose an account."));
+    assert!(goal.verified_report().is_some());
+    let raw = serde_json::to_vec(&state).unwrap();
+    for action in [
+        GoalAction::Resume { id: id("task") },
+        GoalAction::Complete {
+            id: id("task"),
+            source: rsi_agent_goal::GoalCompleter::Owner,
+        },
+    ] {
+        let mut cold: GoalState = serde_json::from_slice(&raw).unwrap();
+        cold.validate().unwrap();
+        cold.apply(action, 2, false).unwrap();
+        let goal = cold.goal.unwrap();
+        assert!(goal.reason.is_none() && goal.block_code.is_none());
+        assert_eq!(goal.allocated_rounds, 1);
+    }
+}
+
+#[test]
+fn policy_codes_use_remaining_projection_space_and_leave_room_for_in_flight_evidence() {
+    let mut state = create(2, false);
+    let goal = state.goal.as_mut().unwrap();
+    goal.objective = "\\".repeat(8192);
+    goal.constraints = "\"".repeat(4096);
+    goal.reserve().unwrap();
+    let block = |size| GoalAction::Block {
+        id: id("task"),
+        code: "a".repeat(size),
+        message: "\"".repeat(4096),
+    };
+    let before = state.clone();
+    assert!(state.apply(block(32 * 1024), 2, false).is_err());
+    assert_eq!(state, before);
+    state.apply(block(20 * 1024), 2, false).unwrap();
+    let goal = state.goal.as_mut().unwrap();
+    let message = goal.reservation.as_ref().unwrap().message_id.clone();
+    let turn = TurnId::new("t".repeat(rsi_agent_session_protocol::MAXIMUM_AGENT_IDENTIFIER_BYTES))
+        .unwrap();
+    goal.record_report(GoalReport {
+        source_turn: turn.clone(),
+        kind: GoalReportKind::Complete,
+        evidence: "\\".repeat(4096),
+    })
+    .unwrap();
+    goal.settle(
+        &message,
+        RoundSettlement::Turn {
+            turn_id: turn,
+            outcome: RoundOutcome::PartialFailed,
+        },
+    )
+    .unwrap();
+    assert!(rsi_agent_session_protocol::ProjectionValue::encode(&state).is_ok());
+    assert_eq!(state.goal.unwrap().block_code.unwrap().len(), 20 * 1024);
+}
+
+#[test]
 fn plugin_completion_stops_rounds_without_verifying_or_replacing_the_model_report() {
     let mut untouched = create(2, false);
     let before = untouched.clone();
@@ -132,9 +227,8 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     let mut state = create(2, true);
     let goal = state.goal.as_mut().unwrap();
     assert_eq!(goal.allocated_rounds, 0);
-    goal.reserve().unwrap();
+    let input = goal.reserve().unwrap();
     let reservation = goal.reservation.clone().unwrap();
-    let input = reservation.input.as_deref().unwrap();
     assert!(input.contains(&goal.objective));
     assert!(input.contains(&goal.constraints));
     assert!(input.contains("round 1/2"));
@@ -314,15 +408,9 @@ fn report_verification_checks_source_settlement_for_every_disposition() {
             let goal = state.goal.as_mut().unwrap();
             let reservation = goal.reservation.as_ref().unwrap();
             let message = reservation.message_id.clone();
-            let frozen = reservation.input.clone();
-            assert!(frozen.is_some());
-            let expected_input = if settlement == RoundSettlement::Abandoned {
-                frozen
-            } else {
-                None
-            };
+            let digest = reservation.input_sha256.clone();
             goal.settle(&message, settlement).unwrap();
-            assert_eq!(goal.reservation.as_ref().unwrap().input, expected_input);
+            assert_eq!(goal.reservation.as_ref().unwrap().input_sha256, digest);
             assert!(goal.verified_report().is_none());
         }
     }
@@ -438,7 +526,7 @@ fn codec_rejects_tampered_reservation_and_unverified_complete_state() {
     for change in [
         "message_id",
         "request_id",
-        "input",
+        "objective",
         "input_sha256",
         "phase",
         "round",
@@ -448,6 +536,7 @@ fn codec_rejects_tampered_reservation_and_unverified_complete_state() {
         let goal = &mut value["goal"];
         match change {
             "phase" => goal["phase"] = "completed".into(),
+            "objective" => goal["objective"] = "different frozen input".into(),
             "round" => goal["reservation"]["round"] = 2.into(),
             "count" => goal["allocated_rounds"] = 0.into(),
             field => goal["reservation"][field] = "forged".into(),
@@ -469,9 +558,9 @@ fn allocated_input_validates_at_maximum_text_sizes_and_rejects_an_invalid_goal()
     let prepared = goal.next_reservation().unwrap();
     assert_eq!(goal.allocated_rounds, 0);
     assert!(goal.reservation.is_none());
-    goal.reserve().unwrap();
+    let input = goal.reserve().unwrap();
     let admitted = goal.reservation.as_ref().unwrap();
-    assert_eq!(admitted.input.as_ref(), Some(&prepared.input.text));
+    assert_eq!(input, prepared.input.text);
     assert_eq!(admitted.message_id, prepared.input.message_id);
     assert_eq!(admitted.request_id.as_ref(), Some(&prepared.request_id));
     assert_eq!(admitted.input_sha256, prepared.input_sha256);

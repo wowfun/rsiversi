@@ -33,8 +33,8 @@ Pause revokes before pending-only discard and lets an already claimed Turn
 finish. Cancel also targets the exact automatic message or claimed Turn.
 The driver prepares only the next reservation from the current Goal. It passes
 ownership of its frozen text to admission; the previous round stays in place.
-Explicit completion checks the caller's expected revision before disarming a
-live driver. A stale completion leaves the current owner's lease intact.
+Explicit block and completion check the caller's expected revision before
+disarming a live driver. A stale command leaves the current owner's lease intact.
 A trusted application's live disarm revokes scheduling for the addressed
 Session. It preserves the durable Goal, its revision and any admitted Turn.
 Disarming an idle Session creates no scheduling owner.

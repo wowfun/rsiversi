@@ -121,7 +121,7 @@ impl SessionCommand for Command {
                 let args: ReserveGoal =
                     serde_json::from_value(arguments.value().clone()).map_err(invalid)?;
                 let goal = state.current_mut(&args.id).map_err(invalid)?;
-                goal.reserve().map_err(invalid)?;
+                let text = goal.reserve().map_err(invalid)?;
                 let reservation = goal
                     .reservation
                     .as_ref()
@@ -135,7 +135,7 @@ impl SessionCommand for Command {
                     input.owner == goal.id
                         && input.round == reservation.round
                         && input.message_id == reservation.message_id
-                        && reservation.input.as_ref() == Some(&input.text)
+                        && input.text == text
                 }) {
                     return Err(invalid(
                         "continuation input differs from the proposed Goal reservation",
