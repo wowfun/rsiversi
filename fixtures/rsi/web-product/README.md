@@ -38,6 +38,9 @@ module location so the fixture-directory CI entry point matches local execution.
 Goal lifecycle probes read the current Session status and assert the visible
 driver, composer objective and control state. They open the Goal controls
 from the paused composer strip and read the status mirror for diagnostics.
+After the owner marks the settled Goal complete, the detail view shows the
+owner's attribution and the composer removes the Goal. The provider request
+count stays at the two rounds the fixture admitted.
 
 The accessibility component fixture mounts the production React activity and
 notice owners with the document styles in Chromium and Firefox. It checks

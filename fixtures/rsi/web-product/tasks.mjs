@@ -250,6 +250,14 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await goalVisible(detail.locator(".ui-field").filter({ hasText: "Driver: Disarmed" }), "cancelled Goal driver disarmed");
     assert.match(await detail.innerText(), /Allocated rounds: 2 \/ 3/);
     await capture("goal-cancelled", true, ["Resume Goal", "Create and start Goal"]);
+    await detail.getByRole("button", { name: "Mark complete", exact: true }).click();
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Durable phase: Completed" }), "owner completion");
+    await goalVisible(detail.locator(".ui-field").filter({ hasText: "Completed by: Host owner" }), "completion attribution");
+    await goalBar.waitFor({ state: "detached" });
+    assert.equal(await detail.getByRole("button", { name: "Mark complete", exact: true }).count(), 0);
+    assert.equal(await detail.locator(".ui-field").filter({ hasText: "Model report:" }).count(), 0);
+    await capture("goal-owner-completed", true, ["Create and start Goal"]);
+    assert.equal(service.provider.requests.length, beforeGoal + 2);
 
     if (!goalOnly) {
       const beforeJob = service.provider.requests.length;
