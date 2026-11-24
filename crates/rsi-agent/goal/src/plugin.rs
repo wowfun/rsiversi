@@ -135,7 +135,7 @@ impl SessionCommand for Command {
                     input.owner == goal.id
                         && input.round == reservation.round
                         && input.message_id == reservation.message_id
-                        && input.text == reservation.input
+                        && reservation.input.as_ref() == Some(&input.text)
                 }) {
                     return Err(invalid(
                         "continuation input differs from the proposed Goal reservation",

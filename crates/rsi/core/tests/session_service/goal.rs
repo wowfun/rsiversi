@@ -267,6 +267,10 @@ async fn draft_goal_drives_exact_allocations_and_restart_reads_do_not_arm() {
 }
 
 async fn reporting_chat(Json(request): Json<serde_json::Value>) -> Response {
+    report_response(request, "complete", "The fixed fixture result was checked").await
+}
+
+async fn report_response(request: serde_json::Value, kind: &str, evidence: &str) -> Response {
     // ExclusiveFinal orders the Tool batch; the provider still closes the Turn.
     if request["messages"]
         .as_array()
@@ -276,7 +280,8 @@ async fn reporting_chat(Json(request): Json<serde_json::Value>) -> Response {
     {
         return chat().await;
     }
-    let arguments = serde_json::json!({"goal_id":"test-goal","kind":"complete","evidence":"The fixed fixture result was checked"}).to_string();
+    let arguments =
+        serde_json::json!({"goal_id":"test-goal","kind":kind,"evidence":evidence}).to_string();
     let call = serde_json::json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"goal-report","type":"function","function":{"name":"report_goal","arguments":arguments}}]},"finish_reason":null}]});
     let finish = serde_json::json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":1}});
     Response::builder()
@@ -315,6 +320,56 @@ async fn real_report_tool_completes_only_after_its_source_turn() {
     assert!(history.facts.iter().any(|fact| matches!(fact.body(), SessionFactBody::TurnTerminal { turn_id, outcome: rsi_agent_session_protocol::TurnOutcome::Completed, .. } if turn_id == &report.source_turn)));
     assert!(running.shutdown().await.is_clean());
     provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_maximum_escaped_blocker_survives_host_restart() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = fixture(&format!("http://{}", listener.local_addr().unwrap()));
+    let provider = tokio::spawn(async move {
+        let route = post(|Json(request)| async move {
+            report_response(request, "blocked", &"\\".repeat(4096)).await
+        });
+        axum::serve(listener, Router::new().route("/v1/chat/completions", route))
+            .await
+            .unwrap();
+    });
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "escaped-blocker").await;
+    control(
+        &handle,
+        "create-escaped",
+        GoalAction::Create {
+            id: DomainRequestId::new("test-goal").unwrap(),
+            objective: "\\".repeat(8192),
+            constraints: "\"".repeat(4096),
+            max_rounds: Some(2),
+        },
+    )
+    .await;
+    assert_eq!(stopped(&handle).await.stage, GoalDriverStage::Disarmed);
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.phase, GoalPhase::Blocked, "{:?}", goal.reason);
+    assert_eq!(goal.allocated_rounds, 1);
+    assert_eq!(goal.verified_report().unwrap().evidence, "\\".repeat(4096));
+    assert!(goal.reservation.as_ref().unwrap().input.is_none());
+    drop(handle);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+    let restarted = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = restarted
+        .session_service()
+        .unwrap()
+        .attach(&SessionId::new("escaped-blocker").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(state(&handle).await.goal.unwrap(), goal);
+    assert!(!handle.goal_status().await.unwrap().armed);
+    assert!(restarted.shutdown().await.is_clean());
 }
 
 async fn workflow_chat(Json(request): Json<serde_json::Value>) -> Response {

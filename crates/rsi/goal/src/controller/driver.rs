@@ -82,10 +82,7 @@ impl GoalService {
         let reservation = goal.next_reservation().map_err(invalid)?;
         let invocation = SessionCommandInvocation {
             command: ContributionId::new(GOAL_RESERVE).map_err(invalid)?,
-            request_id: reservation
-                .request_id
-                .clone()
-                .ok_or_else(|| invalid("durable reserve lacks request identity"))?,
+            request_id: reservation.request_id,
             expected_revision: snapshot.revision,
             arguments: CommandArguments::new(
                 serde_json::to_value(ReserveGoal {
@@ -98,17 +95,17 @@ impl GoalService {
         owner.publish(
             live,
             GoalDriverStage::Reserving,
-            Some(reservation.message_id.clone()),
+            Some(reservation.input.message_id.clone()),
             None,
         );
         live.begin_mutation(
             &invocation,
-            &reservation.message_id,
+            &reservation.input.message_id,
             "reserve",
             matches!(snapshot.revision, CommandRevision::Draft { .. })
-                .then(|| reservation.input_sha256.clone()),
+                .then_some(reservation.input_sha256),
         )?;
-        let input = reservation.into_input(&goal.id);
+        let input = reservation.input;
         let result = if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
             live.session
                 .reserve_initial(&live.lease, invocation, input)

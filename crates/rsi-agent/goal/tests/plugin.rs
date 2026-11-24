@@ -235,8 +235,8 @@ async fn reserve_callback_rejects_any_input_differing_from_its_proposed_allocati
     let state: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
     let goal = state.goal.unwrap();
     let reservation = goal.next_reservation().unwrap();
-    let request_id = reservation.request_id.clone().unwrap();
-    let expected = reservation.into_input(&goal.id);
+    let request_id = reservation.request_id;
+    let expected = reservation.input;
     let mut context = rsi_agent_composition_protocol::SessionCommandContext {
         outcome: None,
         history: None,
@@ -397,8 +397,8 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
     let context = rsi_agent_composition_protocol::SessionCommandContext {
         outcome: None,
         history: None,
-        request_id: reservation.request_id.clone().unwrap(),
-        continuation_input: Some(reservation.into_input(&goal.id)),
+        request_id: reservation.request_id,
+        continuation_input: Some(reservation.input),
         header: Arc::new(draft.header().clone()),
         revision: draft.revision(),
         domains: draft

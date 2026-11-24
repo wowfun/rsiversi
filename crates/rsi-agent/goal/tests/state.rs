@@ -134,10 +134,11 @@ fn proposed_allocation_is_frozen_and_cannot_refund_or_double_allocate() {
     assert_eq!(goal.allocated_rounds, 0);
     goal.reserve().unwrap();
     let reservation = goal.reservation.clone().unwrap();
-    assert!(reservation.input.contains(&goal.objective));
-    assert!(reservation.input.contains(&goal.constraints));
-    assert!(reservation.input.contains("round 1/2"));
-    assert!(!reservation.input.contains("report_goal"));
+    let input = reservation.input.as_deref().unwrap();
+    assert!(input.contains(&goal.objective));
+    assert!(input.contains(&goal.constraints));
+    assert!(input.contains("round 1/2"));
+    assert!(!input.contains("report_goal"));
     assert!(goal.reserve().is_err());
     assert_eq!(goal.reservation.as_ref().unwrap(), &reservation);
     let encoded = serde_json::to_vec(&state).unwrap();
@@ -311,8 +312,17 @@ fn report_verification_checks_source_settlement_for_every_disposition() {
             let mut state = reserved(2);
             report(&mut state, kind);
             let goal = state.goal.as_mut().unwrap();
-            let message = goal.reservation.as_ref().unwrap().message_id.clone();
+            let reservation = goal.reservation.as_ref().unwrap();
+            let message = reservation.message_id.clone();
+            let frozen = reservation.input.clone();
+            assert!(frozen.is_some());
+            let expected_input = if settlement == RoundSettlement::Abandoned {
+                frozen
+            } else {
+                None
+            };
             goal.settle(&message, settlement).unwrap();
+            assert_eq!(goal.reservation.as_ref().unwrap().input, expected_input);
             assert!(goal.verified_report().is_none());
         }
     }
@@ -460,9 +470,58 @@ fn allocated_input_validates_at_maximum_text_sizes_and_rejects_an_invalid_goal()
     assert_eq!(goal.allocated_rounds, 0);
     assert!(goal.reservation.is_none());
     goal.reserve().unwrap();
-    assert_eq!(goal.reservation.as_ref(), Some(&prepared));
+    let admitted = goal.reservation.as_ref().unwrap();
+    assert_eq!(admitted.input.as_ref(), Some(&prepared.input.text));
+    assert_eq!(admitted.message_id, prepared.input.message_id);
+    assert_eq!(admitted.request_id.as_ref(), Some(&prepared.request_id));
+    assert_eq!(admitted.input_sha256, prepared.input_sha256);
     assert!(goal.next_reservation().is_err());
     state.validate().unwrap();
+}
+
+#[test]
+fn a_settled_blocked_goal_fits_the_public_projection_at_escaped_text_limits() {
+    let mut state = create(2, false);
+    let goal = state.goal.as_mut().unwrap();
+    goal.objective = "\\".repeat(8192);
+    goal.constraints = "\"".repeat(4096);
+    goal.reserve().unwrap();
+    let reservation = goal.reservation.as_ref().unwrap();
+    let message = reservation.message_id.clone();
+    let digest = reservation.input_sha256.clone();
+    let turn = TurnId::new("source").unwrap();
+    goal.record_report(GoalReport {
+        kind: GoalReportKind::Blocked,
+        evidence: "\\".repeat(4096),
+        source_turn: turn.clone(),
+    })
+    .unwrap();
+    goal.settle(
+        &message,
+        RoundSettlement::Turn {
+            turn_id: turn,
+            outcome: RoundOutcome::Completed,
+        },
+    )
+    .unwrap();
+    let view = rsi_agent_session_protocol::ProjectionValue::encode(&state).unwrap();
+    let receipt = &view.value()["goal"]["reservation"];
+    assert_eq!(receipt["message_id"], message.as_str());
+    assert_eq!(receipt["input_sha256"], digest);
+    assert!(receipt.get("input").is_none());
+    let reopened: GoalState = serde_json::from_value(view.value().clone()).unwrap();
+    reopened.validate().unwrap();
+    assert_eq!(reopened, state);
+    assert_eq!(
+        reopened
+            .goal
+            .unwrap()
+            .verified_report()
+            .unwrap()
+            .evidence
+            .len(),
+        4096
+    );
 }
 
 #[test]

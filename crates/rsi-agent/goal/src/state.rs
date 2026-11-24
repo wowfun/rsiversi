@@ -1,6 +1,8 @@
 //! Bounded semantic codec and effect-free state transitions.
 
-use rsi_agent_session_protocol::{DomainRequestId, MessageId, TurnId, TurnOutcome};
+use rsi_agent_session_protocol::{
+    ContinuationInput, DomainRequestId, MessageId, TurnId, TurnOutcome,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -107,7 +109,7 @@ pub struct GoalReport {
     pub source_turn: TurnId,
 }
 
-/// Complete frozen input of one charged round.
+/// Identity, evidence and disposition of one charged round.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -118,12 +120,24 @@ pub struct GoalReservation {
     pub message_id: MessageId,
     /// Deterministic internal reserve receipt, absent only for the staged first baseline.
     pub request_id: Option<DomainRequestId>,
-    /// Exact retry input; never regenerated after uncertain acceptance.
-    pub input: String,
+    /// Frozen text until a canonical message owns it, including after abandonment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
     /// SHA-256 of the exact UTF-8 input.
     pub input_sha256: String,
     /// Absent while acceptance, claim or terminal outcome remains unresolved.
     pub settlement: Option<RoundSettlement>,
+}
+
+/// Newly prepared Kernel input with its exact reservation identity and digest.
+#[derive(Debug)]
+pub struct PreparedGoalRound {
+    /// Complete input moved to the Kernel upon admission.
+    pub input: ContinuationInput,
+    /// Deterministic identity for the reserve command.
+    pub request_id: DomainRequestId,
+    /// SHA-256 of the input text for receipt reconciliation.
+    pub input_sha256: String,
 }
 
 /// Small outcome retained with the latest reservation.
@@ -400,12 +414,19 @@ impl Goal {
         self.validate_fields()?;
         if let Some(reservation) = &self.reservation {
             let expected = self.make_reservation(reservation.round)?;
+            let frozen_text = (!reservation
+                .settlement
+                .as_ref()
+                .is_some_and(RoundSettlement::has_accepted_message))
+            .then_some(expected.input.text.as_str());
             if reservation.round != self.allocated_rounds
-                || reservation.message_id != expected.message_id
+                || reservation.message_id != expected.input.message_id
                 || (reservation.request_id.is_none() && reservation.round != 1)
-                || (reservation.request_id.is_some()
-                    && reservation.request_id != expected.request_id)
-                || reservation.input != expected.input
+                || reservation
+                    .request_id
+                    .as_ref()
+                    .is_some_and(|id| id != &expected.request_id)
+                || reservation.input.as_deref() != frozen_text
                 || reservation.input_sha256 != expected.input_sha256
             {
                 return Err("Goal reservation does not match frozen task and round".into());
@@ -452,9 +473,17 @@ impl Goal {
     /// # Errors
     /// Rejects stopped, already bound unresolved, exhausted or invalid Goal state.
     pub fn reserve(&mut self) -> Result<(), String> {
-        let reservation = self.next_reservation()?;
-        self.allocated_rounds = reservation.round;
-        self.reservation = Some(reservation);
+        let prepared = self.next_reservation()?;
+        let input = prepared.input;
+        self.allocated_rounds = input.round;
+        self.reservation = Some(GoalReservation {
+            round: input.round,
+            message_id: input.message_id,
+            request_id: Some(prepared.request_id),
+            input: Some(input.text),
+            input_sha256: prepared.input_sha256,
+            settlement: None,
+        });
         self.report = None;
         Ok(())
     }
@@ -463,7 +492,7 @@ impl Goal {
     ///
     /// # Errors
     /// Rejects invalid Goal fields, a stopped Goal, an unsettled input or an exhausted budget.
-    pub fn next_reservation(&self) -> Result<GoalReservation, String> {
+    pub fn next_reservation(&self) -> Result<PreparedGoalRound, String> {
         if self.phase != GoalPhase::Active
             || self.unsettled()
             || self.allocated_rounds >= self.max_rounds
@@ -474,7 +503,7 @@ impl Goal {
         self.make_reservation(self.allocated_rounds + 1)
     }
 
-    fn make_reservation(&self, round: u64) -> Result<GoalReservation, String> {
+    fn make_reservation(&self, round: u64) -> Result<PreparedGoalRound, String> {
         if round == 0 || round > self.max_rounds {
             return Err("invalid Goal round".into());
         }
@@ -485,13 +514,15 @@ impl Goal {
             "Continue Goal {}. Automatic round {round}/{}.\nObjective:\n{}\nConstraints:\n{}\nCheck current results. Verify the whole objective before marking it complete. Leave unfinished work active. Follow the configured Goal tool policy for blockers.",
             self.id, self.max_rounds, self.objective, self.constraints
         );
-        Ok(GoalReservation {
-            round,
-            message_id,
-            request_id: Some(round_request_id(&self.id, round, "reserve")?),
+        Ok(PreparedGoalRound {
+            request_id: round_request_id(&self.id, round, "reserve")?,
             input_sha256: format!("{:x}", Sha256::digest(input.as_bytes())),
-            input,
-            settlement: None,
+            input: ContinuationInput {
+                owner: self.id.clone(),
+                round,
+                message_id,
+                text: input,
+            },
         })
     }
 
@@ -528,6 +559,9 @@ impl Goal {
             } else {
                 Err("Goal settlement conflict".into())
             };
+        }
+        if settlement.has_accepted_message() {
+            reservation.input = None;
         }
         reservation.settlement = Some(settlement.clone());
         if self.completed_by.is_some()
@@ -605,18 +639,9 @@ impl Goal {
     }
 }
 
-impl GoalReservation {
-    /// Transfers the frozen text and message identity to Kernel admission.
-    pub fn into_input(
-        self,
-        owner: &DomainRequestId,
-    ) -> rsi_agent_session_protocol::ContinuationInput {
-        rsi_agent_session_protocol::ContinuationInput {
-            owner: owner.clone(),
-            round: self.round,
-            message_id: self.message_id,
-            text: self.input,
-        }
+impl RoundSettlement {
+    fn has_accepted_message(&self) -> bool {
+        matches!(self, Self::Discarded | Self::Turn { .. })
     }
 }
 
@@ -681,16 +706,20 @@ rsi_persistence_testkit::payload_contract!(
         samples.push(state.clone());
         let turn = TurnId::new("turn").unwrap();
         let goal = state.goal.as_mut().unwrap();
-        goal.reservation.as_mut().unwrap().settlement = Some(RoundSettlement::Turn {
-            turn_id: turn.clone(),
-            outcome: RoundOutcome::Completed,
-        });
+        let message = goal.reservation.as_ref().unwrap().message_id.clone();
         goal.report = Some(GoalReport {
             kind: GoalReportKind::Complete,
             evidence: "validated".into(),
-            source_turn: turn,
+            source_turn: turn.clone(),
         });
-        goal.phase = GoalPhase::Completed;
+        goal.settle(
+            &message,
+            RoundSettlement::Turn {
+                turn_id: turn,
+                outcome: RoundOutcome::Completed,
+            },
+        )
+        .unwrap();
         samples.push(state);
 
         for source in [
