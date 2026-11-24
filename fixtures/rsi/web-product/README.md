@@ -344,6 +344,8 @@ Explicit `RSI_WEB_ASSETS` and `RSI_WEB_BINARY` must pass the same receipt checks
 The fixture owns an isolated real Service Host, temporary settings and Workspace,
 ephemeral TLS/H2 listener and a bounded deterministic OpenAI-compatible provider.
 Device credentials are registered through the real local operator application.
+Fixtures that preselect an isolated Workspace register its coordinates through
+the [Workspace API](../../../crates/rsi-workspace/api/README.md) before opening the client.
 Browser commands pass through the product Worker, API and Agent Kernel. The
 provider supplies fixed replies and Tool requests; this verifies mechanisms and
 rendering, not autonomous model capability. Real provider validation is opt-in

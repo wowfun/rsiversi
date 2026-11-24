@@ -33,13 +33,13 @@ export async function connectWorkbench(page, service, registration) {
 export async function registerFixtureWorkspace(request, service, registration = service.registration) {
   const headers={authorization:`Bearer ${registration.token}`,'x-rsi-wire-version':'2'};
   const describe=await request.post(service.origin+'/api/v2/rsi-api-protocol/5/connection/describe/1/read',{headers,data:{wire_version:2}});
-  assert.equal(describe.status(),200);
+  assert.equal(describe.status(),200,'negotiate the fixture Host connection');
   const {name,version}=JSON.parse(await readFile(new URL('../../../crates/rsi-workspace/api/wire-contract.json',import.meta.url),'utf8'));
   const coordinates={location:{kind:'local'},path:service.workspace};
-  const registered=await request.post(`${service.origin}/api/v2/${name}/${version}/workspace/register/5/mutation`,{
+  const registered=await request.post(`${service.origin}/api/v2/${name}/${version}/workspace/register/6/mutation`,{
     headers:{...headers,'x-rsi-host-epoch':describe.headers()['x-rsi-host-epoch']},data:coordinates,
   });
-  assert.equal(registered.status(),200);
+  assert.equal(registered.status(),200,'register the isolated workspace');
   assert.deepEqual((await registered.json()).coordinates,coordinates);
 }
 // Exercise the same cookie, CSRF and Host-generation checks as the real Worker.
