@@ -92,7 +92,7 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
                     index: 0,
                     seq: fact.seq(),
                     offset: 0,
-                    source: Some(source),
+                    source: rsi_conversation::EnteredSource::Claim(source),
                     content: rsi_conversation::EnteredContent::Blocks(content),
                 },
             );

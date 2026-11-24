@@ -2,6 +2,12 @@
 
 Entered runtime context carries the explicit participant label `Runtime context`.
 Labels follow typed provenance; identical human text remains human input.
+For application-authored inputs, the recorded source kind identifies the
+producer. A `user` source is a user message. Other producers appear as context
+with their kind as the label, or `Context` when unnamed. This attribution
+affects presentation only. Native runtime snapshots, prepared injections and
+consumed Tool context belong to the Step. A direct native claim keeps its
+original delivery position.
 The schedule deletion command contributes held context labelled `Automation task`.
 Its original text and source remain available with the Step that consumed it.
 An operator's Run now command shows the same collapsed automation trigger as a timed delivery.

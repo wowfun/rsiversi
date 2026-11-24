@@ -20,6 +20,60 @@ fn execution() -> rsi_meta::Execution {
 }
 
 #[tokio::test]
+async fn authored_context_uses_its_recorded_producer_in_history_and_live_delivery() {
+    use rsi_agent_session_protocol::SessionFact;
+    use serde_json::json;
+    let handle = support::Handle::new("producers", false);
+    let body = "<system-reminder>Same text</system-reminder>";
+    let message = |id, kind| {
+        json!({
+            "role":"user", "attribution":{"id":id,"source":{"kind":kind}},
+            "content":[{"type":"text","text":body}]
+        })
+    };
+    let prepared: SessionFact = serde_json::from_value(json!({
+        "seq":8,"timestamp_ms":1,"type":"step_inputs_prepared","turn_id":"turn","step_id":"step",
+        "decision":{"kind":"enter","messages":[
+            {"kind":"replacement","claim":{"fact_seq":1,"ordinal":0},"message":message("replacement","user")},
+            {"kind":"added","message":message("runtime","runtime-context")},
+            {"kind":"added","message":message("novel","third-party-producer")}
+        ]}
+    })).unwrap();
+    for live in [false, true] {
+        let mut rows = Vec::new();
+        let collect = |row: rsi_conversation::EnteredInput<'_>| {
+            let (role, producer) = row.presentation();
+            let (source, rsi_conversation::InputPart::Text(text)) = row.parts().next().unwrap()
+            else {
+                panic!("expected original text");
+            };
+            assert_eq!(text, body);
+            assert_eq!(source.seq, 8);
+            rows.push((role, producer.map(|name| name.into_owned())));
+        };
+        if live {
+            rsi_client::LiveInputClaims::default()
+                .prepare(handle.as_ref(), &prepared, collect)
+                .await
+                .unwrap();
+        } else {
+            rsi_client::visit_prepared_inputs(handle.as_ref(), &prepared, &[], collect)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rows,
+            [
+                ("user", None),
+                ("step-context", Some("runtime-context".into())),
+                ("step-context", Some("third-party-producer".into()))
+            ]
+        );
+    }
+    assert!(handle.source_reads.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn two_real_scopes_share_a_domain_and_retire_their_controllers_independently() {
     support::isolated_controller_scopes(execution()).await;
 }

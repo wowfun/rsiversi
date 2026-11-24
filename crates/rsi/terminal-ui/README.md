@@ -38,6 +38,8 @@ of its owning Turn supplies the outcome on the same request row.
 
 Context-compaction output is an internal status block, distinct from assistant
 answers even when the preceding model intent is outside the loaded page.
+Entered context starts collapsed under its producer label. Expanding it shows
+the original text using the same source coordinates as Web.
 
 Pure terminal presentation: grapheme editing, bounded transcript projection,
 Markdown rendering, layout and source positions. The resident terminal application

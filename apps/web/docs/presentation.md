@@ -69,7 +69,8 @@ its outcome in the issuing pane without publishing an empty session.
 Non-human messages that start a Turn appear above its process disclosure. The
 trigger header shows its recorded source family and time. Opening it reveals the
 original notification text and its source actions. The body starts folded on
-attachment and is unmounted when closed. Runtime context keeps its own disclosure.
+attachment and is unmounted when closed. Request-time context joins the Step's
+process disclosure. Each producer has an expandable row containing its original input.
 An external schedule change consumed by a Step is folded into that Turn's
 process below its opening input. Expanding the process and its context row
 reveals the original text in a scrollable code panel, even when the notice

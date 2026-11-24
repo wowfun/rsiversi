@@ -25,13 +25,35 @@ pub enum InputPart<'a> {
     File(&'a rsi_media_protocol::FileRef),
 }
 
+/// Origin of the message that actually entered the Step.
+#[derive(Clone, Copy, Debug)]
+pub enum EnteredSource<'a> {
+    /// Direct Turn text.
+    Direct,
+    /// An unchanged native claim.
+    Claim(&'a InputMessageSource),
+    /// Original application source of an authored message or Tool context.
+    Application(&'a serde_json::Value),
+}
+
+fn application_presentation<'a>(
+    source: &'a serde_json::Value,
+    context_role: &'static str,
+) -> (&'static str, Option<std::borrow::Cow<'a, str>>) {
+    match source.get("kind").and_then(serde_json::Value::as_str) {
+        Some("user") => ("user", None),
+        Some(kind) if !kind.is_empty() => (context_role, Some(kind.into())),
+        _ => (context_role, Some("Context".into())),
+    }
+}
+
 /// A row in final input order. The original source can be from an older Fact.
 #[derive(Clone, Copy, Debug)]
 pub struct EnteredInput<'a> {
     /// Index within the entire prepared list, including hidden guidance.
     pub index: usize,
-    /// Original input provenance, when the claim carries one.
-    pub source: Option<&'a InputMessageSource>,
+    /// Presentation provenance of the final message.
+    pub source: EnteredSource<'a>,
     /// Fact that owns the text or media.
     pub seq: u64,
     /// First content index within that Fact.
@@ -41,42 +63,47 @@ pub struct EnteredInput<'a> {
 }
 
 impl<'a> EnteredInput<'a> {
-    /// Participant label for an attributed message, when it is not the local user.
-    pub fn attribution(&self) -> Option<std::borrow::Cow<'static, str>> {
-        self.presentation().1
-    }
-
     /// Display role and participant label derived from the recorded input source.
-    pub fn presentation(&self) -> (&'static str, Option<std::borrow::Cow<'static, str>>) {
+    pub fn presentation(&self) -> (&'static str, Option<std::borrow::Cow<'a, str>>) {
+        use EnteredSource::{Application, Claim};
         let (role, title) = match self.source {
-            Some(InputMessageSource::Agent {
+            Claim(InputMessageSource::Agent {
                 source_session_id, ..
             }) => (
                 "trigger-agent",
                 format!("Message from {source_session_id}").into(),
             ),
-            Some(InputMessageSource::Completion {
+            Claim(InputMessageSource::Completion {
                 child_session_id, ..
             }) => (
                 "trigger-completion",
                 format!("Completion from {child_session_id}").into(),
             ),
-            Some(InputMessageSource::Continuation { source, .. }) => match source.domain.id() {
+            Claim(InputMessageSource::Continuation { source, .. }) => match source.domain.id() {
                 "rsi.schedule" => ("trigger-schedule", "Automation task".into()),
                 "rsi.goal" => ("trigger-goal", "Goal continuation".into()),
                 _ => ("trigger-request", "Automatic continuation".into()),
             },
-            Some(InputMessageSource::RuntimeContext) => ("context", "Runtime context".into()),
-            Some(InputMessageSource::Command { source, .. })
+            Claim(InputMessageSource::RuntimeContext) => ("step-context", "Runtime context".into()),
+            Claim(InputMessageSource::Command { source, .. })
                 if source.command.as_str() == "rsi.schedule.run" =>
             {
                 ("trigger-schedule", "Automation task".into())
             }
-            Some(InputMessageSource::Command { source, .. })
+            Claim(InputMessageSource::Command { source, .. })
                 if source.command.as_str() == "rsi.schedule.delete" =>
             {
                 ("step-context", "Automation task".into())
             }
+            Claim(InputMessageSource::PluginContext {
+                tool: Some(rsi_agent_session_protocol::ToolContextOrigin { source, .. }),
+                ..
+            })
+            | Application(source) => return application_presentation(source, "step-context"),
+            Claim(InputMessageSource::Application {
+                attribution: Some(rsi_agent_session_protocol::MessageAttribution { source, .. }),
+                ..
+            }) => return application_presentation(source, "context"),
             _ => return ("user", None),
         };
         (role, Some(title))

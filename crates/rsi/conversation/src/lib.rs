@@ -8,7 +8,7 @@ pub use conversation::{
 };
 mod entered;
 mod identity;
-pub use entered::{EnteredContent, EnteredInput, InputPart};
+pub use entered::{EnteredContent, EnteredInput, EnteredSource, InputPart};
 mod index;
 mod media;
 mod metrics;

@@ -32,6 +32,48 @@ fn input_with_image(media: &rsi_media_protocol::MediaRef) -> SessionFact {
 }
 
 #[test]
+fn entered_context_folds_once_and_keeps_exact_text_after_expansion_and_replay() {
+    let source = serde_json::json!({"kind":"skill-catalog"});
+    let text = "<system-reminder>Available skills</system-reminder>";
+    let content = [AgentMessageContent::Text { text: text.into() }];
+    let row = rsi_conversation::EnteredInput {
+        index: 0,
+        seq: 7,
+        offset: 0,
+        source: rsi_conversation::EnteredSource::Application(&source),
+        content: rsi_conversation::EnteredContent::Blocks(&content),
+    };
+    let mut transcript = Transcript::default();
+    transcript.entered(7, 1, row, false);
+    let block = &mut transcript.blocks[0];
+    assert_eq!(block.title, "skill-catalog");
+    assert_eq!(block.role, Role::Status);
+    assert!(block.summary_only());
+    block.collapsed = false;
+    transcript.entered(7, 1, row, true);
+    assert_eq!(transcript.blocks.len(), 1);
+    assert!(!transcript.blocks[0].summary_only());
+    assert_eq!(transcript.blocks[0].text(), text);
+    let long_kind = serde_json::json!({"kind":"\u{001b}界".repeat(1800)});
+    transcript.entered(
+        8,
+        1,
+        rsi_conversation::EnteredInput {
+            index: 1,
+            seq: 8,
+            source: rsi_conversation::EnteredSource::Application(&long_kind),
+            ..row
+        },
+        false,
+    );
+    let restored = Viewport::capture(&transcript, None, 80, 24)
+        .0
+        .restore()
+        .unwrap();
+    assert!(restored.blocks.last().unwrap().summary_only());
+}
+
+#[test]
 fn ordered_images_preserve_exact_sources_and_selection_mapping() {
     let image = SessionFact::new(3, 1, SessionFactBody::ImageOutput {
         turn_id: TurnId::new("turn").unwrap(), effect_id: EffectId::new("effect").unwrap(), index: 0,
@@ -79,7 +121,7 @@ fn ordered_images_preserve_exact_sources_and_selection_mapping() {
                     index: 0,
                     seq: fact.seq(),
                     offset: 0,
-                    source: Some(source),
+                    source: rsi_conversation::EnteredSource::Claim(source),
                     content: rsi_conversation::EnteredContent::Blocks(content),
                 },
                 false,

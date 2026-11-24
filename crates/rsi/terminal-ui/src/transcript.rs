@@ -15,6 +15,7 @@ pub const MAX_BLOCKS: usize = 512;
 pub const MAX_TEXT: usize = 4 * 1024 * 1024;
 pub const MAX_METADATA: usize = 8 * 1024 * 1024;
 pub const WINDOW: usize = 256 * 1024;
+const MAX_TITLE_BYTES: usize = 4096;
 
 fn tool_model_request(fact: &SessionFact) -> Option<String> {
     if let SessionFactBody::ToolIntent {
@@ -630,7 +631,7 @@ impl Transcript {
             timestamp_ms,
             rsi_conversation::EnteredInput {
                 index: 0,
-                source: None,
+                source: rsi_conversation::EnteredSource::Direct,
                 seq,
                 offset: 0,
                 content: rsi_conversation::EnteredContent::Direct(text),
@@ -646,7 +647,7 @@ impl Transcript {
         row: rsi_conversation::EnteredInput<'_>,
         older: bool,
     ) {
-        let attributed = row.attribution();
+        let (presentation, attributed) = row.presentation();
         let role = if attributed.is_some() {
             Role::Status
         } else {
@@ -654,19 +655,22 @@ impl Transcript {
         };
         let title = attributed.unwrap_or_else(|| user_time(timestamp_ms).into());
         let key = format!("prepared:{}:{}", seq, row.index);
-        self.block_index(key.clone(), &title, role, seq);
+        let index = self.block_index(key, &title, role, seq);
+        let block = &mut self.blocks[index];
+        if matches!(presentation, "context" | "step-context") && !block.concise {
+            block.concise = true;
+            block.collapsed = true;
+        }
         for (source, part) in row.parts() {
             let piece = match part {
                 rsi_conversation::InputPart::Text(text) => Piece::new(source, text, 0, WINDOW),
                 rsi_conversation::InputPart::Image(media, _) => Piece::json(source, media, 0),
                 rsi_conversation::InputPart::File(file) => Piece::json(source, file, 0),
             };
-            self.add(key.clone(), &title, role, piece);
+            self.add_piece(index, piece);
         }
-        if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-            block.first = seq;
-            block.last = seq;
-        }
+        self.blocks[index].first = seq;
+        self.blocks[index].last = seq;
         self.trim(older);
     }
 
@@ -1139,13 +1143,16 @@ impl Transcript {
     fn block_index(&mut self, key: String, title: &str, role: Role, seq: u64) -> usize {
         let position = self.blocks.iter().position(|block| block.key == key);
         position.unwrap_or_else(|| {
+            let mut title =
+                crate::terminal_text(&title[..title.floor_char_boundary(MAX_TITLE_BYTES)]);
+            title.truncate(title.floor_char_boundary(MAX_TITLE_BYTES));
             self.blocks.push(Block {
                 markdown: None,
                 clock: ProcessClock::default(),
                 outcome: None,
                 key,
                 layout_revision: std::sync::Arc::new(()),
-                title: crate::terminal_text(title),
+                title,
                 role,
                 pieces: VecDeque::new(),
                 sources: SourceIndex::default(),
@@ -1169,6 +1176,10 @@ impl Transcript {
     }
     fn add(&mut self, key: String, title: &str, role: Role, piece: Piece) {
         let index = self.block_index(key, title, role, piece.source.seq);
+        self.add_piece(index, piece);
+    }
+
+    fn add_piece(&mut self, index: usize, piece: Piece) {
         let block = &mut self.blocks[index];
         if !block.transient.is_empty() {
             block.transient.clear();

@@ -138,7 +138,7 @@ struct WindowBlock {
 impl WindowBlock {
     fn validate(&self) -> Result<(), &'static str> {
         if self.key.len() > 4096
-            || self.title.len() > 4096
+            || self.title.len() > super::MAX_TITLE_BYTES
             || self.pieces.len() > MAXIMUM_BLOCK_SOURCES
             || crate::terminal_text(&self.title) != self.title
             || crate::terminal_text(&self.transient) != self.transient

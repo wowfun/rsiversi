@@ -1,6 +1,6 @@
 //! Resolve final display rows at the owning Session boundary.
 use rsi_agent_session_protocol::{PreparedInput, PreparedInputRole, SessionFact, SessionFactBody};
-use rsi_conversation::{EnteredContent, EnteredInput};
+use rsi_conversation::{EnteredContent, EnteredInput, EnteredSource};
 use rsi_session_protocol::{SessionError, SessionHandle};
 
 /// Visits the final user rows of a preparation in order. The sorted history page
@@ -108,7 +108,7 @@ async fn visit_inputs<'a>(
                 }
                 EnteredInput {
                     index,
-                    source: None,
+                    source: EnteredSource::Application(&message.attribution().source),
                     seq: fact.seq(),
                     offset,
                     content: EnteredContent::Blocks(message.content()),
@@ -140,7 +140,7 @@ async fn visit_inputs<'a>(
                 }
                 let (source, offset, content) = match (original.body(), claim.ordinal()) {
                     (SessionFactBody::TurnAccepted { text, .. }, 0) => {
-                        (None, 0, EnteredContent::Direct(text))
+                        (EnteredSource::Direct, 0, EnteredContent::Direct(text))
                     }
                     (
                         SessionFactBody::InputMessageClaimed {
@@ -151,7 +151,11 @@ async fn visit_inputs<'a>(
                         if source.input_role() == PreparedInputRole::Developer {
                             continue;
                         }
-                        (Some(source), 0, EnteredContent::Blocks(content))
+                        (
+                            EnteredSource::Claim(source),
+                            0,
+                            EnteredContent::Blocks(content),
+                        )
                     }
                     (SessionFactBody::ToolContextsClaimed { messages, .. }, ordinal) => {
                         let pos = ordinal as usize;
@@ -167,7 +171,7 @@ async fn visit_inputs<'a>(
                             }
                         }
                         (
-                            None,
+                            EnteredSource::Application(&message.source),
                             tool_offsets.1[pos],
                             EnteredContent::Tool(&message.text),
                         )

@@ -38,11 +38,11 @@ fn running_and_deleting_a_schedule_use_their_distinct_transcript_roles() {
             index: 0,
             seq: 1,
             offset: 0,
-            source: Some(&claim),
+            source: rsi_conversation::EnteredSource::Claim(&claim),
             content: EnteredContent::Direct("[SCHEDULE REMINDER]"),
         };
-        assert_eq!(input.presentation().0, role);
-        assert_eq!(input.attribution().as_deref(), title);
+        let (actual_role, actual_title) = input.presentation();
+        assert_eq!((actual_role, actual_title.as_deref()), (role, title));
     }
 }
 
@@ -55,18 +55,19 @@ fn runtime_context_label_follows_provenance_instead_of_message_text() {
     let runtime = InputMessageSource::RuntimeContext;
     let input = EnteredInput {
         index: 0,
-        source: Some(&human),
+        source: rsi_conversation::EnteredSource::Claim(&human),
         seq: 1,
         offset: 0,
         content: EnteredContent::Direct("Runtime context"),
     };
-    assert_eq!(input.attribution(), None);
+    assert_eq!(input.presentation(), ("user", None));
     assert_eq!(
         EnteredInput {
-            source: Some(&runtime),
+            source: rsi_conversation::EnteredSource::Claim(&runtime),
             ..input
         }
-        .attribution()
+        .presentation()
+        .1
         .as_deref(),
         Some("Runtime context")
     );
@@ -97,7 +98,7 @@ fn file_input_has_an_exact_detail_source_without_loading_or_storing_paths() {
     };
     let entered = EnteredInput {
         index: 0,
-        source: Some(source),
+        source: rsi_conversation::EnteredSource::Claim(source),
         seq: 1,
         offset: 0,
         content: EnteredContent::Blocks(content),

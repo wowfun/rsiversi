@@ -688,7 +688,7 @@ mod tests {
                             index: 0,
                             seq,
                             offset: 0,
-                            source: Some(source),
+                            source: rsi_conversation::EnteredSource::Claim(source),
                             content: rsi_conversation::EnteredContent::Blocks(content),
                         },
                     );
@@ -1366,7 +1366,7 @@ mod tests {
                 InputMessageSource::RuntimeContext,
                 "Workspace location",
                 "Runtime context",
-                "context",
+                "step-context",
             ),
             (
                 InputMessageSource::Agent {
