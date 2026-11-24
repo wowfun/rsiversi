@@ -257,8 +257,9 @@ export async function startService({ binary, assets, report, configure, registra
       $directory=$env:RSI_FIXTURE_DIRECTORY
       $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
       $acl=[System.Security.AccessControl.DirectorySecurity]::new()
-      $userSid=$identity.Value
-      $acl.SetSecurityDescriptorSddlForm(('O:{0}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{0})' -f $userSid),[System.Security.AccessControl.AccessControlSections]'Owner,Access')
+      $acl.SetSecurityDescriptorSddlForm(('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{0})' -f $identity.Value),[System.Security.AccessControl.AccessControlSections]::Access)
+      $owner=[System.IO.Directory]::GetAccessControl($directory).GetOwner([System.Security.Principal.SecurityIdentifier])
+      if(!$owner.Equals($identity)){$acl.SetOwner($identity)}
       [System.IO.Directory]::SetAccessControl($directory,$acl)
     `],{env:{...process.env,RSI_FIXTURE_DIRECTORY:config}});
     const host = join(config, "host-profiles/fixture"); const application = join(config, "application-profiles/browser-fixture");
