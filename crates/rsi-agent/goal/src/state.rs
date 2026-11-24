@@ -324,7 +324,7 @@ impl GoalState {
             }
             GoalAction::Pause { id } | GoalAction::Cancel { id } => {
                 let goal = self.current_mut(&id)?;
-                if goal.phase != GoalPhase::Completed {
+                if goal.phase == GoalPhase::Active {
                     goal.phase = GoalPhase::Paused;
                     goal.reason = Some("Paused by the user".into());
                 }
@@ -490,7 +490,11 @@ impl Goal {
             };
         }
         reservation.settlement = Some(settlement.clone());
-        if self.completed_by.is_some() {
+        if self.completed_by.is_some()
+            || (self.phase == GoalPhase::Paused
+                && matches!(settlement, RoundSettlement::Turn { .. })
+                && !self.verified_completion())
+        {
             return self.validate();
         }
         match settlement {

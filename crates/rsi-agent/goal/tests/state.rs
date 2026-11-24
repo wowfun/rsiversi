@@ -194,6 +194,59 @@ fn draft_and_durable_creation_allocate_nothing_until_reservation() {
 }
 
 #[test]
+fn settlement_of_an_earlier_round_preserves_the_users_pause() {
+    for (outcome, kind, phase) in [
+        (
+            RoundOutcome::Failed,
+            GoalReportKind::Complete,
+            GoalPhase::Paused,
+        ),
+        (
+            RoundOutcome::Completed,
+            GoalReportKind::Blocked,
+            GoalPhase::Paused,
+        ),
+        (
+            RoundOutcome::Completed,
+            GoalReportKind::Complete,
+            GoalPhase::Completed,
+        ),
+    ] {
+        let mut state = reserved(2);
+        report(&mut state, kind);
+        state
+            .apply(GoalAction::Pause { id: id("task") }, 2, false)
+            .unwrap();
+        let goal = state.goal.as_mut().unwrap();
+        let message = goal.reservation.as_ref().unwrap().message_id.clone();
+        let settlement = terminal(outcome);
+        goal.settle(&message, settlement.clone()).unwrap();
+        assert_eq!(goal.phase, phase);
+        assert_eq!(
+            goal.reservation.as_ref().unwrap().settlement.as_ref(),
+            Some(&settlement)
+        );
+        if phase == GoalPhase::Paused {
+            assert_eq!(goal.reason.as_deref(), Some("Paused by the user"));
+        }
+    }
+}
+
+#[test]
+fn cancelling_after_a_failed_turn_preserves_the_blocker() {
+    let mut state = reserved(2);
+    let goal = state.goal.as_mut().unwrap();
+    let message = goal.reservation.as_ref().unwrap().message_id.clone();
+    goal.settle(&message, terminal(RoundOutcome::Failed))
+        .unwrap();
+    let blocked = state.clone();
+    state
+        .apply(GoalAction::Cancel { id: id("task") }, 2, false)
+        .unwrap();
+    assert_eq!(state, blocked);
+}
+
+#[test]
 fn failure_overrides_a_model_completion_claim_and_retains_its_source() {
     for outcome in [
         RoundOutcome::Blocked,
