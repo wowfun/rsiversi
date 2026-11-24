@@ -374,6 +374,7 @@ fn codec_rejects_tampered_reservation_and_unverified_complete_state() {
     let state = reserved(2);
     for change in [
         "message_id",
+        "request_id",
         "input",
         "input_sha256",
         "phase",
@@ -391,6 +392,24 @@ fn codec_rejects_tampered_reservation_and_unverified_complete_state() {
         let decoded: GoalState = serde_json::from_value(value).unwrap();
         assert!(decoded.validate().is_err(), "accepted {change}");
     }
+}
+
+#[test]
+fn allocated_input_validates_at_maximum_text_sizes_and_rejects_an_invalid_goal() {
+    let mut state = create(1, false);
+    let goal = state.goal.as_mut().unwrap();
+    goal.objective = "o".repeat(8192);
+    goal.constraints = "c".repeat(4096);
+    let mut invalid = goal.clone();
+    invalid.constraints.push('x');
+    assert!(invalid.reserve().is_err());
+    let prepared = goal.next_reservation().unwrap();
+    assert_eq!(goal.allocated_rounds, 0);
+    assert!(goal.reservation.is_none());
+    goal.reserve().unwrap();
+    assert_eq!(goal.reservation.as_ref(), Some(&prepared));
+    assert!(goal.next_reservation().is_err());
+    state.validate().unwrap();
 }
 
 #[test]

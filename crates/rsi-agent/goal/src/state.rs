@@ -299,6 +299,7 @@ impl GoalState {
                 };
                 goal.validate()?;
                 self.goal = Some(goal);
+                return Ok(());
             }
             GoalAction::Resume { id } => {
                 let goal = self.current_mut(&id)?;
@@ -356,6 +357,24 @@ impl GoalState {
 
 impl Goal {
     fn validate(&self) -> Result<(), String> {
+        self.validate_fields()?;
+        if let Some(reservation) = &self.reservation {
+            let expected = self.make_reservation(reservation.round)?;
+            if reservation.round != self.allocated_rounds
+                || reservation.message_id != expected.message_id
+                || (reservation.request_id.is_none() && reservation.round != 1)
+                || (reservation.request_id.is_some()
+                    && reservation.request_id != expected.request_id)
+                || reservation.input != expected.input
+                || reservation.input_sha256 != expected.input_sha256
+            {
+                return Err("Goal reservation does not match frozen task and round".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), String> {
         safe_text(&self.objective, 8192, false)?;
         safe_text(&self.constraints, 4096, true)?;
         validate_max_rounds(self.max_rounds)?;
@@ -369,19 +388,6 @@ impl Goal {
         }
         if let Some(report) = &self.report {
             safe_text(&report.evidence, 4096, false)?;
-        }
-        if let Some(reservation) = &self.reservation {
-            let expected = self.make_reservation(reservation.round)?;
-            if reservation.round != self.allocated_rounds
-                || reservation.message_id != expected.message_id
-                || (reservation.request_id.is_none() && reservation.round != 1)
-                || (reservation.request_id.is_some()
-                    && reservation.request_id != expected.request_id)
-                || reservation.input != expected.input
-                || reservation.input_sha256 != expected.input_sha256
-            {
-                return Err("Goal reservation does not match frozen task and round".into());
-            }
         }
         if let Some(source) = &self.completed_by {
             if self.phase != GoalPhase::Completed {
@@ -406,21 +412,26 @@ impl Goal {
     /// # Errors
     /// Rejects stopped, already bound unresolved, exhausted or invalid Goal state.
     pub fn reserve(&mut self) -> Result<(), String> {
+        let reservation = self.next_reservation()?;
+        self.allocated_rounds = reservation.round;
+        self.reservation = Some(reservation);
+        self.report = None;
+        Ok(())
+    }
+
+    /// Prepares one frozen input without modifying the current allocation or model report.
+    ///
+    /// # Errors
+    /// Rejects invalid Goal fields, a stopped Goal, an unsettled input or an exhausted budget.
+    pub fn next_reservation(&self) -> Result<GoalReservation, String> {
         if self.phase != GoalPhase::Active
             || self.unsettled()
             || self.allocated_rounds >= self.max_rounds
         {
             return Err("Goal cannot allocate another round".into());
         }
-        let round = self
-            .allocated_rounds
-            .checked_add(1)
-            .ok_or("Goal round overflow")?;
-        let reservation = self.make_reservation(round)?;
-        self.allocated_rounds = round;
-        self.reservation = Some(reservation);
-        self.report = None;
-        self.validate()
+        self.validate_fields()?;
+        self.make_reservation(self.allocated_rounds + 1)
     }
 
     fn make_reservation(&self, round: u64) -> Result<GoalReservation, String> {
@@ -551,13 +562,16 @@ impl Goal {
 }
 
 impl GoalReservation {
-    /// Copies the complete exact input into the Kernel's bounded admission value.
-    pub fn input(&self, owner: &DomainRequestId) -> rsi_agent_session_protocol::ContinuationInput {
+    /// Transfers the frozen text and message identity to Kernel admission.
+    pub fn into_input(
+        self,
+        owner: &DomainRequestId,
+    ) -> rsi_agent_session_protocol::ContinuationInput {
         rsi_agent_session_protocol::ContinuationInput {
             owner: owner.clone(),
             round: self.round,
-            message_id: self.message_id.clone(),
-            text: self.input.clone(),
+            message_id: self.message_id,
+            text: self.input,
         }
     }
 }

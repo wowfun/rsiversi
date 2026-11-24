@@ -79,12 +79,7 @@ impl GoalService {
         snapshot: &GoalSnapshot,
         goal: &rsi_agent_goal::Goal,
     ) -> GoalResult<()> {
-        let mut next = goal.clone();
-        next.reserve().map_err(invalid)?;
-        let reservation = next
-            .reservation
-            .as_ref()
-            .ok_or_else(|| invalid("Goal reserve returned no input"))?;
+        let reservation = goal.next_reservation().map_err(invalid)?;
         let invocation = SessionCommandInvocation {
             command: ContributionId::new(GOAL_RESERVE).map_err(invalid)?,
             request_id: reservation
@@ -113,14 +108,15 @@ impl GoalService {
             matches!(snapshot.revision, CommandRevision::Draft { .. })
                 .then(|| reservation.input_sha256.clone()),
         )?;
+        let input = reservation.into_input(&goal.id);
         let result = if matches!(snapshot.revision, CommandRevision::Draft { .. }) {
             live.session
-                .reserve_initial(&live.lease, invocation, reservation.input(&goal.id))
+                .reserve_initial(&live.lease, invocation, input)
                 .await
                 .map(|_| ())
         } else {
             live.session
-                .internal_command(&live.lease, invocation, Some(reservation.input(&goal.id)))
+                .internal_command(&live.lease, invocation, Some(input))
                 .await
                 .map(|_| ())
         };

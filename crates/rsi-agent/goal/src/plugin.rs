@@ -130,8 +130,12 @@ impl SessionCommand for Command {
                         "request identity differs from the proposed Goal reservation",
                     ));
                 }
-                let expected = reservation.input(&goal.id);
-                if context.continuation_input.as_ref() != Some(&expected) {
+                if !context.continuation_input.as_ref().is_some_and(|input| {
+                    input.owner == goal.id
+                        && input.round == reservation.round
+                        && input.message_id == reservation.message_id
+                        && input.text == reservation.input
+                }) {
                     return Err(invalid(
                         "continuation input differs from the proposed Goal reservation",
                     ));

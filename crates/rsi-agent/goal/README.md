@@ -22,6 +22,9 @@ reservation and input acceptance commit together, without refunds after acceptan
 Busy admission changes neither the allocated count nor the live lease. Resume
 preserves that count. Each reservation freezes its deterministic message identity,
 complete input and digest; uncertain acknowledgement cannot allocate a new round.
+Allocation constructs this reservation once. The reserve command compares the
+caller's owner, round, message identity and text with that frozen input. Reading
+a durable snapshot independently reconstructs the reservation to verify it.
 
 Application commands create, resume, pause, cancel or explicitly complete a Goal.
 Explicit completion records its source, disarms future rounds and preserves any

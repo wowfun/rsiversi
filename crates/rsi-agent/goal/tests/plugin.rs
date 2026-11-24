@@ -232,20 +232,15 @@ async fn reserve_callback_rejects_any_input_differing_from_its_proposed_allocati
     let fixture = Fixture::new().await;
     let mut draft = fixture.draft().await;
     create(&mut draft).await;
-    let mut goal: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
-    let goal = goal.goal.as_mut().unwrap();
-    goal.reserve().unwrap();
-    let expected = goal.reservation.as_ref().unwrap().input(&goal.id);
+    let state: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
+    let goal = state.goal.unwrap();
+    let reservation = goal.next_reservation().unwrap();
+    let request_id = reservation.request_id.clone().unwrap();
+    let expected = reservation.into_input(&goal.id);
     let mut context = rsi_agent_composition_protocol::SessionCommandContext {
         outcome: None,
         history: None,
-        request_id: goal
-            .reservation
-            .as_ref()
-            .unwrap()
-            .request_id
-            .clone()
-            .unwrap(),
+        request_id,
         header: Arc::new(draft.header().clone()),
         revision: CommandRevision::Durable { control_seq: 1 },
         domains: draft
@@ -382,10 +377,9 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
     let fixture = Fixture::new().await;
     let mut draft = fixture.draft().await;
     create(&mut draft).await;
-    let mut state: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
-    let goal = state.goal.as_mut().unwrap();
-    goal.reserve().unwrap();
-    let reservation = goal.reservation.as_ref().unwrap();
+    let state: rsi_agent_goal::GoalState = serde_json::from_value(view(&draft).await).unwrap();
+    let goal = state.goal.unwrap();
+    let reservation = goal.next_reservation().unwrap();
     let command = draft
         .composition()
         .contributions()
@@ -404,7 +398,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
         outcome: None,
         history: None,
         request_id: reservation.request_id.clone().unwrap(),
-        continuation_input: Some(reservation.input(&goal.id)),
+        continuation_input: Some(reservation.into_input(&goal.id)),
         header: Arc::new(draft.header().clone()),
         revision: draft.revision(),
         domains: draft
