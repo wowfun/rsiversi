@@ -406,10 +406,7 @@ impl SubmissionAdmission {
                     guard
                 }
             };
-            guards.push(SubmissionGuard {
-                _guard: guard,
-                key,
-            });
+            guards.push(SubmissionGuard { _guard: guard, key });
         }
         let slot = tokio::select! {
             biased;
@@ -592,6 +589,7 @@ impl SessionLoad {
 }
 
 struct SessionRuntime {
+    working_directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
     header: Arc<SessionHeader>,
     header_fingerprint: String,
     composition: AgentCompositionPin,
@@ -823,6 +821,7 @@ impl SessionRuntime {
         });
         Self {
             header: Arc::new(header),
+            working_directory: None,
             header_fingerprint,
             composition,
             generation_rejection: None,
@@ -968,6 +967,7 @@ mod store_reads;
 mod tool_origin;
 mod turn_service;
 mod turn_state;
+mod working_directory;
 
 use observation::{
     activation_outcome, activation_terminal_controls, agent_root_and_path, completion_message,

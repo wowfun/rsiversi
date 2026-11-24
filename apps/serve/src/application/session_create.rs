@@ -1,4 +1,4 @@
-use super::Sessions;
+use super::{BoundSessions, Sessions};
 use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::{BlankSession, DraftClaim, SelectDraftPreset, SessionError};
@@ -183,6 +183,85 @@ impl Sessions {
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         Ok(result)
+    }
+}
+
+impl BoundSessions {
+    pub(super) async fn create_plugin_child(&self, payload: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tool {
+            generation: String,
+            effect: rsi_agent_session_protocol::EffectId,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Child {
+            request: String,
+            parent: SessionId,
+            session_id: SessionId,
+            task_name: String,
+            plugin: String,
+            preset: Option<AgentPresetId>,
+            tool: Option<Tool>,
+            cwd: Option<PathBuf>,
+        }
+        let child: Child = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
+        if child.request != self.plugin_callback.id() {
+            return Err(Error::Remote(
+                "Plugin child creation requires the application callback".into(),
+            ));
+        }
+        use rsi_agent_turn_protocol::PluginChildSource;
+        let source = if let Some(tool) = child.tool {
+            let caller = self
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.started_tool(&tool.generation, &child.parent, &tool.effect))
+                .ok_or_else(|| Error::Remote("Application tool invocation has ended".into()))?;
+            PluginChildSource::Tool(caller)
+        } else {
+            let parent = self
+                .interactive_header(&child.request, &child.parent)
+                .await?;
+            if parent.coordinates().location() != &ExecutionLocation::Local {
+                return Err(Error::Remote(
+                    "Application plugins require a local workspace".into(),
+                ));
+            }
+            PluginChildSource::Session(Box::new(parent))
+        };
+        let directory = match child.cwd {
+            Some(path) => {
+                let origin = self
+                    .routes
+                    .caller(&child.request)
+                    .map_err(|_| Error::Cancelled)?;
+                Some(
+                    self.workspaces
+                        .local_coordinates(origin, &path)
+                        .await
+                        .map_err(remote)?,
+                )
+            }
+            None => None,
+        };
+        let turns = self
+            .context
+            .lookup_local::<rsi_agent_turn_protocol::TurnServiceContract>()
+            .ok_or_else(|| Error::Remote("Agent runtime unavailable".into()))?;
+        let header = turns
+            .create_plugin_child(rsi_agent_turn_protocol::CreatePluginChild {
+                source,
+                directory,
+                session_id: child.session_id,
+                task_name: child.task_name,
+                plugin: child.plugin,
+                preset: child.preset,
+            })
+            .await
+            .map_err(remote)?;
+        Ok(receipt(&header, false))
     }
 }
 

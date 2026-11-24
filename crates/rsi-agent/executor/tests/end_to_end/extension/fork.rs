@@ -567,7 +567,13 @@ async fn verify_journal_resources(
     use rsi_agent_composition_protocol::SessionResourceReader as _;
     use rsi_agent_session_protocol::SessionResourceValue;
     let head = adapter
-        .read(header, None, Some("head"), CancellationToken::new())
+        .read(
+            header,
+            header.coordinates(),
+            None,
+            Some("head"),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let SessionResourceValue::Read { text, .. } = head else {
@@ -578,6 +584,7 @@ async fn verify_journal_resources(
     let result = adapter
         .read(
             header,
+            header.coordinates(),
             None,
             segment["sha256"].as_str(),
             CancellationToken::new(),
@@ -594,6 +601,7 @@ async fn verify_journal_resources(
         adapter
             .read(
                 header,
+                header.coordinates(),
                 None,
                 Some(&"f".repeat(64)),
                 CancellationToken::new()
@@ -605,7 +613,7 @@ async fn verify_journal_resources(
     cancelled.cancel();
     assert!(
         adapter
-            .read(header, None, Some("head"), cancelled)
+            .read(header, header.coordinates(), None, Some("head"), cancelled)
             .await
             .is_err()
     );

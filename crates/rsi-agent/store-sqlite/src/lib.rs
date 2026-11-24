@@ -180,6 +180,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             fact_prefix_sha256 TEXT NOT NULL,
             control_seq INTEGER NOT NULL CHECK (control_seq >= 0),
             inbox_paused INTEGER NOT NULL DEFAULT 0 CHECK (inbox_paused IN (0, 1)),
+            directory_control_seq INTEGER NOT NULL DEFAULT 0 CHECK (directory_control_seq >= 0),
             last_settled_control_seq INTEGER NOT NULL DEFAULT 0
                 CHECK (last_settled_control_seq >= 0 AND last_settled_control_seq <= control_seq),
             control_prefix_sha256 TEXT NOT NULL
@@ -1171,8 +1172,8 @@ impl SqliteStore {
 
 #[macro_use]
 mod fact_storage;
-mod feedback;
 mod activity;
+mod feedback;
 mod maintenance;
 mod offline_maintenance;
 mod reference_index;
@@ -1208,13 +1209,13 @@ mod validation;
 
 use append::{
     admit_append, advance_watermark, apply_atomic_sqlite_append, decode_indexed_message,
-    decode_ready_message, derived_session_root, indexed_message_row, insert_fact,
-    message_target_name, validate_sqlite_activation_guards, validate_sqlite_quiescence_guard,
+    decode_ready_message, indexed_message_row, insert_fact, message_target_name,
+    validate_sqlite_activation_guards, validate_sqlite_quiescence_guard,
 };
 use cas::{
     decode_context_checkpoint, decode_json, decode_projected_json, decode_sha256, decode_u64,
-    encode_json, fact_index_kind, install_cas, io_error, sql_error, sqlite_u64,
-    sync_directory, validate_sha256,
+    encode_json, fact_index_kind, install_cas, io_error, sql_error, sqlite_u64, sync_directory,
+    validate_sha256,
 };
 use fact_storage::read_indexed_fact;
 use filesystem::{

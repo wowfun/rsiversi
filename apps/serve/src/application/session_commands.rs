@@ -1,4 +1,4 @@
-use super::{BoundSessions, Sessions};
+use super::BoundSessions;
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::{
     SessionError, SessionHandle,
@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn wait_terminal(&self, payload: Value) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -38,13 +38,9 @@ impl Sessions {
             session_id: rsi_agent_session_protocol::SessionId,
         }
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let handle = self
-            .interactive_handle(&input.request, &input.session_id)
+        let header = self
+            .interactive_header(&input.request, &input.session_id)
             .await?;
-        let header = handle.header().await.map_err(|_| Error::Cancelled)?;
-        self.routes
-            .caller(&input.request)
-            .map_err(|_| Error::Cancelled)?;
         Ok(
             json!({"id":header.session_id(),"createdAt":header.created_at_ms(),
             "cwd":(header.coordinates().location()==&rsi_execution_protocol::ExecutionLocation::Local).then(||header.canonical_cwd())}),
@@ -148,7 +144,16 @@ impl Sessions {
         id: &rsi_agent_session_protocol::SessionId,
     ) -> Result<Arc<dyn rsi_session_protocol::SessionHandle>> {
         let origin = self.routes.caller(request).map_err(|_| Error::Cancelled)?;
-        self.interactive_handle_for(request, id, origin).await
+        Ok(self.interactive_session_for(request, id, origin).await?.0)
+    }
+
+    pub(super) async fn interactive_header(
+        &self,
+        request: &str,
+        id: &rsi_agent_session_protocol::SessionId,
+    ) -> Result<rsi_agent_session_protocol::SessionHeader> {
+        let origin = self.routes.caller(request).map_err(|_| Error::Cancelled)?;
+        Ok(self.interactive_session_for(request, id, origin).await?.1)
     }
 
     pub(super) async fn interactive_credential_handle(
@@ -160,15 +165,21 @@ impl Sessions {
             .routes
             .credential(request)
             .map_err(|_| Error::Cancelled)?;
-        self.interactive_handle_for(request, session, origin).await
+        Ok(self
+            .interactive_session_for(request, session, origin)
+            .await?
+            .0)
     }
 
-    async fn interactive_handle_for(
+    async fn interactive_session_for(
         &self,
         request: &str,
         id: &rsi_agent_session_protocol::SessionId,
         origin: rsi_api_protocol::CallOrigin,
-    ) -> Result<Arc<dyn rsi_session_protocol::SessionHandle>> {
+    ) -> Result<(
+        Arc<dyn SessionHandle>,
+        rsi_agent_session_protocol::SessionHeader,
+    )> {
         let handle = self
             .ingress
             .scoped(origin)
@@ -179,13 +190,19 @@ impl Sessions {
             .header()
             .await
             .map_err(|_| Error::Remote("Session header unavailable".into()))?;
-        if header.fork_origin().is_some() {
+        if header.fork_origin().is_some()
+            && !(request == self.plugin_callback.id()
+                && matches!(
+                    header.execution_owner(),
+                    Some(rsi_agent_session_protocol::ExecutionOwner::Plugin { .. })
+                ))
+        {
             return Err(Error::Remote(
                 "Child Session requires its parent command".into(),
             ));
         }
         self.routes.caller(request).map_err(|_| Error::Cancelled)?;
-        Ok(handle)
+        Ok((handle, header))
     }
 
     pub(super) async fn cancel(&self, payload: Value) -> Result<Value> {

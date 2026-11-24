@@ -1,5 +1,5 @@
 use super::{
-    Sessions,
+    BoundSessions,
     session_fragments::Identity,
     session_history::{fragment, resource_key},
 };
@@ -113,7 +113,7 @@ enum Operation {
     },
 }
 
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn presets(&self, payload: Value) -> Result<Value> {
         let input: Request = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         let origin = self

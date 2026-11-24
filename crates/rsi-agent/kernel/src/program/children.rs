@@ -140,7 +140,7 @@ impl LiveRun {
         segments.push(segment);
         let fork = &self.descriptor.fork;
         let origin = ForkOrigin {
-            history: rsi_agent_session_protocol::HistoryOrigin {
+            parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: self.descriptor.session_id.clone(),
                 parent_header_fingerprint: self.descriptor.parent_header_sha256.clone(),
                 point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -153,7 +153,8 @@ impl LiveRun {
                 terminal_control_prefix_sha256: fork.terminal_control_prefix_sha256.clone(),
                 requested_turns: fork.requested_turns.clone(),
                 effective_turns: fork.effective_turns,
-            },
+            }
+            .into(),
             root_session_id: root.clone(),
             path: AgentPath::new(segments).map_err(session_error)?,
             task_name: format!("{}-{ordinal}", self.descriptor.run_id),
@@ -176,6 +177,10 @@ impl LiveRun {
                 self.kernel.inner.clock.now_ms().max(1),
                 origin,
                 self.descriptor.selection.clone(),
+                self.kernel
+                    .current_working_directory(&self.header)
+                    .await?
+                    .as_deref(),
             )
             .and_then(|header| {
                 header.with_execution_policy(

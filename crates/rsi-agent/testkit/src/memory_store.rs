@@ -26,6 +26,7 @@ impl MemorySession {
             last_activity_ms: header.created_at_ms(),
             header,
             inbox_paused: false,
+            working_directory: None,
             checkpoint: None,
             fact_prefix_digest: EMPTY_FACT_PREFIX_DIGEST,
             control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
@@ -123,6 +124,8 @@ impl SessionStore for MemoryStore {
             BlankWrite::Keep => {}
             BlankWrite::SelectPreset => saved.expect("matched blank Session").header = header,
             BlankWrite::Insert => {
+                validate_memory_agent_node(&state, &header)?;
+                index_agent_child(&mut state, &header);
                 state
                     .recent_sessions
                     .insert((header.created_at_ms(), id.clone()));
@@ -692,19 +695,7 @@ impl SessionStore for MemoryStore {
             state
                 .recent_sessions
                 .insert((header.created_at_ms(), batch.session_id.clone()));
-            if let Some(origin) = header.fork_origin() {
-                state.agent_children.insert(
-                    (
-                        origin.history.parent_session_id.clone(),
-                        batch.session_id.clone(),
-                    ),
-                    StoreAgentChild {
-                        session_id: batch.session_id.clone(),
-                        path: origin.path.clone(),
-                        task_name: origin.task_name.clone(),
-                    },
-                );
-            }
+            index_agent_child(&mut state, &header);
             state.sessions.insert(
                 batch.session_id.clone(),
                 MemorySession {
@@ -839,6 +830,7 @@ impl SessionStore for MemoryStore {
             .sessions
             .get(session_id)
             .map(|session| StoreRecentSession {
+                working_directory: session.working_directory.clone(),
                 header: session.header.clone(),
                 last_activity_ms: session.last_activity_ms,
                 durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
@@ -1585,6 +1577,7 @@ impl SessionStore for MemoryStore {
                     .get(session_id)
                     .expect("recent index references its Session");
                 StoreRecentSession {
+                    working_directory: session.working_directory.clone(),
                     header: session.header.clone(),
                     last_activity_ms: session.last_activity_ms,
                     durable_fact_seq: session.facts.last().map_or(0, |fact| fact.seq()),
@@ -2515,16 +2508,7 @@ fn apply_atomic_memory_append(
         state
             .recent_sessions
             .insert((header.created_at_ms(), session_id.clone()));
-        if let Some(origin) = header.fork_origin() {
-            state.agent_children.insert(
-                (origin.history.parent_session_id.clone(), session_id.clone()),
-                StoreAgentChild {
-                    session_id: session_id.clone(),
-                    path: origin.path.clone(),
-                    task_name: origin.task_name.clone(),
-                },
-            );
-        }
+        index_agent_child(state, &header);
         state.sessions.insert(
             session_id.clone(),
             MemorySession {
@@ -2594,6 +2578,14 @@ fn apply_atomic_memory_append(
                 })?;
             }
             AgentControlRecordBody::InboxPaused => session.inbox_paused = true,
+            AgentControlRecordBody::WorkingDirectoryChanged { cwd } => {
+                session.working_directory =
+                    Some(rsi_agent_store_protocol::WorkingDirectoryChange::new(
+                        &session.header,
+                        record.seq(),
+                        cwd.clone(),
+                    )?);
+            }
             AgentControlRecordBody::InboxResumed => session.inbox_paused = false,
             _ => {}
         }
@@ -2695,25 +2687,31 @@ fn apply_program_updates(
     Ok(())
 }
 
+fn index_agent_child(state: &mut MemoryState, header: &SessionHeader) {
+    if let Some(origin) = header.fork_origin() {
+        state.agent_children.insert(
+            (
+                origin.parent.session_id().clone(),
+                header.session_id().clone(),
+            ),
+            StoreAgentChild {
+                session_id: header.session_id().clone(),
+                path: origin.path.clone(),
+                task_name: origin.task_name.clone(),
+            },
+        );
+    }
+}
+
 fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Result<()> {
     let Some(origin) = header.fork_origin() else {
         return Ok(());
     };
     let parent = state
         .sessions
-        .get(&origin.history.parent_session_id)
+        .get(origin.parent.session_id())
         .ok_or_else(|| StoreError::Invalid("Agent parent session is not durable".into()))?;
-    let expected_root = parent
-        .header
-        .fork_origin()
-        .map_or(parent.header.session_id(), |parent_origin| {
-            &parent_origin.root_session_id
-        });
-    if &origin.root_session_id != expected_root {
-        return Err(StoreError::Invalid(
-            "Agent child root differs from its parent's durable root".into(),
-        ));
-    }
+    rsi_agent_store_protocol::validate_agent_parent(header, &parent.header)?;
     let child_count = state
         .sessions
         .values()
@@ -2741,9 +2739,7 @@ fn validate_memory_agent_node(state: &MemoryState, header: &SessionHeader) -> Re
                 "Agent tree path is already present".into(),
             ));
         }
-        if parent_session_id == &origin.history.parent_session_id
-            && child.task_name == origin.task_name
-        {
+        if parent_session_id == origin.parent.session_id() && child.task_name == origin.task_name {
             return Err(StoreError::Invalid(
                 "Agent task name is already present below its parent".into(),
             ));
@@ -2973,6 +2969,7 @@ fn apply_message_updates(
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -3183,6 +3180,10 @@ fn apply_activation_updates(
                     || activation.parent_session_id.is_some()
                         && activation.completion_reserved_bytes.is_none()
                         && !activation.completion_to_program
+                        && state.sessions[session_id]
+                            .header
+                            .completion_parent()
+                            .is_some()
                 {
                     return Err(StoreError::Corrupt(
                         "activation settlement disagrees with its active reservation".into(),
@@ -3260,6 +3261,7 @@ fn apply_activation_updates(
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -3373,6 +3375,7 @@ fn apply_ready_updates(
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }

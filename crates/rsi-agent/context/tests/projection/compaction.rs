@@ -422,7 +422,9 @@ fn quoted_summary_requests_fit_the_protocol_and_make_progress_through_large_hist
             assert!(planned.request.tools().is_empty());
             assert_eq!(planned.request.tool_choice(), &ToolChoice::None);
             let directive = planned.request.messages().last().unwrap();
-            assert!(matches!(directive.content(), [MessageContent::Text { text, .. }] if text.starts_with("Summarize the transcript above")));
+            assert!(
+                matches!(directive.content(), [MessageContent::Text { text, .. }] if text.starts_with("Summarize the transcript above"))
+            );
             let effect = format!("summary-{count}");
             append(
                 &mut state,
@@ -1459,9 +1461,12 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             .fork_origin()
             .unwrap()
             .clone();
-        origin.history.resolved_after_seq = after_seq;
-        origin.history.effective_turns = if reused { 2 } else { 1 };
-        origin.history.requested_turns = if reused {
+        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+            panic!("expected inherited history")
+        };
+        history.resolved_after_seq = after_seq;
+        history.effective_turns = if reused { 2 } else { 1 };
+        history.requested_turns = if reused {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)
@@ -1472,6 +1477,7 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
                 3,
                 origin,
                 rsi_agent_session_protocol::ModelSelection::baseline(parent_header.settings()),
+                None,
             )
             .unwrap();
         let mut child = ModelContextState::open(
@@ -1787,9 +1793,12 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             .fork_origin()
             .unwrap()
             .clone();
-        origin.history.resolved_after_seq = after;
-        origin.history.effective_turns = if reuse { 2 } else { 1 };
-        origin.history.requested_turns = if reuse {
+        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+            panic!("expected inherited history")
+        };
+        history.resolved_after_seq = after;
+        history.effective_turns = if reuse { 2 } else { 1 };
+        history.requested_turns = if reuse {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)
@@ -1802,6 +1811,7 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
                 rsi_agent_session_protocol::ModelSelection::baseline(
                     header("instructions").settings(),
                 ),
+                None,
             )
             .unwrap();
         let mut child = ModelContextState::open(

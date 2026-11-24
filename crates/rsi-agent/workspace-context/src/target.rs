@@ -21,15 +21,15 @@ impl TargetWorkspaceContext {
 
     async fn remote(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&ExecutionLease>,
         request: Request,
         cancellation: CancellationToken,
     ) -> Result<(Capture, Vec<(String, String)>), WorkspaceContextError> {
         request.validate()?;
-        let operation = admit_source(header, execution)?;
+        let operation = admit_source(coordinates, execution)?;
         let execution = execution.cloned().ok_or(WorkspaceContextError::Closed)?;
-        let cwd = PathBuf::from(header.canonical_cwd());
+        let cwd = PathBuf::from(coordinates.path());
         let config = self.local.config.clone();
         let stop = self.local.owner.cancellation.child_token();
         let _guard = stop.clone().drop_guard();
@@ -251,21 +251,21 @@ async fn read_exchange(
 impl WorkspaceContext for TargetWorkspaceContext {
     async fn agents(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&ExecutionLease>,
         id: Option<&str>,
         reserved_names: &BTreeSet<String>,
         cancellation: CancellationToken,
     ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError> {
-        if *header.coordinates().location() == rsi_execution::ExecutionLocation::Local {
+        if *coordinates.location() == rsi_execution::ExecutionLocation::Local {
             return self
                 .local
-                .agents(header, execution, id, reserved_names, cancellation)
+                .agents(coordinates, execution, id, reserved_names, cancellation)
                 .await;
         }
         let (capture, _) = self
             .remote(
-                header,
+                coordinates,
                 execution,
                 Request::Agents {
                     id: id.map(str::to_owned),
@@ -283,21 +283,21 @@ impl WorkspaceContext for TargetWorkspaceContext {
     }
     async fn skills(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&ExecutionLease>,
         id: Option<&str>,
         audience: SkillAudience,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError> {
-        if *header.coordinates().location() == rsi_execution::ExecutionLocation::Local {
+        if *coordinates.location() == rsi_execution::ExecutionLocation::Local {
             return self
                 .local
-                .skills(header, execution, id, audience, cancellation)
+                .skills(coordinates, execution, id, audience, cancellation)
                 .await;
         }
         let (capture, _) = self
             .remote(
-                header,
+                coordinates,
                 execution,
                 Request::Skills {
                     id: id.map(str::to_owned),
@@ -315,16 +315,16 @@ impl WorkspaceContext for TargetWorkspaceContext {
     }
     async fn snapshot(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        if *header.coordinates().location() == rsi_execution::ExecutionLocation::Local {
-            return self.local.snapshot(header, execution, requests).await;
+        if *coordinates.location() == rsi_execution::ExecutionLocation::Local {
+            return self.local.snapshot(coordinates, execution, requests).await;
         }
         let response = self
             .remote(
-                header,
+                coordinates,
                 execution,
                 Request::Snapshot {
                     names: requests.names().to_vec(),

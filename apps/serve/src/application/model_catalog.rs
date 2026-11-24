@@ -1,4 +1,4 @@
-use super::Sessions;
+use super::BoundSessions;
 use rsi_agent_session_protocol::FrozenAgentSettings;
 use rsi_ai_protocol::ModelRef;
 use rsi_extension::{Error, Result};
@@ -13,7 +13,7 @@ struct CatalogPage {
     #[serde(default)]
     optional_default: bool,
 }
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn select_model(&self, payload: Value) -> Result<Value> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]

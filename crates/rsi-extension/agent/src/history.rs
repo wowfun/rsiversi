@@ -38,8 +38,57 @@ struct Authority {
     horizon: u64,
     cancellation: CancellationToken,
     page: tokio::sync::Mutex<Option<Page>>,
-    previous: Option<String>,
+    purpose: HistoryPurpose,
 }
+#[derive(Debug)]
+pub(crate) enum HistoryPurpose {
+    Read,
+    Step(Option<String>),
+    Tool(Arc<rsi_agent_turn_protocol::AgentCallerAuthority>),
+}
+
+#[derive(Debug)]
+pub(crate) struct ToolDirectory {
+    pub history: Arc<HistoryRouter>,
+    pub turns: Arc<dyn rsi_agent_turn_protocol::TurnExecution>,
+}
+
+#[async_trait]
+impl Handler for ToolDirectory {
+    async fn call(
+        &self,
+        method: &str,
+        value: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DirectoryRequest {
+            session_id: String,
+            operation_id: String,
+            path: Option<String>,
+        }
+        if method != "agent.tool.directory" {
+            return Err(Error::Protocol);
+        }
+        let request: DirectoryRequest =
+            serde_json::from_value(value).map_err(|_| Error::Protocol)?;
+        let authority = self
+            .history
+            .authority(&(request.session_id, request.operation_id))?;
+        let HistoryPurpose::Tool(caller) = &authority.purpose else {
+            return Err(Error::Protocol);
+        };
+        tokio::select! {
+            biased;
+            () = authority.cancellation.cancelled() => Err(Error::Cancelled),
+            () = cancellation.cancelled() => Err(Error::Cancelled),
+            result = self.turns.tool_working_directory(caller, request.path.as_deref()) =>
+                result.map(|cwd| json!(cwd.path())).map_err(|error| Error::Remote(error.to_string())),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct HistoryRouter {
     active: Mutex<BTreeMap<(String, String), Arc<Authority>>>,
@@ -78,17 +127,24 @@ impl HistoryRouter {
         horizon: u64,
         cancellation: &CancellationToken,
     ) -> Result<HistoryScope> {
-        self.enter_step_reader(session, operation, reader, horizon, cancellation, None)
+        self.enter(
+            session,
+            operation,
+            reader,
+            horizon,
+            cancellation,
+            HistoryPurpose::Read,
+        )
     }
 
-    pub(crate) fn enter_step_reader(
+    pub(crate) fn enter(
         self: &Arc<Self>,
         session: &str,
         operation: &str,
         reader: Arc<dyn ContributionFactReader>,
         horizon: u64,
         cancellation: &CancellationToken,
-        previous: Option<String>,
+        purpose: HistoryPurpose,
     ) -> Result<HistoryScope> {
         let key = (session.to_owned(), operation.to_owned());
         let mut active = self
@@ -103,7 +159,7 @@ impl HistoryRouter {
             key.clone(),
             Arc::new(Authority {
                 reader,
-                previous,
+                purpose,
                 horizon,
                 cancellation: cancellation.clone(),
                 page: tokio::sync::Mutex::new(None),
@@ -212,7 +268,9 @@ impl Handler for HistoryRouter {
             if authority.cancellation.is_cancelled() || cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let previous = authority.previous.as_deref().ok_or(Error::Protocol)?;
+            let HistoryPurpose::Step(Some(previous)) = &authority.purpose else {
+                return Err(Error::Protocol);
+            };
             let remaining = previous
                 .get(part.offset..)
                 .filter(|s| !s.is_empty())
@@ -358,13 +416,13 @@ mod tests {
         let router = Arc::new(HistoryRouter::default());
         let cancel = CancellationToken::new();
         let scope = router
-            .enter_step_reader(
+            .enter(
                 "session",
                 "step",
                 Arc::new(Reader(vec![])),
                 0,
                 &cancel,
-                Some(previous.clone()),
+                HistoryPurpose::Step(Some(previous.clone())),
             )
             .unwrap();
         let read = |offset| {
@@ -421,23 +479,16 @@ mod tests {
             )
             .unwrap(),
         );
-        let authority = Arc::new(Authority {
-            reader: Arc::new(Reader(vec![start.clone(), fact.clone()])),
-            previous: None,
-            horizon: 3,
-            cancellation: cancellation.clone(),
-            page: tokio::sync::Mutex::new(None),
-        });
-        router
-            .active
-            .lock()
-            .unwrap()
-            .insert(key.clone(), authority.clone());
-        let scope = HistoryScope {
-            router: router.clone(),
-            key,
-            cancellation,
-        };
+        let scope = router
+            .enter_reader(
+                "session",
+                "operation",
+                Arc::new(Reader(vec![start.clone(), fact.clone()])),
+                3,
+                &cancellation,
+            )
+            .unwrap();
+        let authority = router.authority(&key).unwrap();
         let mut request = json!({"session_id":"foreign","operation_id":"operation","after_seq":0,"through_seq":3,"offset":0});
         assert!(
             router

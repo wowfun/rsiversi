@@ -508,6 +508,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
             .unwrap(),
         );
         let context = ContributionContext {
+            working_directory: None,
             execution: None,
             header: Arc::new(draft.header().clone()),
             turn_id: turn.clone(),

@@ -22,7 +22,7 @@ Message feedback is stored once in its canonical control. A partial index on
 Session, answer sequence and control sequence seeks the last change for one
 answer. Appends and replay check the predecessor and local Fact anchor.
 
-Schema 56 stores ordinary Facts of at least 1 KiB in independent checksummed zstd frames
+Schema 58 stores ordinary Facts of at least 1 KiB in independent checksummed zstd frames
 when the frame plus its SQL index projection is smaller than the canonical
 JSON. Uncompressed rows are read directly from SQLite. Model-effect coordinates
 remain queryable without expanding frames. Standalone command records and
@@ -30,7 +30,12 @@ mailbox acceptance references keep their indexed JSON representation. Page
 admission uses the original logical size before decompression. Coverage digests,
 replay and inspection use the exact original bytes. Purge counts the stored bytes.
 
-The Store uses Header format 41 with separate history provenance and Agent
+Each Session row points to its latest working-directory control. The path lives
+in the canonical control. Reading a Session with a change fetches its path by
+the control primary key in the same snapshot. Cold validation checks the pointer
+against control replay.
+
+The Store uses Header format 44 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating

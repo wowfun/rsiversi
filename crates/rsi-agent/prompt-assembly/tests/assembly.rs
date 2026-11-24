@@ -45,6 +45,7 @@ fn input<'a>(
     scope: Option<&'a rsi_meta_scope::ScopeKey>,
 ) -> PromptInput<'a> {
     PromptInput {
+        cwd: header.canonical_cwd(),
         header,
         model,
         scope,

@@ -75,7 +75,11 @@ pub async fn assert_program_store_contract(
     let descriptor = ProgramRunDescriptor {
         run_id: run.clone(),
         session_id: id.clone(),
-        creator_turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
+        creator_turn_id: accepted
+            .body()
+            .turn_id()
+            .expect("turn-owned fixture fact")
+            .clone(),
         creator_effect_id: EffectId::new("workflow").unwrap(),
         parent_header_sha256: header.fingerprint().unwrap(),
         fork: ProgramForkBoundary {
@@ -702,7 +706,7 @@ async fn reject_nonwaking_or_retired_initial_children(
             SessionId::new("invalid-program-child").unwrap(),
             2,
             ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: id.clone(),
                     parent_header_fingerprint: parent.fingerprint().unwrap(),
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -715,12 +719,14 @@ async fn reject_nonwaking_or_retired_initial_children(
                     terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
-                },
+                }
+                .into(),
                 root_session_id: id.clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "invalid-child".into(),
             },
             descriptor.selection.clone(),
+            None,
         )
         .unwrap()
         .with_execution_owner(ExecutionOwner::ProgramRun {

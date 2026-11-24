@@ -103,6 +103,30 @@ enum Requirement {
     Header,
     Contribution,
     Deny,
+    RestoredDirectory,
+    MovedDirectory,
+}
+
+#[tokio::test]
+async fn native_file_read_uses_moved_root_directory_and_the_pinned_approval_policy() {
+    scenario(
+        Requirement::MovedDirectory,
+        SandboxMode::WorkspaceWrite,
+        ApprovalDecision::AllowOnce,
+        "file_read",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_file_read_uses_restored_directory_after_the_selected_sibling_is_recreated() {
+    scenario(
+        Requirement::RestoredDirectory,
+        SandboxMode::WorkspaceWrite,
+        ApprovalDecision::AllowOnce,
+        "file_read",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -142,7 +166,10 @@ async fn scenario(
     tool: &str,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let container =
+        rsi_workspace_path::canonical_native_path(directory.path().canonicalize().unwrap());
+    let root = container.join("A");
+    std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("sample"), b"a\0\xffz").unwrap();
     let stack = BaseStack::activate().await;
     assert!(stack.security_fiber.dispose().await.is_clean());
@@ -180,7 +207,9 @@ async fn scenario(
         mode,
         calls: AtomicUsize::new(0),
         decision: match requirement {
-            Requirement::Header => ToolPolicyDecision::Abstain,
+            Requirement::Header | Requirement::RestoredDirectory | Requirement::MovedDirectory => {
+                ToolPolicyDecision::Abstain
+            }
             Requirement::Contribution => ToolPolicyDecision::RequireApproval,
             Requirement::Deny => ToolPolicyDecision::Deny {
                 reason: "fixture denies workspace reads".into(),
@@ -223,18 +252,67 @@ async fn scenario(
             "system",
             ModelRef::new("deployment", "model").unwrap(),
             mode,
-            matches!(requirement, Requirement::Header),
+            matches!(
+                requirement,
+                Requirement::Header | Requirement::RestoredDirectory | Requirement::MovedDirectory
+            ),
         )
         .unwrap(),
     )
     .unwrap();
-    let session = stack.fresh(header).await;
-    *stack.composition.contributions.lock().unwrap() = ContributionCatalog::default();
     let turns = stack
         .runtime
         .root()
         .lookup_local::<TurnServiceContract>()
         .unwrap();
+    let session = if matches!(requirement, Requirement::RestoredDirectory) {
+        use rsi_agent_session_protocol::{ExecutionCoordinates, ExecutionLocation};
+        use rsi_agent_turn_protocol::{CreatePluginChild, PluginChildSource};
+        let sibling = container.join("B");
+        std::fs::create_dir(&sibling).unwrap();
+        stack.store.save_blank(header.clone(), None).await.unwrap();
+        let child = turns
+            .create_plugin_child(CreatePluginChild {
+                source: PluginChildSource::Session(Box::new(header)),
+                directory: Some(
+                    ExecutionCoordinates::new(ExecutionLocation::Local, sibling.to_str().unwrap())
+                        .unwrap(),
+                ),
+                session_id: SessionId::new("files-child").unwrap(),
+                task_name: "reader".into(),
+                plugin: "fixture".into(),
+                preset: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            turns.working_directory(&child, None).await.unwrap(),
+            *child.coordinates()
+        );
+        std::fs::rename(&sibling, container.join("moved-B")).unwrap();
+        assert_eq!(
+            turns.working_directory(&child, None).await.unwrap(),
+            *child.creation_coordinates()
+        );
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("sample"), b"wrong directory").unwrap();
+        SubmitSession::Resume(turns.prepare_resume(child.session_id()).await.unwrap())
+    } else if matches!(requirement, Requirement::MovedDirectory) {
+        let sibling = container.join("B");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::rename(root.join("sample"), sibling.join("sample")).unwrap();
+        std::fs::write(root.join("sample"), b"wrong directory").unwrap();
+        stack.store.save_blank(header.clone(), None).await.unwrap();
+        turns
+            .working_directory(&header, Some(sibling.to_str().unwrap()))
+            .await
+            .unwrap();
+        SubmitSession::Resume(turns.prepare_resume(header.session_id()).await.unwrap())
+    } else {
+        let session = stack.fresh(header).await;
+        *stack.composition.contributions.lock().unwrap() = ContributionCatalog::default();
+        session
+    };
     let submitted = turns
         .submit(SubmitTurn {
             reasoning_effort: None,

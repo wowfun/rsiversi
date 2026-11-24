@@ -2,6 +2,503 @@ use super::*;
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 
 #[tokio::test]
+async fn working_directory_callback_requires_the_owning_live_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = rsi_workspace_path::canonical_native_path(temp.path().canonicalize().unwrap());
+    let selected = base.join("target");
+    std::fs::create_dir(&selected).unwrap();
+    let header = SessionHeader::new_local(
+        SessionId::new("directory-tool").unwrap(),
+        1,
+        base.to_str().unwrap(),
+        AgentPresetId::new("test-agent").unwrap(),
+        profile(),
+    )
+    .unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store.clone()).await;
+    let worker = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header.clone()),
+            message: mailbox_message("start-directory-tool"),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _executor = kernel.register("directory-tool-worker".into()).unwrap();
+    let mut claim = kernel
+        .claim("directory-tool-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let caller = control_tool_caller(&kernel, &claim).await;
+    let cwd = kernel
+        .tool_working_directory(&caller, Some("target"))
+        .await
+        .unwrap();
+    assert_eq!(cwd.path(), selected.to_str().unwrap());
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    assert_eq!(claim.working_coordinates(), &cwd);
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    assert!(matches!(
+        kernel.tool_working_directory(&caller, Some("..")).await,
+        Err(rsi_agent_turn_protocol::TurnError::StaleClaim)
+    ));
+    assert_eq!(
+        store
+            .session_summary(header.session_id())
+            .await
+            .unwrap()
+            .working_coordinates(),
+        &cwd
+    );
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn working_directory_moves_a_resident_root_and_recovers_only_that_session() {
+    use rsi_agent_session_protocol::MessageDelivery;
+    use rsi_agent_store_sqlite::SqliteStore;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = rsi_workspace_path::canonical_native_path(temp.path().canonicalize().unwrap());
+    let [a, b, c] = ["A", "B", "C"].map(|name| root.join(name));
+    for dir in [&a, &b, &c] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    let [chat, other] = ["chat", "other"].map(|id| {
+        SessionHeader::new_local(
+            SessionId::new(id).unwrap(),
+            1,
+            a.to_str().unwrap(),
+            AgentPresetId::new("test-agent").unwrap(),
+            profile(),
+        )
+        .unwrap()
+    });
+    let open = || Arc::new(SqliteStore::open(&root.join("store")).unwrap());
+    let store = open();
+    store.save_blank(other.clone(), None).await.unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let worker = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(chat.clone()),
+            message: mailbox_message("first-turn"),
+            delivery: MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let executor = kernel.register("root-worker".into()).unwrap();
+    let mut claim = kernel
+        .claim("root-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    assert_eq!(claim.working_coordinates(), chat.coordinates());
+
+    let moved = kernel
+        .working_directory(&chat, Some(b.to_str().unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(moved.path(), b.to_str().unwrap());
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    assert_eq!(claim.working_coordinates(), &moved);
+    let first = store.session_summary(chat.session_id()).await.unwrap();
+    assert_eq!(
+        kernel.working_directory(&chat, Some(".")).await.unwrap(),
+        moved
+    );
+    assert_eq!(
+        store.session_summary(chat.session_id()).await.unwrap(),
+        first
+    );
+    let next = kernel.working_directory(&chat, Some("../C")).await.unwrap();
+    assert_eq!(next.path(), c.to_str().unwrap());
+    assert_eq!(
+        kernel.working_directory(&other, None).await.unwrap(),
+        *other.coordinates()
+    );
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    assert_eq!(claim.working_coordinates(), &next);
+    let pending = store
+        .inspect_session(chat.session_id())
+        .await
+        .unwrap()
+        .pending;
+    assert_eq!(pending.len(), 2);
+    for (notice, (from, to)) in pending.iter().zip([(&a, &b), (&b, &c)]) {
+        let message = store
+            .read_agent_message(chat.session_id(), &notice.message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.delivery, MessageDelivery::NextStep);
+        assert_eq!(
+            message.message.content,
+            vec![AgentMessageContent::Text {
+                text: format!(
+                    "The working directory changed from {} to {}.",
+                    serde_json::json!(from),
+                    serde_json::json!(to)
+                ),
+            }]
+        );
+    }
+    kernel.claim_pending_step_messages(&claim).await.unwrap();
+    assert_spawn_uses_working_directory(&kernel, &claim, &*store).await;
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(executor);
+    kernel.shutdown(worker).await.unwrap();
+    drop(kernel);
+    drop(store);
+
+    let store = open();
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    assert_eq!(kernel.working_directory(&chat, None).await.unwrap(), next);
+    assert_eq!(
+        store
+            .session_summary(chat.session_id())
+            .await
+            .unwrap()
+            .header,
+        chat
+    );
+    std::fs::rename(&c, root.join("moved-C")).unwrap();
+    assert_eq!(
+        kernel.working_directory(&chat, None).await.unwrap(),
+        *chat.coordinates()
+    );
+    std::fs::create_dir(&c).unwrap();
+    assert_eq!(
+        kernel.working_directory(&chat, None).await.unwrap(),
+        *chat.coordinates()
+    );
+    let inbox = store.inspect_session(chat.session_id()).await.unwrap();
+    assert!(!inbox.tree.session.has_waking_message);
+    assert_eq!(inbox.pending.len(), 1);
+    assert!(
+        store
+            .session_summary(other.session_id())
+            .await
+            .unwrap()
+            .is_blank()
+    );
+}
+
+#[tokio::test]
+async fn redirected_child_restores_once_and_holds_its_notice_over_restart() {
+    use rsi_agent_session_protocol::{ExecutionCoordinates, ExecutionLocation, MessageDelivery};
+    use rsi_agent_store_sqlite::SqliteStore;
+    let temp = tempfile::tempdir().unwrap();
+    let root = rsi_workspace_path::canonical_native_path(temp.path().canonicalize().unwrap());
+    let origin = root.join("A");
+    let selected = root.join("B");
+    std::fs::create_dir(&origin).unwrap();
+    std::fs::create_dir(&selected).unwrap();
+    let open = || Arc::new(SqliteStore::open(&root.join("store")).unwrap());
+    let store = open();
+    let parent = SessionHeader::new_local(
+        SessionId::new("parent").unwrap(),
+        1,
+        origin.to_str().unwrap(),
+        AgentPresetId::new("test-agent").unwrap(),
+        profile(),
+    )
+    .unwrap();
+    store.save_blank(parent.clone(), None).await.unwrap();
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let child = kernel
+        .create_plugin_child(rsi_agent_turn_protocol::CreatePluginChild {
+            source: rsi_agent_turn_protocol::PluginChildSource::Session(Box::new(parent)),
+            directory: Some(
+                ExecutionCoordinates::new(ExecutionLocation::Local, selected.to_str().unwrap())
+                    .unwrap(),
+            ),
+            session_id: SessionId::new("child").unwrap(),
+            task_name: "check".into(),
+            plugin: "example".into(),
+            preset: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        kernel.working_directory(&child, None).await.unwrap(),
+        *child.coordinates()
+    );
+    std::fs::rename(&selected, root.join("moved-B")).unwrap();
+    std::fs::rename(&origin, root.join("moved-A")).unwrap();
+    assert!(kernel.working_directory(&child, None).await.is_err());
+    assert!(
+        store
+            .session_summary(child.session_id())
+            .await
+            .unwrap()
+            .is_blank()
+    );
+    std::fs::rename(root.join("moved-A"), &origin).unwrap();
+    let (a, b) = tokio::join!(
+        kernel.working_directory(&child, None),
+        kernel.working_directory(&child, None)
+    );
+    assert_eq!(a.unwrap(), *child.creation_coordinates());
+    assert_eq!(b.unwrap(), *child.creation_coordinates());
+    let inbox = store.inspect_session(child.session_id()).await.unwrap();
+    assert!(!inbox.tree.session.has_waking_message);
+    assert_eq!(inbox.pending.len(), 1);
+    let notice = store
+        .read_agent_message(child.session_id(), &inbox.pending[0].message_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notice.delivery, MessageDelivery::NextStep);
+    assert!(
+        matches!(&notice.message.source, AgentMessageSource::Application { attribution: Some(a) } if a.source == serde_json::json!({"kind":"working-directory"}))
+    );
+    assert_eq!(
+        notice.message.content,
+        vec![rsi_agent_session_protocol::AgentMessageContent::Text {
+            text: format!(
+                "The working directory {} is unavailable. The working directory is now {}.",
+                serde_json::json!(selected),
+                serde_json::json!(origin)
+            ),
+        }]
+    );
+    let before = store.session_summary(child.session_id()).await.unwrap();
+    assert!(before.working_directory.is_some());
+    drop(kernel);
+    drop(store);
+    std::fs::create_dir(&selected).unwrap();
+    let reopened = open();
+    let kernel =
+        AgentKernel::recover_with_clock(reopened.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    assert_eq!(
+        kernel.working_directory(&child, None).await.unwrap(),
+        *child.creation_coordinates()
+    );
+    assert_eq!(
+        reopened.session_summary(child.session_id()).await.unwrap(),
+        before
+    );
+    let worker = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: SubmitSession::Resume(
+                kernel.prepare_resume(child.session_id()).await.unwrap(),
+            ),
+            message: mailbox_message("wake"),
+            delivery: MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("directory-worker".into()).unwrap();
+    let mut claim = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        kernel.claim("directory-worker", CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    assert_eq!(claim.working_coordinates().path(), origin.to_str().unwrap());
+    std::fs::rename(&origin, root.join("moved-A")).unwrap();
+    assert!(kernel.refresh_working_directory(&mut claim).await.is_err());
+    std::fs::rename(root.join("moved-A"), &origin).unwrap();
+    kernel.refresh_working_directory(&mut claim).await.unwrap();
+    kernel.claim_pending_step_messages(&claim).await.unwrap();
+    assert!(
+        reopened
+            .inspect_session(child.session_id())
+            .await
+            .unwrap()
+            .pending
+            .is_empty()
+    );
+    assert_spawn_uses_working_directory(&kernel, &claim, &*reopened).await;
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    kernel.shutdown(worker).await.unwrap();
+}
+
+async fn assert_spawn_uses_working_directory(
+    kernel: &AgentKernel,
+    claim: &rsi_agent_turn_protocol::TurnClaim,
+    store: &dyn SessionStore,
+) {
+    let caller = control_tool_caller(kernel, claim).await;
+    let id = SessionId::new("grandchild").unwrap();
+    for _ in 0..2 {
+        kernel
+            .spawn_agent(SpawnAgentRequest {
+                caller: caller.clone(),
+                child_session_id: id.clone(),
+                task_name: "delegated".into(),
+                message_id: MessageId::new("grandchild-input").unwrap(),
+                message: "inspect the current workspace".into(),
+                fork_turns: ForkTurnSelection::None,
+                output_contract: None,
+                model: None,
+                role: None,
+                reasoning_effort: None,
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+    }
+    let actual = store.session_summary(&id).await.unwrap().header;
+    assert_eq!(actual.coordinates(), claim.working_coordinates());
+    assert_eq!(
+        actual.creation_coordinates(),
+        claim.header().creation_coordinates()
+    );
+}
+
+#[tokio::test]
+async fn plugin_child_runs_and_settles_with_an_empty_idle_parent() {
+    let store = Arc::new(MemoryStore::new());
+    let parent = header("plugin-parent");
+    store.save_blank(parent.clone(), None).await.unwrap();
+    let kernel = kernel(store.clone()).await;
+    let worker = kernel.start_workers();
+    let child = kernel
+        .create_plugin_child(rsi_agent_turn_protocol::CreatePluginChild {
+            source: rsi_agent_turn_protocol::PluginChildSource::Session(Box::new(parent.clone())),
+            directory: Some(
+                rsi_agent_session_protocol::ExecutionCoordinates::new(
+                    rsi_agent_session_protocol::ExecutionLocation::Local,
+                    "/sibling",
+                )
+                .unwrap(),
+            ),
+            session_id: SessionId::new("plugin-child").unwrap(),
+            task_name: "analyze".into(),
+            plugin: "@example/reviewer".into(),
+            preset: None,
+        })
+        .await
+        .unwrap();
+    let mut message = mailbox_message("plugin-child-request");
+    message.source = AgentMessageSource::Application { attribution: None };
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(child.clone()),
+            message,
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("plugin-child-worker".into()).unwrap();
+    let claim = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        kernel.claim("plugin-child-worker", CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(claim.session_id(), child.session_id());
+    assert_eq!(claim.header().canonical_cwd(), "/sibling");
+    assert_eq!(
+        claim.header().settings().sandbox(),
+        parent.settings().sandbox()
+    );
+    assert_eq!(
+        store
+            .completion_reservation_count(parent.session_id())
+            .await
+            .unwrap(),
+        0
+    );
+    kernel
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .active_activation(child.session_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let parent = store.session_summary(parent.session_id()).await.unwrap();
+    assert!(
+        parent.is_blank(),
+        "plugin delivery must not create an automatic parent Turn or message"
+    );
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn plugin_tool_child_records_the_exact_started_effect_and_turn() {
+    use rsi_agent_session_protocol::{ExecutionOwner, MessageDelivery, PluginToolOrigin};
+    use rsi_agent_turn_protocol::{CreatePluginChild, PluginChildSource};
+    let store = Arc::new(MemoryStore::new());
+    let kernel = kernel(store).await;
+    let worker = kernel.start_workers();
+    kernel
+        .submit_message(SubmitMessage {
+            session: fresh(header("plugin-tool-parent")),
+            message: mailbox_message("trigger-plugin"),
+            delivery: MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let _lease = kernel.register("plugin-tool-worker".into()).unwrap();
+    let claim = kernel
+        .claim("plugin-tool-worker", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let caller = Arc::new(control_tool_caller(&kernel, &claim).await);
+    let expected = PluginToolOrigin {
+        turn_id: claim.turn_id().clone(),
+        effect_id: caller.tool_effect_id().unwrap().clone(),
+    };
+    let make = |id: &str| CreatePluginChild {
+        source: PluginChildSource::Tool(caller.clone()),
+        directory: None,
+        session_id: SessionId::new(id).unwrap(),
+        task_name: id.into(),
+        plugin: "@example/delegator".into(),
+        preset: None,
+    };
+    let child = kernel.create_plugin_child(make("worker")).await.unwrap();
+    assert!(
+        matches!(child.execution_owner(), Some(ExecutionOwner::Plugin { session_id, plugin, tool: Some(origin) })
+        if session_id == claim.session_id() && plugin == "@example/delegator" && origin == &expected)
+    );
+    kernel.release(&claim).unwrap();
+    assert!(matches!(
+        kernel.create_plugin_child(make("late")).await,
+        Err(TurnError::StaleClaim)
+    ));
+    kernel.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One captured boundary is reused across pages and nested Full/Last descendants.
 async fn fork_reader_authenticates_once_and_reuses_its_immutable_boundary() {
     let store = Arc::new(MemoryStore::new());

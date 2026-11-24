@@ -36,7 +36,7 @@ pub use feedback::{
     MessageFeedbackChange, MessageFeedbackOutcome, SavedMessageFeedback,
 };
 use history::SessionOrigin;
-pub use history::{ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
+pub use history::{AgentParent, ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
 mod model_attempt;
 mod queue;
 pub use model_attempt::{
@@ -126,7 +126,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 41;
+pub const SESSION_FORMAT_VERSION: u32 = 44;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1030,6 +1030,8 @@ pub enum WaitKind {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(missing_docs)] // Transition-level prose is the authoritative field contract.
 pub enum AgentControlRecordBody {
+    /// Host-selected canonical local workspace for subsequent model steps and tools.
+    WorkingDirectoryChanged { cwd: String },
     /// A version-checked operator judgment on a Session-owned assistant answer.
     MessageFeedbackChanged {
         /// Target, observed predecessor and desired value.
@@ -1244,6 +1246,7 @@ impl AgentControlRecordBody {
                     "completion reservation must be within 1..={MAXIMUM_AGENT_MESSAGE_BYTES} bytes"
                 )))
             }
+            Self::WorkingDirectoryChanged { cwd } => validate_canonical_path(cwd),
             Self::MessageFeedbackChanged { .. }
             | Self::InboxPaused
             | Self::InboxResumed
@@ -1658,6 +1661,12 @@ pub struct SessionHeader {
     session_id: SessionId,
     created_at_ms: u64,
     coordinates: ExecutionCoordinates,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_creation_cwd"
+    )]
+    #[schemars(with = "Option<String>")]
+    creation_cwd: Option<ExecutionCoordinates>,
     agent_preset_id: AgentPresetId,
     settings: FrozenAgentSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1671,6 +1680,29 @@ pub struct SessionHeader {
     initial_output: Option<InitialOutputContract>,
 }
 
+fn serialize_creation_cwd<S: serde::Serializer>(
+    coordinates: &Option<ExecutionCoordinates>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    coordinates
+        .as_ref()
+        .map(ExecutionCoordinates::path)
+        .serialize(serializer)
+}
+
+/// Execution choices for a local plugin child. Unspecified coordinates and preset inherit the parent's.
+#[derive(Debug)]
+pub struct PluginChildTarget<'a> {
+    /// Authorized canonical child directory.
+    pub coordinates: Option<ExecutionCoordinates>,
+    /// Explicit child composition.
+    pub preset: Option<AgentPresetId>,
+    /// Model selection captured at creation.
+    pub selection: ModelSelection,
+    /// Tool names offered in the creating request, when the plugin is executing a Tool.
+    pub offered_tools: Option<&'a [String]>,
+}
+
 impl<'de> Deserialize<'de> for SessionHeader {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -1682,6 +1714,7 @@ impl<'de> Deserialize<'de> for SessionHeader {
             session_id: Option<serde_json::Value>,
             created_at_ms: Option<serde_json::Value>,
             coordinates: Option<serde_json::Value>,
+            creation_cwd: Option<serde_json::Value>,
             agent_preset_id: Option<serde_json::Value>,
             settings: Option<serde_json::Value>,
             protection: Option<SessionProtectionScope>,
@@ -1714,6 +1747,15 @@ impl<'de> Deserialize<'de> for SessionHeader {
             session_id: decode_header_field(wire.session_id, "session_id")?,
             created_at_ms: decode_header_field(wire.created_at_ms, "created_at_ms")?,
             coordinates: decode_header_field(wire.coordinates, "coordinates")?,
+            creation_cwd: wire
+                .creation_cwd
+                .map(|value| {
+                    let path = serde_json::from_value::<String>(value)
+                        .map_err(serde::de::Error::custom)?;
+                    ExecutionCoordinates::new(ExecutionLocation::Local, path)
+                        .map_err(serde::de::Error::custom)
+                })
+                .transpose()?,
             agent_preset_id: decode_header_field(wire.agent_preset_id, "agent_preset_id")?,
             settings: decode_header_field(wire.settings, "settings")?,
             protection: wire.protection,
@@ -1815,7 +1857,7 @@ impl SessionHeader {
             session_id,
             created_at_ms,
             coordinates,
-
+            creation_cwd: None,
             agent_preset_id,
             settings,
             protection: None,
@@ -1840,6 +1882,17 @@ impl SessionHeader {
             ));
         }
         validate_canonical_path(self.coordinates.path())?;
+        if let Some(origin) = &self.creation_cwd {
+            validate_canonical_path(origin.path())?;
+            if self.fork_origin().is_none()
+                || self.coordinates.location() != &ExecutionLocation::Local
+                || origin == &self.coordinates
+            {
+                return Err(SessionError::Invalid(
+                    "invalid Agent child creation directory".into(),
+                ));
+            }
+        }
         self.settings.validate()?;
         if let Some(scope) = &self.protection {
             scope.validate()?;
@@ -1862,38 +1915,39 @@ impl SessionHeader {
                 ));
             }
         }
-        if let Some(origin) = self.history_origin() {
-            origin.validate()?;
-            if origin.parent_session_id == self.session_id {
-                return Err(SessionError::Invalid(
-                    "forked session cannot name itself as its parent".into(),
-                ));
-            }
-        }
         match (self.fork_origin(), &self.execution_owner) {
-            (None, None) => {}
+            (None, None) => {
+                if let Some(history) = self.history_origin() {
+                    history.validate()?;
+                    if history.parent_session_id == self.session_id {
+                        return Err(SessionError::Invalid(
+                            "fork cannot name itself as parent".into(),
+                        ));
+                    }
+                }
+            }
             (Some(origin), Some(owner)) => {
                 origin.validate()?;
                 owner.validate()?;
-                let parent = match owner {
-                    ExecutionOwner::TurnActivation {
-                        session_id,
-                        turn_id,
-                    } => {
-                        if !matches!(&origin.history.point, ForkPoint::BeforeTurn { turn_id: source } if source == turn_id)
-                        {
-                            return Err(SessionError::Invalid(
-                                "activation owner differs from creator Turn".into(),
-                            ));
-                        }
-                        session_id
-                    }
-                    ExecutionOwner::ProgramRun { session_id, .. } => session_id,
-                };
-                if parent != &origin.history.parent_session_id {
+                if owner.session_id() == &self.session_id
+                    || owner.session_id() != origin.parent.session_id()
+                {
                     return Err(SessionError::Invalid(
                         "execution owner differs from lineage parent".into(),
                     ));
+                }
+                match (owner, origin.parent.history().map(|history| &history.point)) {
+                    (
+                        ExecutionOwner::TurnActivation { turn_id, .. },
+                        Some(ForkPoint::BeforeTurn { turn_id: source }),
+                    ) if turn_id == source => {}
+                    (ExecutionOwner::ProgramRun { .. }, Some(ForkPoint::BeforeTurn { .. }))
+                    | (ExecutionOwner::Plugin { .. }, _) => {}
+                    _ => {
+                        return Err(SessionError::Invalid(
+                            "execution owner differs from creator Turn".into(),
+                        ));
+                    }
                 }
             }
             _ => {
@@ -1931,6 +1985,21 @@ impl SessionHeader {
     /// Returns the canonical creation-time workspace path.
     pub fn canonical_cwd(&self) -> &str {
         self.coordinates.path()
+    }
+
+    /// Original local project of a delegated child, inherited independently of its working directory.
+    pub fn creation_cwd(&self) -> &str {
+        self.creation_coordinates().path()
+    }
+
+    /// Workspace where the Session was created, including for descendants of a moved Session.
+    pub fn creation_coordinates(&self) -> &ExecutionCoordinates {
+        self.creation_cwd.as_ref().unwrap_or(&self.coordinates)
+    }
+
+    /// Whether a delegated child can return from its selected workspace to its creation directory.
+    pub fn is_redirected(&self) -> bool {
+        self.creation_cwd.is_some()
     }
 
     /// Returns the durable Agent preset identity selected for this session.
@@ -1972,11 +2041,13 @@ impl SessionHeader {
                 "session Header already contains fork lineage".into(),
             ));
         }
+        let history = origin.parent.history().ok_or_else(|| {
+            SessionError::Invalid("a Turn-owned fork requires its invoking Turn".into())
+        })?;
         self.execution_owner = Some(ExecutionOwner::TurnActivation {
-            session_id: origin.history.parent_session_id.clone(),
-            turn_id: origin.history.point.turn_id().clone(),
+            session_id: history.parent_session_id.clone(),
+            turn_id: history.point.turn_id().clone(),
         });
-        origin.validate()?;
         self.fork_origin = Some(SessionOrigin::Agent { origin });
         self.validate()?;
         Ok(self)
@@ -1989,22 +2060,98 @@ impl SessionHeader {
         created_at_ms: u64,
         origin: ForkOrigin,
         selection: ModelSelection,
+        working_directory: Option<&ExecutionCoordinates>,
     ) -> Result<Self> {
-        if origin.history.parent_session_id != self.session_id {
+        if origin.parent.session_id() != &self.session_id {
             return Err(SessionError::Invalid(
                 "fork origin parent does not match the source Header".into(),
+            ));
+        }
+        let coordinates = working_directory.unwrap_or(&self.coordinates);
+        if coordinates.location() != self.coordinates.location() {
+            return Err(SessionError::Invalid(
+                "spawn cannot change execution location".into(),
             ));
         }
         let mut child = Self::new(
             session_id,
             created_at_ms,
-            self.coordinates.clone(),
+            coordinates.clone(),
             self.agent_preset_id.clone(),
             self.settings.clone().with_model_selection(selection)?,
         )?
         .with_fork_origin(origin)?
         .with_delegation_policy(self.delegation_policy.clone())?;
+        if coordinates != self.creation_coordinates() {
+            child.creation_cwd = Some(self.creation_coordinates().clone());
+        }
         child.protection.clone_from(&self.protection);
+        child.validate()?;
+        Ok(child)
+    }
+
+    /// Derives an unseeded plugin-owned child at the captured parent's settings and authority.
+    pub fn plugin_child(
+        &self,
+        session_id: SessionId,
+        created_at_ms: u64,
+        path: AgentPath,
+        task_name: String,
+        owner: ExecutionOwner,
+        target: PluginChildTarget<'_>,
+    ) -> Result<Self> {
+        let coordinates = target
+            .coordinates
+            .unwrap_or_else(|| self.coordinates.clone());
+        if coordinates.location() != &ExecutionLocation::Local
+            || self.coordinates.location() != coordinates.location()
+        {
+            return Err(SessionError::Invalid(
+                "Plugin delegation requires local execution coordinates".into(),
+            ));
+        }
+        let mut child = Self::new(
+            session_id,
+            created_at_ms,
+            coordinates,
+            target
+                .preset
+                .unwrap_or_else(|| self.agent_preset_id.clone()),
+            self.settings
+                .clone()
+                .with_model_selection(target.selection)?,
+        )?;
+        let root = self
+            .fork_origin()
+            .map_or(self.session_id(), |origin| &origin.root_session_id);
+        child.fork_origin = Some(SessionOrigin::Agent {
+            origin: ForkOrigin {
+                parent: AgentParent::Session {
+                    parent_session_id: self.session_id.clone(),
+                    parent_header_fingerprint: self.fingerprint()?,
+                },
+                root_session_id: root.clone(),
+                path,
+                task_name,
+            },
+        });
+        child.execution_owner = Some(owner);
+        if child.canonical_cwd() != self.creation_cwd() {
+            child.creation_cwd = Some(self.creation_coordinates().clone());
+        }
+        child.protection.clone_from(&self.protection);
+        child.delegation_policy.clone_from(&self.delegation_policy);
+        if let Some(offered) = target.offered_tools {
+            if let Some(policy) = &mut child.delegation_policy {
+                policy.restrict_to(offered);
+            } else {
+                child.delegation_policy = Some(DelegationPolicy::freeze(
+                    None,
+                    offered.iter().cloned().collect(),
+                    None,
+                )?);
+            }
+        }
         child.validate()?;
         Ok(child)
     }
@@ -2053,6 +2200,14 @@ impl SessionHeader {
         self.execution_owner.as_ref()
     }
 
+    /// Parent receiving Kernel completion through its mailbox or Program.
+    pub fn completion_parent(&self) -> Option<&SessionId> {
+        self.execution_owner().and_then(|owner| match owner {
+            ExecutionOwner::Plugin { .. } => None,
+            owner => Some(owner.session_id()),
+        })
+    }
+
     /// Returns the optional immutable fork lineage.
     pub const fn fork_origin(&self) -> Option<&ForkOrigin> {
         match &self.fork_origin {
@@ -2063,7 +2218,7 @@ impl SessionHeader {
     /// Historical source selection, without granting Agent control authority.
     pub const fn history_origin(&self) -> Option<&HistoryOrigin> {
         match &self.fork_origin {
-            Some(SessionOrigin::Agent { origin }) => Some(&origin.history),
+            Some(SessionOrigin::Agent { origin }) => origin.parent.history(),
             Some(SessionOrigin::Independent { history }) => Some(history),
             None => None,
         }

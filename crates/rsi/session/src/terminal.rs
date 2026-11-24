@@ -243,7 +243,12 @@ impl LocalSessionHandle {
             .as_ref()
             .ok_or_else(|| unavailable("terminal provider is absent"))?;
         let header = self.header_snapshot().await?;
-        let cwd = PathBuf::from(header.canonical_cwd());
+        let selected = self
+            .turns
+            .working_directory(&header, None)
+            .await
+            .map_err(super::map_turn_error)?;
+        let cwd = PathBuf::from(selected.path());
         let local = header.coordinates().location() == &rsi_execution::ExecutionLocation::Local;
         terminal_mode(local, header.settings().sandbox())?;
         let shell = manual_shell(cfg!(windows) && local, &cwd)?;
@@ -351,8 +356,9 @@ impl LocalSessionHandle {
         header: &super::SessionHeader,
         size: rsi_pty_protocol::Size,
     ) -> Result<TerminalLaunch> {
-        let workspace = PathBuf::from(header.canonical_cwd());
         let lease = self.execution_lease()?;
+        let coordinates = self.validate_workspace(header, lease.as_ref()).await?;
+        let workspace = PathBuf::from(coordinates.path());
         let local = lease.as_ref().is_none_or(|lease| {
             *lease.binding().location() == rsi_execution::ExecutionLocation::Local
         });
@@ -369,13 +375,6 @@ impl LocalSessionHandle {
             workspace,
         };
         if let Some(lease) = lease {
-            let coordinates = lease
-                .canonicalize(header.canonical_cwd())
-                .await
-                .map_err(|_| unavailable("terminal workspace is unavailable on its target"))?;
-            if &coordinates != header.coordinates() {
-                return Err(unavailable("terminal workspace changed on its target"));
-            }
             let program = if *lease.binding().location() == rsi_execution::ExecutionLocation::Local
             {
                 lease
@@ -402,7 +401,6 @@ impl LocalSessionHandle {
                 termination_grace_ms: 250,
             }))
         } else {
-            self.prepare_workspace(header).await?;
             let process = terminals.sandbox.confine(request).await.map_err(|_| {
                 unavailable("the frozen sandbox cannot provide a controlling terminal")
             })?;

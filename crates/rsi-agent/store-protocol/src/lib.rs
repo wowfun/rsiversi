@@ -89,7 +89,7 @@ pub fn validate_feedback_append(
 }
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 56;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 58;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -101,6 +101,57 @@ pub const MAXIMUM_STORE_CONTROL_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES;
 /// Maximum aggregate encoded Agent-message bytes returned in one mailbox prefix.
 pub const MAXIMUM_STORE_MAILBOX_PAGE_BYTES: usize = MAXIMUM_STORE_BATCH_BYTES / 2;
 
+/// Verifies tree membership and the plugin child's recovery directory across parent preset changes.
+pub fn validate_agent_lineage(header: &SessionHeader, parent: &SessionHeader) -> Result<()> {
+    let child = header
+        .fork_origin()
+        .ok_or_else(|| StoreError::Invalid("Agent child requires a parent".into()))?;
+    let ancestor = parent.fork_origin();
+    let root = ancestor.map_or(parent.session_id(), |origin| &origin.root_session_id);
+    if &child.root_session_id != root || child.parent.session_id() != parent.session_id() {
+        return Err(StoreError::Invalid(
+            "Agent child root differs from its parent's durable root".into(),
+        ));
+    }
+    if matches!(
+        child.parent,
+        rsi_agent_session_protocol::AgentParent::Session { .. }
+    ) {
+        let path = ancestor.map_or(&[][..], |origin| origin.path.segments());
+        if child.path.segments().split_last().map(|(_, prefix)| prefix) != Some(path)
+            || header.creation_cwd() != parent.creation_cwd()
+        {
+            return Err(StoreError::Invalid(
+                "plugin child does not match its captured parent Header, path or creation directory".into(),
+            ));
+        }
+    } else if header.creation_coordinates() != parent.creation_coordinates() {
+        return Err(StoreError::Invalid(
+            "Agent fork working directory differs from its parent".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies the plugin's parent capture in the same transaction that inserts the child.
+pub fn validate_agent_parent(header: &SessionHeader, parent: &SessionHeader) -> Result<()> {
+    validate_agent_lineage(header, parent)?;
+    if let Some(rsi_agent_session_protocol::AgentParent::Session {
+        parent_header_fingerprint,
+        ..
+    }) = header.fork_origin().map(|origin| &origin.parent)
+        && parent
+            .fingerprint()
+            .map_err(|error| StoreError::Invalid(error.to_string()))?
+            != *parent_header_fingerprint
+    {
+        return Err(StoreError::Invalid(
+            "plugin child does not match its captured parent Header".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Binds activation labels to the immutable Session Header lineage.
 pub fn validate_activation_lineage(
     header: &SessionHeader,
@@ -111,7 +162,7 @@ pub fn validate_activation_lineage(
     let matches = match header.fork_origin() {
         Some(origin) => {
             root == &origin.root_session_id
-                && parent == Some(&origin.history.parent_session_id)
+                && parent == Some(origin.parent.session_id())
                 && path == &origin.path
         }
         None => root == header.session_id() && parent.is_none() && path.depth() == 0,
@@ -1359,9 +1410,9 @@ impl StoreAgentSubtreeSnapshot {
     pub fn activation_owns(&self, descendant: &StoreAgentDescendantStatus) -> bool {
         let mut next = descendant;
         for _ in 0..MAXIMUM_DURABLE_AGENT_TREE_NODES {
-            if matches!(
+            if !matches!(
                 next.execution_owner,
-                rsi_agent_session_protocol::ExecutionOwner::ProgramRun { .. }
+                rsi_agent_session_protocol::ExecutionOwner::TurnActivation { .. }
             ) {
                 return false;
             }
@@ -1401,14 +1452,7 @@ impl StoreAgentSubtreeSnapshot {
                 .execution_owner
                 .validate()
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            let (rsi_agent_session_protocol::ExecutionOwner::TurnActivation {
-                session_id: owner,
-                ..
-            }
-            | rsi_agent_session_protocol::ExecutionOwner::ProgramRun {
-                session_id: owner, ..
-            }) = &descendant.execution_owner;
-            if owner != &descendant.parent_session_id {
+            if descendant.execution_owner.session_id() != &descendant.parent_session_id {
                 return Err(StoreError::Corrupt(
                     "execution owner differs from the immutable parent".into(),
                 ));
@@ -1841,6 +1885,9 @@ pub struct StoreRecentSessionCursor {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreRecentSession {
+    /// Latest working-directory control observed in the same snapshot as the Header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<WorkingDirectoryChange>,
     /// Complete validated immutable Header selected in the listing snapshot.
     pub header: SessionHeader,
     /// Latest qualifying activity in that snapshot; never earlier than creation.
@@ -1851,7 +1898,41 @@ pub struct StoreRecentSession {
     pub durable_control_seq: u64,
 }
 
+/// Latest Host-selected local workspace and its authenticated position in the control stream.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkingDirectoryChange {
+    /// Last change in this Session.
+    pub seq: std::num::NonZeroU64,
+    /// Canonical local coordinates selected at that position.
+    pub coordinates: rsi_agent_session_protocol::ExecutionCoordinates,
+}
+
+impl WorkingDirectoryChange {
+    /// Decodes an indexed change in its owning Session's execution location.
+    pub fn new(header: &SessionHeader, seq: u64, cwd: String) -> Result<Self> {
+        use rsi_agent_session_protocol::{ExecutionCoordinates, ExecutionLocation};
+        if header.coordinates().location() != &ExecutionLocation::Local {
+            return Err(StoreError::Invalid(
+                "working-directory changes require a local Session".into(),
+            ));
+        }
+        Ok(Self {
+            seq: std::num::NonZeroU64::new(seq)
+                .ok_or_else(|| StoreError::Invalid("missing working-directory control".into()))?,
+            coordinates: ExecutionCoordinates::new(ExecutionLocation::Local, cwd)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+        })
+    }
+}
+
 impl StoreRecentSession {
+    /// Effective workspace at this snapshot.
+    pub fn working_coordinates(&self) -> &rsi_agent_session_protocol::ExecutionCoordinates {
+        self.working_directory
+            .as_ref()
+            .map_or_else(|| self.header.coordinates(), |change| &change.coordinates)
+    }
     /// A catalogued identity whose first Agent admission has not happened yet.
     pub fn is_blank(&self) -> bool {
         self.durable_fact_seq == 0 && self.durable_control_seq == 0
@@ -1884,19 +1965,24 @@ impl BlankWrite {
         header: &SessionHeader,
         previous: Option<&rsi_agent_session_protocol::AgentPresetId>,
     ) -> Result<Self> {
+        let plugin_child = matches!(
+            header.execution_owner(),
+            Some(rsi_agent_session_protocol::ExecutionOwner::Plugin { .. })
+        );
         if header.history_origin().is_some()
-            || header.execution_owner().is_some()
-            || header.protection().is_some()
+            || (!plugin_child
+                && (header.execution_owner().is_some() || header.protection().is_some()))
         {
             return Err(StoreError::Invalid(
-                "only ordinary root Sessions can reserve a blank Header".into(),
+                "a blank Header requires an ordinary root or an unseeded plugin child".into(),
             ));
         }
         match saved {
             None if previous.is_none() => Ok(Self::Insert),
             Some((prior, true)) if prior == header => Ok(Self::Keep),
             Some((prior, true))
-                if Some(prior.agent_preset_id()) == previous
+                if !plugin_child
+                    && Some(prior.agent_preset_id()) == previous
                     && prior
                         .clone()
                         .with_agent_preset_id(header.agent_preset_id().clone())
@@ -2078,7 +2164,7 @@ impl fmt::Debug for SessionValidationLease {
 /// Mechanical durable operations under one already-held writer lease.
 #[async_trait]
 pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
-    /// Registers an ordinary blank or changes only its preset from the saved predecessor.
+    /// Registers a blank. Only ordinary roots can replace their preset from the saved predecessor.
     async fn save_blank(
         &self,
         _header: SessionHeader,
@@ -3426,6 +3512,12 @@ mod tests {
                             run_id: ProgramRunId::new("run").unwrap(),
                             ordinal: 1,
                         }
+                    } else if group % 3 == 2 && depth == 3 {
+                        ExecutionOwner::Plugin {
+                            session_id: parent.clone(),
+                            plugin: "@example/reviewer".into(),
+                            tool: None,
+                        }
                     } else {
                         ExecutionOwner::TurnActivation {
                             session_id: parent.clone(),
@@ -3452,7 +3544,7 @@ mod tests {
             let expected = match group % 3 {
                 0 => child.path.depth() == 1,
                 1 => false,
-                _ => true,
+                _ => child.path.depth() < 3,
             };
             assert_eq!(
                 tree.activation_owns(child),

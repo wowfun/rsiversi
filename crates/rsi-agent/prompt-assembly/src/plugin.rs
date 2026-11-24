@@ -78,10 +78,7 @@ struct ContextConfig {
 struct WorkingDirectory;
 impl TextProvider for WorkingDirectory {
     fn resolve(&self, input: &PromptInput<'_>) -> ContributionResult<Option<String>> {
-        Ok(Some(format!(
-            "Working directory: {}",
-            input.header.canonical_cwd()
-        )))
+        Ok(Some(format!("Working directory: {}", input.cwd)))
     }
 }
 

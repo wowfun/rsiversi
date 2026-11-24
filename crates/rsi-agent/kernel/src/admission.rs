@@ -124,10 +124,7 @@ impl AgentKernel {
             }
         }
 
-        let parent_session_id = claim
-            .header()
-            .fork_origin()
-            .map(|origin| origin.history.parent_session_id.clone());
+        let parent_session_id = claim.header().completion_parent().cloned();
         let live_seq = {
             let state = lock_state(&self.inner);
             state
@@ -338,11 +335,11 @@ impl AgentKernel {
         timestamp_ms: u64,
     ) -> TurnResult<Option<AtomicSessionAppend>> {
         let (header, reply) = child;
-        let Some(origin) = header.fork_origin() else {
+        let Some(parent_session_id) = header.completion_parent() else {
             return Ok(None);
         };
+        let origin = header.fork_origin().expect("child Header owns its lineage");
         let child_session_id = header.session_id();
-        let parent_session_id = &origin.history.parent_session_id;
         match self
             .program_completion_append(header, activation_id, outcome, result.as_ref())
             .await?
@@ -583,9 +580,7 @@ impl AgentKernel {
                 let header = read_validated_header_bounded(&self.inner, &session_id)
                     .await
                     .map_err(turn_store_error)?;
-                let parent_session_id = header
-                    .fork_origin()
-                    .map(|origin| origin.history.parent_session_id.clone());
+                let parent_session_id = header.completion_parent().cloned();
                 let reply = if parent_session_id.is_some()
                     && matches!(outcome, TurnOutcome::Completed)
                     && terminal_result(terminal).is_none()

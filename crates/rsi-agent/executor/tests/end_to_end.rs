@@ -1861,7 +1861,6 @@ mod context_builder;
 mod contributions;
 #[path = "end_to_end/extension.rs"]
 mod extension;
-#[cfg(unix)]
 #[path = "end_to_end/files.rs"]
 mod files;
 #[path = "end_to_end/generations.rs"]

@@ -240,7 +240,7 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
     let parent = metadata_header("parent");
     let child = metadata_header("child")
         .with_fork_origin(ForkOrigin {
-            history: HistoryOrigin {
+            parent: HistoryOrigin {
                 parent_session_id: parent.session_id().clone(),
                 parent_header_fingerprint: parent.fingerprint().unwrap(),
                 point: ForkPoint::before(&TurnId::new("turn").unwrap()),
@@ -251,7 +251,8 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
                 terminal_control_prefix_sha256: hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
-            },
+            }
+            .into(),
             root_session_id: parent.session_id().clone(),
             path: AgentPath::new(vec![1]).unwrap(),
             task_name: "child".into(),
@@ -259,6 +260,7 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
         .unwrap();
     let other = metadata_header("other");
     let summary = |header: SessionHeader| rsi_session_protocol::SessionSummary {
+        working_directory: None,
         last_activity_ms: header.created_at_ms(),
         header,
         durable_fact_seq: 7,

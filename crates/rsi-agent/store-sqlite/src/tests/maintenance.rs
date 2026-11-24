@@ -794,7 +794,7 @@ async fn purge_blockers_are_exact_and_refusals_do_not_latch_cached_proof_checks(
     let parent = seed(&store, "parent", 1).await;
     let child_header = test_header("child")
         .with_fork_origin(ForkOrigin {
-            history: rsi_agent_session_protocol::HistoryOrigin {
+            parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: parent.targets[0].session_id.clone(),
                 parent_header_fingerprint: parent.targets[0].header_sha256.clone(),
                 point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -807,7 +807,8 @@ async fn purge_blockers_are_exact_and_refusals_do_not_latch_cached_proof_checks(
                 terminal_control_prefix_sha256: "0".repeat(64),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
-            },
+            }
+            .into(),
             root_session_id: parent.targets[0].session_id.clone(),
             path: AgentPath::new(vec![1]).unwrap(),
             task_name: "child".into(),

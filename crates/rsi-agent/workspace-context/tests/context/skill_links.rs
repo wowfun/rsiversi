@@ -80,7 +80,7 @@ async fn assert_selected_views(
 ) {
     let SessionResourceValue::List { entries } = source
         .skills(
-            session,
+            session.coordinates(),
             None,
             None,
             SkillAudience::Human,
@@ -96,7 +96,7 @@ async fn assert_selected_views(
     for audience in [SkillAudience::Human, SkillAudience::Model] {
         let SessionResourceValue::Read { resource, text } = source
             .skills(
-                session,
+                session.coordinates(),
                 None,
                 Some("guide"),
                 audience,
@@ -113,7 +113,7 @@ async fn assert_selected_views(
     for text in ["/guide", "/skill guide", "please use $guide"] {
         let snapshot = source
             .snapshot(
-                session,
+                session.coordinates(),
                 None,
                 &WorkspaceSkillRequests::from_messages(&[&human(text)]).unwrap(),
             )
@@ -144,7 +144,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
     let session = header(&project);
     let SessionResourceValue::List { entries } = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             None,
             SkillAudience::Human,
@@ -159,7 +159,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
     assert_eq!(entries[0].source, ".agents/skills/a-first/SKILL.md");
     let SessionResourceValue::Read { text, .. } = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             Some("guide"),
             SkillAudience::Model,
@@ -178,7 +178,7 @@ async fn aliases_keep_first_logical_source_and_existing_name_precedence() {
     .unwrap();
     let SessionResourceValue::Read { resource, text } = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             Some("guide"),
             SkillAudience::Model,
@@ -214,7 +214,7 @@ async fn file_links_dangling_links_and_cycles_do_not_hide_valid_skills() {
     let source = context(None, vec![temp.path().join("loop-root"), root]);
     let snapshot = source
         .snapshot(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("$valid $linked")]).unwrap(),
         )
@@ -243,7 +243,7 @@ async fn link_entries_count_before_alias_deduplication() {
     let source = context(None, vec![root]);
     let snapshot = source
         .snapshot(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::default(),
         )
@@ -293,7 +293,7 @@ async fn exact_linked_reads_distinguish_absence_and_each_invocation_restriction(
         assert_eq!(
             source
                 .skills(
-                    &header,
+                    header.coordinates(),
                     None,
                     Some(name),
                     audience,

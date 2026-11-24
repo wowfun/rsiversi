@@ -227,8 +227,14 @@ may project that snapshot into read-only Session handles; this does not grant
 write ownership, create an Agent, or make an unpublished draft durable.
 
 `application.inbox` can observe any Session visible to the caller, including a
-Kernel subagent preparing a model request. Interactive commands and queue
-mutations on a subagent still go through its parent. The inbox opening captures
+Kernel subagent preparing a model request. A trusted application can establish
+an unseeded plugin child using its generation's private callback. The Host
+verifies the parent Session and records the package identity supplied by the
+plugin runtime. A delegation from a model Tool uses the executor's live
+capability for the same application generation, parent and effect. That
+callback can submit work to its plugin-owned child.
+Interactive commands and queue mutations from a device go through the parent.
+The inbox opening captures
 the exact active Turn, Fact and
 control cursors and pending-message metadata. A durable opening also returns
 `history`: the Header metadata, model baseline, `through` and `selection_cursor`
@@ -308,7 +314,12 @@ Listing reads neither transcript bodies nor pending human interactions.
 With `history: true`, the same cursor returns immutable history metadata and
 the durable Fact/control cursor from that same listed row. The
 parent names the history source for both independent and Agent forks. The
-working directory is present for local execution only.
+working directory is present for local execution only. A trusted application uses
+`application.directory` for an admitted Session. An explicit path resolves from
+its current local directory. Omitting it checks the selection and restores the
+creation directory if the selection disappeared. A change is published to the
+Session history and queued for the model at its next Step. Workspace membership
+continues to use the creation directory.
 `application.create` resolves a named Workspace or registers an explicit
 local directory through Workspace ingress for the live device. An unplaced
 conversation uses the first visible registered local Workspace in insertion

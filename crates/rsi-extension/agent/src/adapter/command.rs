@@ -390,6 +390,7 @@ impl SessionCommand for ExternalCommand {
         self.adapter
             .load_snapshot(
                 &context.header,
+                None,
                 view.revision,
                 &journal,
                 false,

@@ -1,5 +1,5 @@
 use super::{
-    Sessions,
+    BoundSessions,
     session_history::{resource_key, stored_history},
 };
 use futures_util::StreamExt as _;
@@ -108,7 +108,7 @@ fn remote(error: impl std::fmt::Display) -> Error {
     Error::Remote(error.to_string().chars().take(1000).collect())
 }
 
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn inbox(&self, payload: Value) -> Result<Value> {
         let Input {
             request,

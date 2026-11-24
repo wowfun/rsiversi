@@ -54,6 +54,7 @@ impl Fixture {
         Self {
             reminder: Reminder { state, config },
             context: ContributionContext {
+                working_directory: None,
                 execution: None,
                 header: Arc::new(header("session")),
                 turn_id: TurnId::new("turn").unwrap(),

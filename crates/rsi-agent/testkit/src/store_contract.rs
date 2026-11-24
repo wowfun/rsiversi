@@ -1235,7 +1235,7 @@ pub async fn assert_mechanical_store_contract(
     );
 
     let child_origin = |task_name: &str| ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: session_id.clone(),
             parent_header_fingerprint: header.fingerprint().unwrap(),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -1248,7 +1248,8 @@ pub async fn assert_mechanical_store_contract(
             terminal_control_prefix_sha256: all.terminal_control_prefix_sha256.clone(),
             requested_turns: ForkTurnSelection::All,
             effective_turns: all.effective_turns,
-        },
+        }
+        .into(),
         root_session_id: session_id.clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: task_name.into(),
@@ -1260,6 +1261,7 @@ pub async fn assert_mechanical_store_contract(
             30,
             child_origin("first-child"),
             rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+            None,
         )
         .unwrap();
     let first_child_fingerprint = first_child_header.fingerprint().unwrap();
@@ -1345,7 +1347,7 @@ pub async fn assert_mechanical_store_contract(
             grandchild_id.clone(),
             31,
             ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: first_child_id.clone(),
                     parent_header_fingerprint: first_child_fingerprint,
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -1358,12 +1360,14 @@ pub async fn assert_mechanical_store_contract(
                     terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
-                },
+                }
+                .into(),
                 root_session_id: session_id.clone(),
                 path: AgentPath::new(vec![1, 1]).unwrap(),
                 task_name: "grandchild".into(),
             },
             rsi_agent_session_protocol::ModelSelection::baseline(first_child_header.settings()),
+            None,
         )
         .unwrap();
     store
@@ -1471,6 +1475,7 @@ pub async fn assert_mechanical_store_contract(
             31,
             child_origin("second-child"),
             rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -1503,6 +1508,7 @@ pub async fn assert_mechanical_store_contract(
             31,
             duplicate_task_origin,
             rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -1562,6 +1568,7 @@ pub async fn assert_mechanical_store_contract(
             33,
             malformed_origin,
             rsi_agent_session_protocol::ModelSelection::baseline(header.settings()),
+            None,
         )
         .unwrap();
     assert!(matches!(

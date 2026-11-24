@@ -60,6 +60,7 @@ async fn native_tool_transport() {
                     client: client.clone(),
                     retired: CancellationToken::new(),
                     views: Arc::new(Semaphore::new(256)),
+                    started: Default::default(),
                 });
                 let (_, current) = watch::channel(Some(endpoint.clone()));
                 view = Some(captured_view(endpoint, current));

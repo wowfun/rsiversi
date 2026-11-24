@@ -68,7 +68,8 @@ impl AgentKernel {
             .await?;
         self.finish_step_snapshot(claim, &cancellation, origin)?;
         Ok(ContributionContext {
-            header: Arc::new(claim.header().clone()),
+            working_directory: claim.directory_override(),
+            header: claim.shared_header(),
             execution: claim.execution().cloned(),
             turn_id: claim.turn_id().clone(),
             accepted_fact_seq: claim.accepted_seq(),

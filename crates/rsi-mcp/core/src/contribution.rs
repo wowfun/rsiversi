@@ -299,6 +299,7 @@ impl SessionResourceReader for Resources {
     async fn read(
         &self,
         _header: &SessionHeader,
+        _: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,

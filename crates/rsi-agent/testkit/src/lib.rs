@@ -78,6 +78,7 @@ struct MemoryState {
 
 #[derive(Clone, Debug)]
 struct MemorySession {
+    working_directory: Option<rsi_agent_store_protocol::WorkingDirectoryChange>,
     inbox_paused: bool,
     model_coordinates: BTreeSet<(TurnId, rsi_agent_session_protocol::EffectId, String)>,
     last_activity_ms: u64,
@@ -316,7 +317,10 @@ pub async fn append_history_fixture(
         let through_seq = fact.seq();
         let timestamp_ms = fact.timestamp_ms();
         pending.push(fact);
-        if terminal_turn.is_none() && facts.peek().is_some() && pending.len() < MAXIMUM_STORE_BATCH_FACTS {
+        if terminal_turn.is_none()
+            && facts.peek().is_some()
+            && pending.len() < MAXIMUM_STORE_BATCH_FACTS
+        {
             continue;
         }
         if let Some(turn_id) = terminal_turn {

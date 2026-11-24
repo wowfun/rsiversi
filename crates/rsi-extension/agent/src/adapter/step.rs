@@ -94,7 +94,12 @@ impl BeforeStepContributor for AgentAdapter {
             })
             .ok_or_else(|| invalid("missing captured journal"))?;
         let (revision, journal) = self
-            .load_current(header, Some(captured.revision), cancellation.clone())
+            .load_current(
+                header,
+                context.captured.working_coordinates(),
+                Some(captured.revision),
+                cancellation.clone(),
+            )
             .await
             .map_err(invalid)?;
         let (previous, paged) = match context.previous {
@@ -106,13 +111,13 @@ impl BeforeStepContributor for AgentAdapter {
         };
         let _history = self
             .history
-            .enter_step_reader(
+            .enter(
                 session.as_str(),
                 effect.as_str(),
                 context.captured.facts.clone(),
                 context.captured.horizon.fact_seq,
                 &cancellation,
-                paged,
+                crate::history::HistoryPurpose::Step(paged),
             )
             .map_err(invalid)?;
         let ownership =

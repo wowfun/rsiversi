@@ -523,7 +523,7 @@ mod tests {
                     SessionId::new(format!("child-{index:03}")).unwrap(),
                     2,
                     ForkOrigin {
-                        history: rsi_agent_session_protocol::HistoryOrigin {
+                        parent: rsi_agent_session_protocol::HistoryOrigin {
                             parent_session_id: root.session_id().clone(),
                             parent_header_fingerprint: root.fingerprint().unwrap(),
                             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -536,12 +536,14 @@ mod tests {
                             terminal_control_prefix_sha256: "0".repeat(64),
                             requested_turns: ForkTurnSelection::None,
                             effective_turns: 0,
-                        },
+                        }
+                        .into(),
                         root_session_id: root.session_id().clone(),
                         path: AgentPath::new(vec![index]).unwrap(),
                         task_name: format!("task-{index}"),
                     },
                     ModelSelection::baseline(root.settings()),
+                    None,
                 )
                 .unwrap();
             append(&store, &child, 0, 4).await;

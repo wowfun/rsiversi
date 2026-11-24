@@ -1,5 +1,13 @@
 # rsi-agent-turn-protocol
 
+Trusted Host plugins can move a local Session to an existing directory. Each
+change and its next-step notice share one commit. A full mailbox leaves the
+move in effect and the Host reports the undelivered notice. Selecting the
+current directory is idempotent. An idle Session stays idle. The next model
+step and new Tools use the selected directory. If it disappears, the Kernel
+returns to the creation directory and notifies the model. Processes already
+launched retain their original cwd.
+
 The optional Session archive service supplies committed membership to the
 executor at model admission. The navigation owner resolves subagent ancestry.
 A blocked Turn records its terminal outcome before creating a model intent.
@@ -345,6 +353,12 @@ including any open-Step closure and tree settlement.
 The executor supplies the resolved outcome and waits for that terminal receipt;
 it does not independently publish an intermediate ending prefix. Ordinary
 `close_current_step` remains charged business publication.
+
+Trusted applications may establish an unseeded plugin child against an already
+authorized, durable parent Header. Creation freezes the parent's protection,
+sandbox, approval and delegation policy. It allocates the child in the same
+tree without waking the parent. The application supplies its first prompt
+through normal mailbox admission after plugin setup.
 
 Mailbox admission, message state, dual-stream reconnectable observation, and
 the six source-authorized Agent operations share this seam. Spawn creates a

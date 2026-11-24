@@ -20,10 +20,12 @@ impl SessionResourceReader for Reader {
     async fn read(
         &self,
         header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
+        assert_eq!(coordinates, header.coordinates());
         match self {
             Self::Execution(expected, calls) => {
                 assert_eq!(execution.unwrap().binding(), expected);
@@ -76,7 +78,7 @@ async fn adapter(
         Arc::new(GenerationOwner),
     )
     .unwrap();
-    (runtime, lease, SessionResourceAdapter::new(pin))
+    (runtime, lease, SessionResourceAdapter::new(pin, None))
 }
 fn request() -> SessionResourceRequest {
     SessionResourceRequest::List {

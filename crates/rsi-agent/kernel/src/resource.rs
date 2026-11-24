@@ -24,7 +24,8 @@ impl SessionResources for AgentKernel {
         let _guard = stop.clone().drop_guard();
         let operation = async {
             let (header, pin) = self.projection_generation(session).await?;
-            SessionResourceAdapter::new(pin)
+            let directory = self.current_working_directory(&header).await?;
+            SessionResourceAdapter::new(pin, directory)
                 .read(
                     header,
                     execution,

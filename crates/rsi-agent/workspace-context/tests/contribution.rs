@@ -50,7 +50,7 @@ struct Source {
 impl WorkspaceContext for Source {
     async fn agents(
         &self,
-        _: &SessionHeader,
+        _: &rsi_agent_session_protocol::ExecutionCoordinates,
         _: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         _: &std::collections::BTreeSet<String>,
@@ -61,7 +61,7 @@ impl WorkspaceContext for Source {
     }
     async fn skills(
         &self,
-        _: &SessionHeader,
+        _: &rsi_agent_session_protocol::ExecutionCoordinates,
         _: Option<&rsi_execution::ExecutionLease>,
         _: Option<&str>,
         _: rsi_agent_workspace_context::SkillAudience,
@@ -73,7 +73,7 @@ impl WorkspaceContext for Source {
     }
     async fn snapshot(
         &self,
-        _: &SessionHeader,
+        _: &rsi_agent_session_protocol::ExecutionCoordinates,
         _: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {

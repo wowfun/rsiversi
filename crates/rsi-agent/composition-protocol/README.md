@@ -1,5 +1,9 @@
 # rsi-agent-composition-protocol
 
+Session resource readers receive the immutable Session identity and the working
+coordinates at the Host's last committed move. Listing or reading a resource
+does not move the Session or enqueue model input.
+
 `PreparedFreshSession::initial_commit` includes the selection digest and complete
 initial Domain set, even when empty, together with held command inputs. Kernel
 owns atomic publication. Pins retain immutable executable owners, not durable

@@ -60,12 +60,13 @@ async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_
                 SessionId::new(name).unwrap(),
                 1000,
                 ForkOrigin {
-                    history: history(parent),
+                    parent: history(parent).into(),
                     root_session_id: root_id.clone(),
                     path: AgentPath::new(vec![1; depth]).unwrap(),
                     task_name: name.into(),
                 },
                 ModelSelection::baseline(parent.settings()),
+                None,
             )
             .unwrap()
     };

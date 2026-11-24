@@ -89,8 +89,12 @@ impl ClaimFactRead {
                 .map_or(after_seq, SessionFact::seq)
                 .min(live_seq);
             facts.extend(page.facts.into_iter().filter_map(|fact| {
-                (fact.seq() <= live_seq && fact.body().turn_id().is_none_or(|turn| !hidden_turns.contains(turn)))
-                    .then(|| Arc::new(fact))
+                (fact.seq() <= live_seq
+                    && fact
+                        .body()
+                        .turn_id()
+                        .is_none_or(|turn| !hidden_turns.contains(turn)))
+                .then(|| Arc::new(fact))
             }));
         }
         kernel.validate_claim(&lock_state(&kernel.inner), claim)?;
@@ -102,7 +106,11 @@ impl ClaimFactRead {
                 .take(limit - scanned)
             {
                 through_seq = fact.seq();
-                if fact.body().turn_id().is_none_or(|turn| !hidden_turns.contains(turn)) {
+                if fact
+                    .body()
+                    .turn_id()
+                    .is_none_or(|turn| !hidden_turns.contains(turn))
+                {
                     facts.push(fact);
                 }
             }
@@ -160,6 +168,29 @@ impl AgentKernel {
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    async fn tool_working_directory(
+        &self,
+        caller: &AgentCallerAuthority,
+        path: Option<&str>,
+    ) -> TurnResult<rsi_agent_session_protocol::ExecutionCoordinates> {
+        if caller.tool_effect_id().is_none() {
+            return Err(TurnError::StaleClaim);
+        }
+        self.change_working_directory(caller.header(), path, Some(caller))
+            .await
+    }
+
+    async fn refresh_working_directory(&self, claim: &mut TurnClaim) -> TurnResult<()> {
+        let directory = {
+            let state = lock_state(&self.inner);
+            self.validate_claim(&state, claim)?;
+            state.sessions[claim.session_id()].working_directory.clone()
+        };
+        let effective = self.ensure_coordinates(claim.header(), directory).await?;
+        self.inner
+            .claim_issuer
+            .set_working_directory(claim, effective)
+    }
     async fn reserve_model_attempt(
         &self,
         claim: &TurnClaim,

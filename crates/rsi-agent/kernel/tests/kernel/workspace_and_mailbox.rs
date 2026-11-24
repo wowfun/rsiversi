@@ -518,7 +518,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
         .map(|index| {
             let child_id = SessionId::new(format!("session-tree-capacity-child-{index}")).unwrap();
             let origin = rsi_agent_session_protocol::ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: root_id.clone(),
                     parent_header_fingerprint: parent_fingerprint.clone(),
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -531,7 +531,8 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                     terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
-                },
+                }
+                .into(),
                 root_session_id: root_id.clone(),
                 path: AgentPath::new(vec![u16::try_from(index).unwrap()]).unwrap(),
                 task_name: format!("capacity-child-{index}"),
@@ -542,6 +543,7 @@ async fn spawn_rejects_the_two_hundred_fifty_seventh_tree_session() {
                     50,
                     origin,
                     rsi_agent_session_protocol::ModelSelection::baseline(parent_header.settings()),
+                    None,
                 )
                 .unwrap();
             rsi_agent_store_protocol::AtomicSessionAppend {

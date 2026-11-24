@@ -18,6 +18,7 @@ pub trait SessionResourceReader: fmt::Debug + Send + Sync + 'static {
     async fn read(
         &self,
         header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
@@ -28,11 +29,18 @@ pub trait SessionResourceReader: fmt::Debug + Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub struct SessionResourceAdapter {
     pin: AgentCompositionPin,
+    working_directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
 }
 impl SessionResourceAdapter {
     /// Captures a draft or resident generation, without resolving current sources.
-    pub const fn new(pin: AgentCompositionPin) -> Self {
-        Self { pin }
+    pub const fn new(
+        pin: AgentCompositionPin,
+        working_directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
+    ) -> Self {
+        Self {
+            pin,
+            working_directory,
+        }
     }
 
     /// Executes one bounded, cancellable operation without mutation authority.
@@ -115,12 +123,17 @@ impl SessionResourceAdapter {
                 cancellation
                     .run_until_cancelled(
                         deadline.timeout(
-                            std::panic::AssertUnwindSafe(reader.read(
-                                &header,
-                                lease.as_ref(),
-                                id,
-                                stop,
-                            ))
+                            std::panic::AssertUnwindSafe(
+                                reader.read(
+                                    &header,
+                                    self.working_directory
+                                        .as_deref()
+                                        .unwrap_or_else(|| header.coordinates()),
+                                    lease.as_ref(),
+                                    id,
+                                    stop,
+                                ),
+                            )
                             .catch_unwind(),
                         ),
                     )

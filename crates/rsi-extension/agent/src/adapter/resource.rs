@@ -18,6 +18,7 @@ impl SessionResourceReader for AgentAdapter {
     async fn read(
         &self,
         header: &SessionHeader,
+        _: &rsi_agent_session_protocol::ExecutionCoordinates,
         _execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,

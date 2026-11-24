@@ -404,7 +404,7 @@ pub trait SpawnRoleResolver: fmt::Debug + Send + Sync + 'static {
     /// Resolves one current definition; exact accepted retries never invoke this.
     async fn resolve(
         &self,
-        header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         reference: &rsi_agent_session_protocol::SpawnRoleReference,
         cancellation: CancellationToken,
@@ -527,6 +527,32 @@ pub struct PrepareFork {
     pub turns: rsi_agent_session_protocol::ForkTurnSelection,
     /// Revocation or draft-owner cancellation interrupts preparation, including a pending preset pin.
     pub cancellation: tokio_util::sync::CancellationToken,
+}
+
+/// Unseeded Agent creation by an enabled plugin of a trusted application.
+#[derive(Debug)]
+pub struct CreatePluginChild {
+    /// Parent authority captured at the plugin's entry point.
+    pub source: PluginChildSource,
+    /// Optional canonical local execution directory, authorized by the Host.
+    pub directory: Option<rsi_agent_session_protocol::ExecutionCoordinates>,
+    /// Fresh identity allocated by the caller.
+    pub session_id: SessionId,
+    /// Name within this parent's tree.
+    pub task_name: String,
+    /// Cordis or native package identity obtained by the hosting runtime.
+    pub plugin: String,
+    /// Optional composition for this child.
+    pub preset: Option<rsi_agent_session_protocol::AgentPresetId>,
+}
+
+/// A trusted plugin can run independently or within a model Tool invocation.
+#[derive(Debug)]
+pub enum PluginChildSource {
+    /// Exact parent Header authorized by the application.
+    Session(Box<SessionHeader>),
+    /// Capability supplied by the executor for this plugin Tool.
+    Tool(Arc<AgentCallerAuthority>),
 }
 
 /// Bounded runtime settlement diagnostics, independent of startup recovery.
@@ -830,6 +856,23 @@ impl LocalContract for ManualCompactorContract {
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Selects a local working directory or recovers a missing selection at its creation directory.
+    async fn working_directory(
+        &self,
+        header: &SessionHeader,
+        path: Option<&str>,
+    ) -> Result<rsi_agent_session_protocol::ExecutionCoordinates> {
+        if path.is_some() || header.is_redirected() {
+            return Err(TurnError::ExecutionUnavailable);
+        }
+        Ok(header.coordinates().clone())
+    }
+    /// Materializes a plugin-owned child without submitting a prompt.
+    async fn create_plugin_child(&self, _request: CreatePluginChild) -> Result<SessionHeader> {
+        Err(TurnError::Invalid(
+            "plugin child creation is unavailable".into(),
+        ))
+    }
     /// Serializes operator feedback for one finalized local assistant message.
     async fn change_message_feedback(
         &self,
@@ -1188,6 +1231,7 @@ pub fn session_job_scope(header_sha256: &str) -> rsi_jobs::Result<rsi_jobs::JobS
 /// Exact executor claim over one oldest nonterminal turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnClaim {
+    working_directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
     execution: Option<rsi_execution::ExecutionLease>,
     executor_id: String,
     claim_id: u64,
@@ -1201,6 +1245,19 @@ pub struct TurnClaim {
 }
 
 impl TurnClaim {
+    /// Coordinates selected for this Step's workspace reads, approval and Tool dispatch.
+    pub fn working_coordinates(&self) -> &rsi_agent_session_protocol::ExecutionCoordinates {
+        self.working_directory
+            .as_deref()
+            .unwrap_or_else(|| self.header.coordinates())
+    }
+
+    /// Shared coordinate override captured for this Step's callbacks.
+    pub fn directory_override(
+        &self,
+    ) -> Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>> {
+        self.working_directory.clone()
+    }
     /// Borrows the exact caller-bound provider tuple retained by this claim.
     pub fn execution(&self) -> Option<&rsi_execution::ExecutionLease> {
         self.execution.as_ref()
@@ -1226,7 +1283,12 @@ impl TurnClaim {
         &self.turn_id
     }
 
-    /// Borrows the immutable session header without exposing its shared owner.
+    /// Shares the immutable Header with callbacks for this claim.
+    pub fn shared_header(&self) -> Arc<SessionHeader> {
+        self.header.clone()
+    }
+
+    /// Borrows the immutable session header.
     pub fn header(&self) -> &SessionHeader {
         &self.header
     }
@@ -1282,6 +1344,18 @@ pub struct TurnClaimIssuer {
 }
 
 impl TurnClaimIssuer {
+    /// Updates the workspace of this issuer's execution snapshot at a Step or Tool boundary.
+    pub fn set_working_directory(
+        &self,
+        claim: &mut TurnClaim,
+        directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
+    ) -> Result<()> {
+        if !self.validates(claim) {
+            return Err(TurnError::StaleClaim);
+        }
+        claim.working_directory = directory;
+        Ok(())
+    }
     /// Prepares a receipt for this issuer's exact claim and Fact batch.
     /// The issuing service must expose it only after accepting the entire batch.
     pub fn published(
@@ -1335,6 +1409,7 @@ impl TurnClaimIssuer {
         live_seq: u64,
     ) -> TurnClaim {
         TurnClaim {
+            working_directory: None,
             execution: None,
             executor_id,
             claim_id,
@@ -1451,6 +1526,10 @@ struct StartedToolOrigin {
 }
 
 impl AgentCallerAuthority {
+    /// Coordinates used when this Tool invocation was admitted.
+    pub fn working_coordinates(&self) -> &rsi_agent_session_protocol::ExecutionCoordinates {
+        self.claim.working_coordinates()
+    }
     /// Borrows the producing Step's frozen subset; absent means its full catalog.
     pub fn source_tools(&self) -> Option<&[String]> {
         self.source_tools.as_deref()
@@ -1580,6 +1659,18 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Checks or changes the workspace on behalf of the exact active extension Tool.
+    async fn tool_working_directory(
+        &self,
+        _caller: &AgentCallerAuthority,
+        _path: Option<&str>,
+    ) -> Result<rsi_agent_session_protocol::ExecutionCoordinates> {
+        Err(TurnError::ExecutionUnavailable)
+    }
+    /// Snapshots current workspace coordinates before a model Step or Tool group.
+    async fn refresh_working_directory(&self, _claim: &mut TurnClaim) -> Result<()> {
+        Ok(())
+    }
     /// Reports transient Context replay activity without durable history or per-page events.
     fn set_composition_rebuilding(&self, claim: &TurnClaim, rebuilding: bool) -> Result<()> {
         let _ = (claim, rebuilding);

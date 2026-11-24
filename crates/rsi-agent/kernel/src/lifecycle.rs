@@ -1220,6 +1220,7 @@ impl AgentKernel {
         let loaded = load_control_state(&self.inner.store, Some(&self.inner), header)
             .await
             .map_err(turn_kernel_error)?;
+        let working_directory = self.stored_working_directory(header).await?;
         let header_fingerprint = header
             .fingerprint()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
@@ -1249,6 +1250,7 @@ impl AgentKernel {
                         loaded.fact_seq,
                         false,
                     );
+                    session.working_directory = working_directory;
                     session.turns = loaded.turns;
                     session.turn_order = loaded.order;
                     for turn_id in &session.turn_order {

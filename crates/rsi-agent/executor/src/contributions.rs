@@ -549,6 +549,7 @@ impl Driver {
             let known_tools = composition.known_tool_names();
             let result = run.callback(&producer, async {
                 let prepared = assembler.assemble(rsi_agent_composition_protocol::PromptInput {
+                    cwd: claim.working_coordinates().path(),
                     header: claim.header(), model: selection.expect("BeforeStep selection"),
                     scope: Some(scope), instructions: prompt.sections(),
                     tools: selected.as_deref().unwrap_or(&offered), known_tools: &known_tools,

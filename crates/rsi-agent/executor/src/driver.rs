@@ -17,7 +17,7 @@ impl Driver {
 
     pub(super) async fn run_claim(
         &self,
-        claim: TurnClaim,
+        mut claim: TurnClaim,
         stop: &CancellationToken,
         observation_slot: Option<OwnedSemaphorePermit>,
     ) {
@@ -98,7 +98,7 @@ impl Driver {
             None => true,
         };
         drop(preparation_guard);
-        self.run_observed_claim(&claim, stop).await;
+        self.run_observed_claim(&mut claim, stop).await;
         // Only observation ownership is dropped; Tools retains uncertain effects.
         let unconfirmed = self
             .active_tools
@@ -157,7 +157,7 @@ impl Driver {
         false
     }
 
-    async fn run_observed_claim(&self, claim: &TurnClaim, stop: &CancellationToken) {
+    async fn run_observed_claim(&self, claim: &mut TurnClaim, stop: &CancellationToken) {
         let Some((job_scope, _job_status)) = self.prepare_jobs(claim).await else {
             return;
         };
@@ -278,7 +278,7 @@ impl Driver {
 
     pub(super) async fn drive(
         &self,
-        claim: &TurnClaim,
+        claim: &mut TurnClaim,
         composition: &mut AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         stop: &CancellationToken,
@@ -298,6 +298,12 @@ impl Driver {
                 reason: "a completed model effect lacks a durable terminal or successor intent"
                     .into(),
             }));
+        }
+        if !state.effects.is_empty() || state.image.is_some() {
+            self.turns
+                .refresh_working_directory(claim)
+                .await
+                .map_err(fatal)?;
         }
         let recovered_waiver = self
             .resume_effects(claim, composition, fold, state.effects, stop)
@@ -358,7 +364,7 @@ impl Driver {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep one visible model/Tool durability loop over the exact claim authorities.
     async fn run_language(
         &self,
-        claim: &TurnClaim,
+        claim: &mut TurnClaim,
         composition: &mut AgentCompositionPin,
         job_scope: Option<&JobScopeAuthority>,
         fold: &mut ModelContextState,
@@ -384,6 +390,10 @@ impl Driver {
             }
             if matches!(slot, AttemptSlot::First) {
                 drop(prepared_options.take());
+                self.turns
+                    .refresh_working_directory(claim)
+                    .await
+                    .map_err(fatal)?;
                 self.claim_step_messages(claim, fold).await?;
                 if request == ModelRequest::Stopping
                     && !fold.has_pending_tool_inputs()
@@ -544,6 +554,10 @@ impl Driver {
             }
             let mut settled = Vec::new();
             while let Some((call, scheduling)) = scheduled.pop_front() {
+                self.turns
+                    .refresh_working_directory(claim)
+                    .await
+                    .map_err(fatal)?;
                 match scheduling {
                     ToolScheduling::Exclusive | ToolScheduling::ExclusiveFinal => {
                         settled.push(
@@ -1036,7 +1050,8 @@ impl Driver {
                 },
             };
             let elapsed = live.elapsed_ms();
-            let (event, exceeded) = record_event(&mut assembler, &mut evidence, elapsed, received).map_err(DriveFailure::Fatal)?;
+            let (event, exceeded) = record_event(&mut assembler, &mut evidence, elapsed, received)
+                .map_err(DriveFailure::Fatal)?;
             if exceeded {
                 combined.cancel();
                 capacity = true;
@@ -1327,7 +1342,7 @@ impl Driver {
         if let Some(lease) = claim.execution() {
             extensions = extensions.with(Arc::new(lease.clone())).map_err(fatal)?;
         }
-        let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
+        let cwd = std::path::PathBuf::from(claim.working_coordinates().path());
         let execution_review = prepared
             .prepare_execution(ToolStart {
                 cancellation: combined.token(),
@@ -1853,7 +1868,7 @@ impl Driver {
     ) -> std::result::Result<ToolResult, DriveFailure> {
         let execution_cancel = cancellation.child_token();
         let _cancel_on_drop = execution_cancel.clone().drop_guard();
-        let cwd = std::path::PathBuf::from(claim.header().canonical_cwd());
+        let cwd = std::path::PathBuf::from(claim.working_coordinates().path());
         let mut extensions = crate::execution_support::tool_start_extensions(
             self.turns.as_ref(),
             claim,
@@ -2454,7 +2469,7 @@ fn tool_approval_review(
     Ok(rsi_approval_protocol::ApprovalReview {
         execution,
         arguments: arguments.clone(),
-        cwd: claim.header().canonical_cwd().to_owned(),
+        cwd: claim.working_coordinates().path().to_owned(),
         sandbox: serde_json::to_value(execution_mode)?
             .as_str()
             .expect("sandbox enum is a string")
@@ -2494,7 +2509,9 @@ pub(super) fn record_event(
             error: failure,
             replay: None,
         };
-        evidence.push(elapsed, &event).map_err(|error| bounded(&error.to_string()))?;
+        evidence
+            .push(elapsed, &event)
+            .map_err(|error| bounded(&error.to_string()))?;
         return Ok((event, true));
     }
     Ok((event, false))

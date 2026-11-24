@@ -56,7 +56,10 @@ the generation recipe owns the exact executable artifact. A replacement's genera
 validator loads its complete committed journal before Kernel publishes selection.
 Failure leaves the previous generation and durable journal unchanged.
 Before transferring history, `agent.load.begin` identifies the Session, creation
-time, local working directory, domain revision and event count. A resident,
+time, current local working directory, domain revision and event count. For any
+local Session working outside its creation directory, the Host also supplies
+the creation directory. A directory change does not invalidate an otherwise
+current journal. A resident,
 quiescent mirror of this positive revision replies `current` and is retained
 for the callback. The required `reload` flag forces transfer during candidate
 validation, even for a revision already loaded by an abandoned candidate. This
@@ -109,6 +112,11 @@ an omitted update relies on the executor's equality check against that Step's
 canonical Context assembly. The adapter trusts this typed in-process publication
 contract instead of adding a second history lookup. Recovery reconciles an unknown
 receipt against canonical history.
+
+During an executing extension Tool, `agent.tool.directory` checks or changes
+that Tool's own Session directory. The Host binds both IDs to the live Tool
+authority and uses the same directory and model-notice commit as an application.
+History reads, fork transforms and closed operations carry no Tool authority.
 
 During preparation, `agent.history.read` borrows only that operation's captured
 claim-visible Fact reader and horizon. Session and operation identities must match

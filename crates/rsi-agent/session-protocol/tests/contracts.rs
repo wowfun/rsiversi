@@ -129,6 +129,168 @@ fn current_header_policy_defaults_do_not_admit_older_formats() {
 }
 
 #[test]
+fn idle_plugin_child_records_its_owner_and_inherits_the_protected_parent() {
+    let parent = SessionHeader::new_local(
+        SessionId::new("idle").unwrap(),
+        1,
+        "/workspace",
+        AgentPresetId::new("parent").unwrap(),
+        settings(),
+    )
+    .unwrap()
+    .with_protection(SessionProtectionScope::new("automation", "source:rule").unwrap())
+    .unwrap();
+    let child = parent
+        .plugin_child(
+            SessionId::new("child").unwrap(),
+            2,
+            AgentPath::new(vec![1]).unwrap(),
+            "research".into(),
+            ExecutionOwner::Plugin {
+                session_id: parent.session_id().clone(),
+                plugin: "@example/reviewer".into(),
+                tool: None,
+            },
+            PluginChildTarget {
+                offered_tools: None,
+                coordinates: None,
+                preset: None,
+                selection: ModelSelection::baseline(parent.settings()),
+            },
+        )
+        .unwrap();
+    assert!(child.history_origin().is_none());
+    let origin = child.fork_origin().unwrap();
+    assert_eq!(origin.parent.session_id(), parent.session_id());
+    assert_eq!(origin.parent.fingerprint(), parent.fingerprint().unwrap());
+    assert_eq!(&origin.root_session_id, parent.session_id());
+    assert_eq!(child.coordinates(), parent.coordinates());
+    assert_eq!(child.protection(), parent.protection());
+    assert_eq!(child.settings(), parent.settings());
+    assert_eq!(child.agent_preset_id(), parent.agent_preset_id());
+    let wire = serde_json::to_value(&child).unwrap();
+    assert_eq!(
+        wire["execution_owner"],
+        json!({"kind":"plugin","session_id":"idle","plugin":"@example/reviewer"})
+    );
+    assert!(wire["fork_origin"]["origin"].get("history").is_none());
+    assert_eq!(
+        serde_json::from_value::<SessionHeader>(wire.clone()).unwrap(),
+        child
+    );
+    for invalid in [
+        json!({"kind":"plugin","session_id":"someone-else","plugin":"@example/reviewer"}),
+        json!({"kind":"plugin","session_id":"idle","plugin":""}),
+        json!({"kind":"turn_activation","session_id":"idle","turn_id":"invented"}),
+        json!({"kind":"program_run","session_id":"idle","run_id":"invented","ordinal":1}),
+    ] {
+        let mut changed = wire.clone();
+        changed["execution_owner"] = invalid;
+        assert!(serde_json::from_value::<SessionHeader>(changed).is_err());
+    }
+}
+
+#[test]
+fn redirected_plugin_children_keep_the_creation_directory_across_nested_delegation() {
+    let parent = SessionHeader::new_local(
+        SessionId::new("parent").unwrap(),
+        1,
+        "/origin",
+        AgentPresetId::new("standard").unwrap(),
+        settings(),
+    )
+    .unwrap();
+    let child_at = |parent: &SessionHeader, id: &str, segments: Vec<u16>, cwd: &str| {
+        parent
+            .plugin_child(
+                SessionId::new(id).unwrap(),
+                2,
+                AgentPath::new(segments).unwrap(),
+                id.into(),
+                ExecutionOwner::Plugin {
+                    session_id: parent.session_id().clone(),
+                    plugin: "owner".into(),
+                    tool: None,
+                },
+                PluginChildTarget {
+                    offered_tools: None,
+                    preset: None,
+                    coordinates: Some(
+                        ExecutionCoordinates::new(ExecutionLocation::Local, cwd).unwrap(),
+                    ),
+                    selection: ModelSelection::baseline(parent.settings()),
+                },
+            )
+            .unwrap()
+    };
+    let child = child_at(&parent, "sibling", vec![1], "/sibling");
+    let nested = child_at(&child, "nested", vec![1, 1], "/third");
+    let home = child_at(&child, "home", vec![1, 2], "/origin");
+    assert_eq!(nested.canonical_cwd(), "/third");
+    let fork = |restored| {
+        let origin = ForkOrigin {
+            parent: HistoryOrigin {
+                parent_session_id: child.session_id().clone(),
+                parent_header_fingerprint: child.fingerprint().unwrap(),
+                point: ForkPoint::before(&TurnId::new("turn").unwrap()),
+                resolved_after_seq: 0,
+                resolved_terminal_seq: 0,
+                terminal_prefix_sha256: "0".repeat(64),
+                resolved_terminal_control_seq: 0,
+                terminal_control_prefix_sha256: "0".repeat(64),
+                requested_turns: ForkTurnSelection::None,
+                effective_turns: 0,
+            }
+            .into(),
+            root_session_id: parent.session_id().clone(),
+            path: AgentPath::new(vec![1, 3]).unwrap(),
+            task_name: "delegated".into(),
+        };
+        child
+            .forked_child(
+                SessionId::new("delegated").unwrap(),
+                3,
+                origin,
+                ModelSelection::baseline(child.settings()),
+                restored,
+            )
+            .unwrap()
+    };
+    let active_fork = fork(None);
+    let restored_fork = fork(Some(child.creation_coordinates()));
+    assert_eq!(active_fork.canonical_cwd(), "/sibling");
+    assert_eq!(restored_fork.canonical_cwd(), "/origin");
+    for header in [
+        &parent,
+        &child,
+        &nested,
+        &home,
+        &active_fork,
+        &restored_fork,
+    ] {
+        assert_eq!(header.creation_cwd(), "/origin");
+        let wire = serde_json::to_value(header).unwrap();
+        assert_eq!(
+            wire.get("creation_cwd").is_some(),
+            header.canonical_cwd() != "/origin"
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionHeader>(wire).unwrap(),
+            *header
+        );
+    }
+    for (header, value) in [
+        (&parent, "/other"),
+        (&child, "relative"),
+        (&child, "/sibling"),
+    ] {
+        let mut wire = serde_json::to_value(header).unwrap();
+        wire["creation_cwd"] = json!(value);
+        assert!(serde_json::from_value::<SessionHeader>(wire).is_err());
+    }
+}
+
+#[test]
 fn protection_is_bounded_immutable_and_part_of_header_identity() {
     let ordinary = SessionHeader::new_local(
         SessionId::new("protected").unwrap(),
@@ -154,7 +316,7 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
         Some(&scope)
     );
     let origin = ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: protected.session_id().clone(),
             parent_header_fingerprint: protected.fingerprint().unwrap(),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -167,7 +329,8 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
             terminal_control_prefix_sha256: "0".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
-        },
+        }
+        .into(),
         root_session_id: protected.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
@@ -178,6 +341,7 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
             2,
             origin,
             ModelSelection::baseline(&settings()),
+            None,
         )
         .unwrap();
     assert_eq!(child.protection(), Some(&scope));
@@ -916,7 +1080,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     assert!(ForkTurnSelection::Last(0).validate().is_err());
 
     ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: SessionId::new("session-parent").unwrap(),
             parent_header_fingerprint: "a".repeat(64),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -929,7 +1093,8 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
             terminal_control_prefix_sha256: "0".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
-        },
+        }
+        .into(),
         root_session_id: SessionId::new("session-root").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "first-turn-child".into(),
@@ -946,7 +1111,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     )
     .unwrap()
     .with_fork_origin(ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: SessionId::new("session-parent").unwrap(),
             parent_header_fingerprint: "a".repeat(64),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -959,7 +1124,8 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
             terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 2,
-        },
+        }
+        .into(),
         root_session_id: SessionId::new("session-root").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "reviewer".into(),
@@ -991,7 +1157,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
 #[test]
 fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
     let malformed = ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: SessionId::new("parent").unwrap(),
             parent_header_fingerprint: "00".repeat(32),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -1004,7 +1170,8 @@ fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
             terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
-        },
+        }
+        .into(),
         root_session_id: SessionId::new("parent").unwrap(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
@@ -1439,9 +1606,21 @@ fn assert_independent_fork(child: &SessionHeader) {
         manual
     );
     let mut agent_origin = child.fork_origin().unwrap().clone();
-    agent_origin.history.point = history.point;
+    let rsi_agent_session_protocol::AgentParent::History(seed) = &mut agent_origin.parent else {
+        panic!("expected inherited history")
+    };
+    seed.point = history.point;
     assert!(
-        agent_origin.validate().is_err(),
+        SessionHeader::new_local(
+            SessionId::new("through-agent").unwrap(),
+            3,
+            "/workspace",
+            AgentPresetId::new("test-agent").unwrap(),
+            settings()
+        )
+        .unwrap()
+        .with_fork_origin(agent_origin)
+        .is_err(),
         "an Agent child cannot reinterpret a through-Turn cut as creator authority"
     );
 }

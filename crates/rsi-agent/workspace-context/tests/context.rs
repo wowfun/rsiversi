@@ -65,20 +65,20 @@ async fn native_source_rejects_remote_coordinates_before_reading_a_local_namesak
     let requests = WorkspaceSkillRequests::default();
     assert!(
         source
-            .snapshot(&local, None, &requests)
+            .snapshot(local.coordinates(), None, &requests)
             .await
             .unwrap()
             .instructions
             .is_some()
     );
     assert!(matches!(
-        source.snapshot(&remote, None, &requests).await,
+        source.snapshot(remote.coordinates(), None, &requests).await,
         Err(WorkspaceContextError::Invalid(_))
     ));
     assert!(matches!(
         source
             .skills(
-                &remote,
+                remote.coordinates(),
                 None,
                 None,
                 SkillAudience::Human,
@@ -90,7 +90,7 @@ async fn native_source_rejects_remote_coordinates_before_reading_a_local_namesak
     assert!(matches!(
         source
             .agents(
-                &remote,
+                remote.coordinates(),
                 None,
                 None,
                 &BTreeSet::new(),
@@ -116,7 +116,7 @@ async fn stray_agent_filenames_do_not_hide_valid_definitions() {
     let source = context(None, vec![]);
     let entries = source
         .agents(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             None,
             &BTreeSet::new(),
@@ -147,7 +147,7 @@ async fn non_utf8_agent_filename_does_not_hide_valid_definitions() {
     .unwrap();
     let entries = context(None, vec![])
         .agents(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             None,
             &BTreeSet::new(),
@@ -209,7 +209,7 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
     let source = context(None, vec![root]);
     let error = source
         .skills(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             None,
             SkillAudience::Human,
@@ -225,7 +225,7 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
     );
     let snapshot = source
         .snapshot(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::default(),
         )
@@ -241,7 +241,7 @@ async fn skill_discovery_failure_identifies_the_logical_source() {
     fs::remove_file(denied).unwrap();
     let recovered = source
         .snapshot(
-            &header(temp.path()),
+            header(temp.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::default(),
         )
@@ -296,7 +296,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     let session = header(&project);
     let human = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             None,
             SkillAudience::Human,
@@ -322,14 +322,20 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     ] {
         assert!(
             source
-                .skills(header, None, Some(name), audience, CancellationToken::new())
+                .skills(
+                    header.coordinates(),
+                    None,
+                    Some(name),
+                    audience,
+                    CancellationToken::new()
+                )
                 .await
                 .is_err()
         );
     }
     let before = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             Some("automatic"),
             SkillAudience::Model,
@@ -350,7 +356,7 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     );
     let after = source
         .skills(
-            &session,
+            session.coordinates(),
             None,
             Some("automatic"),
             SkillAudience::Model,
@@ -367,7 +373,13 @@ async fn explicit_reads_preserve_independent_flags_precedence_and_current_bytes(
     cancelled.cancel();
     assert!(
         source
-            .skills(&session, None, None, SkillAudience::Human, cancelled)
+            .skills(
+                session.coordinates(),
+                None,
+                None,
+                SkillAudience::Human,
+                cancelled
+            )
             .await
             .is_err()
     );
@@ -417,7 +429,7 @@ async fn selected_workspace_loads_project_and_user_sources_by_default() {
             SessionId::new("workspace-child").unwrap(),
             2,
             ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: created.session_id().clone(),
                     parent_header_fingerprint: created.fingerprint().unwrap(),
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -430,18 +442,20 @@ async fn selected_workspace_loads_project_and_user_sources_by_default() {
                     terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
-                },
+                }
+                .into(),
                 root_session_id: created.session_id().clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
             },
             ModelSelection::baseline(created.settings()),
+            None,
         )
         .unwrap();
     for session in [created, restored, child] {
         let snapshot = source
             .snapshot(
-                &session,
+                session.coordinates(),
                 None,
                 &WorkspaceSkillRequests::from_messages(&[&human("$project-only")]).unwrap(),
             )
@@ -488,7 +502,7 @@ async fn project_instructions_are_root_to_cwd_and_project_skill_wins_name_collis
 
     let snapshot = source
         .snapshot(
-            &header(&cwd),
+            header(&cwd).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/shared")]).unwrap(),
         )
@@ -524,7 +538,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
 
     let agent_snapshot = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&message(
                 AgentMessageSource::Agent {
@@ -541,7 +555,7 @@ async fn only_direct_human_input_invokes_a_user_invocable_hidden_skill() {
 
     let human_snapshot = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("\n /manual argument")]).unwrap(),
         )
@@ -563,7 +577,7 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
 
     let catalog = source
         .snapshot(
-            &session,
+            session.coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -574,7 +588,7 @@ async fn catalog_discovers_a_large_skill_from_metadata_and_loads_its_body_only_w
 
     let invoked = source
         .snapshot(
-            &session,
+            session.coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/large")]).unwrap(),
         )
@@ -603,7 +617,7 @@ async fn crlf_skill_frontmatter_is_discovered_and_invoked() {
 
     let snapshot = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/crlf")]).unwrap(),
         )
@@ -631,7 +645,7 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
 
     let first = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -639,7 +653,7 @@ async fn oversized_optional_sources_are_omitted_from_a_complete_empty_snapshot()
         .unwrap();
     let second = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -670,7 +684,7 @@ async fn session_unsafe_instruction_and_skill_sources_are_omitted() {
 
     let snapshot = source
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/unsafe")]).unwrap(),
         )
@@ -711,7 +725,7 @@ async fn project_skill_links_follow_targets_while_instructions_stay_contained() 
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project),
+            header(&project).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -738,7 +752,7 @@ async fn symlinked_project_skill_root_loads_external_skills() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project),
+            header(&project).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -765,7 +779,7 @@ async fn skill_entry_scan_stops_at_the_declared_bound() {
 
     let snapshot = context(None, vec![skills])
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -793,7 +807,7 @@ async fn later_skill_root_overflow_is_not_mistaken_for_a_complete_catalog() {
 
     let snapshot = context(None, vec![first, second])
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -818,7 +832,7 @@ async fn project_skill_invocation_exposes_only_a_project_relative_source() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&project),
+            header(&project).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/relative")]).unwrap(),
         )
@@ -855,7 +869,7 @@ async fn instruction_bounds_retain_the_most_specific_project_policy() {
 
     let snapshot = context(None, Vec::new())
         .snapshot(
-            &header(&cwd),
+            header(&cwd).coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[]).unwrap(),
         )
@@ -885,7 +899,7 @@ async fn skills_above_the_source_limit_are_omitted_from_the_catalog() {
     let session = header(temporary.path());
     let snapshot = source
         .snapshot(
-            &session,
+            session.coordinates(),
             None,
             &WorkspaceSkillRequests::from_messages(&[&human("/oversized")]).unwrap(),
         )
@@ -932,7 +946,7 @@ async fn nested_roots_precede_rsi_and_personal_roots_and_stop_at_git() {
             fs::remove_dir_all(path).unwrap();
         }
         let snapshot = source
-            .snapshot(&header(&cwd), None, &requests)
+            .snapshot(header(&cwd).coordinates(), None, &requests)
             .await
             .unwrap();
         assert!(snapshot.complete);
@@ -949,7 +963,7 @@ async fn nested_roots_precede_rsi_and_personal_roots_and_stop_at_git() {
     );
     fs::remove_dir_all(project.join(".git")).unwrap();
     let snapshot = source
-        .snapshot(&header(&cwd), None, &requests)
+        .snapshot(header(&cwd).coordinates(), None, &requests)
         .await
         .unwrap();
     assert!(snapshot.invocations[0].text.contains("NEAREST"));
@@ -1017,7 +1031,7 @@ async fn invalid_optional_body_does_not_discard_other_workspace_context() {
     let source = context(None, vec![]);
     let requests = WorkspaceSkillRequests::from_messages(&[&human("$bad $good")]).unwrap();
     let snapshot = source
-        .snapshot(&header(temp.path()), None, &requests)
+        .snapshot(header(temp.path()).coordinates(), None, &requests)
         .await
         .unwrap();
     assert!(snapshot.complete);
@@ -1054,7 +1068,11 @@ async fn instruction_byte_limit_prefers_deepest_without_reaching_the_file_count_
     }
     fs::write(cwd.join("AGENTS.md"), "DEEPEST RETAINED").unwrap();
     let snapshot = context(None, Vec::new())
-        .snapshot(&header(&cwd), None, &WorkspaceSkillRequests::default())
+        .snapshot(
+            header(&cwd).coordinates(),
+            None,
+            &WorkspaceSkillRequests::default(),
+        )
         .await
         .unwrap();
     let text = snapshot.instructions.unwrap();
@@ -1080,7 +1098,7 @@ async fn skill_catalog_retains_a_complete_lexical_prefix_within_its_byte_limit()
     }
     let snapshot = context(None, vec![skills])
         .snapshot(
-            &header(temporary.path()),
+            header(temporary.path()).coordinates(),
             None,
             &WorkspaceSkillRequests::default(),
         )
@@ -1118,7 +1136,7 @@ async fn unavailable_agent_roots_do_not_hide_valid_user_definitions() {
     let reserved = BTreeSet::new();
     let read = || {
         source.agents(
-            &header,
+            header.coordinates(),
             None,
             None,
             &reserved,
@@ -1169,7 +1187,7 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
     let reserved = BTreeSet::new();
     let read = || {
         source.agents(
-            &header,
+            header.coordinates(),
             None,
             Some("review"),
             &reserved,
@@ -1198,7 +1216,7 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
     assert!(
         source
             .agents(
-                &header,
+                header.coordinates(),
                 None,
                 Some("../escape"),
                 &BTreeSet::new(),
@@ -1217,7 +1235,7 @@ async fn agent_files_refresh_precedence_and_invalid_winners_are_shared() {
         assert!(
             source
                 .agents(
-                    &header,
+                    header.coordinates(),
                     None,
                     Some("linked"),
                     &BTreeSet::new(),
@@ -1249,7 +1267,7 @@ async fn agent_catalog_overflow_keeps_a_bounded_prefix_and_exact_lookup() {
     let header = header(temp.path());
     let entries = source
         .agents(
-            &header,
+            header.coordinates(),
             None,
             None,
             &BTreeSet::new(),
@@ -1262,7 +1280,7 @@ async fn agent_catalog_overflow_keeps_a_bounded_prefix_and_exact_lookup() {
     assert_eq!(entries[31].name, "role-31");
     let exact = source
         .agents(
-            &header,
+            header.coordinates(),
             None,
             Some("role-32"),
             &BTreeSet::new(),

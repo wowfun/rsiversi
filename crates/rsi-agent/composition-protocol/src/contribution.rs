@@ -83,6 +83,8 @@ pub trait ContributionFactReader: fmt::Debug + Send + Sync {
 /// Consistent immutable inputs shared by every callback in one stage.
 #[derive(Clone, Debug)]
 pub struct ContributionContext {
+    /// Workspace override shared by the Step's contributors.
+    pub working_directory: Option<Arc<rsi_agent_session_protocol::ExecutionCoordinates>>,
     /// Frozen execution Header.
     pub header: Arc<SessionHeader>,
     /// Exact non-durable execution authority captured from the live claim.
@@ -265,4 +267,13 @@ pub struct CapturedFactHistory {
     pub through_seq: u64,
     /// Cancellation-bound reader, never a Store writer.
     pub facts: Arc<dyn ContributionFactReader>,
+}
+
+impl ContributionContext {
+    /// Effective workspace for this captured Step.
+    pub fn working_coordinates(&self) -> &rsi_agent_session_protocol::ExecutionCoordinates {
+        self.working_directory
+            .as_deref()
+            .unwrap_or_else(|| self.header.coordinates())
+    }
 }

@@ -293,6 +293,7 @@ struct Sessions {
 #[derive(Debug)]
 struct BoundSessions {
     sessions: Sessions,
+    plugin_callback: Arc<rsi_api_http::ApplicationCallback>,
     connection: std::sync::Weak<rsi_extension::Connection>,
     submissions: tokio::sync::Semaphore,
 }
@@ -318,12 +319,14 @@ impl Sessions {
     fn attach(
         self,
         connection: &Arc<rsi_extension::Connection>,
+        plugin_callback: Arc<rsi_api_http::ApplicationCallback>,
     ) -> rsi_meta::Result<Vec<rsi_extension::HandlerRegistration>> {
         if let Some(peer) = &self.preset_peer {
             peer.send_replace(Arc::downgrade(connection));
         }
         let sessions: Arc<dyn rsi_extension::Handler> = Arc::new(BoundSessions {
             sessions: self,
+            plugin_callback,
             connection: Arc::downgrade(connection),
             submissions: tokio::sync::Semaphore::new(2),
         });
@@ -340,6 +343,8 @@ impl Sessions {
                 "application.command",
                 "application.inbox",
                 "application.create",
+                "application.child.create",
+                "application.directory",
                 "application.workspaces",
                 "application.descendants",
                 "application.submit",
@@ -375,6 +380,8 @@ impl rsi_extension::Handler for BoundSessions {
                 result = async {match method{
                     "application.sessions"=>self.page(payload).await,
                     "application.create"=>self.create(payload).await,
+                    "application.child.create"=>self.create_plugin_child(payload).await,
+                    "application.directory"=>self.working_directory(payload).await,
                     "application.workspaces"=>self.workspace_operation(payload).await,
                     "application.models"=>self.model_catalog(payload).await,
                     "application.presets"=>self.presets(payload).await,
@@ -825,11 +832,11 @@ async fn start_process(
             .lookup_local::<ExtensionContract>()
             .ok_or_else(|| failure("missing application connection"))?;
         let disconnected = connection.disconnect_token();
-        let owner = sessions.owner_callback(&connection).await?;
+        let owner = Arc::new(sessions.owner_callback(&connection).await?);
         let tools = sessions.tools.clone();
         let language = sessions.language.is_some() && sessions.models.is_some();
         let _directory = session_page::watch_directory(&sessions, &connection, owner.id())?;
-        let _sessions = sessions.attach(&connection)?;
+        let _sessions = sessions.attach(&connection, owner.clone())?;
         let import_available = importer.is_some();
         let _handle = importer
             .map(|selection| {

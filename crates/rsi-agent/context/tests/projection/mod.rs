@@ -476,7 +476,7 @@ fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> Session
             SessionId::new("session-child").unwrap(),
             2,
             ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: parent_id.clone(),
                     parent_header_fingerprint: parent_fingerprint,
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -497,12 +497,14 @@ fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> Session
                     },
                     requested_turns: ForkTurnSelection::All,
                     effective_turns,
-                },
+                }
+                .into(),
                 root_session_id: parent_id,
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
             },
             rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap()
 }
@@ -549,7 +551,11 @@ fn entered_facts_after(after_seq: u64, bodies: Vec<SessionFactBody>) -> Vec<Sess
         let seq = after_seq + u64::try_from(result.len()).unwrap() + 1;
         let fact = SessionFact::new(seq, seq, body).unwrap();
         let count = fact.claimed_input_count();
-        let turn_id = fact.body().turn_id().expect("turn-owned fixture fact").clone();
+        let turn_id = fact
+            .body()
+            .turn_id()
+            .expect("turn-owned fixture fact")
+            .clone();
         let step_id = match fact.body() {
             SessionFactBody::InputMessageClaimed { step_id, .. }
             | SessionFactBody::ToolContextsClaimed { step_id, .. } => step_id.clone(),
@@ -1032,16 +1038,20 @@ fn nested_full_seed_keeps_ancestor_sources_and_last_refuses_the_ancestor_window(
     let local = page("local-turn", "PARENT_INPUT");
     for selection in [ForkTurnSelection::All, ForkTurnSelection::Last(1)] {
         let mut origin = parent.fork_origin().unwrap().clone();
-        origin.history.parent_session_id = parent.session_id().clone();
-        origin.history.parent_header_fingerprint = parent.fingerprint().unwrap();
+        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+            panic!("expected inherited history")
+        };
+        history.parent_session_id = parent.session_id().clone();
+        history.parent_header_fingerprint = parent.fingerprint().unwrap();
         origin.path = AgentPath::new(vec![1, 1]).unwrap();
-        origin.history.requested_turns = selection.clone();
+        history.requested_turns = selection.clone();
         let child = parent
             .forked_child(
                 SessionId::new("nested-child").unwrap(),
                 3,
                 origin,
                 rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
+                None,
             )
             .unwrap();
         let budget = rsi_agent_context::ContextBudget::default();

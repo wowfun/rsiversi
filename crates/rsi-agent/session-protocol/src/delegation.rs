@@ -71,6 +71,10 @@ impl<'de> Deserialize<'de> for DelegationPolicy {
     }
 }
 impl DelegationPolicy {
+    /// Narrows an inherited policy to a started Tool's actual request without changing its role.
+    pub(crate) fn restrict_to(&mut self, offered: &[String]) {
+        self.tools.retain(|name| offered.contains(name));
+    }
     /// Freezes current names after configured and ancestor restrictions.
     /// Unknown configured names are rejected before any child admission.
     pub fn freeze(
@@ -207,6 +211,11 @@ mod tests {
             DelegationPolicy::freeze(None, names(&["read", "write", "new_tool"]), Some(&parent))
                 .unwrap();
         assert_eq!(child.tools(), &names(&["read"]));
+        let mut inherited = parent.clone();
+        inherited.restrict_to(&["read".into(), "new_tool".into()]);
+        assert_eq!(inherited.tools(), &names(&["read"]));
+        assert_eq!(inherited.persona(), parent.persona());
+        assert!(inherited.matches_role(Some(&role)).unwrap());
         assert!(parent.matches_role(Some(&role)).unwrap());
         let changed = DelegationRole {
             persona: Some("changed".into()),

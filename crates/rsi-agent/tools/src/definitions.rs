@@ -79,7 +79,7 @@ impl Definitions {
     }
     async fn load(
         &self,
-        header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         stop: CancellationToken,
@@ -87,7 +87,7 @@ impl Definitions {
         let mut entries = self
             .source
             .agents(
-                header,
+                coordinates,
                 execution,
                 id,
                 &self.inline.keys().cloned().collect(),
@@ -240,7 +240,7 @@ fn descriptor(entry: &WorkspaceAgentDefinition) -> SessionResourceDescriptor {
 impl SpawnRoleResolver for Definitions {
     async fn resolve(
         &self,
-        header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         reference: &SpawnRoleReference,
         cancellation: CancellationToken,
@@ -251,7 +251,7 @@ impl SpawnRoleResolver for Definitions {
             ));
         }
         let entry = self
-            .load(header, execution, Some(&reference.name), cancellation)
+            .load(coordinates, execution, Some(&reference.name), cancellation)
             .await
             .map_err(|e| match e {
                 ContributionError::Capacity => TurnError::Capacity,
@@ -275,12 +275,13 @@ impl SpawnRoleResolver for Definitions {
 impl SessionResourceReader for Definitions {
     async fn read(
         &self,
-        header: &SessionHeader,
+        _header: &SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
-        let entries = self.load(header, execution, id, cancellation).await?;
+        let entries = self.load(coordinates, execution, id, cancellation).await?;
         let value = if id.is_some() {
             let entry = entries
                 .into_iter()
@@ -313,7 +314,7 @@ impl BeforeStepContributor for Definitions {
         let context = context.captured;
         let entries = match self
             .load(
-                &context.header,
+                context.working_coordinates(),
                 context.execution.as_ref(),
                 None,
                 cancellation.clone(),
@@ -440,7 +441,7 @@ mod tests {
     impl WorkspaceContext for CountedSource {
         async fn agents(
             &self,
-            header: &SessionHeader,
+            coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
             execution: Option<&rsi_execution::ExecutionLease>,
             id: Option<&str>,
             reserved: &BTreeSet<String>,
@@ -452,12 +453,12 @@ mod tests {
                 return Err(error);
             }
             self.inner
-                .agents(header, execution, id, reserved, cancellation)
+                .agents(coordinates, execution, id, reserved, cancellation)
                 .await
         }
         async fn skills(
             &self,
-            header: &SessionHeader,
+            coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
             execution: Option<&rsi_execution::ExecutionLease>,
             id: Option<&str>,
             audience: rsi_agent_workspace_context::SkillAudience,
@@ -465,19 +466,19 @@ mod tests {
         ) -> Result<SessionResourceValue, rsi_agent_workspace_context::WorkspaceContextError>
         {
             self.inner
-                .skills(header, execution, id, audience, cancellation)
+                .skills(coordinates, execution, id, audience, cancellation)
                 .await
         }
         async fn snapshot(
             &self,
-            header: &SessionHeader,
+            coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
             execution: Option<&rsi_execution::ExecutionLease>,
             requests: &rsi_agent_workspace_context::WorkspaceSkillRequests,
         ) -> Result<
             rsi_agent_workspace_context::WorkspaceContextSnapshot,
             rsi_agent_workspace_context::WorkspaceContextError,
         > {
-            self.inner.snapshot(header, execution, requests).await
+            self.inner.snapshot(coordinates, execution, requests).await
         }
     }
     #[derive(Debug, Default)]
@@ -552,6 +553,7 @@ mod tests {
             vec![Arc::new(fact)],
         ));
         let mut context = ContributionContext {
+            working_directory: None,
             execution: None,
             header: Arc::new(header),
             turn_id: TurnId::new("turn").unwrap(),
@@ -703,13 +705,14 @@ mod tests {
             ),
         };
         let entries = definitions
-            .load(&header, None, None, CancellationToken::new())
+            .load(header.coordinates(), None, None, CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(entries.len(), 64);
         assert_eq!(source.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(entries.iter().all(|entry| entry.seed.is_some()));
         let context = ContributionContext {
+            working_directory: None,
             execution: None,
             header: Arc::new(header.clone()),
             turn_id: rsi_agent_session_protocol::TurnId::new("turn").unwrap(),
@@ -735,7 +738,7 @@ mod tests {
             let result = prepare(&definitions, &context).await;
             let spawn = definitions
                 .resolve(
-                    &header,
+                    header.coordinates(),
                     None,
                     &SpawnRoleReference {
                         provider: "rsi.agents".into(),
@@ -787,7 +790,7 @@ mod tests {
             ),
         };
         let entries = collision
-            .load(&header, None, None, CancellationToken::new())
+            .load(header.coordinates(), None, None, CancellationToken::new())
             .await
             .unwrap();
         let entry = entries
@@ -803,7 +806,7 @@ mod tests {
         assert!(
             collision
                 .resolve(
-                    &header,
+                    header.coordinates(),
                     None,
                     &SpawnRoleReference {
                         provider: "rsi.agents".into(),

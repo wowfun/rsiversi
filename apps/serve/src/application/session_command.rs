@@ -1,4 +1,4 @@
-use super::Sessions;
+use super::BoundSessions;
 use rsi_agent_session_protocol::{DomainRequestId, SessionCommandInvocation, SessionId};
 use rsi_extension::{Error, Result};
 use serde::Deserialize;
@@ -22,7 +22,7 @@ struct Input {
     session_id: SessionId,
     operation: Operation,
 }
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn command(&self, payload: Value) -> Result<Value> {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         let handle = if matches!(input.operation, Operation::Execute { .. }) {

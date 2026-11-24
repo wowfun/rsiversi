@@ -38,7 +38,7 @@ impl LocalSessionHandle {
                     }
                 };
                 let response = if let Some((header, pin)) = captured {
-                    SessionResourceAdapter::new(pin)
+                    SessionResourceAdapter::new(pin, None)
                         .read(header, execution, request, &self.execution, stop.clone())
                         .await
                         .map_err(|error| match error {

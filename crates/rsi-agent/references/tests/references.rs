@@ -139,7 +139,7 @@ fn inherited(parent: &SessionHeader, after: u64, terminal: u64) -> SessionHeader
             SessionId::new("child").unwrap(),
             2,
             ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: parent.session_id().clone(),
                     parent_header_fingerprint: parent.fingerprint().unwrap(),
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -152,12 +152,14 @@ fn inherited(parent: &SessionHeader, after: u64, terminal: u64) -> SessionHeader
                     terminal_control_prefix_sha256: "b".repeat(64),
                     requested_turns: ForkTurnSelection::All,
                     effective_turns: 1,
-                },
+                }
+                .into(),
                 root_session_id: parent.session_id().clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
             },
             ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap()
 }

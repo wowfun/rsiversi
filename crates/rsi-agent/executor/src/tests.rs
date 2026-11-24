@@ -783,7 +783,7 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
     )
     .unwrap()
     .with_fork_origin(ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: parent_session_id.clone(),
             parent_header_fingerprint: "a".repeat(64),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -796,7 +796,8 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
             terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 1,
-        },
+        }
+        .into(),
         root_session_id: parent_session_id,
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "checkpoint-child".into(),

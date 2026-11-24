@@ -2049,7 +2049,7 @@ mod tests {
                 SessionId::new("child-session").unwrap(),
                 2,
                 rsi_agent_session_protocol::ForkOrigin {
-                    history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent: rsi_agent_session_protocol::HistoryOrigin {
                         parent_session_id: state.header.session_id().clone(),
                         parent_header_fingerprint: state.header.fingerprint().unwrap(),
                         point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -2062,12 +2062,14 @@ mod tests {
                         terminal_control_prefix_sha256: "0".repeat(64),
                         requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
                         effective_turns: 0,
-                    },
+                    }
+                    .into(),
                     root_session_id: state.header.session_id().clone(),
                     path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
                     task_name: "child".into(),
                 },
                 selection,
+                None,
             )
             .unwrap();
         state.reasoning_effort =

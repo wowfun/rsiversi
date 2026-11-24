@@ -68,6 +68,7 @@ async fn real_prompt_registry_is_private_to_overlapping_generations() {
         let result = assembler
             .assemble(
                 PromptInput {
+                    cwd: header.canonical_cwd(),
                     header: &header,
                     model: &model,
                     scope: Some(scope),
@@ -218,6 +219,7 @@ async fn awaited_prompt_keeps_its_generation_and_scope_across_replacement_and_re
             assembler
                 .assemble(
                     PromptInput {
+                        cwd: header.canonical_cwd(),
                         header: &header,
                         model: &model,
                         scope: Some(scope),

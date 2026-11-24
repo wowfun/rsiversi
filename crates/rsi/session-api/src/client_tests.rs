@@ -203,6 +203,7 @@ async fn summary_reads_keep_one_cut_and_reject_foreign_or_inconsistent_metadata(
     let remote = Remote::new();
     let client = SessionClient::new(remote.clone());
     let expected = SessionSummary {
+        working_directory: None,
         header: header(),
         last_activity_ms: 2,
         durable_fact_seq: 7,
@@ -934,6 +935,7 @@ async fn recent_continuation_accepts_empty_scans_and_rejects_stale_or_foreign_vi
         assert!(client.list_recent(Some(&cursor), 1).await.is_err());
     }
     let row = SessionSummary {
+        working_directory: None,
         header: header(),
         last_activity_ms: 1,
         durable_fact_seq: 0,
@@ -959,6 +961,7 @@ async fn recent_continuation_accepts_empty_scans_and_rejects_stale_or_foreign_vi
 async fn recent_pages_reject_wrong_order_request_bounds_and_visible_successor() {
     fn row(id: &str, time: u64) -> SessionSummary {
         SessionSummary {
+            working_directory: None,
             header: SessionHeader::new_local(
                 SessionId::new(id).unwrap(),
                 time,

@@ -10,7 +10,7 @@ use cap_std::ambient_authority;
 #[cfg(not(unix))]
 use cap_std::fs::Dir;
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentMessageContent, AgentMessageSource, SessionHeader,
+    AgentMessage, AgentMessageContent, AgentMessageSource, ExecutionCoordinates, SessionHeader,
 };
 #[cfg(unix)]
 use rsi_files_native_fs::{
@@ -114,7 +114,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     /// names are checked in the same walk and returned as unavailable collisions.
     async fn agents(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         reserved_names: &BTreeSet<String>,
@@ -123,7 +123,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     /// Reads an explicitly selected skill or its catalog under independent invocation flags.
     async fn skills(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         audience: SkillAudience,
@@ -132,7 +132,7 @@ pub trait WorkspaceContext: fmt::Debug + Send + Sync + 'static {
     /// Reads one complete bounded snapshot for the exact Header and selected skill names.
     async fn snapshot(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError>;
@@ -294,14 +294,14 @@ const fn default_true() -> bool {
 impl WorkspaceContext for LocalWorkspaceContext {
     async fn agents(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         reserved_names: &BTreeSet<String>,
         cancellation: CancellationToken,
     ) -> Result<Vec<WorkspaceAgentDefinition>, WorkspaceContextError> {
-        require_local_source(header)?;
-        let operation = admit_source(header, execution)?;
+        require_local_source(coordinates)?;
+        let operation = admit_source(coordinates, execution)?;
         if id.is_some_and(|id| !valid_skill_name(id)) {
             return Err(WorkspaceContextError::Invalid("invalid agent name".into()));
         }
@@ -317,7 +317,7 @@ impl WorkspaceContext for LocalWorkspaceContext {
             .await
             .ok_or(WorkspaceContextError::Closed)??;
         let config = self.config.clone();
-        let cwd = PathBuf::from(header.canonical_cwd());
+        let cwd = PathBuf::from(coordinates.path());
         let budget = SnapshotBudget::new(&config, &cwd, stop)?;
         let id = id.map(str::to_owned);
         let reserved_names = reserved_names.clone();
@@ -331,14 +331,14 @@ impl WorkspaceContext for LocalWorkspaceContext {
     }
     async fn skills(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         audience: SkillAudience,
         cancellation: CancellationToken,
     ) -> Result<rsi_agent_session_protocol::SessionResourceValue, WorkspaceContextError> {
-        require_local_source(header)?;
-        let operation = admit_source(header, execution)?;
+        require_local_source(coordinates)?;
+        let operation = admit_source(coordinates, execution)?;
         if id.is_some_and(|id| !valid_skill_name(id)) {
             return Err(WorkspaceContextError::Invalid("invalid skill name".into()));
         }
@@ -349,7 +349,7 @@ impl WorkspaceContext for LocalWorkspaceContext {
             .await
             .ok_or(WorkspaceContextError::Closed)??;
         let config = Arc::clone(&self.config);
-        let cwd = PathBuf::from(header.canonical_cwd());
+        let cwd = PathBuf::from(coordinates.path());
         let budget = SnapshotBudget::new(&config, &cwd, stop)?;
         let id = id.map(str::to_owned);
         cancellation
@@ -362,20 +362,20 @@ impl WorkspaceContext for LocalWorkspaceContext {
     }
     async fn snapshot(
         &self,
-        header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         requests: &WorkspaceSkillRequests,
     ) -> Result<WorkspaceContextSnapshot, WorkspaceContextError> {
-        require_local_source(header)?;
-        let operation = admit_source(header, execution)?;
+        require_local_source(coordinates)?;
+        let operation = admit_source(coordinates, execution)?;
         let lease = self.owner.acquire().await?;
         let config = Arc::clone(&self.config);
         let budget = SnapshotBudget::new(
             &config,
-            Path::new(header.canonical_cwd()),
+            Path::new(coordinates.path()),
             self.owner.cancellation.clone(),
         )?;
-        let cwd = PathBuf::from(header.canonical_cwd());
+        let cwd = PathBuf::from(coordinates.path());
         let invocations = requests.names().to_vec();
         lease
             .run(move || {
@@ -387,19 +387,17 @@ impl WorkspaceContext for LocalWorkspaceContext {
 }
 
 fn admit_source(
-    header: &SessionHeader,
+    coordinates: &ExecutionCoordinates,
     execution: Option<&rsi_execution::ExecutionLease>,
 ) -> Result<Option<rsi_execution::ExecutionOperation>, WorkspaceContextError> {
     match execution {
-        Some(lease) if lease.binding().location() == header.coordinates().location() => {
+        Some(lease) if lease.binding().location() == coordinates.location() => {
             lease.admit().map(Some).map_err(|error| match error {
                 rsi_process::ProcessError::Capacity => WorkspaceContextError::Capacity,
                 _ => WorkspaceContextError::Closed,
             })
         }
-        None if *header.coordinates().location()
-            == rsi_agent_session_protocol::ExecutionLocation::Local =>
-        {
+        None if *coordinates.location() == rsi_agent_session_protocol::ExecutionLocation::Local => {
             Ok(None)
         }
         _ => Err(WorkspaceContextError::Invalid(
@@ -408,8 +406,8 @@ fn admit_source(
     }
 }
 
-fn require_local_source(header: &SessionHeader) -> Result<(), WorkspaceContextError> {
-    if *header.coordinates().location() == rsi_agent_session_protocol::ExecutionLocation::Local {
+fn require_local_source(coordinates: &ExecutionCoordinates) -> Result<(), WorkspaceContextError> {
+    if *coordinates.location() == rsi_agent_session_protocol::ExecutionLocation::Local {
         Ok(())
     } else {
         Err(WorkspaceContextError::Invalid(

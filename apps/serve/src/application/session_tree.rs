@@ -13,6 +13,33 @@ struct TreeRequest {
     session_id: SessionId,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryRequest {
+    request: String,
+    session_id: SessionId,
+    path: Option<String>,
+}
+
+impl super::BoundSessions {
+    pub(super) async fn working_directory(&self, payload: Value) -> Result<Value> {
+        let input: DirectoryRequest =
+            serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
+        let header = self
+            .interactive_header(&input.request, &input.session_id)
+            .await?;
+        let turns = self
+            .context
+            .lookup_local::<rsi_agent_turn_protocol::TurnServiceContract>()
+            .ok_or_else(|| Error::Remote("Agent execution unavailable".into()))?;
+        let coordinates = turns
+            .working_directory(&header, input.path.as_deref())
+            .await
+            .map_err(|e| Error::Remote(e.to_string()))?;
+        Ok(json!(coordinates.path()))
+    }
+}
+
 impl Sessions {
     pub(super) async fn descendants(&self, payload: Value) -> Result<Value> {
         let input: TreeRequest = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
@@ -49,6 +76,11 @@ impl Sessions {
                 ) => continue,
                 Err(_) => return Err(Error::Remote("Child Session header unavailable".into())),
             };
+            if matches!(child.execution_owner, ExecutionOwner::Plugin { .. }) {
+                // The application manager publishes this edge in the parent's own catalog after setup.
+                depths.insert(id, depth);
+                continue;
+            }
             let status = if child.status.has_open_turn {
                 if activity.is_none() {
                     activity = Some(

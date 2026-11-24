@@ -197,6 +197,7 @@ async fn capture_current_writer() {
     );
     std::fs::create_dir(&root).expect("capture destination must not exist");
     for scenario in [
+        "plugin-child",
         "mechanical",
         "domains",
         "generations",
@@ -208,6 +209,23 @@ async fn capture_current_writer() {
         let store = SqliteStore::open(&path).unwrap();
         let [accepted, event, terminal] = facts();
         match scenario {
+            "plugin-child" => {
+                let child = persist_idle_plugin_child(&store, Some("/sibling")).await;
+                store.commit_agent(rsi_agent_store_protocol::AtomicAgentCommit {
+                    sessions: vec![rsi_agent_store_protocol::AtomicSessionAppend {
+                        session_id: child.session_id().clone(),
+                        expected_fact_seq: 0,
+                        expected_control_seq: 0,
+                        header: Some(child),
+                        facts: vec![],
+                        controls: vec![AgentControlRecord::new(1, 3,
+                            rsi_agent_session_protocol::AgentControlRecordBody::WorkingDirectoryChanged { cwd: "/workspace".into() }
+                        ).unwrap()],
+                    }],
+                    required_active_activations: vec![],
+                    quiescent_descendants_of: None,
+                }).await.unwrap();
+            }
             "mechanical" => {
                 Box::pin(rsi_agent_testkit::assert_mechanical_store_contract(
                     &store,
@@ -277,6 +295,136 @@ async fn capture_current_writer() {
         serde_json::to_vec_pretty(&baseline).unwrap(),
     )
     .unwrap();
+}
+
+fn plugin_child_at(
+    parent: &SessionHeader,
+    id: &str,
+    segment: u16,
+    task: &str,
+    cwd: Option<&str>,
+) -> SessionHeader {
+    parent
+        .plugin_child(
+            SessionId::new(id).unwrap(),
+            2,
+            rsi_agent_session_protocol::AgentPath::new(vec![segment]).unwrap(),
+            task.into(),
+            rsi_agent_session_protocol::ExecutionOwner::Plugin {
+                session_id: parent.session_id().clone(),
+                plugin: "@example/reviewer".into(),
+                tool: None,
+            },
+            rsi_agent_session_protocol::PluginChildTarget {
+                offered_tools: None,
+                coordinates: cwd.map(|path| {
+                    rsi_agent_session_protocol::ExecutionCoordinates::new(
+                        rsi_agent_session_protocol::ExecutionLocation::Local,
+                        path,
+                    )
+                    .unwrap()
+                }),
+                preset: None,
+                selection: rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
+            },
+        )
+        .unwrap()
+}
+
+async fn persist_idle_plugin_child(store: &SqliteStore, cwd: Option<&str>) -> SessionHeader {
+    let parent = header("idle");
+    store.save_blank(parent.clone(), None).await.unwrap();
+    let child = plugin_child_at(&parent, "plugin-child", 1, "worker", cwd);
+    store.save_blank(child.clone(), None).await.unwrap();
+    store.save_blank(child.clone(), None).await.unwrap();
+    child
+}
+
+#[tokio::test]
+async fn idle_plugin_child_reopens_in_its_parent_tree_and_rejects_stale_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let child = persist_idle_plugin_child(&store, Some("/sibling")).await;
+    assert_eq!(child.canonical_cwd(), "/sibling");
+    let parent = header("idle");
+    assert_eq!(child.creation_cwd(), parent.canonical_cwd());
+    let candidate = plugin_child_at(&parent, "forged", 2, "other", Some("/sibling"));
+    let mut wire = serde_json::to_value(&candidate).unwrap();
+    wire["creation_cwd"] = serde_json::json!("/unrelated");
+    let forged = serde_json::from_value(wire).unwrap();
+    assert!(rsi_agent_store_protocol::validate_agent_lineage(&forged, &parent).is_err());
+    assert!(matches!(store.save_blank(forged, None).await,
+        Err(rsi_agent_store_protocol::StoreError::Invalid(message)) if message.contains("creation directory")));
+    assert!(matches!(
+        store.session_summary(candidate.session_id()).await,
+        Err(rsi_agent_store_protocol::StoreError::NotFound(_))
+    ));
+    for (segment, task, expected) in [
+        (1, "other", "Agent tree path is already present"),
+        (
+            2,
+            "worker",
+            "Agent task name is already present below its parent",
+        ),
+        (1, "worker", "Agent tree path is already present"),
+    ] {
+        let duplicate = plugin_child_at(&parent, "duplicate", segment, task, None);
+        let id = duplicate.session_id().clone();
+        assert!(matches!(store.save_blank(duplicate, None).await,
+            Err(rsi_agent_store_protocol::StoreError::Invalid(message)) if message == expected));
+        assert!(matches!(
+            store.session_summary(&id).await,
+            Err(rsi_agent_store_protocol::StoreError::NotFound(_))
+        ));
+    }
+    let changed = parent
+        .clone()
+        .with_agent_preset_id(AgentPresetId::new("changed").unwrap())
+        .unwrap();
+    rsi_agent_store_protocol::validate_agent_lineage(&child, &changed).unwrap();
+    store
+        .save_blank(changed, Some(parent.agent_preset_id().clone()))
+        .await
+        .unwrap();
+    let stale = plugin_child_at(&parent, "stale", 2, "second", None);
+    assert!(store.save_blank(stale, None).await.is_err());
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    let inspection = reopened.inspect_session(parent.session_id()).await.unwrap();
+    assert_eq!(inspection.tree.descendants.len(), 1);
+    assert_eq!(
+        &inspection.tree.descendants[0].status.session_id,
+        child.session_id()
+    );
+    drop(reopened);
+    let reopened = SqliteStore::open(root.path()).unwrap();
+    let snapshot = reopened
+        .read_agent_subtree_snapshot(parent.session_id())
+        .await
+        .unwrap();
+    assert_eq!(snapshot, inspection.tree);
+    assert_eq!(
+        reopened
+            .session_summary(child.session_id())
+            .await
+            .unwrap()
+            .header,
+        child
+    );
+    let tree = reopened
+        .list_agent_children(parent.session_id(), None, 16)
+        .await
+        .unwrap();
+    assert_eq!(tree.children.len(), 1);
+    assert_eq!(&tree.children[0].session_id, child.session_id());
+    assert!(
+        reopened
+            .session_summary(parent.session_id())
+            .await
+            .unwrap()
+            .is_blank()
+    );
 }
 
 #[tokio::test]
@@ -481,8 +629,27 @@ async fn retained_writer_corpus() {
                 page.validate().unwrap();
                 for session in &page.sessions {
                     let _proof = store.prepare_session(session).await.unwrap();
+                    let summary = store.session_summary(session).await.unwrap();
+                    assert_eq!(summary.header.session_id(), session);
+                    if entry.file_name() == "plugin-child" && session.as_str() == "plugin-child" {
+                        assert_eq!(summary.header.canonical_cwd(), "/sibling");
+                        assert_eq!(summary.header.creation_cwd(), "/workspace");
+                        assert_eq!(
+                            summary
+                                .working_directory
+                                .as_ref()
+                                .map(|change| change.seq.get()),
+                            Some(1)
+                        );
+                    }
+                    if summary.is_blank() {
+                        assert!(
+                            matches!(store.header(session).await, Err(StoreError::NotFound(id)) if id == session.as_str())
+                        );
+                        continue;
+                    }
                     let header = store.header(session).await.unwrap();
-                    assert_eq!(header.session_id(), session);
+                    assert_eq!(header, summary.header);
                     let mut facts = Vec::new();
                     loop {
                         let page = store

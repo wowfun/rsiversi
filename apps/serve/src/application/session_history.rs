@@ -441,11 +441,7 @@ async fn check_parent(
         .read_summary(parent)
         .await
         .map_err(|_| Error::Remote("Parent unavailable to caller".into()))?;
-    if header
-        .fork_origin()
-        .map(|fork| &fork.history.parent_session_id)
-        != Some(parent)
-    {
+    if header.fork_origin().map(|fork| fork.parent.session_id()) != Some(parent) {
         return Err(Error::Remote(
             "Session address does not identify a direct child".into(),
         ));
@@ -477,9 +473,18 @@ fn stored_header(header: &rsi_agent_session_protocol::SessionHeader) -> Value {
     let cwd = (header.coordinates().location()
         == &rsi_execution_protocol::ExecutionLocation::Local)
         .then(|| header.canonical_cwd());
-    json!({"id":header.session_id(),"created_at":header.created_at_ms(),"cwd":cwd,
+    let mut meta = json!({"id":header.session_id(),"created_at":header.created_at_ms(),"cwd":cwd,
         "preset":header.agent_preset_id(),"inherited":header.history_origin().is_some(),
-        "parent":header.history_origin().map(|origin| &origin.parent_session_id)})
+        "parent":header.fork_origin().map(|origin| origin.parent.session_id()).or_else(|| header.history_origin().map(|history| &history.parent_session_id))});
+    if let (Some(rsi_agent_session_protocol::ExecutionOwner::Plugin { .. }), Some(origin)) =
+        (header.execution_owner(), header.fork_origin())
+    {
+        meta["plugin_child_depth"] = json!(origin.path.depth());
+        if header.creation_cwd() != header.canonical_cwd() {
+            meta["creation_cwd"] = json!(header.creation_cwd());
+        }
+    }
+    meta
 }
 
 async fn current_selection(

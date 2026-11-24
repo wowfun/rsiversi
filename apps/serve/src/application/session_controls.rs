@@ -19,6 +19,9 @@ struct ControlEvent<'a> {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ControlBody<'a> {
+    WorkingDirectoryChanged {
+        cwd: &'a str,
+    },
     Accepted {
         message_id: &'a MessageId,
         message: &'a AgentMessage,
@@ -108,13 +111,15 @@ pub(super) fn encode_controls(
 }
 
 fn project_control<'a>(
-    header: &SessionHeader,
+    header: &'a SessionHeader,
     record: &'a AgentControlRecord,
     anchor: u64,
 ) -> Result<Option<ControlEvent<'a>>> {
     let body =
         if let Some(value) = mailbox_event(record.body()) {
             value
+        } else if let Body::WorkingDirectoryChanged { cwd } = record.body() {
+            ControlBody::WorkingDirectoryChanged { cwd }
         } else if let Body::DomainStateCommitted { commit } = record.body() {
             let Some(update) = commit.updates().iter().find(|update| {
                 update.snapshot().identity().id() == rsi_agent_model_selection::DOMAIN

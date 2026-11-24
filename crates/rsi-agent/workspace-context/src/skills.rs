@@ -142,13 +142,20 @@ pub(super) struct SkillResources(pub Arc<dyn WorkspaceContext>);
 impl SessionResourceReader for SkillResources {
     async fn read(
         &self,
-        header: &SessionHeader,
+        _header: &SessionHeader,
+        coordinates: &ExecutionCoordinates,
         execution: Option<&rsi_execution::ExecutionLease>,
         id: Option<&str>,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionResourceValue> {
         self.0
-            .skills(header, execution, id, SkillAudience::Human, cancellation)
+            .skills(
+                coordinates,
+                execution,
+                id,
+                SkillAudience::Human,
+                cancellation,
+            )
             .await
             .map_err(|error| match error {
                 WorkspaceContextError::Closed => ContributionError::Closed,
@@ -217,7 +224,7 @@ impl ToolExecutor for SkillTool {
         let value = self
             .0
             .skills(
-                authority.header(),
+                authority.working_coordinates(),
                 authority.execution(),
                 Some(&arguments.name),
                 SkillAudience::Model,

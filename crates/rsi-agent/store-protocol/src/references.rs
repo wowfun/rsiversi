@@ -2,8 +2,8 @@
 use super::{Result, StoreError};
 use rsi_agent_session_protocol::{
     ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentMessageContent,
-    AgentMessageSource, ExecutionOwner, InputMessageSource, ProgramRunEvent, ReferenceCollector,
-    SessionFact, SessionFactBody, SessionHeader,
+    AgentMessageSource, InputMessageSource, ProgramRunEvent, ReferenceCollector, SessionFact,
+    SessionFactBody, SessionHeader,
 };
 
 /// Projects the immutable Header's typed lineage and execution ownership.
@@ -20,9 +20,9 @@ pub fn header_references(header: &SessionHeader) -> Result<ReferenceCollector> {
             .map_err(StoreError::Invalid)?;
     }
     if let Some(owner) = header.execution_owner() {
-        let (ExecutionOwner::TurnActivation { session_id, .. }
-        | ExecutionOwner::ProgramRun { session_id, .. }) = owner;
-        output.session(session_id).map_err(StoreError::Invalid)?;
+        output
+            .session(owner.session_id())
+            .map_err(StoreError::Invalid)?;
     }
     Ok(output)
 }
@@ -160,6 +160,7 @@ pub fn native_control_references(record: &AgentControlRecord) -> Result<Referenc
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }

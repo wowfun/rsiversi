@@ -320,7 +320,7 @@ async fn spill_survives_pruning_compaction_source_and_restart_then_expires_expli
             SessionId::new("spill-child").unwrap(),
             2,
             ForkOrigin {
-                history: HistoryOrigin {
+                parent: HistoryOrigin {
                     parent_session_id: parent.session_id().clone(),
                     parent_header_fingerprint: parent.fingerprint().unwrap(),
                     point: ForkPoint::BeforeTurn {
@@ -336,12 +336,14 @@ async fn spill_survives_pruning_compaction_source_and_restart_then_expires_expli
                     terminal_control_prefix_sha256: "c".repeat(64),
                     requested_turns: ForkTurnSelection::All,
                     effective_turns: 1,
-                },
+                }
+                .into(),
                 root_session_id: parent.session_id().clone(),
                 path: AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
             },
             ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap();
     let mut child = ModelContextState::open(

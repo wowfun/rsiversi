@@ -994,8 +994,9 @@ async fn repeated_recent_listing_does_not_validate_history() {
             .list_recent_sessions(
                 &rsi_agent_store_protocol::ExecutionLocations::all(),
                 None,
-                1
-            , None)
+                1,
+                None
+            )
             .await
             .unwrap()
             .sessions
@@ -1008,8 +1009,9 @@ async fn repeated_recent_listing_does_not_validate_history() {
             .list_recent_sessions(
                 &rsi_agent_store_protocol::ExecutionLocations::all(),
                 None,
-                1
-            , None)
+                1,
+                None
+            )
             .await
             .unwrap()
             .sessions
@@ -2281,7 +2283,7 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
             SessionId::new(id).unwrap(),
             2,
             rsi_agent_session_protocol::ForkOrigin {
-                history: rsi_agent_session_protocol::HistoryOrigin {
+                parent: rsi_agent_session_protocol::HistoryOrigin {
                     parent_session_id: parent.session_id().clone(),
                     parent_header_fingerprint: parent.fingerprint().unwrap(),
                     point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -2294,12 +2296,14 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
                     terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
                     effective_turns: 0,
-                },
+                }
+                .into(),
                 root_session_id: parent.session_id().clone(),
                 path: rsi_agent_session_protocol::AgentPath::new(vec![1]).unwrap(),
                 task_name: "child".into(),
             },
             rsi_agent_session_protocol::ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap()
 }
@@ -3485,7 +3489,11 @@ async fn checkpoint_codec_rejects_damaged_frames_and_clears_encoding_on_raw_repl
             Err(StoreError::Corrupt(_))
         ));
     }
-    for length in [-1, 1, i64::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES).unwrap() + 1] {
+    for length in [
+        -1,
+        1,
+        i64::try_from(MAXIMUM_CONTEXT_CHECKPOINT_BYTES).unwrap() + 1,
+    ] {
         connection
             .execute(
                 "UPDATE context_checkpoints SET uncompressed_bytes=?1",
@@ -3754,7 +3762,11 @@ async fn domain_reads_query_only_the_selected_keys_and_reuse_their_common_contro
         2,
         2,
         SessionFactBody::CancelRequested {
-            turn_id: accepted.body().turn_id().expect("turn-owned fixture").clone(),
+            turn_id: accepted
+                .body()
+                .turn_id()
+                .expect("turn-owned fixture")
+                .clone(),
             reason: None,
         },
     )
@@ -3826,7 +3838,11 @@ async fn domain_reads_batch_distinct_controls_and_reject_missing_canonical_rows(
     let header = test_header("domain-batch");
     let session = header.session_id().clone();
     let accepted = test_fact(1);
-    let turn = accepted.body().turn_id().expect("turn-owned fixture").clone();
+    let turn = accepted
+        .body()
+        .turn_id()
+        .expect("turn-owned fixture")
+        .clone();
     let update = |id, revision, enabled| {
         DomainStateUpdate::new(
             DomainRevision::new(revision),

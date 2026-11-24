@@ -1,5 +1,13 @@
 # rsi-agent-store-protocol
 
+A local Session's working-directory change records the canonical target in a
+`WorkingDirectoryChanged` control. A summary resolves the latest change at
+its own cut. Cold validation binds
+the child's creation directory and tree path to its parent. A blank parent's
+preset can change later, so its full fingerprint is checked at insertion.
+Session membership,
+stored Header fingerprints and earlier observations keep their original meaning.
+
 A per-answer feedback read returns its latest live value and both durable
 cursors from one snapshot. A feedback append compares the stored predecessor
 and requires a finalized local assistant answer within the control’s Fact cut.
@@ -594,3 +602,10 @@ selects current heads with a revision greater than one and excludes retired
 Sessions and removed domains. A domain first introduced by a later generation
 can also have a revision greater than one. The read returns candidate identities.
 Its consumer selects eligible work from their current typed state.
+
+## Plugin child creation
+
+A trusted creator can register an unseeded child before its first prompt. The
+writer verifies the captured parent Header and immediate path, then publishes
+the child and its tree entry together. An exact retry keeps the same Header.
+The saved child binds its preset and permission ceiling at creation.

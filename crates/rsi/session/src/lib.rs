@@ -1333,22 +1333,31 @@ impl LocalSessionHandle {
         &self,
         header: &SessionHeader,
         execution: Option<&rsi_execution::ExecutionLease>,
-    ) -> Result<()> {
+    ) -> Result<rsi_workspace_protocol::ExecutionCoordinates> {
+        let selected =
+            if header.coordinates().location() == &rsi_execution::ExecutionLocation::Local {
+                self.turns
+                    .working_directory(header, None)
+                    .await
+                    .map_err(map_turn_error)?
+            } else {
+                header.coordinates().clone()
+            };
         if let Some(execution) = execution {
             let coordinates = execution
-                .canonicalize(header.canonical_cwd())
+                .canonicalize(selected.path())
                 .await
                 .map_err(|_| SessionError::Api(rsi_api_protocol::ApiError::Unavailable))?;
-            if &coordinates != header.coordinates() {
+            if coordinates != selected {
                 return Err(SessionError::Invalid(
                     "durable Session workspace changed on its execution target".into(),
                 ));
             }
-            return Ok(());
+            return Ok(selected);
         }
         access::require_native(header.coordinates().location())?;
-        let cwd = canonical_workspace_directory(Path::new(header.canonical_cwd())).await?;
-        if cwd.to_str() != Some(header.canonical_cwd()) {
+        let cwd = canonical_workspace_directory(Path::new(selected.path())).await?;
+        if cwd.to_str() != Some(selected.path()) {
             return Err(SessionError::Invalid(
                 "durable Session workspace no longer resolves to its canonical path".into(),
             ));
@@ -1357,7 +1366,7 @@ impl LocalSessionHandle {
             .get_or_create(&cwd)
             .await
             .map_err(|error| SessionError::Backend(error.to_string()))?;
-        Ok(())
+        Ok(selected)
     }
 
     async fn prepare_input_content(
@@ -2050,11 +2059,27 @@ impl SessionHandle for LocalSessionHandle {
             }
             return result;
         }
-        let HandleState::Fresh(draft) = &*state else {
+        if !matches!(*state, HandleState::Fresh(_)) {
             return Err(SessionError::NotFound("draft lease".into()));
-        };
-        let session = SubmitSession::Fresh(draft.freeze());
+        }
         let (message, execution, _publications) = self.prepare_message(request, &header).await?;
+        // Directory recovery may have published the otherwise blank child during preparation.
+        if header.is_redirected() {
+            self.reconcile_fresh_submission(&mut state, false).await?;
+        }
+        let session = match &*state {
+            HandleState::Fresh(draft) => SubmitSession::Fresh(draft.freeze()),
+            HandleState::Attached(attached) => {
+                workflow::require_preset(self.workflow.as_deref(), attached.agent_preset_id())?;
+                SubmitSession::Resume(
+                    self.turns
+                        .prepare_resume(self.session_id())
+                        .await
+                        .map_err(map_turn_error)?,
+                )
+            }
+            HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
+        };
         let result = self
             .turns
             .submit_message(SubmitAgentMessage {
@@ -2063,9 +2088,12 @@ impl SessionHandle for LocalSessionHandle {
                 delivery,
             })
             .await;
-        let enrollment = self
-            .reconcile_fresh_submission(&mut state, result.is_ok())
-            .await;
+        let enrollment = if matches!(*state, HandleState::Fresh(_)) {
+            self.reconcile_fresh_submission(&mut state, result.is_ok())
+                .await
+        } else {
+            Ok(())
+        };
         if result.is_ok()
             && let Some(owner) = &self.references
         {

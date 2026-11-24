@@ -82,7 +82,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 41 retains verbatim files as
+without repeating serialization. Session format 44 retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -150,7 +150,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 41 admits this content under both pending and claimed command
+Session format 44 admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-2 envelope for a trusted process
@@ -252,9 +252,10 @@ durable acceptance. Only the source owner can reread and freeze a selection.
 
 Headers require complete execution coordinates: a Local or stable SSH location
 and its target-canonical workspace path. Decoding validates both together without
-filesystem I/O; a path alone never selects an execution machine. Forks preserve
-the exact parent coordinates. These coordinates are durable identity, not a grant
-or a reconstructible execution lease.
+filesystem I/O; a path alone never selects an execution machine. An Agent spawn
+inherits its parent's current working directory at admission. Manual history
+forks preserve the source Header coordinates. Coordinates identify a location
+and are independent of the execution lease.
 
 The Header freezes optional `DelegationPolicy` in child Headers: selected role,
 persona, normalized role digest and at most 64 ordered effective Tool names.
@@ -265,6 +266,19 @@ canonical workspace without a workspace-trust field. Header fingerprints and
 fork bindings include the complete Header. All other format versions are
 rejected before validating current Header fields, without migration or file
 rewriting. Current Headers reject unknown fields.
+
+A local plugin child's creation directory follows its parent's creation directory,
+including for nested children. When the plugin selects a different initial working
+directory, its Header retains the creation directory alongside its initial execution
+coordinates. The Store binds the creation directory to the parent at insertion.
+Recovery may return the child to that directory after its selected directory
+disappears. A trusted Host plugin can also change an existing local Session's
+working directory. Each move records the canonical target in a control. The
+latest control takes precedence over the initial directory. Moving or recovering
+a Session preserves its immutable Header, workspace membership and lineage fingerprint.
+If this child spawns another Agent or a Program child, the descendant inherits
+the same creation directory. Spawning after recovery therefore starts in the
+restored directory, including when the old path has since been recreated.
 
 Human message content may include a frozen Session reference. The Agent-owned
 reference binds a bounded preview and immutable CAS envelope to the source and
@@ -349,7 +363,7 @@ canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 41 is accepted; all other formats are unsupported. Header protection is
+format 44 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -413,6 +427,19 @@ have a durable Header and control tail while its Fact tail is zero.
 Mailbox depth, content blocks per message, and paths per workspace-touch Fact
 have separate named 64-entry bounds. They currently share a value but are
 independent contracts and may evolve without accidental semantic coupling.
+
+The execution owner identifies the immediate parent in an Agent tree. An
+independent history fork has a source Session and starts a new tree. A trusted
+application plugin may start a child from a live parent even while the parent is
+idle. Its creation records the plugin identity and binds the parent's permission
+ceiling. An unseeded child inherits no conversation prefix. An application
+plugin delegating from a running model Tool records its producing Turn and
+effect alongside its package.
+
+A trusted plugin can explicitly choose another local directory for its child.
+The child's execution coordinates pin that canonical directory for file tools
+and workspace-write. Its sandbox mode, approval requirement and protected
+resource scope still derive from the parent.
 
 Fork lineage records the parent Header fingerprint, tree path, invoking Turn,
 resolved balanced completed-turn interval, and exact terminal Fact/control

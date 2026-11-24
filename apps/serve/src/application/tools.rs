@@ -4,7 +4,7 @@ use rsi_agent_composition_protocol::{
     AgentCompositionError, RequestInputContext, RequestInputPreparer, RequestToolCatalog,
     RequestToolSource,
 };
-use rsi_agent_session_protocol::{ExecutionLocation, SessionHeader};
+use rsi_agent_session_protocol::{EffectId, ExecutionLocation, SessionHeader, SessionId};
 use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_credentials_protocol::SecretValue;
 use rsi_tools_protocol::{
@@ -47,6 +47,37 @@ struct Endpoint {
     client: reqwest::Client,
     retired: CancellationToken,
     views: Arc<Semaphore>,
+    started: std::sync::Mutex<Vec<Arc<AgentCallerAuthority>>>,
+}
+
+/// The executor's permit bounds this set. The capability expires with the call, including cancellation.
+struct StartedTool<'a> {
+    endpoint: &'a Endpoint,
+    caller: Arc<AgentCallerAuthority>,
+}
+impl<'a> StartedTool<'a> {
+    fn hold(endpoint: &'a Endpoint, caller: Arc<AgentCallerAuthority>) -> Self {
+        endpoint
+            .started
+            .lock()
+            .expect("application tool calls")
+            .push(caller.clone());
+        Self { endpoint, caller }
+    }
+}
+impl Drop for StartedTool<'_> {
+    fn drop(&mut self) {
+        let mut started = self
+            .endpoint
+            .started
+            .lock()
+            .expect("application tool calls");
+        let index = started
+            .iter()
+            .position(|call| Arc::ptr_eq(call, &self.caller))
+            .expect("held call");
+        started.swap_remove(index);
+    }
 }
 impl Endpoint {
     async fn release_view(&self, id: &str) {
@@ -186,6 +217,25 @@ impl Source {
 }
 
 impl Publisher {
+    pub(super) fn started_tool(
+        &self,
+        generation: &str,
+        session: &SessionId,
+        effect: &EffectId,
+    ) -> Option<Arc<AgentCallerAuthority>> {
+        let current = self.endpoint.borrow();
+        let endpoint = current.as_ref()?;
+        if endpoint.listener.generation != generation || endpoint.retired.is_cancelled() {
+            return None;
+        }
+        endpoint
+            .started
+            .lock()
+            .expect("application tool calls")
+            .iter()
+            .find(|call| call.session_id() == session && call.tool_effect_id() == Some(effect))
+            .cloned()
+    }
     pub(super) fn publish(&self, listener: Listener, key: SecretValue, retired: CancellationToken) {
         self.endpoint.send_replace(Some(Arc::new(Endpoint {
             listener,
@@ -193,6 +243,7 @@ impl Publisher {
             retired,
             client: self.client.clone(),
             views: Arc::new(Semaphore::new(256)),
+            started: Default::default(),
         })));
     }
 }
@@ -490,6 +541,7 @@ impl ToolExecutor for Body {
         if execution.cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
+        let _started = StartedTool::hold(&self.view.endpoint, caller);
         self.view
             .start_and_observe(&request, &identity, &execution.cancellation)
             .await

@@ -10,6 +10,109 @@ pub(super) enum MessageAdmission<'a> {
 
 #[async_trait]
 impl TurnService for AgentKernel {
+    async fn working_directory(
+        &self,
+        header: &SessionHeader,
+        path: Option<&str>,
+    ) -> TurnResult<rsi_agent_session_protocol::ExecutionCoordinates> {
+        if path.is_some() {
+            return self.change_working_directory(header, path, None).await;
+        }
+        let cached = self.current_working_directory(header).await?;
+        let selected = self.ensure_coordinates(header, cached).await?;
+        Ok(selected
+            .as_deref()
+            .unwrap_or_else(|| header.coordinates())
+            .clone())
+    }
+    async fn create_plugin_child(
+        &self,
+        request: rsi_agent_turn_protocol::CreatePluginChild,
+    ) -> TurnResult<SessionHeader> {
+        use rsi_agent_session_protocol::{ExecutionOwner, ModelSelection, PluginToolOrigin};
+        use rsi_agent_turn_protocol::PluginChildSource;
+        let (parent, caller) = match &request.source {
+            PluginChildSource::Session(parent) => (parent.as_ref(), None),
+            PluginChildSource::Tool(caller) => (caller.header(), Some(caller.as_ref())),
+        };
+        if parent.session_id() == &request.session_id {
+            return Err(TurnError::Invalid(
+                "a plugin child requires a fresh identity".into(),
+            ));
+        }
+        let admission = self
+            .inner
+            .submission_admission
+            .acquire_pair(&request.session_id, Some(parent.session_id()))
+            .await?;
+        let tool = if let Some(caller) = caller {
+            self.validate_agent_caller(caller)?;
+            Some(PluginToolOrigin {
+                turn_id: caller.turn_id().clone(),
+                effect_id: caller
+                    .tool_effect_id()
+                    .ok_or(TurnError::StaleClaim)?
+                    .clone(),
+            })
+        } else {
+            None
+        };
+        let (_, parent_path) = agent_root_and_path(parent);
+        let path = self
+            .next_child_path(parent.session_id(), &parent_path, &request.task_name)
+            .await?;
+        let directory = match request.directory {
+            Some(directory) => Some(directory),
+            None => self
+                .current_working_directory(parent)
+                .await?
+                .as_deref()
+                .cloned(),
+        };
+        let child = parent
+            .plugin_child(
+                request.session_id,
+                self.inner.clock.now_ms().max(1),
+                path,
+                request.task_name,
+                ExecutionOwner::Plugin {
+                    session_id: parent.session_id().clone(),
+                    plugin: request.plugin,
+                    tool,
+                },
+                rsi_agent_session_protocol::PluginChildTarget {
+                    coordinates: directory,
+                    preset: request.preset,
+                    offered_tools: caller.and_then(AgentCallerAuthority::source_tools),
+                    selection: caller
+                        .and_then(AgentCallerAuthority::source_selection)
+                        .cloned()
+                        .unwrap_or_else(|| ModelSelection::baseline(parent.settings())),
+                },
+            )
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        self.inner
+            .composition
+            .pin_session(&child, None)
+            .await
+            .map_err(turn_composition_error)?;
+        let kernel = self.clone();
+        self.owned_commit(async move {
+            let _admission = admission;
+            if let PluginChildSource::Tool(caller) = &request.source {
+                kernel.validate_agent_caller(caller)?;
+            }
+            kernel
+                .inner
+                .store
+                .save_blank(child.clone(), None)
+                .await
+                .map_err(turn_store_error)?;
+            kernel.inner.session_changes.committed(child.session_id());
+            Ok(child)
+        })
+        .await
+    }
     async fn change_message_feedback(
         &self,
         id: &SessionId,
@@ -1336,11 +1439,11 @@ impl AgentKernel {
         let session_id = header.session_id().clone();
         let parent_session_id = header
             .fork_origin()
-            .map(|origin| origin.history.parent_session_id.clone());
+            .map(|origin| origin.parent.session_id().clone());
         let admissions = self
             .inner
             .submission_admission
-            .acquire_pair(&session_id, parent_session_id.as_ref())
+            .acquire_pair(&session_id, header.completion_parent())
             .await?;
         let execution = self
             .inner
@@ -1550,9 +1653,8 @@ impl AgentKernel {
             .program_child_claim_append(&header, &request.message_id, &request.activation_id)
             .await?;
         let program_sink = program_append.is_some();
-        let parent_activation = if let Some(parent_session_id) = &parent_session_id
-            && !program_sink
-        {
+        let mailbox_parent = header.completion_parent().filter(|_| !program_sink);
+        let parent_activation = if let Some(parent_session_id) = mailbox_parent {
             self.fence_pending_terminal(parent_session_id).await?;
             let active = self
                 .inner
@@ -1618,9 +1720,7 @@ impl AgentKernel {
                 },
             ));
         }
-        if let Some(parent_session_id) = &parent_session_id
-            && !program_sink
-        {
+        if let Some(parent_session_id) = mailbox_parent {
             controls.push(AgentControlRecord::new(
                 scan.durable_control_seq
                     .checked_add(controls.len() as u64 + 1)
@@ -1750,6 +1850,30 @@ impl AgentKernel {
 }
 
 impl AgentKernel {
+    async fn next_child_path(
+        &self,
+        parent_session_id: &SessionId,
+        parent_path: &AgentPath,
+        task_name: &str,
+    ) -> TurnResult<AgentPath> {
+        let direct = list_direct_agent_children(&self.inner.store, parent_session_id).await?;
+        if direct.iter().any(|child| child.task_name == task_name) {
+            return Err(TurnError::Invalid(
+                "subagent task name is already present below this parent".into(),
+            ));
+        }
+        let used_segments = direct
+            .iter()
+            .filter_map(|child| child.path.segments().last().copied())
+            .collect::<BTreeSet<_>>();
+        let segment = (1..=u16::MAX)
+            .find(|segment| !used_segments.contains(segment))
+            .ok_or(TurnError::Capacity)?;
+        let mut segments = parent_path.segments().to_vec();
+        segments.push(segment);
+        AgentPath::new(segments).map_err(|error| TurnError::Invalid(error.to_string()))
+    }
+
     #[allow(clippy::too_many_lines)] // Child identity, lineage, source admission and initial message form one preparation protocol.
     async fn spawn_agent_prepared(&self, request: SpawnAgentRequest) -> TurnResult<SpawnedAgent> {
         self.validate_agent_caller(&request.caller)?;
@@ -1778,11 +1902,13 @@ impl AgentKernel {
         let admission = self
             .inner
             .submission_admission
-            .acquire(&request.child_session_id)
+            .acquire_pair(&request.child_session_id, Some(request.caller.session_id()))
             .await?;
         if let Some(existing) = self.existing_spawn(&request, &message).await? {
             return Ok(existing);
         }
+        let parent_header = request.caller.header();
+        let parent_directory = self.current_working_directory(parent_header).await?;
         let record = if let Some(rsi_agent_turn_protocol::SpawnRoleSelection::Reference {
             reference,
             resolver,
@@ -1790,12 +1916,16 @@ impl AgentKernel {
         {
             let seed = request
                 .cancellation
-                .run_until_cancelled(resolver.resolve(
-                    request.caller.header(),
-                    request.caller.execution(),
-                    reference,
-                    request.cancellation.clone(),
-                ))
+                .run_until_cancelled(
+                    resolver.resolve(
+                        parent_directory
+                            .as_deref()
+                            .unwrap_or_else(|| parent_header.coordinates()),
+                        request.caller.execution(),
+                        reference,
+                        request.cancellation.clone(),
+                    ),
+                )
                 .await
                 .ok_or(TurnError::StaleClaim)??;
             seed.validate()
@@ -1813,9 +1943,8 @@ impl AgentKernel {
             None
         };
         let selection = spawn_selection(&request, record.as_ref())?;
-        let parent_header = request.caller.header().clone();
         let parent_session_id = parent_header.session_id().clone();
-        let (root_session_id, parent_path) = agent_root_and_path(&parent_header);
+        let (root_session_id, parent_path) = agent_root_and_path(parent_header);
         if parent_path.depth() >= rsi_agent_session_protocol::MAXIMUM_AGENT_TREE_DEPTH {
             return Err(TurnError::Capacity);
         }
@@ -1832,26 +1961,9 @@ impl AgentKernel {
                 "subagent session identity is already present in this tree".into(),
             ));
         }
-        let direct = list_direct_agent_children(&self.inner.store, &parent_session_id).await?;
-        if direct
-            .iter()
-            .any(|child| child.task_name == request.task_name)
-        {
-            return Err(TurnError::Invalid(
-                "subagent task name is already present below this parent".into(),
-            ));
-        }
-        let used_segments = direct
-            .iter()
-            .filter_map(|child| child.path.segments().last().copied())
-            .collect::<BTreeSet<_>>();
-        let segment = (1..=u16::MAX)
-            .find(|segment| !used_segments.contains(segment))
-            .ok_or(TurnError::Capacity)?;
-        let mut segments = parent_path.segments().to_vec();
-        segments.push(segment);
-        let path =
-            AgentPath::new(segments).map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let path = self
+            .next_child_path(&parent_session_id, &parent_path, &request.task_name)
+            .await?;
         let boundary = self
             .inner
             .store
@@ -1863,7 +1975,7 @@ impl AgentKernel {
             .await
             .map_err(turn_store_error)?;
         let origin = ForkOrigin {
-            history: rsi_agent_session_protocol::HistoryOrigin {
+            parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: parent_session_id.clone(),
                 parent_header_fingerprint: parent_header
                     .fingerprint()
@@ -1878,7 +1990,8 @@ impl AgentKernel {
                 terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
                 requested_turns: request.fork_turns.clone(),
                 effective_turns: boundary.effective_turns,
-            },
+            }
+            .into(),
             root_session_id: root_session_id.clone(),
             path: path.clone(),
             task_name: request.task_name,
@@ -1889,6 +2002,7 @@ impl AgentKernel {
                 self.inner.clock.now_ms().max(1),
                 origin,
                 selection,
+                parent_directory.as_deref(),
             )
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let composition = self
@@ -1938,7 +2052,7 @@ impl AgentKernel {
             PreparedFreshSession::new(child_header, composition).map_err(turn_composition_error)?;
         let baseline = self
             .fork_baseline(
-                &parent_header,
+                parent_header,
                 prepared.composition(),
                 &request.fork_turns,
                 &boundary,
@@ -1981,10 +2095,12 @@ impl AgentKernel {
         let origin = header
             .fork_origin()
             .filter(|origin| {
-                &origin.history.parent_session_id == request.caller.session_id()
-                    && origin.history.point.turn_id() == request.caller.turn_id()
+                origin.parent.session_id() == request.caller.session_id()
+                    && origin.parent.history().is_some_and(|history| {
+                        history.point.turn_id() == request.caller.turn_id()
+                            && history.requested_turns == request.fork_turns
+                    })
                     && origin.task_name == request.task_name
-                    && origin.history.requested_turns == request.fork_turns
             })
             .ok_or_else(|| {
                 TurnError::Invalid("spawn retry disagrees with existing child lineage".into())
@@ -2022,6 +2138,7 @@ impl AgentKernel {
                 header.created_at_ms(),
                 origin.clone(),
                 spawn_selection(request, saved)?,
+                Some(header.coordinates()),
             )
             .and_then(|header| header.with_delegation_policy(Some(policy.clone())))
             .and_then(|header| header.with_spawn_role(saved.cloned()))
@@ -2035,7 +2152,7 @@ impl AgentKernel {
             })
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         if expected != header
-            || origin.history.parent_header_fingerprint
+            || origin.parent.fingerprint()
                 != parent
                     .fingerprint()
                     .map_err(|error| TurnError::Invalid(error.to_string()))?
@@ -2096,10 +2213,10 @@ impl AgentKernel {
             .caller
             .header()
             .fork_origin()
-            .map(|origin| &origin.history.parent_session_id);
+            .map(|origin| origin.parent.session_id());
         let target_parent = target_header
             .fork_origin()
-            .map(|origin| &origin.history.parent_session_id);
+            .map(|origin| origin.parent.session_id());
         if caller_parent != Some(&request.target_session_id)
             && target_parent != Some(caller_session_id)
         {
@@ -2155,14 +2272,13 @@ impl AgentKernel {
             let Some(origin) = candidate.fork_origin() else {
                 break;
             };
-            if &origin.history.parent_session_id == caller.session_id() {
+            if origin.parent.session_id() == caller.session_id() {
                 authorized = true;
                 break;
             }
-            candidate =
-                read_validated_header_bounded(&self.inner, &origin.history.parent_session_id)
-                    .await
-                    .map_err(turn_store_error)?;
+            candidate = read_validated_header_bounded(&self.inner, origin.parent.session_id())
+                .await
+                .map_err(turn_store_error)?;
         }
         if !authorized {
             return Err(TurnError::Invalid(

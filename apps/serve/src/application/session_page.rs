@@ -61,7 +61,7 @@ fn catalog_item(summary: &SessionSummary, running: bool) -> Value {
     let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
         "blank":summary.is_blank(),"running":running});
     if let Some(origin) = header.fork_origin() {
-        item["parent"] = json!(origin.history.parent_session_id);
+        item["parent"] = json!(origin.parent.session_id());
     }
     item
 }
@@ -281,6 +281,7 @@ mod tests {
         )
         .unwrap();
         let mut summary = SessionSummary {
+            working_directory: None,
             header,
             last_activity_ms: 2,
             durable_fact_seq: 0,

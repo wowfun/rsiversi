@@ -269,7 +269,7 @@ impl rsi_agent_turn_protocol::SessionArchive for Navigation {
         if archived.contains(&origin.root_session_id) {
             return Ok(true);
         }
-        let mut parent = &origin.history.parent_session_id;
+        let mut parent = origin.parent.session_id();
         if archived.contains(parent) {
             return Ok(true);
         }
@@ -288,7 +288,7 @@ impl rsi_agent_turn_protocol::SessionArchive for Navigation {
             let Some(lineage) = ancestor.fork_origin() else {
                 break;
             };
-            parent = &lineage.history.parent_session_id;
+            parent = lineage.parent.session_id();
             if archived.contains(parent) {
                 return Ok(true);
             }

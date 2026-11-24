@@ -1,5 +1,5 @@
 use super::{
-    Sessions,
+    BoundSessions,
     session_history::{fragment_text, resource_key},
 };
 use futures_util::StreamExt;
@@ -88,7 +88,7 @@ impl Feed {
 fn remote(error: impl fmt::Display) -> Error {
     Error::Remote(error.to_string().chars().take(512).collect())
 }
-impl Sessions {
+impl BoundSessions {
     pub(super) async fn interactions(&self, payload: Value) -> Result<Value> {
         let Input {
             request,

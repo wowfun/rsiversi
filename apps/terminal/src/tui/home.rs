@@ -373,6 +373,7 @@ mod tests {
                 .unwrap();
             Ok(rsi_session_protocol::RecentSessionPage {
                 sessions: vec![rsi_session_protocol::SessionSummary {
+                    working_directory: None,
                     last_activity_ms: header.created_at_ms(),
                     header,
                     durable_fact_seq: 0,

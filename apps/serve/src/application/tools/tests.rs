@@ -173,6 +173,7 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         retired: CancellationToken::new(),
         views: Arc::new(Semaphore::new(256)),
+        started: Default::default(),
     });
     (socket, endpoint)
 }

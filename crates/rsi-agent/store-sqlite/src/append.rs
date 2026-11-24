@@ -221,7 +221,14 @@ pub(super) fn apply_atomic_sqlite_append(
         .ok_or_else(|| StoreError::Invalid("Fact sequence is exhausted".into()))?;
 
     let mut claimed_acceptances = Vec::new();
+    let mut directory_control_seq = None;
     for (index, record) in append.controls.iter().enumerate() {
+        if matches!(
+            record.body(),
+            AgentControlRecordBody::WorkingDirectoryChanged { .. }
+        ) {
+            directory_control_seq = Some(sqlite_u64("working-directory control", record.seq())?);
+        }
         if let AgentControlRecordBody::MessageDiscarded { message_id, .. } = record.body()
             && let Some(AgentControlRecordBody::QueueMutationRecorded { receipt }) =
                 append.controls.get(index + 1).map(AgentControlRecord::body)
@@ -306,7 +313,8 @@ pub(super) fn apply_atomic_sqlite_append(
             "UPDATE sessions
              SET durable_seq = ?1, fact_prefix_sha256 = ?2,
                  control_seq = ?3, control_prefix_sha256 = ?4,
-                 last_settled_control_seq = COALESCE(?8, last_settled_control_seq)
+                 last_settled_control_seq = COALESCE(?8, last_settled_control_seq),
+                 directory_control_seq = COALESCE(?9, directory_control_seq)
              WHERE session_id = ?5 AND durable_seq = ?6 AND control_seq = ?7",
             params![
                 sqlite_u64("durable sequence", durable_fact_seq)?,
@@ -326,6 +334,7 @@ pub(super) fn apply_atomic_sqlite_append(
                     ))
                     .map(|record| sqlite_u64("settlement control sequence", record.seq()))
                     .transpose()?,
+                directory_control_seq,
             ],
         )
         .map_err(sql_error)?;
@@ -378,6 +387,13 @@ impl ControlIndexer<'_, '_> {
             )
             .map_err(sql_error)?;
         match self.record.body() {
+            AgentControlRecordBody::WorkingDirectoryChanged { .. } => {
+                let (header, _) = read_session_header_row(self.transaction, self.session_id)?;
+                if header.coordinates().location() != &rsi_agent_session_protocol::ExecutionLocation::Local {
+                    return Err(StoreError::Invalid("working-directory changes require a local Session".into()));
+                }
+                Ok(())
+            }
             AgentControlRecordBody::MessageFeedbackChanged { change } => super::feedback::validate_change(
                 self.transaction, self.session_id, change, self.record.seq() - 1, self.after_fact_seq
             ),
@@ -882,7 +898,9 @@ impl ControlIndexer<'_, '_> {
                 "DELETE FROM active_activations
                  WHERE session_id = ?1 AND activation_id = ?2
                    AND (parent_session_id IS NULL
-                        OR completion_reserved_bytes IS NOT NULL OR completion_to_program=1)",
+                        OR completion_reserved_bytes IS NOT NULL OR completion_to_program=1
+                        OR EXISTS (SELECT 1 FROM agent_nodes WHERE session_id=?1
+                                   AND json_extract(execution_owner_json,'$.kind')='plugin'))",
                 params![self.session_id.as_str(), activation_id.as_str()],
             )
             .map_err(sql_error)?;
@@ -1227,12 +1245,8 @@ pub(super) fn insert_session(
     let Some(origin) = header.fork_origin() else {
         return Ok(());
     };
-    let expected_root = derived_session_root(transaction, &origin.history.parent_session_id)?;
-    if origin.root_session_id != expected_root {
-        return Err(StoreError::Invalid(
-            "Agent child root differs from its parent's durable root".into(),
-        ));
-    }
+    let (parent, _) = read_session_header_row(transaction, origin.parent.session_id())?;
+    rsi_agent_store_protocol::validate_agent_parent(header, &parent)?;
     let child_count = transaction
         .query_row(
             "SELECT COUNT(*) FROM agent_nodes WHERE root_session_id = ?1",
@@ -1249,50 +1263,38 @@ pub(super) fn insert_session(
         ));
     }
     let path_json = encode_json("Agent path", &origin.path)?;
-    let path_exists = transaction
-        .query_row(
-            "SELECT 1 FROM agent_nodes WHERE root_session_id = ?1 AND path_json = ?2",
-            params![origin.root_session_id.as_str(), &path_json],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(sql_error)?
-        .is_some();
-    if path_exists {
-        return Err(StoreError::Invalid(
-            "Agent tree path is already present".into(),
-        ));
-    }
-    let task_exists = transaction
-        .query_row(
-            "SELECT 1 FROM agent_nodes WHERE parent_session_id = ?1 AND task_name = ?2",
-            params![origin.history.parent_session_id.as_str(), &origin.task_name],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(sql_error)?
-        .is_some();
-    if task_exists {
-        return Err(StoreError::Invalid(
-            "Agent task name is already present below its parent".into(),
-        ));
-    }
-    transaction
+    let inserted = transaction
         .execute(
             "INSERT INTO agent_nodes
                 (session_id, root_session_id, parent_session_id, path_json, task_name, execution_owner_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(root_session_id, path_json) DO NOTHING
+             ON CONFLICT(parent_session_id, task_name) DO NOTHING",
             params![
                 header.session_id().as_str(),
                 origin.root_session_id.as_str(),
-                origin.history.parent_session_id.as_str(),
+                origin.parent.session_id().as_str(),
                 path_json,
                 &origin.task_name,
                 encode_json("execution owner", &header.execution_owner().ok_or_else(|| StoreError::Invalid("child execution owner is absent".into()))?)?,
             ],
         )
-        .map(|_| ())
-        .map_err(sql_error)
+        .map_err(sql_error)?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let path_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE root_session_id=?1 AND path_json=?2)",
+            params![origin.root_session_id.as_str(), path_json],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    Err(StoreError::Invalid(if path_exists {
+        "Agent tree path is already present".into()
+    } else {
+        "Agent task name is already present below its parent".into()
+    }))
 }
 
 pub(super) fn derived_session_root(

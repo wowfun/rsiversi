@@ -218,7 +218,7 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
         (None, None) => {}
         (Some(origin), Some((root, parent, path, task_name, owner)))
             if root == origin.root_session_id.as_str()
-                && parent == origin.history.parent_session_id.as_str()
+                && parent == origin.parent.session_id().as_str()
                 && decode_json::<rsi_agent_session_protocol::AgentPath>("Agent path", &path)?
                     == origin.path
                 && task_name == origin.task_name
@@ -232,13 +232,10 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
             ));
         }
     }
-    if let Some(origin) = header.fork_origin()
-        && derived_session_root(connection, &origin.history.parent_session_id)?
-            != origin.root_session_id
-    {
-        return Err(StoreError::Corrupt(
-            "Agent child root differs from its parent's durable root".into(),
-        ));
+    if let Some(origin) = header.fork_origin() {
+        let (parent, _) = read_session_header_row(connection, origin.parent.session_id())?;
+        rsi_agent_store_protocol::validate_agent_lineage(header, &parent)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
     }
     let active_parent = connection
         .query_row(
@@ -252,7 +249,7 @@ fn validate_session_lineage(connection: &Connection, header: &SessionHeader) -> 
         && parent.as_deref()
             != header
                 .fork_origin()
-                .map(|origin| origin.history.parent_session_id.as_str())
+                .map(|origin| origin.parent.session_id().as_str())
     {
         return Err(StoreError::Corrupt(
             "active activation parent disagrees with Header lineage".into(),
@@ -294,11 +291,17 @@ pub(super) fn header_projection() -> String {
                     CASE WHEN length(CAST(header_json AS BLOB)) <= {MAXIMUM_SESSION_HEADER_BYTES}
                          THEN header_json END,
                     CASE WHEN length(CAST(control_prefix_sha256 AS BLOB)) = 64
-                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms
+                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms, directory_control_seq,
+                    CASE WHEN directory_control_seq > 0 THEN
+                      (SELECT CASE WHEN length(CAST(control_json AS BLOB)) <= {MAXIMUM_SESSION_FACT_BYTES}
+                                   THEN json_extract(control_json,'$.cwd') END FROM agent_controls AS c
+                        WHERE c.session_id=sessions.session_id AND c.seq=sessions.directory_control_seq) END
 ")
 }
 
 pub(super) struct HeaderRow {
+    directory_control_seq: i64,
+    working_directory: Option<String>,
     created_at_ms: i64,
     durable_seq: i64,
     fact_prefix_sha256: Option<String>,
@@ -315,6 +318,12 @@ pub(super) fn read_header_projection(
     offset: usize,
 ) -> rusqlite::Result<HeaderRow> {
     Ok(HeaderRow {
+        directory_control_seq: row.get(offset + 9)?,
+        working_directory: optional_text(
+            row,
+            offset + 10,
+            rsi_agent_session_protocol::MAXIMUM_WORKSPACE_PATH_BYTES,
+        )?,
         created_at_ms: row.get(offset)?,
         durable_seq: row.get(offset + 1)?,
         fact_prefix_sha256: row.get(offset + 2)?,
@@ -368,6 +377,8 @@ fn decode_header_source(
     row: HeaderRow,
 ) -> Result<(StoreRecentSession, String)> {
     let HeaderRow {
+        directory_control_seq,
+        working_directory,
         created_at_ms,
         durable_seq,
         fact_prefix_sha256,
@@ -380,6 +391,7 @@ fn decode_header_source(
     } = row;
     let durable_seq = decode_u64("durable sequence", durable_seq)?;
     let control_seq = decode_u64("durable control sequence", control_seq)?;
+    let directory_control_seq = decode_u64("directory change", directory_control_seq)?;
     let last_activity_ms = decode_u64("activity timestamp", last_activity_ms)?;
     for (label, digest) in [
         ("Fact-prefix digest", fact_prefix_sha256),
@@ -404,6 +416,13 @@ fn decode_header_source(
             "session creation timestamp differs from its durable header".into(),
         ));
     }
+    if directory_control_seq > control_seq
+        || (directory_control_seq == 0) != working_directory.is_none()
+    {
+        return Err(StoreError::Corrupt(
+            "invalid working-directory control position".into(),
+        ));
+    }
     if super::activity::coordinates_key(header.coordinates())? != coordinates_key
         || last_activity_ms < header.created_at_ms()
     {
@@ -413,6 +432,16 @@ fn decode_header_source(
     }
     Ok((
         StoreRecentSession {
+            working_directory: working_directory
+                .map(|cwd| {
+                    rsi_agent_store_protocol::WorkingDirectoryChange::new(
+                        &header,
+                        directory_control_seq,
+                        cwd,
+                    )
+                })
+                .transpose()
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
             header,
             last_activity_ms,
             durable_fact_seq: durable_seq,
@@ -759,6 +788,7 @@ impl MailboxProjection {
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1072,6 +1102,7 @@ impl ActivationProjection {
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1377,6 +1408,7 @@ impl ReadyProjection {
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
+            | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
             | AgentControlRecordBody::InboxResumed => {}
         }
@@ -1449,6 +1481,7 @@ fn validate_agent_indexes_observed(
     let mut queue_receipts = 0_usize;
     let mut last_settled_control_seq = 0;
     let mut inbox_paused = false;
+    let mut directory_control_seq = None;
     let mut successor_link = None;
     let mut statement = connection
         .prepare(
@@ -1479,6 +1512,16 @@ fn validate_agent_indexes_observed(
         activity.observe_control(&record);
         match record.body() {
             AgentControlRecordBody::InboxPaused => inbox_paused = true,
+            AgentControlRecordBody::WorkingDirectoryChanged { .. } => {
+                if header.coordinates().location()
+                    != &rsi_agent_session_protocol::ExecutionLocation::Local
+                {
+                    return Err(StoreError::Corrupt(
+                        "working-directory change in a remote Session".into(),
+                    ));
+                }
+                directory_control_seq = std::num::NonZeroU64::new(record.seq());
+            }
             AgentControlRecordBody::InboxResumed => inbox_paused = false,
             _ => {}
         }
@@ -1577,6 +1620,11 @@ fn validate_agent_indexes_observed(
     if indexed_pause != inbox_paused {
         return Err(StoreError::Corrupt(
             "inbox pause state differs from canonical controls".into(),
+        ));
+    }
+    if directory_control_seq != session.working_directory.as_ref().map(|change| change.seq) {
+        return Err(StoreError::Corrupt(
+            "working-directory position differs from canonical controls".into(),
         ));
     }
     if digest != decode_sha256("control-prefix digest", &indexed_digest)? {

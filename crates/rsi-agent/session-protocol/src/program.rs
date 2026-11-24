@@ -128,14 +128,49 @@ pub enum ExecutionOwner {
         run_id: ProgramRunId,
         ordinal: u32,
     },
+    /// An enabled application plugin acting for its exact live parent.
+    Plugin {
+        session_id: SessionId,
+        plugin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<PluginToolOrigin>,
+    },
+}
+
+/// A plugin delegation performed within this exact started model Tool.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginToolOrigin {
+    /// Turn that started the tool.
+    pub turn_id: TurnId,
+    /// Effect identifying the Tool intent and its start.
+    pub effect_id: EffectId,
 }
 impl ExecutionOwner {
-    /// Rejects invalid durable program ordinals.
+    /// Session whose authority the creator exercised.
+    pub const fn session_id(&self) -> &SessionId {
+        match self {
+            Self::TurnActivation { session_id, .. }
+            | Self::ProgramRun { session_id, .. }
+            | Self::Plugin { session_id, .. } => session_id,
+        }
+    }
+
+    /// Checks the durable creator identity.
     pub fn validate(&self) -> Result<()> {
         if let Self::ProgramRun { ordinal, .. } = self
             && (*ordinal == 0 || *ordinal > MAXIMUM_PROGRAM_CHILDREN)
         {
             return Err(invalid("program execution owner ordinal is out of bounds"));
+        }
+        if let Self::Plugin { plugin, .. } = self
+            && (plugin.is_empty()
+                || plugin.len() > 256
+                || !plugin.bytes().all(|byte| byte.is_ascii_graphic()))
+        {
+            return Err(invalid(
+                "plugin execution owner requires a bounded package identity",
+            ));
         }
         Ok(())
     }

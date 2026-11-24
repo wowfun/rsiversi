@@ -18,7 +18,7 @@ impl GenerationValidator for AgentAdapter {
             .find(|update| update.snapshot.identity().id() == EXTENSION_JOURNAL_DOMAIN)
             .ok_or_else(|| invalid("candidate journal is absent"))?;
         let journal = self.handle.decode(&update.snapshot).map_err(invalid)?;
-        self.load_snapshot(header, update.revision, &journal, true, cancellation)
+        self.load_snapshot(header, None, update.revision, &journal, true, cancellation)
             .await
             .map_err(|error| {
                 validation_error(error, self.connection.disconnect_token().is_cancelled())

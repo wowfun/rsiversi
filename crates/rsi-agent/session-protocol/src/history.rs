@@ -117,12 +117,65 @@ impl HistoryOrigin {
     }
 }
 
-/// Agent-tree membership in addition to immutable history provenance.
+/// Parent binding for a child with or without inherited conversation history.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentParent {
+    /// Authenticated selection from a parent Turn.
+    History(HistoryOrigin),
+    /// Parent of a fresh child with an empty conversation.
+    Session {
+        /// Exact live parent at creation.
+        parent_session_id: SessionId,
+        /// Fingerprint of the parent Header that supplied the child's authority.
+        parent_header_fingerprint: String,
+    },
+}
+
+impl From<HistoryOrigin> for AgentParent {
+    fn from(history: HistoryOrigin) -> Self {
+        Self::History(history)
+    }
+}
+
+impl AgentParent {
+    /// Immediate parent, independently of the selected conversation prefix.
+    pub const fn session_id(&self) -> &SessionId {
+        match self {
+            Self::History(history) => &history.parent_session_id,
+            Self::Session {
+                parent_session_id, ..
+            } => parent_session_id,
+        }
+    }
+
+    /// Exact captured parent Header.
+    pub fn fingerprint(&self) -> &str {
+        match self {
+            Self::History(history) => &history.parent_header_fingerprint,
+            Self::Session {
+                parent_header_fingerprint,
+                ..
+            } => parent_header_fingerprint,
+        }
+    }
+
+    /// Selected history, when the creator requested a fork.
+    pub const fn history(&self) -> Option<&HistoryOrigin> {
+        match self {
+            Self::History(history) => Some(history),
+            Self::Session { .. } => None,
+        }
+    }
+}
+
+/// Agent-tree membership and its immutable parent binding.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkOrigin {
-    /// Immutable history selected before the spawning Turn.
-    pub history: HistoryOrigin,
+    /// The source Session or a selected prefix of its history.
+    #[serde(flatten)]
+    pub parent: AgentParent,
     /// Agent-tree root shared by descendants.
     pub root_session_id: SessionId,
     /// Stable child path below the root.
@@ -133,11 +186,19 @@ pub struct ForkOrigin {
 impl ForkOrigin {
     /// Revalidates Agent membership and its history binding.
     pub fn validate(&self) -> Result<()> {
-        self.history.validate()?;
+        match &self.parent {
+            AgentParent::History(history) => history.validate()?,
+            AgentParent::Session {
+                parent_header_fingerprint,
+                ..
+            } => {
+                validate_sha256("parent header fingerprint", parent_header_fingerprint)?;
+            }
+        }
         validate_identifier("subagent task name", &self.task_name)?;
-        if self.path.depth() == 0 || !matches!(self.history.point, ForkPoint::BeforeTurn { .. }) {
+        if self.path.depth() == 0 {
             return Err(SessionError::Invalid(
-                "Agent lineage requires a non-root path and a before-Turn history cut".into(),
+                "Agent lineage requires a non-root path".into(),
             ));
         }
         Ok(())

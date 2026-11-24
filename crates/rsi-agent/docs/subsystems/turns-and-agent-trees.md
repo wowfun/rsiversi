@@ -83,6 +83,10 @@ status. Job output remains available through the Jobs owner. Host shutdown or
 producer withdrawal cancels the underlying work. Jobs and their observers are
 process-local.
 
+The plugin that starts a child owns result delivery. Its child's activation can
+finish while the parent is idle, without reserving space in the parent's
+mailbox. Archiving any ancestor pauses the child's model requests.
+
 The Turn service is the single application seam. Product input first returns a
 durable mailbox receipt with its exact acceptance control sequence and indexed
 state; it does not invent a Turn identity before scheduling. Claim atomically

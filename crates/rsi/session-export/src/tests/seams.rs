@@ -198,7 +198,7 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
         .unwrap();
     for field in 0..7 {
         let mut origin = ForkOrigin {
-            history: rsi_agent_session_protocol::HistoryOrigin {
+            parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: parent.session_id().clone(),
                 parent_header_fingerprint: parent.fingerprint().unwrap(),
                 point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -211,19 +211,23 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
                 terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
                 requested_turns: ForkTurnSelection::All,
                 effective_turns: boundary.effective_turns,
-            },
+            }
+            .into(),
             root_session_id: parent.session_id().clone(),
             path: AgentPath::new(vec![field + 1]).unwrap(),
             task_name: format!("child-{field}"),
         };
+        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+            panic!("expected inherited history")
+        };
         match field {
-            0 => origin.history.parent_header_fingerprint = "b".repeat(64),
-            1 => origin.history.resolved_after_seq += 1,
-            2 => origin.history.resolved_terminal_seq += 1,
-            3 => origin.history.terminal_prefix_sha256 = "b".repeat(64),
-            4 => origin.history.resolved_terminal_control_seq += 1,
-            5 => origin.history.terminal_control_prefix_sha256 = "b".repeat(64),
-            _ => origin.history.effective_turns += 1,
+            0 => history.parent_header_fingerprint = "b".repeat(64),
+            1 => history.resolved_after_seq += 1,
+            2 => history.resolved_terminal_seq += 1,
+            3 => history.terminal_prefix_sha256 = "b".repeat(64),
+            4 => history.resolved_terminal_control_seq += 1,
+            5 => history.terminal_control_prefix_sha256 = "b".repeat(64),
+            _ => history.effective_turns += 1,
         }
         let child = parent
             .forked_child(
@@ -231,6 +235,7 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
                 2,
                 origin,
                 ModelSelection::baseline(parent.settings()),
+                None,
             )
             .unwrap();
         append(&store, &child, 0, vec![accepted("child")]).await;

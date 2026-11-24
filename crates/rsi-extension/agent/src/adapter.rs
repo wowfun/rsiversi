@@ -314,7 +314,7 @@ pub struct AgentAdapter {
     history: Arc<crate::history::HistoryRouter>,
     arguments: Arc<crate::arguments::Arguments>,
     _argument_registration: rsi_extension::HandlerRegistration,
-    _history_registrations: [rsi_extension::HandlerRegistration; 2],
+    _history_registrations: [rsi_extension::HandlerRegistration; 3],
     questions: Mutex<
         Option<(
             Arc<crate::questions::QuestionRouter>,
@@ -346,6 +346,15 @@ impl AgentAdapter {
         let registrations = [
             register("agent.step-decision.read")?,
             register("agent.history.read")?,
+            connection
+                .register_handler(
+                    "agent.tool.directory",
+                    Arc::new(crate::history::ToolDirectory {
+                        history: history.clone(),
+                        turns: turns.clone(),
+                    }),
+                )
+                .map_err(crate::error)?,
         ];
         Ok(Arc::new(Self {
             history,
@@ -541,6 +550,7 @@ impl AgentAdapter {
     async fn load_current(
         &self,
         header: &rsi_agent_session_protocol::SessionHeader,
+        coordinates: &rsi_agent_session_protocol::ExecutionCoordinates,
         expected: Option<rsi_agent_session_protocol::DomainRevision>,
         cancellation: CancellationToken,
     ) -> rsi_tools_protocol::Result<(rsi_agent_session_protocol::DomainRevision, ExtensionJournal)>
@@ -592,13 +602,21 @@ impl AgentAdapter {
             return Err(tool_error("journal changed after Step capture"));
         }
         let journal = self.handle.decode(&view.snapshot).map_err(tool_error)?;
-        self.load_snapshot(header, view.head.revision, &journal, false, cancellation)
-            .await?;
+        self.load_snapshot(
+            header,
+            Some(coordinates),
+            view.head.revision,
+            &journal,
+            false,
+            cancellation,
+        )
+        .await?;
         Ok((view.head.revision, journal))
     }
     async fn load_snapshot(
         &self,
         header: &rsi_agent_session_protocol::SessionHeader,
+        captured: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
         revision: rsi_agent_session_protocol::DomainRevision,
         journal: &ExtensionJournal,
         reload: bool,
@@ -612,12 +630,22 @@ impl AgentAdapter {
         let mut load = load::Load::new(self.connection.clone(), header.session_id().clone(), lane);
         let transferred = async {
             let count: u64 = journal.segments.iter().map(|segment| segment.count).sum();
+            let cut = if captured.is_none() && header.coordinates().location() == &rsi_execution::ExecutionLocation::Local {
+                match self.store.session_summary(header.session_id()).await {
+                    Ok(cut) => Some(cut),
+                    Err(rsi_agent_store_protocol::StoreError::NotFound(_)) => None,
+                    Err(error) => return Err(tool_error(error)),
+                }
+            } else { None };
             let local_cwd = (header.coordinates().location() == &rsi_execution::ExecutionLocation::Local)
-                .then(|| header.canonical_cwd());
-            let boundary = json!({
+                .then(|| captured.unwrap_or_else(|| cut.as_ref().map_or(header.coordinates(), |cut| cut.working_coordinates())).path());
+            let mut boundary = json!({
                 "session_id": header.session_id(), "created_at": header.created_at_ms(),
                 "local_cwd": local_cwd, "revision": revision.get(), "count": count, "reload": reload,
             });
+            if local_cwd.is_some_and(|cwd| cwd != header.creation_cwd()) {
+                boundary["creation_cwd"] = json!(header.creation_cwd());
+            }
             let action = self.connection.request("agent.load.begin", boundary, cancellation.clone())
                 .await.map_err(|failure| load_error(&failure))?;
             match action.as_str() {
@@ -670,7 +698,12 @@ impl AgentAdapter {
             guard = lane.lock() => guard,
         };
         let (revision, journal) = self
-            .load_current(caller.header(), None, execution.cancellation.clone())
+            .load_current(
+                caller.header(),
+                caller.working_coordinates(),
+                None,
+                execution.cancellation.clone(),
+            )
             .await?;
         let captured = self
             .turns
@@ -679,12 +712,13 @@ impl AgentAdapter {
             .map_err(tool_error)?;
         let _history_scope = self
             .history
-            .enter_reader(
+            .enter(
                 caller.session_id().as_str(),
                 effect.as_str(),
                 captured.facts,
                 captured.through_seq,
                 &execution.cancellation,
+                crate::history::HistoryPurpose::Tool(caller.clone()),
             )
             .map_err(tool_error)?;
         let _question_scope = self

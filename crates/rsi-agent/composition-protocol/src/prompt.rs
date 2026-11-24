@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 /// Immutable values borrowed from one admitted request series.
 #[derive(Debug)]
 pub struct PromptInput<'a> {
+    /// Canonical working directory selected for this request.
+    pub cwd: &'a str,
     /// Immutable Session defaults and delegation persona.
     pub header: &'a SessionHeader,
     /// Actual selected route and reasoning effort.

@@ -617,7 +617,7 @@ async fn named_spawn_resolves_once_and_retries_use_the_durable_seed() {
     impl SpawnRoleResolver for Resolver {
         async fn resolve(
             &self,
-            _: &SessionHeader,
+            _: &rsi_agent_session_protocol::ExecutionCoordinates,
             _: Option<&rsi_execution::ExecutionLease>,
             _: &SpawnRoleReference,
             _: CancellationToken,

@@ -11,6 +11,7 @@ rsi-agent-context = { path = "../context" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-execution = { path = "../../rsi-execution/core" }
+rsi-workspace-path = { path = "../../rsi-workspace/path" }
 getrandom.workspace = true
 rsi-jobs = { path = "../../rsi-jobs/core" }
 async-trait.workspace = true

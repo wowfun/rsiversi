@@ -66,7 +66,11 @@ async fn sqlite_domains_preserve_atomic_revisions_receipts_and_history() {
         2,
         2,
         SessionFactBody::CancelRequested {
-            turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
+            turn_id: accepted
+                .body()
+                .turn_id()
+                .expect("turn-owned fixture fact")
+                .clone(),
             reason: None,
         },
     )
@@ -105,7 +109,11 @@ async fn cold_domain_reads_and_offline_verify_reject_corrupted_canonical_indexes
             2,
             2,
             SessionFactBody::CancelRequested {
-                turn_id: accepted.body().turn_id().expect("turn-owned fixture fact").clone(),
+                turn_id: accepted
+                    .body()
+                    .turn_id()
+                    .expect("turn-owned fixture fact")
+                    .clone(),
                 reason: None,
             },
         )
@@ -421,7 +429,7 @@ fn insert_agent_node_without_admission(database: &Path, header: &SessionHeader) 
             rusqlite::params![
                 session_id.as_str(),
                 origin.root_session_id.as_str(),
-                origin.history.parent_session_id.as_str(),
+                origin.parent.session_id().as_str(),
                 serde_json::to_string(&origin.path).unwrap(),
                 &origin.task_name,
                 serde_json::to_string(header.execution_owner().unwrap()).unwrap(),
@@ -545,7 +553,7 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                 child_id,
                 u64::try_from(index + 1).unwrap(),
                 ForkOrigin {
-                    history: rsi_agent_session_protocol::HistoryOrigin {
+                    parent: rsi_agent_session_protocol::HistoryOrigin {
                         parent_session_id: root_id.clone(),
                         parent_header_fingerprint: parent_header_fingerprint.clone(),
                         point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -558,12 +566,14 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                         terminal_control_prefix_sha256: "0".repeat(64),
                         requested_turns: ForkTurnSelection::None,
                         effective_turns: 0,
-                    },
+                    }
+                    .into(),
                     root_session_id: root_id.clone(),
                     path: AgentPath::new(vec![u16::try_from(index).unwrap()]).unwrap(),
                     task_name: format!("bounded-task-{index}"),
                 },
                 rsi_agent_session_protocol::ModelSelection::baseline(root_header.settings()),
+                None,
             )
             .unwrap()
     };
@@ -1784,11 +1794,14 @@ fn fresh_databases_use_small_pages_and_reopen_preserves_existing_geometry() {
     drop(store);
     let path = root.path().join("sessions.sqlite3");
     let page_size = |connection: &Connection| {
-        connection.pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0)).unwrap()
+        connection
+            .pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0))
+            .unwrap()
     };
     let db = Connection::open(&path).unwrap();
     assert_eq!(page_size(&db), 1024);
-    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=4096; VACUUM").unwrap();
+    db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=4096; VACUUM")
+        .unwrap();
     assert_eq!(page_size(&db), 4096);
     drop(db);
     drop(SqliteStore::open(root.path()).unwrap());

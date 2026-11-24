@@ -551,7 +551,7 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
         .await
         .unwrap();
     let origin = ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: parent.session_id().clone(),
             parent_header_fingerprint: parent.fingerprint().unwrap(),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -564,7 +564,8 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
             terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: ForkTurnSelection::All,
             effective_turns: boundary.effective_turns,
-        },
+        }
+        .into(),
         root_session_id: parent.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
@@ -575,6 +576,7 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
             2,
             origin,
             ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap();
     append(
@@ -628,7 +630,7 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
             .await
             .unwrap();
         let origin = ForkOrigin {
-            history: rsi_agent_session_protocol::HistoryOrigin {
+            parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: child.session_id().clone(),
                 parent_header_fingerprint: child.fingerprint().unwrap(),
                 point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -641,7 +643,8 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
                 terminal_prefix_sha256: boundary.terminal_prefix_sha256,
                 resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
                 terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
-            },
+            }
+            .into(),
             root_session_id: parent.session_id().clone(),
             path: AgentPath::new(vec![1, if inherits_ancestor { 1 } else { 2 }]).unwrap(),
             task_name: name.into(),
@@ -652,6 +655,7 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
                 3,
                 origin,
                 ModelSelection::baseline(child.settings()),
+                None,
             )
             .unwrap();
         append(
@@ -715,7 +719,7 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
         .await
         .unwrap();
     let origin = ForkOrigin {
-        history: rsi_agent_session_protocol::HistoryOrigin {
+        parent: rsi_agent_session_protocol::HistoryOrigin {
             parent_session_id: parent.session_id().clone(),
             parent_header_fingerprint: parent.fingerprint().unwrap(),
             point: rsi_agent_session_protocol::ForkPoint::BeforeTurn {
@@ -728,7 +732,8 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
             terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: selection,
             effective_turns: boundary.effective_turns,
-        },
+        }
+        .into(),
         root_session_id: parent.session_id().clone(),
         path: AgentPath::new(vec![1]).unwrap(),
         task_name: "child".into(),
@@ -739,6 +744,7 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
             2,
             origin,
             ModelSelection::baseline(parent.settings()),
+            None,
         )
         .unwrap();
     append(&store, &child, 0, vec![accepted("child")]).await;
