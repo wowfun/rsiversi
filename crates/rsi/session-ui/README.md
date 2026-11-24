@@ -41,7 +41,8 @@ No history card recaptures its source or accepts a caller-supplied CAS digest.
 
 Goal and current-Turn Jobs are separate contributed surfaces. The target watches
 the controller's existing projection cache and its one live Goal observer, then
-invalidates only this target's presentations. Goal shows durable phase, allocated
+invalidates only this target's presentations. The Goal card decodes and validates
+the cached projection directly. Goal shows durable phase, allocated
 rounds, model report and process-local driving separately. An explicit completion
 names the Host owner or the plugin that made the decision. Create requires an
 explicit positive round cap; Pause leaves claimed work running, Cancel targets

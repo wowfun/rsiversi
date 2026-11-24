@@ -112,7 +112,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         ));
         return Ok(view("Goal", elements));
     };
-    let state: GoalState = serde_json::from_value(value.value().clone()).map_err(invalid)?;
+    let state = GoalState::deserialize(value.value()).map_err(invalid)?;
     state.validate().map_err(invalid)?;
     let revision = match snapshot.cursor() {
         ProjectionCursor::Draft { revision } => CommandRevision::Draft { revision },
