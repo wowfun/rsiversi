@@ -246,6 +246,12 @@ impl Driver {
         } else {
             false
         };
+        if composition.requires_local_application() && !input_required {
+            return Err(failed(
+                "application.input_unavailable",
+                "This preset requires its Host-local application",
+            ));
+        }
         let has_callbacks = composition
             .contributions()
             .entries()

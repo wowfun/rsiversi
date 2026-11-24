@@ -227,6 +227,30 @@ async fn lost_required_input_capture_cannot_send_the_unprepared_prompt() {
     .await;
 }
 
+#[tokio::test]
+async fn application_only_preset_cannot_dispatch_after_its_source_retires() {
+    let stack = BaseStack::activate().await;
+    let pin = stack
+        .composition
+        .pin(header().agent_preset_id(), None)
+        .await
+        .unwrap();
+    *stack.composition.pin.lock().unwrap() = Some(pin.requiring_local_application());
+    let provider = retrying_provider(&stack);
+    let language = stack
+        .activate_language("test.language", provider.clone())
+        .await;
+    let executor = stack.activate_executor("executor-application-only").await;
+    let (_, outcome) = stack
+        .submit_and_wait("requires application tools and input")
+        .await;
+    assert!(
+        matches!(outcome, TurnOutcome::Failed { code, .. } if code == "application.input_unavailable")
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 0);
+    stack.dispose(language, executor).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn cold_input_owner_can_reject_after_startup_outlasts_the_step_deadline() {
     exercise(Decision::ColdReject, TurnOutcome::Blocked, 0).await;
