@@ -35,6 +35,45 @@ fn detail(app: &rsi_gui::GuiApplication) -> Value {
 }
 
 #[tokio::test]
+async fn composer_observes_goal_activation_without_opening_the_detail_or_changing_the_projection() {
+    let (runtime, backend, app) = prepared().await;
+    let pane = || view(&app)["surfaces"]["main"].clone();
+    until(|| {
+        let pane = pane();
+        pane["goal_armed"] == false && pane["projections"].is_object()
+    })
+    .await;
+    let projection = pane()["projections"].clone();
+    let mut changes = app.changes();
+    for (available, armed, expected) in [(true, true, Some(true)), (false, false, None)] {
+        changes.borrow_and_update();
+        *backend.task_panels.live.lock().unwrap() = GoalLiveState {
+            available,
+            armed,
+            stage: if armed {
+                GoalDriverStage::Waiting
+            } else {
+                GoalDriverStage::Disarmed
+            },
+            ..Default::default()
+        };
+        backend.task_panels.live_changed.send_replace(());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                changes.changed().await.unwrap();
+                if pane()["goal_armed"] == json!(expected) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pane()["projections"], projection);
+    }
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn late_goal_control_and_reconciliation_replies_preserve_observed_driver_state() {
     for reconcile in [false, true] {
         let (runtime, backend, app) = prepared().await;

@@ -420,6 +420,7 @@ impl Pane {
             "protected":current.protected, "draft":!current.durable.load(std::sync::atomic::Ordering::Acquire),
             "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
+            "goal_armed":current.controller.goal_armed(),
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
             "sandbox":current.sandbox,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),

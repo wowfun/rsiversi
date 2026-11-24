@@ -47,6 +47,9 @@ pub enum ObservationKind {
 /// One explicit delivery boundary. Returning success acknowledges the exact item.
 #[async_trait]
 pub trait ObservationSink: std::fmt::Debug + Send + Sync {
+    /// The controller's observed Goal activation changed. The latest value is available on the controller.
+    fn goal_activation_changed(&self) {}
+
     /// Delivers a record before the controller advances its replay cursor.
     async fn observation(&self, update: SessionObservation) -> Result<(), ObservationFailure>;
     /// Delivers a transient model snapshot. Sinks without text presentation may ignore it.

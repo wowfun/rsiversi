@@ -30,19 +30,29 @@ fn rejection_diagnostic(error: &SessionError) -> String {
     diagnostic
 }
 
+fn activation(value: &Option<Result<GoalLiveState>>) -> Option<bool> {
+    let live = value.as_ref()?.as_ref().ok()?;
+    live.available.then_some(live.armed)
+}
+
 impl SessionController {
-    pub(super) fn publish_goal(&self, value: GoalLiveState) {
+    pub(super) fn publish_goal(&self, value: Option<Result<GoalLiveState>>) {
+        let mut activation_changed = false;
         self.goal.send_if_modified(|previous| {
-            if previous
-                .as_ref()
-                .and_then(|previous| previous.as_ref().ok())
-                == Some(&value)
-            {
+            if *previous == value {
                 return false;
             }
-            *previous = Some(Ok(value));
+            activation_changed = activation(previous) != activation(&value);
+            *previous = value;
             true
         });
+        if activation_changed {
+            self.sink.goal_activation_changed();
+        }
+    }
+    /// Latest observed authority to schedule Goal rounds, absent until available.
+    pub fn goal_armed(&self) -> Option<bool> {
+        activation(&self.goal.borrow())
     }
     /// Shares the already owned projection stream's latest retained snapshot.
     pub fn projection_changes(&self) -> tokio::sync::watch::Receiver<Option<ProjectionSnapshot>> {

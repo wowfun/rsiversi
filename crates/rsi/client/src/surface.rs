@@ -55,7 +55,7 @@ impl SessionController {
             error,
             SessionError::Capacity | SessionError::Api(rsi_api_protocol::ApiError::Capacity)
         ) {
-            self.goal.send_replace(Some(Err(error)));
+            self.publish_goal(Some(Err(error)));
             return;
         }
         let controller = self.clone();
@@ -67,7 +67,7 @@ impl SessionController {
                     })
                     .await?;
                 while let Some(value) = stream.next().await {
-                    controller.publish_goal(value?);
+                    controller.publish_goal(Some(Ok(value?)));
                 }
                 Err::<(), _>(SessionError::Backend("Goal observation ended".into()))
             };
@@ -75,7 +75,7 @@ impl SessionController {
                 biased;
                 () = controller.stop.cancelled() => {},
                 result = observe => if let Err(error) = result {
-                    controller.goal.send_replace(Some(Err(error)));
+                    controller.publish_goal(Some(Err(error)));
                 },
             }
         }));
@@ -103,7 +103,7 @@ impl SessionController {
             if let Some(kind) = kind(view) {
                 Err((kind, error.into()))
             } else {
-                self.goal.send_replace(Some(Err(error)));
+                self.publish_goal(Some(Err(error)));
                 Ok(())
             }
         };
@@ -172,7 +172,7 @@ impl SessionController {
                     .await
                     .map_err(|e| (ObservationKind::BackgroundJobs, e)),
                 SurfaceUpdate::Goal(value) => {
-                    self.publish_goal(value);
+                    self.publish_goal(Some(Ok(value)));
                     Ok(())
                 }
             };
@@ -182,7 +182,7 @@ impl SessionController {
         if let Some(kind) = kind(*view) {
             Err((kind, ObservationFailure::Ended))
         } else {
-            self.goal.send_replace(Some(Err(SessionError::Backend(
+            self.publish_goal(Some(Err(SessionError::Backend(
                 "Goal observation ended".into(),
             ))));
             Ok(())

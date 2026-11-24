@@ -24,6 +24,9 @@ checking before the product browser fixture. With `RSI_DSH_REFERENCE` pointing t
 the DSH checkout, the test verifies the upstream Git blob at each file's pinned revision.
 
 The document Node tests require Node 22.18 or later for direct TypeScript imports.
+The composer labels an active Goal with a disarmed Host driver as “Inactive Goal”.
+It reads activation from the pane's existing Session observation. Paused and
+blocked Goals keep their own phase labels, and a completed Goal has no strip.
 The terminal resource owner retries an uncertain shell create once using the
 same allocation key and pane generation. If the retry also loses its result,
 the existing unresolved cleanup notice remains visible.

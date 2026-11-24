@@ -235,17 +235,17 @@ impl SessionController {
                 .expect("controller admission poisoned");
             self.stop.cancel();
             self.projections.send_replace(None);
-            self.goal.send_replace(None);
             self.submissions.close();
             self.tasks.close();
         }
+        self.publish_goal(None);
     }
 
     async fn close(&self) {
         self.retire();
         self.tasks.wait().await;
         self.projections.send_replace(None);
-        self.goal.send_replace(None);
+        self.publish_goal(None);
     }
 }
 

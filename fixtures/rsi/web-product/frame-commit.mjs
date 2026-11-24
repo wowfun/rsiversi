@@ -725,6 +725,14 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await showGoal('active');
       await goal.getByText('Active Goal',{exact:true}).waitFor();
       assert.equal(await goal.getByRole('button').count(),0,'a missing surface cannot offer controls');
+      for (const [armed, label] of [[false, 'Inactive Goal'], [true, 'Active Goal']]) {
+        await page.evaluate(async armed => {
+          fixture.view.surfaces.main.goal_armed = armed;
+          await fixture.frame();
+        }, armed);
+        await goal.getByText(label, {exact: true}).waitFor();
+        if (!armed) await page.screenshot({path: join(report, `${name}-inactive-goal.png`)});
+      }
       await showGoal('blocked');
       await goal.getByText('Blocked Goal',{exact:true}).waitFor();
       assert(await goal.getByText('Check the edited draft',{exact:true}).isVisible());

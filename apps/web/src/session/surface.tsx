@@ -240,7 +240,7 @@ function NativeSurface({
       </div>
       {data && !data.protected && !pageOpen && <>
         <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>
-        <GoalBar projections={data.projections} surfaces={data.ui_surfaces} owner={owner}/>
+        <GoalBar projections={data.projections} armed={data.goal_armed} surfaces={data.ui_surfaces} owner={owner}/>
       </>}
       <Composer
         owner={owner}

@@ -164,6 +164,10 @@ impl RenderState {
 }
 #[async_trait]
 impl ObservationSink for Renderer {
+    fn goal_activation_changed(&self) {
+        self.changed();
+    }
+
     async fn observation(
         &self,
         update: rsi_agent_turn_protocol::SessionObservation,

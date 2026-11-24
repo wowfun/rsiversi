@@ -91,6 +91,7 @@ export interface BackgroundJob {
   started_ms:number; finished_ms:number|null; output_retained:boolean;
 }
 export interface NativeSurface extends ComposerProjection {
+  goal_armed?:boolean|null;
   kind:'native';header:string;agent_preset:string;draft?:boolean;generation:string;session:string;workspace:AttachedWorkspace;
   selection:string;creation:SessionCreation|null;sandbox:SandboxMode;ui_revision:string;active:string|null;
   completions:{query:string;sequence:string;entries:import('./session/projection-types.ts').CompletionEntry[];notice:string|null}|null;
