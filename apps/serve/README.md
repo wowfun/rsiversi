@@ -381,9 +381,13 @@ exact composition document through the configuration API with the initiating
 caller's grant. A read spanning extension frames retains one result for that
 request. It releases the result after its final fragment, cancellation or
 request retirement. A native preset's source is the TOML accepted by the Host.
+An application can resolve an explicit ID or the current default through the
+same grant. This returns a small identity and health result without reading
+display metadata or enumerating sibling presets.
 Selecting a preset targets the existing Session's interactive handle. Only a
 blank draft accepts a change. The switch uses its current revision and never
-creates a replacement Session.
+creates a replacement Session. Its receipt reports whether the Host actually
+changed the draft's preset.
 
 `application.model.select` executes the Session's pinned model-selection command
 with a caller-supplied request identity and the current command revision. The

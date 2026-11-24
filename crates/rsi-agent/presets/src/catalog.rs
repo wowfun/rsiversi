@@ -278,7 +278,6 @@ struct ResolvedPreset {
     trust: AgentPresetTrust,
     path: PathBuf,
     writable: bool,
-    metadata: Metadata,
 }
 
 /// Bounded process-local Agent-preset catalog.
@@ -432,10 +431,6 @@ impl AgentPresetCatalog {
                     return;
                 }
                 let metadata = read_metadata(&path.join(METADATA_FILE));
-                let health = match self.compiler.compile_shared(&path.join(COMPOSITION_FILE)) {
-                    Ok(_) => AgentPresetHealth::Healthy,
-                    Err(reason) => AgentPresetHealth::Broken { reason },
-                };
                 let row = AgentPresetRow {
                     is_default: id == default,
                     id,
@@ -443,7 +438,7 @@ impl AgentPresetCatalog {
                     trust: root.trust,
                     name: metadata.name,
                     description: metadata.description,
-                    health,
+                    health: self.composition_health(path),
                 };
                 presets.push((metadata.order.unwrap_or(i64::MAX), row));
             })?;
@@ -459,6 +454,26 @@ impl AgentPresetCatalog {
         })
     }
 
+    /// Probes one composition without enumerating siblings or reading display metadata.
+    ///
+    /// # Errors
+    /// Returns an error if the configured root cannot be inspected.
+    pub fn health(&self, id: &AgentPresetId) -> Result<Option<AgentPresetHealth>> {
+        Ok(self
+            .find_selected(id)?
+            .map(|preset| self.composition_health(&preset.path)))
+    }
+
+    fn composition_health(&self, directory: &Path) -> AgentPresetHealth {
+        match self
+            .compiler
+            .compile_shared(&directory.join(COMPOSITION_FILE))
+        {
+            Ok(_) => AgentPresetHealth::Healthy,
+            Err(reason) => AgentPresetHealth::Broken { reason },
+        }
+    }
+
     /// Reads one healthy preset's exact bounded Profile source.
     ///
     /// # Errors
@@ -466,8 +481,24 @@ impl AgentPresetCatalog {
     /// Returns an error when `id` is absent or broken, or its bounded file
     /// changes while it is read.
     pub fn document(&self, id: &AgentPresetId) -> Result<AgentPresetDocument> {
-        self.read_document(id, |path| self.compiler.compile_shared(path).map(|_| ()))
-            .map(|(document, ())| document)
+        self.document_at(self.resolve_selected(id)?)
+    }
+
+    /// Reads the winning document, returning absence without listing available presets.
+    ///
+    /// # Errors
+    /// Rejects an unreadable root or a broken or changing document.
+    pub fn document_if_present(&self, id: &AgentPresetId) -> Result<Option<AgentPresetDocument>> {
+        self.find_selected(id)?
+            .map(|preset| self.document_at(preset))
+            .transpose()
+    }
+
+    fn document_at(&self, preset: ResolvedPreset) -> Result<AgentPresetDocument> {
+        self.read_document(preset, |path| {
+            self.compiler.compile_shared(path).map(|_| ())
+        })
+        .map(|(document, ())| document)
     }
 
     /// Reads the selected preset text and its effective source layers together.
@@ -478,35 +509,37 @@ impl AgentPresetCatalog {
         &self,
         id: &AgentPresetId,
     ) -> Result<(AgentPresetDocument, rsi_meta_profile::ProfileOrigins)> {
-        self.read_document(id, |path| self.compiler.origins(path))
+        self.read_document(self.resolve_selected(id)?, |path| {
+            self.compiler.origins(path)
+        })
     }
 
     fn read_document<T>(
         &self,
-        id: &AgentPresetId,
+        preset: ResolvedPreset,
         compile: impl FnOnce(&Path) -> std::result::Result<T, String>,
     ) -> Result<(AgentPresetDocument, T)> {
-        let preset = self.resolve_selected(id)?;
         let path = preset.path.join(COMPOSITION_FILE);
         let content = read_utf8_regular(&path, MAX_COPY_BYTES, "read composition")?;
         let inspection = compile(&path).map_err(|reason| PresetError::BrokenPreset {
-            id: id.as_str().to_owned(),
+            id: preset.id.as_str().to_owned(),
             reason,
         })?;
         if read_utf8_regular(&path, MAX_COPY_BYTES, "re-read composition")? != content {
             return Err(PresetError::BrokenPreset {
-                id: id.as_str().to_owned(),
+                id: preset.id.as_str().to_owned(),
                 reason: "composition changed while it was compiled".into(),
             });
         }
+        let metadata = read_metadata(&preset.path.join(METADATA_FILE));
         Ok((
             AgentPresetDocument {
                 id: preset.id,
                 source: preset.source,
                 trust: preset.trust,
                 content,
-                name: preset.metadata.name,
-                description: preset.metadata.description,
+                name: metadata.name,
+                description: metadata.description,
             },
             inspection,
         ))
@@ -646,11 +679,18 @@ impl AgentPresetCatalog {
         Ok(false)
     }
 
-    fn resolve_selected(&self, id: &AgentPresetId) -> Result<ResolvedPreset> {
+    fn find_selected(&self, id: &AgentPresetId) -> Result<Option<ResolvedPreset>> {
         for root in &self.roots {
             if let Some(preset) = resolve_in_root(root, id)? {
-                return Ok(preset);
+                return Ok(Some(preset));
             }
+        }
+        Ok(None)
+    }
+
+    fn resolve_selected(&self, id: &AgentPresetId) -> Result<ResolvedPreset> {
+        if let Some(preset) = self.find_selected(id)? {
+            return Ok(preset);
         }
         let available = self.available_ids()?;
         Err(PresetError::PresetNotFound {
@@ -661,64 +701,11 @@ impl AgentPresetCatalog {
 
     fn available_ids(&self) -> Result<Vec<String>> {
         let mut ids = BTreeSet::new();
-        let mut examined = 0_usize;
+        let mut examined = 0;
         for root in &self.roots {
-            if let Some(id) = &root.exact_id {
-                let metadata = match fs::symlink_metadata(&root.path) {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(io_error("inspect preset row", &root.path, error)),
-                };
-                examined = examined.saturating_add(1);
-                if examined > MAX_ROSTER_ROWS {
-                    return Err(PresetError::RosterCapacity {
-                        maximum: MAX_ROSTER_ROWS,
-                    });
-                }
-                if !metadata.file_type().is_dir() {
-                    return Err(PresetError::InvalidRoot(format!(
-                        "exact preset is not a real directory: {}",
-                        root.path.display()
-                    )));
-                }
+            scan_root(root, &mut examined, |id, _| {
                 ids.insert(id.as_str().to_owned());
-                continue;
-            }
-            let metadata = match fs::symlink_metadata(&root.path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(io_error("inspect root", &root.path, error)),
-            };
-            if !metadata.file_type().is_dir() {
-                return Err(PresetError::InvalidRoot(format!(
-                    "root is not a real directory: {}",
-                    root.path.display()
-                )));
-            }
-            for entry in fs::read_dir(&root.path)
-                .map_err(|error| io_error("read root", &root.path, error))?
-            {
-                let entry =
-                    entry.map_err(|error| io_error("read root entry", &root.path, error))?;
-                examined = examined.saturating_add(1);
-                if examined > MAX_ROSTER_ROWS {
-                    return Err(PresetError::RosterCapacity {
-                        maximum: MAX_ROSTER_ROWS,
-                    });
-                }
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                let Ok(id) = AgentPresetId::new(name) else {
-                    continue;
-                };
-                let file_type = entry
-                    .file_type()
-                    .map_err(|error| io_error("inspect preset row", &entry.path(), error))?;
-                if file_type.is_dir() {
-                    ids.insert(id.as_str().to_owned());
-                }
-            }
+            })?;
         }
         Ok(ids.into_iter().collect())
     }
@@ -753,7 +740,6 @@ fn resolve_in_root(root: &RootSpec, id: &AgentPresetId) -> Result<Option<Resolve
         id: id.clone(),
         source: root.source,
         trust: root.trust,
-        metadata: read_metadata(&path.join(METADATA_FILE)),
         path,
         writable: root.writable,
     }))

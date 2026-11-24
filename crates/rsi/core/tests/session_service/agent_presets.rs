@@ -26,6 +26,7 @@ async fn preset_catalog_reads_observe_source_edits_and_distinguish_missing_from_
     let daemon = DaemonFixture::new(&fixture).await;
     let client = AgentPresetsClient::new(daemon.connection.api_client());
     let id = AgentPresetId::new("read-test").unwrap();
+    assert!(client.resolve(Some(&id)).await.unwrap().is_none());
     assert!(matches!(
         client.document(&id).await.unwrap(),
         Err(AgentPresetDocumentError::NotFound)
@@ -43,6 +44,15 @@ async fn preset_catalog_reads_observe_source_edits_and_distinguish_missing_from_
         .find(|row| row.id == id)
         .unwrap();
     assert!(row.broken.is_some());
+    assert!(
+        client
+            .resolve(Some(&id))
+            .await
+            .unwrap()
+            .unwrap()
+            .broken
+            .is_some()
+    );
     assert!(matches!(
         client.document(&id).await.unwrap(),
         Err(AgentPresetDocumentError::Broken { .. })
@@ -75,6 +85,24 @@ async fn preset_catalog_reads_observe_source_edits_and_distinguish_missing_from_
         client.document(&id).await.unwrap().unwrap().content,
         format!("{content}\n# exact source edit\n")
     );
+    let root = directory.parent().unwrap();
+    for i in 0..=rsi_agent_presets::MAX_ROSTER_ROWS {
+        std::fs::write(root.join(format!(".unrelated-{i}")), []).unwrap();
+    }
+    assert!(matches!(client.list().await, Err(ApiError::Capacity)));
+    let found = client.resolve(Some(&id)).await.unwrap().unwrap();
+    assert_eq!(found.id, id);
+    assert!(found.broken.is_none());
+    assert_eq!(
+        client.resolve(None).await.unwrap().unwrap().id.as_str(),
+        "standard"
+    );
+    let absent = AgentPresetId::new("absent").unwrap();
+    assert!(client.resolve(Some(&absent)).await.unwrap().is_none());
+    assert!(matches!(
+        client.document(&absent).await.unwrap(),
+        Err(AgentPresetDocumentError::NotFound)
+    ));
     daemon.shutdown().await;
 }
 
@@ -111,6 +139,7 @@ async fn preset_reads_require_the_actual_callers_configuration_grant() {
         }
         for (operation, input) in [
             (AgentPresetsOperation::List, json!({})),
+            (AgentPresetsOperation::Resolve, json!({"id":"standard"})),
             (AgentPresetsOperation::Document, json!({"id":"standard"})),
         ] {
             let result = invoke(&running, origin.clone(), operation.spec(), input).await;

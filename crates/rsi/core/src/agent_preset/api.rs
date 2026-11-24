@@ -6,7 +6,8 @@ use rsi_api_protocol::{ApiError, ApiRegistrarContract, json_handler};
 use rsi_configuration_access::ConfigurationAccessContract;
 use rsi_configuration_api::agent_presets::{
     AgentPresetDocument, AgentPresetDocumentError, AgentPresetDocumentRequest, AgentPresetFormat,
-    AgentPresetList, AgentPresetRow, AgentPresetsOperation,
+    AgentPresetList, AgentPresetResolution, AgentPresetResolveRequest, AgentPresetRow,
+    AgentPresetsOperation,
 };
 use rsi_meta::{ActivationPlan, ConfigValue, MetaError, PluginFactory, PreparedActivation};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,13 @@ enum Never {}
 
 fn meta(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+
+fn diagnostic(health: AgentPresetHealth) -> Option<String> {
+    match health {
+        AgentPresetHealth::Healthy => None,
+        AgentPresetHealth::Broken { reason } => Some(reason),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -74,15 +82,50 @@ impl PluginFactory for AgentPresetsApiFactory {
                                             is_default: row.is_default,
                                             name: row.name,
                                             description: row.description,
-                                            broken: match row.health {
-                                                AgentPresetHealth::Healthy => None,
-                                                AgentPresetHealth::Broken { reason } => {
-                                                    Some(reason)
-                                                }
-                                            },
+                                            broken: diagnostic(row.health),
                                         })
                                         .collect(),
                                 }))
+                            })?
+                            .await
+                    }
+                }),
+            )
+            .map_err(meta)?;
+        let authority = grant.clone();
+        let catalog = source.clone();
+        let resolve = registrar
+            .register(
+                AgentPresetsOperation::Resolve.spec(),
+                json_handler(move |context, request: AgentPresetResolveRequest| {
+                    let grant = authority.clone();
+                    let source = catalog.clone();
+                    async move {
+                        grant
+                            .retained(&context.origin, async move {
+                                let snapshot =
+                                    source.snapshot().map_err(|_| ApiError::Unavailable)?;
+                                let id = match request.id {
+                                    Some(id) => id,
+                                    None => snapshot
+                                        .presets()
+                                        .default_id()
+                                        .await
+                                        .map_err(|_| ApiError::Unavailable)?,
+                                };
+                                let value = tokio::task::spawn_blocking(move || {
+                                    let found = snapshot.presets().health(&id)?;
+                                    Ok::<_, PresetError>(found.map(|health| {
+                                        AgentPresetResolution {
+                                            id,
+                                            broken: diagnostic(health),
+                                        }
+                                    }))
+                                })
+                                .await
+                                .map_err(|_| ApiError::Unavailable)?
+                                .map_err(|_| ApiError::Unavailable)?;
+                                Ok(Ok::<_, Never>(value))
                             })?
                             .await
                     }
@@ -101,21 +144,19 @@ impl PluginFactory for AgentPresetsApiFactory {
                                 let snapshot =
                                     source.snapshot().map_err(|_| ApiError::Unavailable)?;
                                 let result = tokio::task::spawn_blocking(move || {
-                                    snapshot.presets().document(&request.id)
+                                    snapshot.presets().document_if_present(&request.id)
                                 })
                                 .await
                                 .map_err(|_| ApiError::Unavailable)?;
                                 match result {
-                                    Ok(document) => Ok(Ok(AgentPresetDocument {
+                                    Ok(Some(document)) => Ok(Ok(AgentPresetDocument {
                                         id: document.id,
                                         format: AgentPresetFormat::Toml,
                                         content: document.content,
                                         name: document.name,
                                         description: document.description,
                                     })),
-                                    Err(PresetError::PresetNotFound { .. }) => {
-                                        Ok(Err(AgentPresetDocumentError::NotFound))
-                                    }
+                                    Ok(None) => Ok(Err(AgentPresetDocumentError::NotFound)),
                                     Err(PresetError::BrokenPreset { reason, .. }) => {
                                         Ok(Err(AgentPresetDocumentError::Broken { reason }))
                                     }
@@ -132,6 +173,7 @@ impl PluginFactory for AgentPresetsApiFactory {
             Box::new(move || {
                 Box::pin(async move {
                     list.close().await;
+                    resolve.close().await;
                     document.close().await;
                     Ok(())
                 })

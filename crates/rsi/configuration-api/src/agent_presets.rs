@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub enum AgentPresetsOperation {
     /// Ordered, path-free catalog with its current default.
     List,
+    /// Identity and compilation health for an explicit preset or the default.
+    Resolve,
     /// Exact native source of one healthy preset.
     Document,
 }
@@ -24,6 +26,7 @@ impl AgentPresetsOperation {
     pub fn spec(self) -> OperationSpec {
         let (name, maximum_response_bytes) = match self {
             Self::List => ("list", 16 * 1024 * 1024),
+            Self::Resolve => ("resolve", 4 * 1024),
             Self::Document => ("document", 4 * 1024 * 1024),
         };
         OperationSpec {
@@ -52,6 +55,25 @@ pub struct AgentPresetRow {
     /// Optional description from the owning metadata file.
     pub description: Option<String>,
     /// Safe catalog diagnostic for a broken source.
+    pub broken: Option<String>,
+}
+
+/// Exact identity lookup. An omitted id selects the Host's current default.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetResolveRequest {
+    /// Explicit preset identity when supplied.
+    pub id: Option<AgentPresetId>,
+}
+
+/// One winning composition. A missing identity is represented by a null reply.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetResolution {
+    /// Identity that was inspected.
+    pub id: AgentPresetId,
+    /// Redacted compilation diagnostic from the catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub broken: Option<String>,
 }
 
@@ -139,6 +161,31 @@ impl AgentPresetsClient {
             return Err(ApiError::Invalid("invalid Agent preset catalog".into()));
         }
         Ok(list)
+    }
+
+    /// Resolves one identity independently of roster size.
+    pub async fn resolve(
+        &self,
+        id: Option<&AgentPresetId>,
+    ) -> Result<Option<AgentPresetResolution>> {
+        let resolution: Option<AgentPresetResolution> = match call_json::<_, _, Never>(
+            self.api.as_ref(),
+            &AgentPresetsOperation::Resolve.spec(),
+            &AgentPresetResolveRequest { id: id.cloned() },
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(never) => match never {},
+        };
+        if let (Some(wanted), Some(row)) = (id, &resolution)
+            && wanted != &row.id
+        {
+            return Err(ApiError::Invalid(
+                "Agent preset lookup identity differs".into(),
+            ));
+        }
+        Ok(resolution)
     }
 
     /// Reads an exact document or a definite catalog failure.

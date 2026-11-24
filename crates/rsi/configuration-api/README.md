@@ -2,7 +2,7 @@
 
 Interface version 6 uses stateless Host Profile previews and direct commit results.
 
-`agent-presets` version 1 exposes read-only `list` and `document` operations under
+`agent-presets` version 1 exposes read-only `list`, `resolve` and `document` operations under
 the caller's retained configuration grant. Each read captures the current Agent
 composition source, using its existing preset catalog and compiler; it neither
 activates a generation nor creates a second catalog. Filesystem discovery and
@@ -10,8 +10,13 @@ document compilation run outside the async executor. Lists preserve catalog
 order, current default and broken-preset diagnostics. Health means pure Profile
 compilation succeeded, not that activation has been tested.
 
-Documents return exact native TOML with an explicit `toml` format, never a
-purported DSH plugin program. Missing and broken documents have distinct domain
+`resolve` probes the winning directory for the supplied ID, or for the current
+default when omitted. It returns the ID and its compilation diagnostic, or
+JSON null when absent. Unrelated directory entries do not limit an exact lookup.
+
+Documents return exact native TOML with an explicit `toml` format. An absent
+document is identified directly even when the full roster exceeds its limit.
+Missing and broken documents have distinct domain
 errors. Requests are at most 1 KiB; encoded lists are at most 16 MiB and documents
 4 MiB. The catalog owns filesystem and metadata limits; the API encoder owns the
 wire-size limit and returns capacity exhaustion instead of truncating content.

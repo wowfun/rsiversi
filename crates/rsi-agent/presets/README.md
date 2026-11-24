@@ -23,9 +23,11 @@ Shadowed entries count toward the scan limit without opening their files.
 System authority may be either a root or one exact injected
 id/directory pair; an exact pair never discovers or grants System trust to a
 sibling directory. Selection probes only the exact `<root>/<id>` path in the
-same precedence order and stops at the first real directory. It does not
-compile sibling presets; a failed exact selection enumerates only bounded valid
-directory ids for its diagnostic. `compile` compiles the selected source once,
+configured roots. A presence and health lookup examines the winning
+composition directly, including when the catalog exceeds the roster limit.
+Display metadata is read for roster and document presentation.
+A failed generation selection enumerates bounded valid directory IDs for its
+diagnostic. `compile` compiles the selected source once,
 while `document` returns bounded text only when the root document remains
 byte-identical across its selected-source preflight. The application injects one `AgentPresetProfileCompiler`
 whose frozen paths, platform, defines, limits, and Agent-only contribution-id

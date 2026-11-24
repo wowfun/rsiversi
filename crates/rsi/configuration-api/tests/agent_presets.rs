@@ -25,6 +25,7 @@ impl ApiClient for Reply {
     async fn operations(&self) -> Result<OperationCatalog> {
         OperationCatalog::new(vec![
             AgentPresetsOperation::List.spec(),
+            AgentPresetsOperation::Resolve.spec(),
             AgentPresetsOperation::Document.spec(),
         ])
     }
@@ -92,6 +93,27 @@ async fn list_rejects_ambiguous_identity_and_default_responses() {
             Err(ApiError::Invalid(_))
         ));
     }
+}
+
+#[tokio::test]
+async fn resolve_correlates_an_explicit_identity_and_preserves_absence() {
+    let id = AgentPresetId::new("standard").unwrap();
+    assert!(
+        client(Value::Null, false)
+            .resolve(Some(&id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let wrong = client(json!({"id":"custom"}), false);
+    assert!(matches!(
+        wrong.resolve(Some(&id)).await,
+        Err(ApiError::Invalid(_))
+    ));
+    assert_eq!(
+        wrong.resolve(None).await.unwrap().unwrap().id.as_str(),
+        "custom"
+    );
 }
 
 #[tokio::test]
