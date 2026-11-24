@@ -290,6 +290,8 @@ pub trait GoalController: fmt::Debug + Send + Sync + 'static {
         session: Arc<dyn GoalSession>,
         request: GoalControl,
     ) -> GoalResult<GoalControlReceipt>;
+    /// Revokes live scheduling for this Session, preserving the Goal and admitted work.
+    async fn disarm(&self, session: &SessionId) -> GoalResult<()>;
     /// Reads a small live snapshot without creating or arming a driver.
     ///
     /// # Errors

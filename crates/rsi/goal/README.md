@@ -35,6 +35,9 @@ The driver prepares only the next reservation from the current Goal. It passes
 ownership of its frozen text to admission; the previous round stays in place.
 Explicit completion checks the caller's expected revision before disarming a
 live driver. A stale completion leaves the current owner's lease intact.
+A trusted application's live disarm revokes scheduling for the addressed
+Session. It preserves the durable Goal, its revision and any admitted Turn.
+Disarming an idle Session creates no scheduling owner.
 Ordinary waking input has priority at acceptance and claim. Driver state is
 separate from the pure durable Goal projection and is explicitly unavailable
 after its owning Host generation ends.

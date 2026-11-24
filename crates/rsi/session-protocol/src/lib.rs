@@ -827,6 +827,10 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     ) -> Result<rsi_goal::GoalControlReceipt> {
         Err(SessionError::NotFound("application Goal controller".into()))
     }
+    /// Revokes continuation authority for the owner application without changing Goal history.
+    async fn disarm_application_goal(&self) -> Result<()> {
+        Err(SessionError::NotFound("application Goal controller".into()))
+    }
     /// Reads current process-local Goal driving independently of its durable projection.
     async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
         Err(SessionError::NotFound("Goal controller".into()))

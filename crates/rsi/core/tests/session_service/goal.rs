@@ -635,6 +635,37 @@ async fn application_goal_edits_on_a_blank_keep_receipts_and_start_no_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn application_disarm_keeps_the_claimed_turn_and_writes_no_goal_change() {
+    let (fixture, gate, provider) = gated().await;
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "plugin-disarm").await;
+    handle.disarm_application_goal().await.unwrap();
+    start(&handle, 3).await;
+    entered(&gate).await;
+    let revision = handle.commands().await.unwrap().revision();
+    let before = state(&handle).await;
+    let mut updates = handle.observe_goal().await.unwrap();
+    assert!(updates.next().await.unwrap().unwrap().armed);
+    handle.disarm_application_goal().await.unwrap();
+    assert!(!updates.next().await.unwrap().unwrap().armed);
+    handle.disarm_application_goal().await.unwrap();
+    assert_eq!(handle.commands().await.unwrap().revision(), revision);
+    assert_eq!(state(&handle).await, before);
+    gate.release.notify_one();
+    assert!(!stopped(&handle).await.armed);
+    let goal = state(&handle).await.goal.unwrap();
+    assert_eq!(goal.phase, GoalPhase::Active);
+    assert_eq!(goal.allocated_rounds, 1);
+    assert!(!goal.unsettled());
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop((updates, handle));
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_completion_preserves_the_running_round_and_survives_reattachment() {
     let (fixture, gate, provider) = gated().await;
     let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)

@@ -437,6 +437,8 @@ complete caller-supplied invocation, or reads its request receipt. These operati
 use the same live request authority and native Session command service as other
 clients. Execution returns its actual draft or durable receipt; the application
 cannot choose a publication sequence or replace the expected revision silently.
+The owner application's `disarm_goal` operation drops the addressed Session's
+live scheduling permission. It returns an acknowledgement without a Store write.
 A workbench uses draft locations to place blank conversations before their
 first message publishes them into the durable Navigation catalog.
 

@@ -495,6 +495,19 @@ impl Live {
 }
 
 impl Owner {
+    fn disarm_live(&self) -> bool {
+        let slot = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(live) = slot.as_ref() else {
+            return false;
+        };
+        live.lease.revoke();
+        self.status
+            .send_if_modified(|state| std::mem::take(&mut state.armed));
+        true
+    }
     fn live(&self) -> Option<Live> {
         self.live
             .lock()
@@ -503,7 +516,12 @@ impl Owner {
     }
     fn snapshot(&self) -> GoalLiveState {
         let mut state = self.status.borrow().clone();
-        state.armed = self.live().is_some_and(|live| live.lease.is_armed());
+        state.armed = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|live| live.lease.is_armed());
         state
     }
     fn publish(
@@ -571,6 +589,27 @@ impl GoalController for GoalService {
         receiver
             .await
             .map_err(|_| GoalError::Backend("Goal control result owner disappeared".into()))?
+    }
+
+    async fn disarm(&self, session: &SessionId) -> GoalResult<()> {
+        if self.inner.stopped.is_cancelled() {
+            return Err(GoalError::ShuttingDown);
+        }
+        let owner = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .cloned();
+        if let Some(owner) = owner
+            && !owner.disarm_live()
+        {
+            // An admitted create/resume may still be installing its lease under the gate.
+            let _gate = owner.gate.lock().await;
+            owner.disarm_live();
+        }
+        Ok(())
     }
 
     fn status(&self, session: &SessionId) -> GoalResult<GoalLiveState> {

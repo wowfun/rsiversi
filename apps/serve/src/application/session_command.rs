@@ -17,6 +17,7 @@ enum Operation {
     Goal {
         control: rsi_goal::GoalControl,
     },
+    DisarmGoal,
     Status {
         request_id: DomainRequestId,
     },
@@ -33,7 +34,10 @@ impl BoundSessions {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         let handle = if matches!(
             input.operation,
-            Operation::Prepare { .. } | Operation::Execute { .. } | Operation::Goal { .. }
+            Operation::Prepare { .. }
+                | Operation::Execute { .. }
+                | Operation::Goal { .. }
+                | Operation::DisarmGoal
         ) {
             self.interactive_credential_handle(&input.request, &input.session_id)
                 .await?
@@ -60,6 +64,10 @@ impl BoundSessions {
                     .await
                     .map_err(remote)?,
             ),
+            Operation::DisarmGoal => {
+                handle.disarm_application_goal().await.map_err(remote)?;
+                return Ok(Value::Null);
+            }
             Operation::Status { request_id } => {
                 serde_json::to_value(handle.command_status(&request_id).await.map_err(remote)?)
             }

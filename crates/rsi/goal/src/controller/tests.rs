@@ -290,6 +290,40 @@ async fn driver_fixture(
 }
 
 #[tokio::test(start_paused = true)]
+async fn disarm_preempts_unaccepted_work_without_allocating_an_idle_owner() {
+    let (fiber, session, lease) = driver_fixture(false, true).await;
+    let service = GoalService::default();
+    service.disarm(&session.id).await.unwrap();
+    assert!(service.inner.sessions.lock().unwrap().is_empty());
+    let owner = service.owner(&session.id).unwrap();
+    service
+        .start(
+            &owner,
+            Live {
+                session: session.clone(),
+                lease: lease.clone(),
+                stop: service.inner.stopped.child_token(),
+                pending: Arc::default(),
+            },
+        )
+        .unwrap();
+    session.entered.acquire().await.unwrap().forget();
+    service.disarm(&session.id).await.unwrap();
+    assert!(!lease.is_armed());
+    session.release.add_permits(1);
+    service.inner.tasks.close();
+    service.inner.tasks.wait().await;
+    assert!(!session.committed.load(Ordering::SeqCst));
+    assert_eq!(
+        service.status(&session.id).unwrap().stage,
+        GoalDriverStage::Disarmed
+    );
+    service.stop().await.unwrap();
+    drop((owner, session, service, lease));
+    assert!(fiber.dispose().await.is_clean());
+}
+
+#[tokio::test(start_paused = true)]
 async fn started_driver_drains_the_original_reservation_with_one_stop_deadline() {
     for draft in [false, true] {
         for before in [false, true] {

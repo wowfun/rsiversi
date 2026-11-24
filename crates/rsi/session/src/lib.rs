@@ -1774,6 +1774,17 @@ impl SessionHandle for LocalSessionHandle {
     ) -> Result<rsi_goal::GoalControlReceipt> {
         self.dispatch_goal(request).await
     }
+    async fn disarm_application_goal(&self) -> Result<()> {
+        self.require_host_owner()?;
+        let _admission = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        self.goals
+            .as_ref()
+            .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
+            .disarm(self.session_id())
+            .await
+            .map_err(goal::session_error)
+    }
     async fn goal_status(&self) -> Result<rsi_goal::GoalLiveState> {
         let _admission = self.admit()?;
         self.lifecycle.check()?;
