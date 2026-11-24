@@ -249,17 +249,7 @@ impl SettingsAccess for Service {
     }
     async fn read(&self, namespace: &str) -> Result<SettingsSnapshot> {
         validate_namespace(namespace)?;
-        let pending = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .contains_key(namespace);
-        if pending {
-            let _write = self.state.write_lock.lock().await;
-            reconcile(&self.state, self.provider.as_ref(), namespace).await?;
-        }
+        reconcile_pending(&self.state, self.provider.as_ref(), namespace).await?;
         self.scope(namespace)?.get()
     }
     async fn replace(
@@ -572,9 +562,52 @@ impl SettingsScope for Scope {
         self.update(expected_revision, Some(value)).await
     }
 
+    async fn user_value(&self, field: Option<&str>) -> Result<(SettingsVersion, Option<Value>)> {
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| SettingsError::StaleRegistration(self.namespace.clone()))?;
+        reconcile_pending(&state, self.provider.as_ref(), &self.namespace).await?;
+        let inner = state
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = active_entry(&inner, &self.namespace, self.registration)?;
+        let section = inner.raw.get(&self.namespace);
+        let value = match field {
+            Some(key) => section.and_then(|value| value.get(key)),
+            None => section,
+        };
+        Ok((
+            SettingsVersion {
+                scope_id: entry.scope_id.clone(),
+                revision: entry.revision,
+            },
+            value.cloned(),
+        ))
+    }
+
     async fn clear(&self, expected_revision: u64) -> Result<SettingsSnapshot> {
         self.update(expected_revision, None).await
     }
+}
+
+async fn reconcile_pending(
+    state: &ServiceState,
+    provider: &dyn SettingsProvider,
+    namespace: &str,
+) -> Result<()> {
+    let pending = state
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending
+        .contains_key(namespace);
+    if pending {
+        let _write = state.write_lock.lock().await;
+        reconcile(state, provider, namespace).await?;
+    }
+    Ok(())
 }
 
 impl Scope {

@@ -228,6 +228,18 @@ async fn merge_revision_cas_and_lease_staleness_are_one_contract() {
         .unwrap();
     let projected = settings.scope("agent").unwrap();
     assert_eq!(projected.get().unwrap(), updated);
+    assert_eq!(
+        projected.user_value(Some("list")).await.unwrap(),
+        (updated.version(), None)
+    );
+    assert_eq!(
+        projected.user_value(Some("model")).await.unwrap(),
+        (updated.version(), Some(json!("next")))
+    );
+    assert_eq!(
+        projected.user_value(None).await.unwrap(),
+        (updated.version(), Some(json!({"model":"next"})))
+    );
     assert!(settings.scope("unregistered").is_err());
     assert!(settings.scope("bad namespace").is_err());
     assert_eq!(updated.revision, 1);
@@ -240,6 +252,10 @@ async fn merge_revision_cas_and_lease_staleness_are_one_contract() {
     ));
     drop(registration.lease);
     assert!(projected.get().is_err());
+    assert!(matches!(
+        projected.user_value(Some("model")).await,
+        Err(SettingsError::StaleRegistration(_))
+    ));
     assert!(settings.scope("agent").is_err());
     assert!(matches!(
         registration.scope.get(),

@@ -266,6 +266,9 @@ impl LocalContract for SettingsAccessContract {
 pub trait SettingsScope: fmt::Debug + Send + Sync + 'static {
     /// Returns the current resolved value.
     fn get(&self) -> Result<SettingsSnapshot>;
+    /// Reads this owner's stored field, or the stored section when no field is requested.
+    /// The version and value come from the same committed namespace revision.
+    async fn user_value(&self, field: Option<&str>) -> Result<(SettingsVersion, Option<Value>)>;
     /// Replaces the raw user section under revision CAS.
     async fn replace(&self, expected_revision: u64, value: Value) -> Result<SettingsSnapshot>;
     /// Clears the raw user section under revision CAS.

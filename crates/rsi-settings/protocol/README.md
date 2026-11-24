@@ -28,6 +28,9 @@ a revision. Remote writes compare both: the identity changes on re-registration
 and service restart, so revision zero from an old owner cannot authorize a write
 to a new owner. Native `SettingsScope` already carries that identity implicitly;
 its revision-only methods retain their generation fence.
+The registered scope can inspect its own stored section or one top-level field
+at a specific version. This lets its owner distinguish an explicit override
+from an inherited value and preserve other user fields during an edit.
 Remote projections preserve common API errors, including uncertain write outcomes,
 without exposing namespace registration or raw-document authority. Section sizing
 counts bounded JSON before allocating an encoded payload.

@@ -3,6 +3,13 @@ use super::*;
 struct SettingsFixture(Option<Value>);
 #[async_trait::async_trait]
 impl SettingsScope for SettingsFixture {
+    async fn user_value(
+        &self,
+        _: Option<&str>,
+    ) -> rsi_settings_protocol::Result<(rsi_settings_protocol::SettingsVersion, Option<Value>)>
+    {
+        unreachable!("retrieval reads resolved settings")
+    }
     fn get(&self) -> rsi_settings_protocol::Result<rsi_settings_protocol::SettingsSnapshot> {
         Ok(rsi_settings_protocol::SettingsSnapshot {
             scope_id: rsi_settings_protocol::SettingsScopeId::parse("a".repeat(32)).unwrap(),
