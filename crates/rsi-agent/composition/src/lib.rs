@@ -9,6 +9,7 @@ mod snapshot;
 pub use catalog::AgentContributionCatalog;
 pub use snapshot::{
     AgentCompositionSnapshot, AgentCompositionSource, AgentCompositionSourceContract,
+    ApplicationPresetSource, ApplicationPresetSourceContract,
 };
 mod contribution;
 mod domain;
@@ -189,7 +190,9 @@ impl AgentComposition for CompositionService {
         if self.state.source.session_pin(header, None)?.is_some() {
             return Ok(None);
         }
-        let prepared = self.state.prepare(header.agent_preset_id()).await?;
+        let local = header.coordinates().location()
+            == &rsi_agent_session_protocol::ExecutionLocation::Local;
+        let prepared = self.state.prepare(header.agent_preset_id(), local).await?;
         let unchanged = prepared
             .row
             .current
@@ -221,15 +224,20 @@ impl AgentComposition for CompositionService {
         if self.state.shutdown.is_cancelled() {
             return Err(AgentCompositionError::ShuttingDown);
         }
+        let local = header.coordinates().location()
+            == &rsi_agent_session_protocol::ExecutionLocation::Local;
         if let Some(pin) = self.state.source.session_pin(header, seed)? {
             if pin.preset_id() != header.agent_preset_id() {
                 return Err(AgentCompositionError::InvalidInput(
                     "Session composition preset differs".into(),
                 ));
             }
+            if !local && pin.requires_local_application() {
+                return Err(native_preset_required(header.agent_preset_id()));
+            }
             return Ok(pin);
         }
-        self.pin(header.agent_preset_id(), seed).await
+        self.state.pin(header.agent_preset_id(), seed, local).await
     }
     async fn default_preset_id(&self) -> rsi_agent_composition_protocol::Result<AgentPresetId> {
         self.state.default_preset_id().await
@@ -240,7 +248,7 @@ impl AgentComposition for CompositionService {
         preset_id: &AgentPresetId,
         seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        self.state.pin(preset_id, seed).await
+        self.state.pin(preset_id, seed, true).await
     }
 }
 
@@ -280,7 +288,7 @@ struct CompositionInner {
 
 #[derive(Debug, Default)]
 struct PresetRow {
-    preparing: Mutex<Weak<PrepareFlight>>,
+    preparing: Mutex<[Weak<PrepareFlight>; 2]>,
     build: Arc<AsyncMutex<()>>,
     current: Mutex<[Option<Arc<Generation>>; 2]>,
     selection: Mutex<Option<Arc<CompiledSelection>>>,
@@ -288,6 +296,7 @@ struct PresetRow {
 
 #[derive(Debug)]
 struct CompiledSelection {
+    application: bool,
     candidate: Arc<rsi_meta_profile::ProfileCandidate>,
     catalog: Arc<AgentContributionCatalog>,
     code: Arc<[u8]>,
@@ -304,12 +313,20 @@ type PrepareFlight = futures_util::future::Shared<
 
 #[derive(Clone)]
 struct PreparedGeneration {
+    application: bool,
     preset_id: AgentPresetId,
     row: Arc<PresetRow>,
     snapshot: Arc<AgentCompositionSnapshot>,
     candidate: Arc<rsi_meta_profile::ProfileCandidate>,
     program_digest: String,
     selection: rsi_agent_session_protocol::GenerationSelection,
+}
+
+fn native_preset_required(id: &AgentPresetId) -> AgentCompositionError {
+    unavailable(
+        id,
+        "Choose a native preset explicitly for this SSH workspace.",
+    )
 }
 
 struct GenerationCandidate {
@@ -361,6 +378,7 @@ impl PresetRow {
         &self,
         snapshot: &AgentCompositionSnapshot,
         candidate: Arc<rsi_meta_profile::ProfileCandidate>,
+        application: bool,
     ) -> rsi_agent_composition_protocol::Result<Arc<CompiledSelection>> {
         if let Some(cached) = self
             .selection
@@ -368,6 +386,7 @@ impl PresetRow {
             .expect("composition selection cache poisoned")
             .as_ref()
             && Arc::ptr_eq(&cached.candidate, &candidate)
+            && cached.application == application
             && cached.catalog.same_identity(&snapshot.contributions)
             && cached.code == snapshot.code
         {
@@ -377,7 +396,8 @@ impl PresetRow {
             .evaluated_digest()
             .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?;
         let compiled = Arc::new(CompiledSelection {
-            selection: selection::identify(snapshot, &program_digest)?,
+            selection: selection::identify(snapshot, &program_digest, application)?,
+            application,
             program_digest,
             candidate,
             catalog: snapshot.contributions.clone(),
@@ -728,8 +748,9 @@ impl CompositionState {
         self: &Arc<Self>,
         preset_id: &AgentPresetId,
         seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+        allow_application: bool,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
-        let prepared = self.prepare(preset_id).await?;
+        let prepared = self.prepare(preset_id, allow_application).await?;
         match seed {
             Some(seed) => {
                 rsi_agent_composition_protocol::AgentGenerationCandidate::build(
@@ -748,22 +769,28 @@ impl CompositionState {
     async fn prepare(
         self: &Arc<Self>,
         preset_id: &AgentPresetId,
+        allow_application: bool,
     ) -> rsi_agent_composition_protocol::Result<PreparedGeneration> {
         let row = self.row(preset_id)?;
         let flight = {
             let mut preparing = row.preparing.lock().expect("preparation flight poisoned");
-            if let Some(flight) = preparing.upgrade() {
+            let slot = &mut preparing[usize::from(allow_application)];
+            if let Some(flight) = slot.upgrade() {
                 flight
             } else {
                 let state = self.clone();
                 let row = row.clone();
                 let preset_id = preset_id.clone();
                 let flight = Arc::new(
-                    async move { state.prepare_source(preset_id, row).await }
-                        .boxed()
-                        .shared(),
+                    async move {
+                        state
+                            .prepare_source(preset_id, row, allow_application)
+                            .await
+                    }
+                    .boxed()
+                    .shared(),
                 );
-                *preparing = Arc::downgrade(&flight);
+                *slot = Arc::downgrade(&flight);
                 flight
             }
         };
@@ -774,6 +801,7 @@ impl CompositionState {
         self: &Arc<Self>,
         preset_id: AgentPresetId,
         row: Arc<PresetRow>,
+        allow_application: bool,
     ) -> rsi_agent_composition_protocol::Result<PreparedGeneration> {
         let prepare_slot = tokio::select! {
             () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
@@ -792,27 +820,47 @@ impl CompositionState {
                 let snapshot = source.snapshot().map_err(|_| {
                     unavailable(&compile_preset_id, "Agent catalog snapshot unavailable")
                 })?;
-                let candidate = snapshot
+                let compiled = snapshot
                     .presets
-                    .compile_shared(&compile_preset_id)
-                    .map_err(|error| preset_unavailable(&compile_preset_id, &error))?;
-                let compiled = compile_row.selection(&snapshot, candidate.clone())?;
-                let program_digest = compiled.program_digest.clone();
-                let selection = compiled.selection.clone();
-                Ok((snapshot, candidate, program_digest, selection))
+                    .compile_if_present(&compile_preset_id)
+                    .map_err(|error| preset_unavailable(&compile_preset_id, &error))?
+                    .map(|candidate| compile_row.selection(&snapshot, candidate, false))
+                    .transpose()?;
+                Ok((snapshot, compiled))
             },
         );
         let candidate = compilation
             .await
             .map_err(|_| unavailable(&preset_id, "Agent Profile compilation task failed"))?;
-        let (snapshot, candidate, program_digest, selection) = candidate?;
+        let (snapshot, compiled) = candidate?;
+        let compiled = if let Some(compiled) = compiled {
+            compiled
+        } else if !allow_application {
+            return Err(native_preset_required(&preset_id));
+        } else {
+            let missing = || unavailable(&preset_id, "preset source is missing");
+            let provider = self
+                .parent
+                .lookup_local::<ApplicationPresetSourceContract>()
+                .ok_or_else(missing)?;
+            let profile = tokio::select! { biased;
+                () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
+                reply = provider.resolve(&preset_id) => reply?.ok_or_else(missing)?,
+            };
+            let candidate = snapshot
+                .presets
+                .compile_profile(&preset_id, profile)
+                .map_err(|error| preset_unavailable(&preset_id, &error))?;
+            row.selection(&snapshot, candidate, true)?
+        };
         Ok(PreparedGeneration {
+            application: compiled.application,
             preset_id,
             row,
             snapshot,
-            candidate,
-            program_digest,
-            selection,
+            candidate: compiled.candidate.clone(),
+            program_digest: compiled.program_digest.clone(),
+            selection: compiled.selection.clone(),
         })
     }
 
@@ -822,6 +870,7 @@ impl CompositionState {
         seed: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         let PreparedGeneration {
+            application,
             preset_id,
             row,
             snapshot,
@@ -910,8 +959,14 @@ impl CompositionState {
             .await
             .map_err(|_| unavailable(preset_id, "Agent generation build task failed"))??;
         cancel_on_drop.disarm();
-        self.publish(Arc::clone(&row), preset_id.clone(), identity, unpublished)
-            .await
+        self.publish(
+            Arc::clone(&row),
+            preset_id.clone(),
+            identity,
+            unpublished,
+            application,
+        )
+        .await
     }
 
     #[expect(
@@ -1092,6 +1147,7 @@ impl CompositionState {
         preset_id: AgentPresetId,
         identity: snapshot::GenerationIdentity,
         unpublished: UnpublishedGeneration,
+        application: bool,
     ) -> rsi_agent_composition_protocol::Result<AgentCompositionPin> {
         let published = {
             let mut inner = self.inner.lock().expect("composition state poisoned");
@@ -1139,6 +1195,11 @@ impl CompositionState {
                 .with_manifest(identity.manifest.clone())
                 .with_selection(identity.selection.clone())
                 .with_prompt_assembler(prompt, scope_key);
+                let pin = if application {
+                    pin.requiring_local_application()
+                } else {
+                    pin
+                };
                 let generation = Arc::new(Generation { pin, identity });
                 let mut current = row.current.lock().expect("composition row poisoned");
                 let mut previous = Vec::new();
@@ -1386,15 +1447,17 @@ mod tests {
         let snapshot =
             AgentCompositionSnapshot::new(presets, AgentContributionCatalog::new([]).unwrap());
         let row = PresetRow::default();
-        let first = row.selection(&snapshot, candidate.clone()).unwrap();
+        let first = row.selection(&snapshot, candidate.clone(), false).unwrap();
         assert!(Arc::ptr_eq(
             &first,
-            &row.selection(&snapshot, candidate.clone()).unwrap()
+            &row.selection(&snapshot, candidate.clone(), false).unwrap()
         ));
         let changed = snapshot
             .with_code_selection(Arc::from(b"new".as_slice()))
             .unwrap();
-        let next = row.selection(&changed, candidate).unwrap();
+        let application = row.selection(&snapshot, candidate.clone(), true).unwrap();
+        assert_ne!(first.selection, application.selection);
+        let next = row.selection(&changed, candidate, false).unwrap();
         assert_ne!(first.selection, next.selection);
     }
 

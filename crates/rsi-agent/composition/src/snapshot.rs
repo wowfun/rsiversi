@@ -3,6 +3,25 @@ use rsi_agent_presets::AgentPresetCatalog;
 use sha2::{Digest, Sha256};
 use std::{fmt, sync::Arc};
 
+/// A live application's native entries for a preset absent from the filesystem catalog.
+#[async_trait::async_trait]
+pub trait ApplicationPresetSource: fmt::Debug + Send + Sync + 'static {
+    /// Returns the programmatic native portion of an available preset. Application
+    /// plugins and their request callbacks remain owned by the provider.
+    async fn resolve(
+        &self,
+        id: &rsi_agent_presets::AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<Option<rsi_meta_profile::Profile>>;
+}
+
+/// Optional source supplied by the active Host composition.
+#[derive(Debug)]
+pub struct ApplicationPresetSourceContract;
+impl rsi_meta::LocalContract for ApplicationPresetSourceContract {
+    const KEY: &'static str = "rsi.agent.application-presets";
+    type Service = dyn ApplicationPresetSource;
+}
+
 /// Immutable compiler/allowlist and executable catalog selected for one build.
 #[derive(Clone)]
 pub struct AgentCompositionSnapshot {

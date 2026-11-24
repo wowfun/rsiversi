@@ -1,6 +1,144 @@
 use super::*;
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 
+#[derive(Clone, Debug, Default)]
+struct LocalApplication(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl rsi_agent_composition::ApplicationPresetSource for LocalApplication {
+    async fn resolve(
+        &self,
+        id: &AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<Option<rsi_meta_profile::Profile>> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok((id.as_str() == "default").then(|| {
+            rsi_meta_profile::Profile::new([rsi_meta_profile::ProfileEntry::new(
+                "context",
+                "test.context",
+                ConfigValue::Null,
+            )])
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl PluginFactory for LocalApplication {
+    fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
+        Ok(PreparedActivation::new(config.clone()))
+    }
+    async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        plan.context()
+            .provide_local::<rsi_agent_composition::ApplicationPresetSourceContract>(Arc::new(
+                self.clone(),
+            ))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn application_default_is_local_and_an_explicit_native_preset_opens_ssh() {
+    use rsi_agent_composition_protocol::AgentSessionDraft;
+    use rsi_agent_session_protocol::{
+        ExecutionCoordinates, ExecutionLocation, ExecutionTargetId, FrozenAgentSettings,
+        SessionHeader, SessionId,
+    };
+    let fixture = Fixture::new(&profile("native")).await;
+    let default_dir = fixture.source.parent().unwrap();
+    let native = default_dir.with_file_name("native");
+    fs::rename(default_dir, &native).unwrap();
+    let source = Arc::new(LocalApplication::default());
+    let provider = fixture
+        .runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "fixture.application",
+                "test",
+                UpdateMode::RestartRequired,
+                source.clone(),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    let header = |id: AgentPresetId, location: ExecutionLocation, path: &str| {
+        SessionHeader::new(
+            SessionId::new("fresh").unwrap(),
+            1,
+            ExecutionCoordinates::new(location, path).unwrap(),
+            id,
+            FrozenAgentSettings::new(
+                "fixture",
+                "system",
+                rsi_ai_protocol::ModelRef::new("provider", "model").unwrap(),
+                rsi_sandbox::SandboxMode::ReadOnly,
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let default = fixture.service.default_preset_id().await.unwrap();
+    let ssh = ExecutionLocation::Ssh {
+        target: ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+    };
+    let rejected = AgentSessionDraft::new(
+        header(default.clone(), ssh.clone(), "/project"),
+        fixture.service.clone(),
+    )
+    .await;
+    assert!(
+        matches!(rejected,Err(AgentCompositionError::Unavailable{reason,..}) if reason.contains("Choose a native preset"))
+    );
+    let mut remote = AgentSessionDraft::new(
+        header(
+            AgentPresetId::new("native").unwrap(),
+            ssh.clone(),
+            "/project",
+        ),
+        fixture.service.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(remote.select_preset(default.clone()).await.is_err());
+    assert_eq!(remote.agent_preset_id().as_str(), "native");
+    assert_eq!(source.0.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.service.default_preset_id().await.unwrap(), default);
+    let local = AgentSessionDraft::new(
+        header(
+            default.clone(),
+            ExecutionLocation::Local,
+            native.to_str().unwrap(),
+        ),
+        fixture.service.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(local.composition().requires_local_application());
+    assert_eq!(source.0.load(Ordering::Relaxed), 1);
+    fs::create_dir(default_dir).unwrap();
+    fs::write(&fixture.source, "invalid").unwrap();
+    assert!(fixture.service.pin(&default, None).await.is_err());
+    fs::write(
+        &fixture.source,
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n",
+    )
+    .unwrap();
+    let winner = fixture
+        .service
+        .pin_session(&header(default.clone(), ssh, "/project"), None)
+        .await
+        .unwrap();
+    assert!(!winner.requires_local_application());
+    assert_ne!(winner.selection(), local.composition().selection());
+    drop((local, remote, winner));
+    assert!(provider.dispose().await.is_clean());
+    fs::remove_file(&fixture.source).unwrap();
+    fs::remove_dir(default_dir).unwrap();
+    assert!(fixture.service.pin(&default, None).await.is_err());
+    fixture.stop().await;
+}
+
 #[derive(Debug)]
 struct BoundSource(rsi_agent_composition_protocol::AgentCompositionPin);
 impl AgentCompositionSource for BoundSource {

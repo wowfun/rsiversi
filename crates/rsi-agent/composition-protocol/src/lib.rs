@@ -77,6 +77,7 @@ pub struct AgentCompositionPin {
     selection: rsi_agent_session_protocol::GenerationSelection,
     tools: Arc<dyn ToolRuntime>,
     application: Option<Arc<request_tools::RequestPreparation>>,
+    requires_local_application: bool,
     tool_weight: Arc<OnceLock<Result<usize>>>,
     context_builder: Arc<dyn ModelContextBuilder>,
     prompt: Option<(Arc<dyn PromptAssembler>, rsi_meta_scope::ScopeKey)>,
@@ -122,6 +123,7 @@ impl AgentCompositionPin {
             source_digest,
             tools,
             application: None,
+            requires_local_application: false,
             tool_weight: Arc::default(),
             context_builder,
             prompt: None,
@@ -138,6 +140,18 @@ impl AgentCompositionPin {
     /// Returns the durable logical preset identity.
     pub const fn preset_id(&self) -> &AgentPresetId {
         &self.preset_id
+    }
+
+    /// Selects the Host-local application as the required model input owner.
+    #[must_use]
+    pub const fn requiring_local_application(mut self) -> Self {
+        self.requires_local_application = true;
+        self
+    }
+
+    /// Whether this composition can execute only with its Host-local application.
+    pub const fn requires_local_application(&self) -> bool {
+        self.requires_local_application
     }
 
     /// Captures the composition owner's current executable identity.

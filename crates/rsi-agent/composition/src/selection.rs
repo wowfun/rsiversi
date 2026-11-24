@@ -6,9 +6,13 @@ use sha2::{Digest, Sha256};
 pub(super) fn identify(
     snapshot: &AgentCompositionSnapshot,
     profile_digest: &str,
+    application: bool,
 ) -> Result<GenerationSelection> {
     let mut digest = Sha256::new();
     digest.update(b"rsi-agent-selection-v1\0");
+    if application {
+        digest.update(b"local-application\0");
+    }
     crate::catalog::hash_field(
         &mut digest,
         snapshot.contributions.durable_digest().as_bytes(),

@@ -5,6 +5,9 @@ initial Domain set, even when empty, together with held command inputs. Kernel
 owns atomic publication. Pins retain immutable executable owners, not durable
 reconstruction bytes. `pin_session` resolves current plugins and validates saved
 state through their typed boundaries; no exact historical code is promised.
+An application-only generation carries its input-owner requirement on the pin.
+The executor checks that owner before model admission, including after application
+retirement. A native generation with equivalent compiled entries has its own identity.
 
 Hot replacement first asks the composition owner for a prepared candidate. An
 unchanged source returns none, so Kernel need not read or copy durable Domain

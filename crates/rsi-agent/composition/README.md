@@ -6,6 +6,17 @@ request boundaries recheck source bytes. File timestamps alone are not source
 identity. The global blocking-work bound remains held until each admitted task
 finishes, even if all its callers cancel.
 
+An application may supply a preset absent from all native discovery roots.
+Composition asks its active provider for the named preset and compiles the
+returned in-memory plugin entries with the same frozen compiler and Agent
+allowlist. An invalid native definition keeps precedence. A missing or retired
+provider cannot authorize a new application-only preset. Filesystem authoring
+and native configuration documents continue to describe their original sources.
+Application-supplied presets require the Host-local workspace and a live
+application input preparer. Selecting one for an SSH Session reports that an
+explicit native preset is required. This leaves the Host default intact.
+SSH lookup checks the native roots and returns before contacting the application.
+
 Published pins retain current executable owners and a diagnostic selection digest.
 Cold preparation resolves current preset sources and code, validates retained state
 for current Domains, and initializes new Domains. It never loads historical

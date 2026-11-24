@@ -564,8 +564,45 @@ impl AgentPresetCatalog {
     /// Rejects absent, unreadable or invalid current sources, including on cache hits.
     pub fn compile_shared(&self, id: &AgentPresetId) -> Result<Arc<ProfileCandidate>> {
         let preset = self.resolve_selected(id)?;
+        self.compile_at(id, preset)
+    }
+
+    /// Checks only the requested native source before consulting an application provider.
+    /// An existing invalid source retains its diagnostic and precedence.
+    ///
+    /// # Errors
+    /// Returns discovery and compilation failures for the selected native source.
+    pub fn compile_if_present(&self, id: &AgentPresetId) -> Result<Option<Arc<ProfileCandidate>>> {
+        self.find_selected(id)?
+            .map(|preset| self.compile_at(id, preset))
+            .transpose()
+    }
+
+    fn compile_at(
+        &self,
+        id: &AgentPresetId,
+        preset: ResolvedPreset,
+    ) -> Result<Arc<ProfileCandidate>> {
         self.compiler
             .compile_shared(&preset.path.join(COMPOSITION_FILE))
+            .map_err(|reason| PresetError::BrokenPreset {
+                id: id.as_str().to_owned(),
+                reason,
+            })
+    }
+
+    /// Compiles literal application entries under this catalog's Agent contribution policy.
+    ///
+    /// # Errors
+    /// Rejects entries the Agent profile compiler cannot admit.
+    pub fn compile_profile(
+        &self,
+        id: &AgentPresetId,
+        profile: rsi_meta_profile::Profile,
+    ) -> Result<Arc<ProfileCandidate>> {
+        self.compiler
+            .compile_profile(profile)
+            .map(Arc::new)
             .map_err(|reason| PresetError::BrokenPreset {
                 id: id.as_str().to_owned(),
                 reason,
