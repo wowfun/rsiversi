@@ -25,7 +25,8 @@ within three seconds to cancel a running command. Viewing, clearing and stopping
 from the panel preserve the model's completion notification.
 
 A conversation with an active, paused or blocked Goal shows its recorded phase
-and objective above the composer. Completed goals, protected interactions and
+and objective above the composer. A blocked Goal exposes its recorded stopping
+reason as the strip's tooltip. Completed goals, protected interactions and
 global workbench pages leave the strip out of the composer. A current Goal
 surface lets the user open its controls from the strip. Reading the strip uses
 the attached conversation's projection without opening a resource.

@@ -716,11 +716,11 @@ export async function verifyFrameCommit(browser, url, report, name) {
       const todo = page.getByRole("region", {name: "To-dos"});
       await todo.getByRole("button").click();
       const goal = page.getByRole("region", {name:"Goal",exact:true});
-      const showGoal = phase => page.evaluate(async phase => {
+      const showGoal = (phase, reason) => page.evaluate(async ({phase, reason}) => {
         const entries=fixture.view.surfaces.main.projections.entries;
-        entries.splice(1,entries.length-1,{producer:'rsi.goal.view',content:{kind:'value',value:{goal:{objective:'Check the edited draft',phase}}}});
+        entries.splice(1,entries.length-1,{producer:'rsi.goal.view',content:{kind:'value',value:{goal:{objective:'Check the edited draft',phase,reason}}}});
         await fixture.frame();
-      },phase);
+      },{phase,reason});
       assert.equal(await goal.count(),0);
       await showGoal('active');
       await goal.getByText('Active Goal',{exact:true}).waitFor();
@@ -733,9 +733,17 @@ export async function verifyFrameCommit(browser, url, report, name) {
         await goal.getByText(label, {exact: true}).waitFor();
         if (!armed) await page.screenshot({path: join(report, `${name}-inactive-goal.png`)});
       }
-      await showGoal('blocked');
+      await showGoal('blocked','Awaiting the review decision');
       await goal.getByText('Blocked Goal',{exact:true}).waitFor();
       assert(await goal.getByText('Check the edited draft',{exact:true}).isVisible());
+      assert.equal(await goal.getAttribute('title'),'Awaiting the review decision');
+      assert.equal(await goal.getByText('Check the edited draft',{exact:true}).getAttribute('title'),null);
+      await page.screenshot({path:join(report,`${name}-blocked-goal.png`)});
+      await showGoal('blocked');
+      assert.equal(await goal.getAttribute('title'),null);
+      await showGoal('paused','Paused by the user');
+      await goal.getByText('Paused Goal',{exact:true}).waitFor();
+      assert.equal(await goal.getAttribute('title'),null);
       await showGoal('completed');await goal.waitFor({state:'detached'});
       const pending = page.getByRole("region", {name: "Pending inputs"});
       for (const id of ["first", "second"]) {
