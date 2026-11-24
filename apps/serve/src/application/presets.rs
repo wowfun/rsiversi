@@ -8,8 +8,74 @@ use rsi_api_protocol::{ApiError, ApiOutput, CallOrigin, RetainedBytes};
 use rsi_configuration_api::agent_presets::AgentPresetsOperation;
 use rsi_extension::{Error, Result};
 use rsi_session_protocol::{SelectDraftPreset, SessionError};
+use rsi_settings_protocol::{SettingsError, SettingsVersion};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// A replacement process announces its own connection before it activates plugins.
+#[derive(Debug)]
+pub(super) struct Source(
+    pub(super) tokio::sync::watch::Receiver<std::sync::Weak<rsi_extension::Connection>>,
+);
+
+#[async_trait::async_trait]
+impl rsi_agent_composition::ApplicationPresetSource for Source {
+    async fn resolve(
+        &self,
+        id: &AgentPresetId,
+    ) -> rsi_agent_composition_protocol::Result<Option<rsi_host::Profile>> {
+        use rsi_agent_composition_protocol::AgentCompositionError;
+        let unavailable = |reason: &str| AgentCompositionError::Unavailable {
+            preset_id: id.clone(),
+            reason: reason.into(),
+        };
+        let mut peers = self.0.clone();
+        let connection = loop {
+            if let Some(connection) = peers.borrow_and_update().upgrade()
+                && !connection.disconnect_token().is_cancelled()
+            {
+                break connection;
+            }
+            peers
+                .changed()
+                .await
+                .map_err(|_| unavailable("The application preset source has stopped"))?;
+        };
+        let reply = connection
+            .request(
+                "application.preset.resolve",
+                json!({"id":id}),
+                connection.disconnect_token(),
+            )
+            .await
+            .map_err(|_| unavailable("The application preset source is unavailable"))?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Declaration {
+            id: AgentPresetId,
+            broken: Option<String>,
+        }
+        let Some(result): Option<Declaration> = serde_json::from_value(reply)
+            .map_err(|_| unavailable("Invalid application preset reply"))?
+        else {
+            return Ok(None);
+        };
+        if result.id != *id {
+            return Err(unavailable("The application returned a different preset"));
+        }
+        if let Some(reason) = result.broken {
+            return Err(unavailable(&reason));
+        }
+        Ok(Some(rsi_host::Profile::new([
+            rsi_host::ProfileEntry::new("context", "rsi.agent.context.default", Value::Null),
+            rsi_host::ProfileEntry::new(
+                "model-selection",
+                "rsi.agent.model-selection",
+                Value::Null,
+            ),
+        ])))
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +93,11 @@ enum Operation {
     },
     Resolve {
         id: Option<String>,
+    },
+    DefaultRead,
+    DefaultWrite {
+        id: Option<AgentPresetId>,
+        expected: Option<SettingsVersion>,
     },
     Document {
         id: String,
@@ -60,6 +131,10 @@ impl Sessions {
                     .preset_reply(AgentPresetsOperation::Resolve, origin, json!({"id":id}))
                     .await?;
                 return serde_json::from_slice(bytes.as_bytes()).map_err(|_| Error::Protocol);
+            }
+            Operation::DefaultRead => return self.preset_default(origin, None).await,
+            Operation::DefaultWrite { id, expected } => {
+                return self.preset_default(origin, Some((id, expected))).await;
             }
             Operation::Document { id, reader, offset } => match AgentPresetId::new(id) {
                 Ok(id) => (Some(id), reader, offset),
@@ -136,6 +211,39 @@ impl Sessions {
             Err(ApiError::Domain(outcome)) => Ok(outcome),
             Err(error) => Err(remote(error)),
             Ok(_) => Err(Error::Protocol),
+        }
+    }
+
+    async fn preset_default(
+        &self,
+        origin: CallOrigin,
+        write: Option<(Option<AgentPresetId>, Option<SettingsVersion>)>,
+    ) -> Result<Value> {
+        let grant = self
+            .context
+            .lookup_local::<rsi_configuration_access::ConfigurationAccessContract>()
+            .ok_or_else(|| remote(ApiError::Unavailable))?;
+        let _lease = grant.admit(&origin).map_err(remote)?;
+        let defaults = self
+            .context
+            .lookup_local::<rsi::AgentPresetDefaultsContract>()
+            .ok_or_else(|| remote(ApiError::Unavailable))?;
+        let result = match write {
+            Some((id, expected)) => defaults
+                .set_choice(expected.as_ref(), id.as_ref())
+                .await
+                .map(|version| (version, id)),
+            None => defaults.choice().await,
+        };
+        match result {
+            Ok((version, selected)) => Ok(json!({
+                "id": selected.as_ref().map_or(rsi::DEFAULT_AGENT_PRESET_ID,AgentPresetId::as_str),
+                "selected": selected,
+                "version": version,
+            })),
+            Err(SettingsError::Conflict { .. }) => Ok(json!({"code":"conflict"})),
+            Err(SettingsError::StaleRegistration(_)) => Ok(json!({"code":"stale_registration"})),
+            Err(error) => Err(Error::Remote(error.to_string())),
         }
     }
 }

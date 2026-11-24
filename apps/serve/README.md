@@ -314,7 +314,9 @@ local directory through Workspace ingress for the live device. An unplaced
 conversation uses the first visible registered local Workspace in insertion
 order. A Home without one requires an explicit directory. Creation returns
 the native draft identity, preset, whether the identity was reused, and its
-creation-time list summary. Ordinary
+creation-time list summary. Reusing a named blank Session selects the explicit preset or the current Host default
+after checking workspace placement. Opening a Session from history preserves its
+recorded preset. Ordinary
 application conversations reserve their identity in the Host catalog before
 returning. Devices with access to that Workspace can discover an empty
 conversation after restart. Unsent composer text stays in the originating browser.
@@ -384,6 +386,20 @@ request retirement. A native preset's source is the TOML accepted by the Host.
 An application can resolve an explicit ID or the current default through the
 same grant. This returns a small identity and health result without reading
 display metadata or enumerating sibling presets.
+With `presets = true` and `tools = true`, the selected process answers exact
+`application.preset.resolve` requests for its own declarations over the active
+duplex connection. It supplies their activation status. The Host contributes the
+model context builder and the Session model-selection domain. The application
+supplies its scoped request inputs and Tools. This source is available for local workspaces.
+Applications read and change the default for new Sessions through the Host's
+`rsi.agent-presets` Settings namespace. The callback returns the effective ID,
+the optional user override, and the Settings version. The caller needs Host
+configuration access. Changing the default preserves user-supplied discovery
+roots. A stale version reports a conflict. Creation uses the shared default
+when the caller omits a preset, including when it reuses a named blank. Opening
+an existing Session preserves its selection. In an SSH workspace, an
+application-only default prompts the user to choose a native preset for that
+creation. The shared default remains available for local workspaces.
 Selecting a preset targets the existing Session's interactive handle. Only a
 blank draft accepts a change. The switch uses its current revision and never
 creates a replacement Session. Its receipt reports whether the Host actually

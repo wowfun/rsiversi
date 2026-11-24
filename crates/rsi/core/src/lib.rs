@@ -130,8 +130,9 @@ mod ssh_targets;
 mod writer_lock;
 
 pub use agent_preset::{
-    AGENT_PRESET_SETTINGS_NAMESPACE, AgentPresetManager, DEFAULT_AGENT_PRESET_ID,
-    USER_AGENT_PRESET_DIRECTORY, user_agent_preset_root,
+    AGENT_PRESET_SETTINGS_NAMESPACE, AgentPresetDefaults, AgentPresetDefaultsContract,
+    AgentPresetManager, DEFAULT_AGENT_PRESET_ID, USER_AGENT_PRESET_DIRECTORY,
+    user_agent_preset_root,
 };
 pub use composition::{
     StandardCodingTools, StandardComposition, StandardHostPreview, capture_standard_environment,

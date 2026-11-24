@@ -8,7 +8,7 @@ use rsi_host::{HostBuilder, HostPaths, Profile, ProfileEntry, ProfileProgram};
 use rsi_meta::UpdateMode;
 use rsi_meta_profile::{ProfileCompiler, ProfileEnvironment, ProfileLimits};
 use rsi_settings_protocol::{
-    SettingsContract, SettingsError, SettingsProviderContract, SettingsScope,
+    SettingsContract, SettingsError, SettingsProviderContract, SettingsScope, SettingsVersion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -74,15 +74,9 @@ struct RootWire {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsWire {
-    default: AgentPresetId,
+    #[serde(rename = "default")]
+    _default: AgentPresetId,
     roots: Vec<RootWire>,
-}
-
-#[derive(Debug, Serialize)]
-struct UserSettingsWire<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    default: Option<&'a AgentPresetId>,
-    roots: &'a [RootWire],
 }
 
 /// Management lifetime for one settings-backed Agent-preset catalog.
@@ -460,53 +454,105 @@ fn read_settings(scope: &dyn SettingsScope) -> rsi_settings_protocol::Result<Set
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))
 }
 
+/// The Host-owned default preset field. Other user settings stay in their original layer.
 #[derive(Clone, Debug)]
-struct SettingsDefaultStore {
+pub struct AgentPresetDefaults {
     scope: Arc<dyn SettingsScope>,
     path: PathBuf,
 }
 
 #[async_trait]
-impl AgentPresetDefaultStore for SettingsDefaultStore {
+impl AgentPresetDefaultStore for AgentPresetDefaults {
     async fn load(&self) -> rsi_agent_presets::Result<Option<AgentPresetId>> {
-        let wire = read_settings(self.scope.as_ref()).map_err(|error| self.error("read", error))?;
-        if wire.default.as_str() == DEFAULT_AGENT_PRESET_ID {
-            Ok(None)
-        } else {
-            Ok(Some(wire.default))
-        }
+        self.choice()
+            .await
+            .map(|(_, id)| id.filter(|id| id.as_str() != DEFAULT_AGENT_PRESET_ID))
+            .map_err(|error| self.error("read", error))
     }
 
     async fn replace(&self, selected: Option<AgentPresetId>) -> rsi_agent_presets::Result<()> {
-        let snapshot = self
-            .scope
-            .get()
-            .map_err(|error| self.error("read", error))?;
-        let wire: SettingsWire =
-            serde_json::from_value(snapshot.value).map_err(|error| self.error("decode", error))?;
         let selected = selected.filter(|id| id.as_str() != DEFAULT_AGENT_PRESET_ID);
-        let replacement = UserSettingsWire {
-            default: selected.as_ref(),
-            roots: &wire.roots,
-        };
-        if selected.is_none() && wire.roots.is_empty() {
-            self.scope
-                .clear(snapshot.revision)
-                .await
-                .map_err(|error| self.error("clear", error))?;
-        } else {
-            let replacement =
-                serde_json::to_value(replacement).map_err(|error| self.error("encode", error))?;
-            self.scope
-                .replace(snapshot.revision, replacement)
-                .await
-                .map_err(|error| self.error("replace", error))?;
-        }
-        Ok(())
+        self.set_choice(None, selected.as_ref())
+            .await
+            .map(|_| ())
+            .map_err(|error| self.error("replace", error))
     }
 }
 
-impl SettingsDefaultStore {
+/// Local field access granted by the active default-preset Settings owner.
+#[derive(Debug)]
+pub struct AgentPresetDefaultsContract;
+impl rsi_meta::LocalContract for AgentPresetDefaultsContract {
+    const KEY: &'static str = "rsi.agent.preset-defaults";
+    type Service = AgentPresetDefaults;
+}
+
+impl AgentPresetDefaults {
+    /// Reads the explicit user choice, including a choice equal to the deployment default.
+    ///
+    /// # Errors
+    /// Returns the namespace's retirement or recovery failure.
+    pub async fn choice(
+        &self,
+    ) -> rsi_settings_protocol::Result<(SettingsVersion, Option<AgentPresetId>)> {
+        let (version, field) = self.scope.user_value(Some("default")).await?;
+        let selected = field
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| SettingsError::Corrupt(error.to_string()))?;
+        Ok((version, selected))
+    }
+
+    /// Updates the user choice, preserving every other stored field.
+    ///
+    /// # Errors
+    /// Returns a stale registration or revision conflict, or the provider's write failure.
+    pub async fn set_choice(
+        &self,
+        expected: Option<&SettingsVersion>,
+        selected: Option<&AgentPresetId>,
+    ) -> rsi_settings_protocol::Result<SettingsVersion> {
+        let (version, raw) = self.scope.user_value(None).await?;
+        if let Some(expected) = expected {
+            if expected.scope_id != version.scope_id {
+                return Err(SettingsError::StaleRegistration(
+                    AGENT_PRESET_SETTINGS_NAMESPACE.into(),
+                ));
+            }
+            if expected.revision != version.revision {
+                return Err(SettingsError::Conflict {
+                    expected: expected.revision,
+                    actual: version.revision,
+                });
+            }
+        }
+        let mut section = match raw {
+            Some(Value::Object(fields)) => fields,
+            None => serde_json::Map::new(),
+            Some(_) => {
+                return Err(SettingsError::Corrupt(
+                    "Invalid preset settings section".into(),
+                ));
+            }
+        };
+        if section.get("default").and_then(Value::as_str) == selected.map(AgentPresetId::as_str) {
+            return Ok(version);
+        }
+        if let Some(id) = selected {
+            section.insert("default".into(), json!(id));
+        } else {
+            section.remove("default");
+        }
+        let stored = if section.is_empty() {
+            self.scope.clear(version.revision).await?
+        } else {
+            self.scope
+                .replace(version.revision, Value::Object(section))
+                .await?
+        };
+        Ok(stored.version())
+    }
+
     fn error(&self, operation: &'static str, error: impl std::fmt::Display) -> PresetError {
         PresetError::Io {
             operation,

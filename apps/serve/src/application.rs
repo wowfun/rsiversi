@@ -56,6 +56,8 @@ struct Config {
     #[serde(default)]
     tools: bool,
     #[serde(default)]
+    presets: bool,
+    #[serde(default)]
     replace_preset_tools: std::collections::BTreeSet<String>,
     #[serde(default)]
     routes: Vec<String>,
@@ -277,7 +279,9 @@ struct Sessions {
     models: Option<Arc<dyn rsi_ai_protocol::LanguageModels>>,
     language: Option<Arc<dyn rsi_ai_protocol::LanguageCall>>,
     defaults: Option<Arc<dyn rsi_session_protocol::AgentSettingsSource>>,
+    context: rsi_meta::Context,
     tools: Option<Arc<tools::Publisher>>,
+    preset_peer: Option<tokio::sync::watch::Sender<std::sync::Weak<rsi_extension::Connection>>>,
     ingress: Arc<dyn rsi_session_protocol::SessionIngress>,
     projections: Arc<dyn rsi_agent_turn_protocol::SessionProjections>,
     workspaces: Arc<dyn rsi_workspace_protocol::WorkspaceIngress>,
@@ -315,6 +319,9 @@ impl Sessions {
         self,
         connection: &Arc<rsi_extension::Connection>,
     ) -> rsi_meta::Result<Vec<rsi_extension::HandlerRegistration>> {
+        if let Some(peer) = &self.preset_peer {
+            peer.send_replace(Arc::downgrade(connection));
+        }
         let sessions: Arc<dyn rsi_extension::Handler> = Arc::new(BoundSessions {
             sessions: self,
             connection: Arc::downgrade(connection),
@@ -577,6 +584,9 @@ impl PluginFactory for Factory {
     fn prepare(&self, config: &ConfigValue) -> rsi_meta::Result<PreparedActivation> {
         let input: Config = serde_json::from_value(config.clone()).map_err(failure)?;
         rsi_packages::validate_identifier(&input.profile).map_err(failure)?;
+        if input.presets && !input.tools {
+            return Err(failure("application presets require application tools"));
+        }
         if let Some(importer) = &input.importer {
             rsi_packages::validate_identifier(&importer.package).map_err(failure)?;
             rsi_packages::validate_identifier(&importer.export).map_err(failure)?;
@@ -650,6 +660,16 @@ impl PluginFactory for Factory {
         } else {
             None
         };
+        let preset_peer = if config.presets {
+            let (peer, connection) = tokio::sync::watch::channel(std::sync::Weak::new());
+            plan.context()
+                .provide_local::<rsi_agent_composition::ApplicationPresetSourceContract>(
+                    Arc::new(presets::Source(connection)),
+                )?;
+            Some(peer)
+        } else {
+            None
+        };
         let mut sessions = Sessions {
             history_pages: session_fragments::Pages::default(),
             owner: plan.local::<rsi_api_http::BrowserOwnerContract>()?,
@@ -662,7 +682,9 @@ impl PluginFactory for Factory {
             defaults: plan
                 .context()
                 .lookup_local::<rsi_session_protocol::AgentSettingsContract>(),
+            context: plan.context().clone(),
             tools,
+            preset_peer,
             ingress: plan.local::<rsi_session_protocol::SessionIngressContract>()?,
             projections: plan.local::<rsi_agent_turn_protocol::SessionProjectionsContract>()?,
             workspaces: plan.local::<rsi_workspace_protocol::WorkspaceIngressContract>()?,

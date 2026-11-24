@@ -109,12 +109,24 @@ impl Sessions {
                                     !self.navigation.workspace_contains(workspace, &requested)
                                 }) => {}
                         Ok(mut draft) => {
-                            if let Some(preset) = input.preset.as_ref()
-                                && draft.header.agent_preset_id() != preset
-                            {
+                            let preset = match &input.preset {
+                                Some(id) => id.clone(),
+                                None => self
+                                    .context
+                                    .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
+                                    .ok_or_else(|| {
+                                        Error::Remote(
+                                            "The Host default preset is unavailable".into(),
+                                        )
+                                    })?
+                                    .default_preset_id()
+                                    .await
+                                    .map_err(remote)?,
+                            };
+                            if draft.header.agent_preset_id() != &preset {
                                 draft = handle
                                     .select_preset(SelectDraftPreset {
-                                        preset_id: preset.clone(),
+                                        preset_id: preset,
                                         expected_revision: draft.revision,
                                     })
                                     .await

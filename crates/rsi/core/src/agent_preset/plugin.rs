@@ -1,5 +1,5 @@
 use super::{
-    AGENT_PRESET_SETTINGS_NAMESPACE, DEFAULT_AGENT_PRESET_ID, SettingsDefaultStore,
+    AGENT_PRESET_SETTINGS_NAMESPACE, AgentPresetDefaults, DEFAULT_AGENT_PRESET_ID,
     SystemPresetSource, read_settings, settings_boot, user_agent_preset_root, validate_settings,
 };
 use async_trait::async_trait;
@@ -85,7 +85,7 @@ impl PluginFactory for CatalogFactory {
             );
         }
         config = config.with_user_root(user_agent_preset_root(&self.paths));
-        let defaults: Arc<dyn AgentPresetDefaultStore> = Arc::new(SettingsDefaultStore {
+        let defaults: Arc<dyn AgentPresetDefaultStore> = Arc::new(AgentPresetDefaults {
             scope,
             path: self.paths.config().join("settings.json"),
         });

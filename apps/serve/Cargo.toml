@@ -33,6 +33,7 @@ rsi-agent-session-protocol = { path = "../../crates/rsi-agent/session-protocol" 
 rsi-agent-store-protocol = { path = "../../crates/rsi-agent/store-protocol" }
 rsi-agent-turn-protocol = { path = "../../crates/rsi-agent/turn-protocol" }
 rsi-agent-composition-protocol = { path = "../../crates/rsi-agent/composition-protocol" }
+rsi-agent-composition = { path = "../../crates/rsi-agent/composition" }
 rsi-agent-model-selection = { path = "../../crates/rsi-agent/model-selection" }
 rsi-tools-protocol = { path = "../../crates/rsi-tools/protocol" }
 reqwest.workspace = true
@@ -45,6 +46,8 @@ rsi-application = { path = "../../crates/rsi/application" }
 rsi-api-http = { path = "../../crates/rsi-api/http" }
 rsi-api-protocol = { path = "../../crates/rsi-api/protocol" }
 rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
+rsi-configuration-access = { path = "../../crates/rsi/configuration-access" }
+rsi-settings-protocol = { path = "../../crates/rsi-settings/protocol" }
 rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 serde_json.workspace = true
