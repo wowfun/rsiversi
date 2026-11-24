@@ -98,11 +98,17 @@ async fn read<T, F: std::future::Future<Output = rsi_session_protocol::Result<T>
 
 async fn select_workspace(
     workspace: &dyn rsi_workspace_protocol::WorkspaceRegistry,
-    cwd: &std::path::Path,
+    coordinates: &rsi_workspace_protocol::ExecutionCoordinates,
 ) -> rsi_workspace_protocol::Result<rsi_workspace_protocol::WorkspaceRecord> {
     let mut delay = std::time::Duration::from_millis(50);
     for attempt in 0..5 {
-        match workspace.get_or_create(cwd).await {
+        match workspace
+            .register_at(
+                coordinates.location(),
+                std::path::Path::new(coordinates.path()),
+            )
+            .await
+        {
             Err(rsi_workspace_protocol::WorkspaceError::Api(
                 rsi_api_protocol::ApiError::Capacity,
             )) if attempt < 4 => {
@@ -1245,33 +1251,32 @@ impl Client {
                     self.state.escape();
                 }
             }
-            Action::New | Action::Attach(_) if self.submission.request.is_some() => self
+            Action::New(_) | Action::Attach(_) if self.submission.request.is_some() => self
                 .state
                 .notice("Resolve the outstanding submission before changing sessions"),
-            Action::New if self.drafts.len() >= 64 => self.state.notice(
+            Action::New(_) if self.drafts.len() >= 64 => self.state.notice(
                 "64 saved Sessions retained; open an existing Session or restart this application",
             ),
             Action::Attach(ref id) if self.drafts.len() >= 64 && !self.drafts.contains_key(id) => {
                 self.state
                     .notice("64 session drafts retained; open an existing saved session first");
             }
-            Action::New => {
-                let cwd = PathBuf::from(self.state.header.canonical_cwd());
+            Action::New(agent_preset_id) => {
+                let coordinates = self.state.header.coordinates().clone();
                 let workspace = self.workspace.clone();
                 self.spawn(async move {
                     let session_id = super::generated_cli_session_id().map_err(error)?;
-                    let registered =
-                        select_workspace(workspace.as_ref(), &cwd)
-                            .await
-                            .map_err(|failure| {
-                                error(format!("Workspace selection failed: {failure}"))
-                            })?;
+                    let registered = select_workspace(workspace.as_ref(), &coordinates)
+                        .await
+                        .map_err(|failure| {
+                            error(format!("Workspace selection failed: {failure}"))
+                        })?;
                     let handle = application
                         .create(CreateSession {
                             fork: None,
                             workspace_id: registered.id,
                             session_id,
-                            agent_preset_id: None,
+                            agent_preset_id,
                         })
                         .await
                         .map_err(|failure| error(format!("Session creation failed: {failure}")))?;
@@ -2030,7 +2035,7 @@ async fn run_inner(
                     match client.ui.registry.surfaces(&client.ui.surface).ok().and_then(|surfaces| surfaces.into_iter().find(|surface| surface.reference.name == "workflow")) {
                         Some(surface) => client.ui_surface(&surface.reference), None => client.state.info("Workflow workbench is unavailable"),
                     }
-                }, setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New => {client.action(Action::New);}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
+                }, setup::Command::Effort => setup.open_effort(rsi_agent_session_protocol::ModelSelection { model: client.state.model.clone().unwrap_or_else(|| client.state.header.settings().default_model().clone()), reasoning_effort: client.state.reasoning_effort.clone() }), setup::Command::Quit => break, setup::Command::Help => client.state.slash.open_help(), setup::Command::New(preset) => {client.action(Action::New(preset));}, setup::Command::Resume(id) => {client.action(id.map_or(Action::Recent, Action::Attach));}, setup::Command::Reference(id) => {client.action(id.map_or(Action::References, Action::CaptureReference));}, command => setup.open(command, true) }
                 dirty = true;
             }
             if navigation_active != (external.active, profiles.active) {

@@ -52,7 +52,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("effort", "Select reasoning effort for the current model"),
     (
         "new",
-        "New session in the current workspace; retain this draft",
+        "New session in the current workspace: /new [preset-id]",
     ),
     (
         "resume",

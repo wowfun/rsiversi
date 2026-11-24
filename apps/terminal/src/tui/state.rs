@@ -2,7 +2,7 @@ use super::{
     editor::Editor,
     transcript::{Anchor, Transcript},
 };
-use rsi_agent_session_protocol::{SessionHeader, SessionId};
+use rsi_agent_session_protocol::{AgentPresetId, SessionHeader, SessionId};
 use rsi_ai_protocol::ModelRef;
 
 #[derive(Clone, Debug)]
@@ -23,7 +23,7 @@ pub(super) enum Action {
     UiEdit(String, u64),
     UiInvoke(rsi_ui::UiReference, serde_json::Value, u64),
     UiImage(u64),
-    New,
+    New(Option<AgentPresetId>),
     Recent,
     References,
     HistoryRequest(Box<rsi_history_api::Request>),
@@ -102,7 +102,7 @@ impl Menu {
             title: "Actions".into(),
             selected: 0,
             items: vec![
-                ("New session".into(), Action::New),
+                ("New session".into(), Action::New(None)),
                 ("Recent sessions".into(), Action::Recent),
                 ("External conversations".into(), Action::External),
                 ("Needs attention".into(), Action::Attention),

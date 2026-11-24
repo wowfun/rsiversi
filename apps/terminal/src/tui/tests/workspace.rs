@@ -4,13 +4,13 @@ use rsi_workspace_protocol::*;
 use std::{collections::VecDeque, path::Path, sync::Mutex, time::Duration};
 
 #[derive(Debug)]
-struct WorkspaceFailures {
+struct WorkspaceFixture {
     errors: Mutex<VecDeque<WorkspaceError>>,
-    paths: Mutex<Vec<PathBuf>>,
+    registrations: Mutex<Vec<ExecutionCoordinates>>,
 }
 
 #[async_trait::async_trait]
-impl WorkspaceRegistry for WorkspaceFailures {
+impl WorkspaceRegistry for WorkspaceFixture {
     async fn find(
         &self,
         _: &rsi_workspace_protocol::WorkspaceKey,
@@ -55,16 +55,19 @@ impl WorkspaceRegistry for WorkspaceFailures {
     }
     async fn register_at(
         &self,
-        _location: &rsi_workspace_protocol::ExecutionLocation,
+        location: &ExecutionLocation,
         path: &Path,
     ) -> rsi_workspace_protocol::Result<WorkspaceRecord> {
-        self.paths.lock().unwrap().push(path.to_owned());
-        Err(self
-            .errors
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("bounded attempts"))
+        let coordinates =
+            ExecutionCoordinates::new(location.clone(), path.to_str().unwrap()).unwrap();
+        self.registrations.lock().unwrap().push(coordinates.clone());
+        if let Some(error) = self.errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        Ok(WorkspaceRecord::new(
+            WorkspaceId::from_bytes([1; 32]),
+            coordinates,
+        ))
     }
     async fn status(&self, _: &WorkspaceId) -> rsi_workspace_protocol::Result<WorkspaceStatus> {
         unreachable!("New does not query directory status")
@@ -86,24 +89,24 @@ async fn new_retries_only_api_capacity_with_a_frozen_directory_and_finite_backof
     ] {
         let attempts = errors.len();
         let final_error = errors.last().unwrap().to_string();
-        let registry = Arc::new(WorkspaceFailures {
+        let registry = Arc::new(WorkspaceFixture {
             errors: Mutex::new(errors.into()),
-            paths: Mutex::new(Vec::new()),
+            registrations: Mutex::default(),
         });
         let (mut client, _, runtime, surface) = client().await;
-        let cwd = PathBuf::from(client.state.header.canonical_cwd());
+        let coordinates = client.state.header.coordinates().clone();
         let session = client.state.header.session_id().clone();
         client.workspace = registry.clone();
         client.state.editor.insert("preserved draft").unwrap();
         let started = tokio::time::Instant::now();
-        client.action(Action::New);
+        client.action(Action::New(None));
         let Err(failure) = client.tasks.next().await.unwrap().result else {
             panic!("registration failed before Session creation")
         };
         assert!(failure.to_string().contains(&final_error), "{failure}");
         assert_eq!(
-            registry.paths.lock().unwrap().as_slice(),
-            vec![cwd; attempts]
+            registry.registrations.lock().unwrap().as_slice(),
+            vec![coordinates; attempts]
         );
         assert_eq!(started.elapsed(), Duration::from_millis(elapsed));
         assert_eq!(client.state.header.session_id(), &session);
@@ -111,4 +114,55 @@ async fn new_retries_only_api_capacity_with_a_frozen_directory_and_finite_backof
         surface.stop().await;
         assert!(runtime.shutdown().await.is_clean());
     }
+}
+
+#[tokio::test]
+async fn new_with_explicit_preset_stays_on_the_attached_ssh_target() {
+    let (mut client, handle, runtime, surface) = client().await;
+    let registry = Arc::new(WorkspaceFixture {
+        errors: Mutex::default(),
+        registrations: Mutex::default(),
+    });
+    let coordinates = ExecutionCoordinates::new(
+        ExecutionLocation::Ssh {
+            target: rsi_agent_session_protocol::ExecutionTargetId::parse("a".repeat(32)).unwrap(),
+        },
+        "/srv/project",
+    )
+    .unwrap();
+    let header = &client.state.header;
+    client.state.header = SessionHeader::new(
+        header.session_id().clone(),
+        1,
+        coordinates.clone(),
+        header.agent_preset_id().clone(),
+        header.settings().clone(),
+    )
+    .unwrap();
+    client.workspace = registry.clone();
+    for (command, expected) in [("/new", None), ("/new standard", Some("standard"))] {
+        client.state.editor.insert(command).unwrap();
+        client.submit(MessageDelivery::NextTurn, false);
+        let Some(setup::Command::New(preset)) = client.setup_command.take() else {
+            panic!("expected a new session command");
+        };
+        client.action(Action::New(preset));
+        client.tasks.next().await.unwrap().result.unwrap();
+        let request = handle.created.lock().unwrap().pop().unwrap();
+        assert_eq!(request.workspace_id, WorkspaceId::from_bytes([1; 32]));
+        assert_eq!(
+            request.agent_preset_id.as_ref().map(AgentPresetId::as_str),
+            expected
+        );
+        assert_eq!(
+            registry.registrations.lock().unwrap().pop().unwrap(),
+            coordinates
+        );
+    }
+    client.state.editor.insert("/new invalid/target").unwrap();
+    client.submit(MessageDelivery::NextTurn, false);
+    assert!(client.setup_command.is_none());
+    assert_eq!(client.state.editor.text(), "/new invalid/target");
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
 }

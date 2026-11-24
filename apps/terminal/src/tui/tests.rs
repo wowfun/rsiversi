@@ -1095,8 +1095,9 @@ impl SessionService for Application {
     }
     async fn create(
         &self,
-        _: CreateSession,
+        request: CreateSession,
     ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        self.0.created.lock().unwrap().push(request);
         Ok(self.0.clone())
     }
     async fn attach(&self, _: &SessionId) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {

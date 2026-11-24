@@ -48,7 +48,7 @@ pub(super) enum Command {
     External,
     ExternalOpen(rsi_acp_protocol::observation::ConversationId),
     Attention,
-    New,
+    New(Option<AgentPresetId>),
     Resume(Option<SessionId>),
     Reference(Option<SessionId>),
     History(rsi_history_api::ConversationIdentity, String),
@@ -82,7 +82,10 @@ pub(super) fn command(text: &str) -> Option<Command> {
         ["/markdown"] => Some(Command::Markdown(None)),
         ["/markdown", "on"] => Some(Command::Markdown(Some(true))),
         ["/markdown", "off"] => Some(Command::Markdown(Some(false))),
-        ["/new"] => Some(Command::New),
+        ["/new"] => Some(Command::New(None)),
+        ["/new", id] => {
+            Some(AgentPresetId::new(*id).map_or(Command::Invalid, |id| Command::New(Some(id))))
+        }
         ["/quit" | "/exit"] => Some(Command::Quit),
         ["/resume"] => Some(Command::Resume(None)),
         ["/resume", id] => {

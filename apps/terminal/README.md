@@ -196,13 +196,16 @@ If configuration disappears after the startup check, a typed `SetupRequired`
 from Session creation also returns to home. Other creation and resume errors keep
 their error classifications.
 Application commands are `/help`, `/login [deepseek|openai|openai-compatible]`,
-`/model`, `/effort`, `/markdown [on|off]`, `/new`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
+`/model`, `/effort`, `/markdown [on|off]`, `/new [preset-id]`, `/resume [session_id]`, `/quit` and its `/exit` alias. They
 bypass message submission, prompt recall and Session command receipts, and shadow
 same-name Session commands. Recognition requires raw single-line input regardless
 of cursor position; invalid arguments retain the draft. Multi-line input starting
 with other reserved names and `//` input are literal Human text in both dispatch layers.
 `/export` rejects multiline arguments and never submits them as Human text.
 Editing and submission keys follow the [interaction design](docs/tui-design.md).
+`/new` stays on the attached session's execution target and directory. It uses
+the Host default unless a preset is supplied. If that default requires a local
+application, use `/new <native-preset-id>` in the SSH workspace.
 Incomplete metrics retain their progress until the next inspection or explicit
 refresh; receiving an incomplete result does not immediately issue another read.
 `@name` opens Agent completion. Ctrl+P → “@ Workspace file · browse and insert

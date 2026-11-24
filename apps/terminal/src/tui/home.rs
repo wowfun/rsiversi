@@ -298,7 +298,7 @@ pub(super) async fn run(
                                     setup::Command::Quit => break Ok(None),
                                     setup::Command::Help => slash.open_help(),
                                     setup::Command::Markdown(mode) => { *markdown = mode.unwrap_or(!*markdown); status = super::markdown_status(*markdown).into(); editor.take(); },
-                                    setup::Command::New | setup::Command::Effort => status="Choose a model with /login or /model first. Draft retained.".into(),
+                                    setup::Command::New(_) | setup::Command::Effort => status="Choose a model with /login or /model first. Draft retained.".into(),
                                     setup::Command::Resume(None) => {let application=application.clone();history=Some(Box::pin(async move{application.list_recent(None,128).await.map_err(error)}));},
                                     setup::Command::Resume(Some(session_id)) => {let application=application.clone();let workspace=workspace.clone();attaching=Some(Box::pin(async move{attachment(resolve_application_handle(&application,&workspace,SessionSelection::Resume{session_id,cwd:None}).await?,true,None).await}));},
                                     command => setup.open(command,false),

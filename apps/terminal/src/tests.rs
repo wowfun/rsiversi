@@ -376,6 +376,7 @@ async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() 
 
 #[derive(Debug, Default)]
 pub(crate) struct UnknownThenAcceptedHandle {
+    pub(crate) created: std::sync::Mutex<Vec<CreateSession>>,
     pub(crate) approvals: std::sync::Mutex<Vec<rsi_approval_protocol::ApprovalRequest>>,
     pub(crate) approval_answers: std::sync::atomic::AtomicUsize,
     pub(crate) approval_failure: std::sync::atomic::AtomicBool,
