@@ -434,7 +434,10 @@ impl SessionStore for SqliteStore {
                             .map_err(sql_error)?;
                         if exists {
                             let snapshot = read_agent_subtree(&transaction, root)?;
-                            let missing = owner.missing_subtree_proofs(&snapshot, &known);
+                            let missing: Vec<_> = subtree_session_ids(&snapshot)
+                                .filter(|id| !known.contains(*id) && !owner.touch_validated_session(id))
+                                .cloned()
+                                .collect();
                             if !missing.is_empty() {
                                 return Ok(Err((commit, missing)));
                             }
@@ -1814,7 +1817,7 @@ impl SessionStore for SqliteStore {
                 pending, active_turn_id, activation_phase, tree, };
             inspection.validate()?;
             Ok(inspection)
-        }).await
+        }, |inspection| &inspection.tree).await
     }
 
     async fn agent_message_exists(&self, session: &SessionId, message: &MessageId) -> Result<bool> {
@@ -2157,7 +2160,7 @@ impl SessionStore for SqliteStore {
         &self,
         parent_session_id: &SessionId,
     ) -> Result<StoreAgentSubtreeSnapshot> {
-        self.with_subtree_reader(parent_session_id, |_, snapshot| Ok(snapshot))
+        self.with_subtree_reader(parent_session_id, |_, snapshot| Ok(snapshot), |tree| tree)
             .await
     }
 
@@ -2725,42 +2728,32 @@ impl StoreInner {
         root: &SessionId,
     ) -> Result<StoreAgentSubtreeSnapshot> {
         let snapshot = read_agent_subtree(connection, root)?;
-        for status in std::iter::once(&snapshot.session)
-            .chain(snapshot.descendants.iter().map(|child| &child.status))
-        {
-            let validated = self.touch_validated_session(&status.session_id);
-            if !validated {
-                self.validate_selected(connection, &status.session_id)?;
+        for id in subtree_session_ids(&snapshot) {
+            if !self.touch_validated_session(id) {
+                self.validate_selected(connection, id)?;
             }
         }
         Ok(snapshot)
-    }
-
-    pub(super) fn missing_subtree_proofs(
-        &self,
-        snapshot: &StoreAgentSubtreeSnapshot,
-        known: &BTreeSet<SessionId>,
-    ) -> Vec<SessionId> {
-        std::iter::once(&snapshot.session)
-            .chain(snapshot.descendants.iter().map(|child| &child.status))
-            .filter(|status| {
-                !known.contains(&status.session_id)
-                    && !self.touch_validated_session(&status.session_id)
-            })
-            .map(|status| status.session_id.clone())
-            .collect()
     }
 
     pub(super) fn mark_subtree_validated(&self, snapshot: &StoreAgentSubtreeSnapshot) {
         let Ok(mut validated) = self.validated_sessions.lock() else {
             return;
         };
-        for status in std::iter::once(&snapshot.session)
-            .chain(snapshot.descendants.iter().map(|child| &child.status))
-        {
-            validated.insert(status.session_id.clone());
+        for id in subtree_session_ids(snapshot) {
+            validated.insert(id.clone());
         }
     }
+}
+
+pub(super) fn subtree_session_ids(
+    tree: &StoreAgentSubtreeSnapshot,
+) -> impl Iterator<Item = &SessionId> {
+    std::iter::once(&tree.session.session_id).chain(
+        tree.descendants
+            .iter()
+            .map(|child| &child.status.session_id),
+    )
 }
 
 #[allow(clippy::too_many_lines)] // One SQL snapshot binds ancestry and all derived watermarks.

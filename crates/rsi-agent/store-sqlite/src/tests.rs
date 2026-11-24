@@ -2335,8 +2335,11 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
                 "subtree" => worker
                     .read_agent_subtree_snapshot(&candidate)
                     .await
-                    .map(|_| ()),
-                "inspection" => worker.inspect_session(&candidate).await.map(|_| ()),
+                    .map(Some),
+                "inspection" => worker
+                    .inspect_session(&candidate)
+                    .await
+                    .map(|value| Some(value.tree)),
                 _ => worker
                     .commit_agent(AtomicAgentCommit {
                         sessions: vec![AtomicSessionAppend {
@@ -2351,7 +2354,7 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
                         quiescent_descendants_of: Some((candidate).into()),
                     })
                     .await
-                    .map(|_| ()),
+                    .map(|_| None),
             }
         });
         entered.await.unwrap();
@@ -2401,7 +2404,15 @@ async fn cold_subtree_inspection_and_quiescence_use_the_validation_lane() {
                 1
             );
         } else {
-            result.unwrap();
+            let cold = result.unwrap().unwrap();
+            assert_eq!(cold.session.session_id, *parent.session_id());
+            assert_eq!(cold.descendants.len(), 1);
+            assert_eq!(cold.descendants[0].status.session_id.as_str(), "cold-child");
+            let warm = store
+                .read_agent_subtree_snapshot(parent.session_id())
+                .await
+                .unwrap();
+            assert_eq!(warm, cold);
         }
         assert_eq!(store.inner.validation_runs.load(Ordering::Relaxed), 3);
     }

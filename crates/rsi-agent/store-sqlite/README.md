@@ -366,11 +366,14 @@ the guarded Session is outside the write set.
 The lineage index includes a bounded execution-owner projection, compared with the
 canonical Header during first-access and offline validation. Warm subtree reads
 decode only that projection, without rereading each descendant Header.
+The unique root/path and parent/task-name indexes arbitrate child insertion in the
+same transaction as its Header. A rejected collision leaves no child row.
 Subtree reads and transactional quiescence guards require that same proof for
 every previously unvalidated member. A foreground subtree snapshot with a
 missing proof is discarded and collected again on the validation connection;
-validation and the returned activity flags share that new snapshot. A guarded
-writer transaction discovers missing proofs before applying writes, releases
+validation and the returned activity flags share that new snapshot. After
+commit the validation cache reads member identities from the returned tree.
+A guarded writer transaction discovers missing proofs before applying writes, releases
 the writer, validates those members, and retries the original compare-and-append
 request. Its operation-local proof set is bounded by the tree limit, and each
 validation retry adds a distinct immutable member. The final activity check

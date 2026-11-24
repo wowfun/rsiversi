@@ -1051,7 +1051,12 @@ impl SqliteStore {
         self.session_proof(session_id).await.map(|_| ())
     }
 
-    async fn with_subtree_reader<T, F>(&self, root: &SessionId, operation: F) -> Result<T>
+    async fn with_subtree_reader<T, F>(
+        &self,
+        root: &SessionId,
+        operation: F,
+        tree_of: fn(&T) -> &StoreAgentSubtreeSnapshot,
+    ) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Transaction<'_>, StoreAgentSubtreeSnapshot) -> Result<T> + Send + 'static,
@@ -1064,9 +1069,8 @@ impl SqliteStore {
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(sql_error)?;
                 let snapshot = session_store::read_agent_subtree(&transaction, &candidate)?;
-                if !owner
-                    .missing_subtree_proofs(&snapshot, &BTreeSet::new())
-                    .is_empty()
+                if !session_store::subtree_session_ids(&snapshot)
+                    .all(|id| owner.touch_validated_session(id))
                 {
                     return Ok(Err(operation));
                 }
@@ -1085,11 +1089,10 @@ impl SqliteStore {
                     move |transaction| {
                         let snapshot =
                             owner.read_validated_agent_subtree(transaction, &candidate)?;
-                        let result = operation(transaction, snapshot.clone())?;
-                        Ok((snapshot, result))
+                        operation(transaction, snapshot)
                     },
-                    move |(snapshot, result)| {
-                        publishing.mark_subtree_validated(&snapshot);
+                    move |result| {
+                        publishing.mark_subtree_validated(tree_of(&result));
                         Ok(result)
                     },
                 )
