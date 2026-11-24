@@ -85,8 +85,8 @@ a read-only outcome lookup with the admitted call.
 Before excludes the selected Turn without waiting for it; neither point copies
 an open execution into the child. The caller authorizes the source Header and execution
 location; Kernel rechecks its immutable identity, resolves the exact Fact/control
-cut, pins the target preset and transforms its baseline. The payload retains its
-Store validation proof; the caller must retain Session lifecycle ownership through
+cut, pins the target preset and transforms its baseline. The payload retains the
+same Store validation proof used to read the source Header. The caller retains Session lifecycle ownership through
 publication or release to block source retirement. No Agent execution owner is inherited.
 
 An exact started Tool caller can request a bounded, read-only durable Fact prefix. The owner revalidates its live claim and effect across the watermark read. The prefix remains clamped to that captured horizon; it grants neither Store access nor Step preparation while effects are active.

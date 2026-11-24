@@ -74,7 +74,7 @@ where
     read_prepared(inner, id, bytes, lease, operation).await
 }
 
-async fn read_prepared<T, F, Fut>(
+pub(super) async fn read_prepared<T, F, Fut>(
     inner: &KernelInner,
     id: &SessionId,
     bytes: usize,

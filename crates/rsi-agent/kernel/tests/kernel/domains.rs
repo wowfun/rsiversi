@@ -2278,6 +2278,31 @@ async fn store_admission_domain_refusal_preserves_known_prewrite_capacity() {
 }
 
 #[tokio::test]
+async fn fork_keeps_the_source_header_read_proof() {
+    let store = Arc::new(MemoryStore::new());
+    let source = header("fork-proof-source");
+    append_terminal_history(&store, source.session_id().as_str(), 1).await;
+    let kernel = kernel(store.clone()).await;
+    let preparations = store.history_read_counts().1;
+    let fork = kernel
+        .prepare_fork(rsi_agent_turn_protocol::PrepareFork {
+            session_id: SessionId::new("fork-proof-child").unwrap(),
+            agent_preset_id: source.agent_preset_id().clone(),
+            source,
+            created_at_ms: 43,
+            point: rsi_agent_session_protocol::ForkPoint::before(
+                &TurnId::new("turn-history-0").unwrap(),
+            ),
+            turns: ForkTurnSelection::None,
+            cancellation: CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+    assert!(fork.header().history_origin().is_some());
+    assert_eq!(store.history_read_counts().1 - preparations, 1);
+}
+
+#[tokio::test]
 async fn manual_fork_is_unpublished_and_uses_terminal_domains_with_independent_ownership() {
     let store = Arc::new(MemoryStore::new());
     let run = DomainRun::start(store.clone()).await;

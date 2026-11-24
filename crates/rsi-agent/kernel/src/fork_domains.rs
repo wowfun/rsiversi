@@ -8,16 +8,23 @@ impl AgentKernel {
         &self,
         request: rsi_agent_turn_protocol::PrepareFork,
     ) -> TurnResult<PreparedFreshSession> {
-        let lease = self
-            .inner
-            .store
-            .prepare_session(request.source.session_id())
-            .await
-            .map_err(turn_store_error)?;
-        let source =
-            observation::read_validated_header_bounded(&self.inner, request.source.session_id())
+        let id = request.source.session_id();
+        let lease = Arc::new(
+            self.inner
+                .store
+                .prepare_session(id)
                 .await
-                .map_err(turn_store_error)?;
+                .map_err(turn_store_error)?,
+        );
+        let (source, _, _) = store_reads::read_prepared(
+            &self.inner,
+            id,
+            MAXIMUM_SESSION_HEADER_BYTES,
+            Some(lease.clone()),
+            |store, id| async move { store.header(&id).await },
+        )
+        .await
+        .map_err(turn_store_error)?;
         if source != request.source {
             return Err(TurnError::Invalid("fork source Header changed".into()));
         }
@@ -64,7 +71,7 @@ impl AgentKernel {
         if request.cancellation.is_cancelled() || self.inner.stop_worker.is_cancelled() {
             return Err(TurnError::ExecutionUnavailable);
         }
-        baseline.retain(Arc::new(lease));
+        baseline.retain(lease);
         PreparedFreshSession::new(header, composition)
             .and_then(|prepared| prepared.with_baseline(baseline))
             .map_err(turn_composition_error)
