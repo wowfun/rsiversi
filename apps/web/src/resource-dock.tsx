@@ -5,7 +5,7 @@ import {IconFullscreenOutlineRegular,IconPanelLeftOutlineRegular} from '../vendo
 import {DockLayout} from '../vendor/dsh/dockkit/components/DockSurface.tsx'
 import type {DockIntents,DockLabels} from '../vendor/dsh/dockkit/contract/adapter.ts'
 import type {TabId,TabRecord} from '../vendor/dsh/dockkit/contract/types.ts'
-import {dockIntent,dockStorageKey,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,findTabPane,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
+import {dockIntent,dockStorageKey,floatingTab,dockPaneIds,displayDock,guideContentId,guideInPane,canCloseTab,findTabPane,getPane,type DockDocument,type DockIntent,type Coordinate} from './dock-state.ts'
 import {composerInteraction,resources,resourceHosts,type ResourceHost} from './resource-hosts.ts'
 import {input,source,useSelected,useView} from './bridge.ts'
 import {activeResourceDock,openDockWindow,presentationIdentity,useLayout,type Viewport} from './presentation.tsx'
@@ -16,6 +16,7 @@ import {ResourceOwner} from './resource-owner.mjs'
 import {ScheduledTaskDetail} from './session/scheduled-tasks.tsx'
 import {FileImagePanel} from './session/transcript-file-image.tsx'
 import {DocumentFilePanel, type DocumentLocation} from './session/document-file.tsx'
+import {Markdown} from './session/markdown.tsx'
 
 const labels:DockLabels={emptyPane:'Open a resource to use this pane',splitPane:'Split resources',splitPaneDisabled:'Two resource panes are open',splitPaneNarrow:'Widen resources to split',closeTab:'Close resource tab',addTab:'Open resources',dockFloat:'Dock resource',closeFloat:'Close resource window',resizePane:'Resize resource panes',moveFloat:'Move resource window',resizeFloat:'Resize resource window',describeFloatPosition:(x,y)=>`Position ${x}, ${y} pixels. Arrow keys move; Shift changes by 50 pixels. Home and End select viewport corners.`,describeFloatSize:(w,h)=>`${w} by ${h} pixels. Arrow keys resize; Shift changes by 50 pixels. Home selects minimum size; End fills available space.`,dropZone:{center:'Merge tabs',left:'Split left',right:'Split right',top:'',bottom:''}}
 const descriptor=(host:ResourceHost,surface:NativeSurface)=>{
@@ -59,7 +60,7 @@ function ResourceBody({view}:{view:string}) {
   return <div className="resource-host" ref={root}/>
 }
 function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:string;owner:ResourceOwner;pane:string;surface:NativeSurface;active:boolean;viewport:Viewport}) {
-  const [dock]=useState(()=>openDockWindow(identity?dockStorageKey(identity,surface.session):undefined))
+  const [dock]=useState(()=>openDockWindow(identity?dockStorageKey(identity,surface.session):undefined,pane,surface.generation))
   const doc=useSyncExternalStore(dock.subscribe,dock.getSnapshot)
   useLayoutEffect(()=>{
     if(!active)return
@@ -111,7 +112,7 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
     dock.commit(next);bindHosts()
     for(const tab of Object.values(next.state.tabs)){
       const c=JSON.parse(tab.contentId) as Coordinate;let binding=bindings.current.get(tab.id)
-      if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task'||c.action==='file_image'||c.action==='workspace_document')continue
+      if(c.action==='resources'||c.action==='terminal'||c.action==='schedule_task'||c.action==='file_image'||c.action==='workspace_document'||c.action==='compaction_summary')continue
       if(!binding){
         binding={label:tab.title};bindings.current.set(tab.id,binding)
         try{
@@ -206,6 +207,12 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
   const guide=<ResourceGuide surface={surface} pane={pane} terminals={{open:openTerminal,list}}/>
   const body=(tab:TabRecord)=>{
     const c=JSON.parse(tab.contentId) as Coordinate,binding=bindings.current.get(tab.id)
+    if(c.action==='compaction_summary'){
+      const summary=dock.summaries.get(tab.contentId)
+      return <section className="compaction-document markdown" aria-label="Context summary" data-compaction-preview="">
+        {summary?('markdown' in summary?<Markdown events={summary.markdown}/>:<div className="message-text">{summary.text}</div>):<p role="status">Reopen the summary from its conversation marker.</p>}
+      </section>
+    }
     if(c.action==='schedule_task')return <ScheduledTaskDetail surface={surface} id={String(c.task)}/>
     if(c.action==='workspace_document'||c.action==='file_image'||c.action==='resources'){
       const seat=findTabPane(displayed,tab.id)
@@ -237,6 +244,6 @@ function SessionDock({owner,pane,surface,active,viewport,identity}:{identity?:st
     }}>
     {columnVisible&&notice&&<p className="resource-notice" role="alert">{notice}</p>}
     {columnVisible&&!Object.keys(doc.state.tabs).length&&guide}
-    <DockLayout state={displayed} active={active} keepMounted={()=>true} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={chrome}/>
+    <DockLayout state={displayed} active={active} keepMounted={()=>true} canCloseTab={tab=>canCloseTab(doc.state,tab)} dropZones="horizontal" minPaneFraction={.2} canSplit={!narrow&&dockPaneIds(doc.state).length<2} canAddTab={paneId=>Object.keys(doc.state.tabs).length<16&&!guideInPane(displayed,paneId)} intents={intents} labels={labels} renderTabTitle={tab=>{const id=bindings.current.get(tab.id)?.view;return id?resourceHosts.get(id)?.title??tab.title:tab.title}} renderTab={body} renderTabMenuItems={(tab,dismiss)=><>{tab.contentId!==guideContentId&&<button role="menuitem" onClick={()=>{dismiss();apply('duplicate',{tab:tab.id})}}>Duplicate</button>}<button role="menuitem" disabled={doc.state.floats.length>=4} onClick={()=>{dismiss();apply('float',{tab:tab.id})}}>Float</button></>} chrome={chrome}/>
   </section>
 }

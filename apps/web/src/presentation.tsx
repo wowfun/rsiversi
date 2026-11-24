@@ -1,7 +1,7 @@
 import {createContext,useCallback,useContext,useEffect,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore,type ReactNode} from 'react'
 import {bindSnapshotSelector} from '../vendor/dsh/renderer/bind.ts'
 import {defaultLayout,validateLayout,PresentationStore} from '../presentation-store.js'
-import {observable,useView,type View} from './bridge.ts'
+import {input,observable,useView,type View} from './bridge.ts'
 import {applyIntent} from '../device-store.js'
 import {LayoutEdits} from '../layout-edits.js'
 import {dockIntent,readDock,writeDock,type DockDocument} from './dock-state.ts'
@@ -11,15 +11,33 @@ export type Layout=SavedLayout & {resourcesClosed:boolean}
 export const LayoutContext=createContext<{layout:Layout;update:(patch:Partial<Layout>)=>void;expand:(id:string,expanded?:boolean)=>void}>({layout:{...defaultLayout as SavedLayout,resourcesClosed:true},update:()=>{},expand:()=>{}})
 export const useLayout=()=>useContext(LayoutContext)
 export const presentationIdentity = observable<string | undefined>(undefined)
-export function openDockWindow(key:string|undefined) {
+type SummaryDocument=Awaited<ReturnType<typeof input.compactionSummary>>
+export function openDockWindow(key:string|undefined,pane:string,generation:string) {
   const state=observable(readDock(key))
+  const summaries=new Map<string,SummaryDocument>()
   function commit(next:DockDocument) {
-    if(next===state.getSnapshot())return
+    const previous=state.getSnapshot()
+    if(next===previous)return
+    if(summaries.size&&next.state.tabs!==previous.state.tabs){
+      const tabs=Object.values(next.state.tabs)
+      for(const id of summaries.keys())if(!tabs.some(tab=>tab.contentId===id))summaries.delete(id)
+    }
     state.set(next)
     writeDock(key,next)
   }
-  return {getSnapshot:state.getSnapshot,subscribe:state.subscribe,commit,
+  const dock={getSnapshot:state.getSnapshot,subscribe:state.subscribe,commit,pane,generation,summaries,
+    async openSummary(sequence:string,signal:AbortSignal){
+      const coordinate={action:'compaction_summary',sequence}
+      const id=JSON.stringify(coordinate)
+      const document=summaries.has(id)?undefined:await input.compactionSummary(pane,generation,sequence,signal)
+      if(signal.aborted||activeResourceDock.getSnapshot()!==dock)return
+      const next=dockIntent(state.getSnapshot(),{kind:'dock',operation:'open',coordinate,title:'Context summary'})
+      if(document)summaries.set(id,document)
+      if(document&&next===state.getSnapshot())state.set({...next})
+      else commit(next)
+    },
     expand:(expanded:boolean)=>commit(dockIntent(state.getSnapshot(),{kind:'dock',operation:'expanded',expanded}))}
+  return dock
 }
 export const activeResourceDock=observable<ReturnType<typeof openDockWindow>|undefined>(undefined)
 const subscribeNothing=()=>()=>{}

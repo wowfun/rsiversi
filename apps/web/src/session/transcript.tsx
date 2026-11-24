@@ -13,10 +13,12 @@ import {
   PureComponent,
   Fragment,
   memo,
+  useEffect,
   useId,
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -27,6 +29,7 @@ import {
   presentationPolicy,
 } from "../../turn-presentation.js";
 import { run } from "../bridge.ts";
+import {activeResourceDock} from '../presentation.tsx';
 import { closeDisclosure } from "../../disclosure.js";
 import { Markdown } from "./markdown.tsx";
 import {ForkTurn} from './fork.tsx';
@@ -103,29 +106,50 @@ function EarlierHistory({owner}: {owner:TranscriptOwner}) {
   </button></div>;
 }
 
-function DisclosureHeader({label,caption,icon,open,toggle}: {
-  label:string; caption:string; icon:ReactNode; open:boolean; toggle?:()=>void;
+function TranscriptRowButton({label,caption,icon,open,busy,hint,onClick}: {
+  label:string; caption:string; icon:ReactNode; open?:boolean; busy?:boolean; hint?:string; onClick?:()=>void;
 }) {
-  return <button className="compaction-toggle" type="button" disabled={!toggle}
-      aria-expanded={toggle ? open : undefined} onClick={toggle}>
+  return <button className="compaction-toggle" type="button" disabled={!onClick||busy}
+      aria-expanded={onClick?open:undefined} aria-busy={busy} title={hint} onClick={onClick}>
       <span className="compaction-icon" aria-hidden="true">{icon}
         {open ? <IconChevronDownOutlineRegular/> : <IconChevronRightOutlineRegular/>}</span>
       <span>{label}</span><span className="compaction-separator" aria-hidden="true"/>
       <span className="compaction-caption">{caption}</span>
+      {hint&&<span className="sr-only">{hint}</span>}
     </button>;
 }
 
-function CompactionRow({block}: {block: TranscriptBlock}) {
-  const [expanded, setExpanded] = useState(false);
-  const expandable = block.text.length > 0;
-  const open = expandable && expanded;
+function CompactionRow({block,pane,generation}: {block:TranscriptBlock; pane?:string; generation?:string}) {
+  const dock=useSyncExternalStore(activeResourceDock.subscribe,activeResourceDock.getSnapshot);
+  const sequence=block.summary_seq;
+  const available=dock!==undefined&&dock.pane===pane&&dock.generation===generation&&sequence!==undefined;
+  const pending=useRef<AbortController|null>(null);
+  const [opening,setOpening]=useState(false);
+  const [failure,setFailure]=useState('');
+  useEffect(()=>{
+    setOpening(false);
+    setFailure('');
+    return ()=>{pending.current?.abort();pending.current=null};
+  },[sequence,dock]);
+  async function open() {
+    if(!available||pending.current)return;
+    const request=new AbortController();
+    pending.current=request;
+    setOpening(true);
+    setFailure('');
+    try{
+      await dock.openSummary(sequence,request.signal);
+    }catch(error){
+      if(!request.signal.aborted)setFailure(error instanceof Error?error.message:String(error));
+    }finally{
+      if(pending.current===request){pending.current=null;setOpening(false)}
+    }
+  }
   return <article className="compaction-row">
-    <DisclosureHeader label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
-      open={open} toggle={expandable ? ()=>setExpanded(value=>!value) : undefined}/>
-    {open && <div className="compaction-summary markdown">
-      {block.markdown ? <Markdown events={block.markdown}/> : block.text}
-      {block.clipped && <p className="omitted">Text shortened in this view.</p>}
-    </div>}
+    <TranscriptRowButton label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
+      busy={opening} hint={available?'View compaction summary in the sidebar':undefined}
+      onClick={available?()=>void open():undefined}/>
+    {failure&&<p role="alert">{failure}</p>}
   </article>;
 }
 
@@ -244,8 +268,8 @@ const Message = memo(function Message({
       className={`message ${block.role}${block.trigger ? " turn-trigger" : ""}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
       hidden={hidden && !block.external}
     >
-      {context && <DisclosureHeader label="Context injection" caption={block.title} icon={<IconContextInjectionOutlineRegular/>}
-        open={summary} toggle={()=>setSummary(value=>!value)}/>}
+      {context && <TranscriptRowButton label="Context injection" caption={block.title} icon={<IconContextInjectionOutlineRegular/>}
+        open={summary} onClick={()=>setSummary(value=>!value)}/>}
       {block.trigger && <TurnTrigger block={block} kind={block.trigger} time={time} open={summary} toggle={()=>setSummary(value=>!value)}/>}
       {showHeader && !block.trigger && <DocumentTranscript block={block}>{foldable ? (
          <ProcessTitle block={block} open={summary || expanded} flat={expanded} preview={preview} running={streaming} toggle={() => setSummary(value => !value)}/>
@@ -433,7 +457,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
     }
     for (const block of transcript.blocks) {
       if (block.role === "compaction") {
-        nodes.push(<CompactionRow key={`${generation}:${block.key}`} block={block}/>);
+        nodes.push(<CompactionRow key={`${generation}:${block.key}`} block={block} pane={pane} generation={generation}/>);
         continue;
       }
       if (summaries.has(block.key)) nodes.push(summaries.get(block.key));

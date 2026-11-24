@@ -51,6 +51,84 @@ pub(super) async fn fixture() -> (Runtime, Arc<Backend>, Arc<rsi_gui::GuiApplica
 }
 
 #[tokio::test]
+async fn compaction_summary_reads_only_the_cited_settlement_in_the_attached_pane() {
+    use rsi_agent_session_protocol::{DomainRequestId, ManualCompactionEvent, ModelAttemptLog};
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent as E};
+    let (runtime, backend, app) = fixture().await;
+    let generation = view(&app)["surfaces"]["main"]["generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = [
+        E::ContentStarted {
+            index: 0,
+            content: ContentStart::Text,
+        },
+        E::ContentDelta {
+            index: 0,
+            delta: ContentDelta::Text("**Record 7**".into()),
+        },
+        E::ContentFinished { index: 0 },
+        E::Finished {
+            reason: FinishReason::Stop,
+            replay: None,
+        },
+    ];
+    let attempt =
+        ModelAttemptLog::from_events(events.into_iter().map(|event| (0, event)), true).unwrap();
+    backend.facts.lock().unwrap().push(
+        SessionFact::new(
+            7,
+            1,
+            SessionFactBody::ManualCompaction {
+                command_id: DomainRequestId::new("compact-7").unwrap(),
+                effect_id: EffectId::new("summary-7").unwrap(),
+                event: ManualCompactionEvent::Settled { attempt },
+            },
+        )
+        .unwrap(),
+    );
+    let pane = rsi_gui::SurfaceId::MAIN;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let body = app
+        .compaction_summary(pane, generation.clone(), 7, stop.clone())
+        .await
+        .unwrap();
+    let doc: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        doc["markdown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["text"] == "Record 7")
+    );
+    assert!(doc.get("text").is_none());
+    assert!(
+        app.compaction_summary(pane, generation.clone(), 8, stop.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        app.compaction_summary(pane, "retired".into(), 7, stop.clone())
+            .await
+            .is_err()
+    );
+    backend.block_source.store(true, Ordering::SeqCst);
+    let pending = app.compaction_summary(pane, generation, 7, stop.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while backend.active_source.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.cancel();
+    assert_eq!(pending.await.unwrap_err(), "Summary closed");
+    assert_eq!(backend.active_source.load(Ordering::SeqCst), 0);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn exact_panel_close_cancels_reads_when_all_ordinary_slots_are_occupied() {
     let (runtime, backend, app) = fixture().await;
     app.command(r#"{"action":"add_surface","pane":"compare"}"#)

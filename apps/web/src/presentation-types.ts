@@ -10,6 +10,7 @@ export interface SessionCreation {workspace_id:string;session_id:string;agent_pr
 export interface MediaLimits {images:number;upload_bytes:number;preview_objects:number;preview_bytes:number;preview_concurrency:number}
 export interface SettingsCatalog {ticket:string;namespace:string|null;page:{namespaces:string[];next:string|null}|null;error:string|null}
 export interface TranscriptBlock {
+  summary_seq?: string;
   trigger?: 'schedule' | 'goal' | 'agent' | 'completion' | 'request';
   key: string;
   role: string;

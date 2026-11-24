@@ -1,5 +1,5 @@
 import { lane, limits } from "./admission.js";
-import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, archive_session, directory_input, scheduled_tasks, background_job, background_output, message_feedback, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
+import init, { build_family, connect, connect_local, command, resource_open, terminal, restore_session, prepare_submission, read_pending_interaction, read_session_resource, export_input, reference_input, file_input, transcript_file, archive_session, directory_input, scheduled_tasks, background_job, background_output, message_feedback, compaction_summary, automation_artifact, dispatch_submission, ui_source, import_image, read_image, next_view, acknowledge_frame, commit_renderer, disconnect, resource_snapshot } from "/rsi_web.js";
 
 const expectedBuildFamily = "__RSI_BUILD_FAMILY__";
 const initialized = init().then(() => {
@@ -98,6 +98,16 @@ async function dispatch(data) {
         if (outputObservers.get(pane) === resolve) outputObservers.delete(pane);
         port.close();
       });
+  } else if (data.method === "compaction_summary") {
+    const {pane,generation,sequence,port} = data.payload;
+    const {promise,resolve} = Promise.withResolvers();
+    port.onmessage = () => resolve();
+    try {
+      result = await compaction_summary(pane,generation,sequence,promise);
+    } finally {
+      resolve();
+      port.close();
+    }
   } else if (data.method === "message_feedback") {
     result = await message_feedback(data.payload);
   } else if (data.method === "automation_artifact") {

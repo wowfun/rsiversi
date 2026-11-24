@@ -124,6 +124,21 @@ let actions: Actions | undefined
 export function installActions(value: Actions) { actions = value }
 export type ArchiveAction = 'archive' | 'stop_and_archive' | 'restore';
 export const input = {
+  async compactionSummary(pane:string, generation:string, sequence:string, signal:AbortSignal) {
+    if (!actions) throw new Error('Application is starting');
+    signal.throwIfAborted();
+    const {port1,port2} = new MessageChannel();
+    const cancel = () => port1.postMessage(null);
+    signal.addEventListener('abort',cancel);
+    try {
+      const result = await actions.call('compaction_summary', {pane,generation,sequence,port:port2}, [port2]);
+      return JSON.parse(result as string) as {markdown:import('./session/markdown.tsx').MarkdownEvent[]}|{text:string};
+    } finally {
+      signal.removeEventListener('abort',cancel);
+      port1.close();
+      port2.close();
+    }
+  },
   async archive(session: string, action: ArchiveAction): Promise<ArchiveActivity[]|null> {
     if (!actions) throw new Error('Application is starting');
     return JSON.parse(await actions.call("archive_session", JSON.stringify({session,action})) as string);

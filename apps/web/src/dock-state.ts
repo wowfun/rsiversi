@@ -7,12 +7,21 @@ import {dockPaneIds,findTabPane,getPane} from '../vendor/dsh/dockkit/engine/tree
 import type {LayoutState,LayoutOp,LayoutNode,NodeId,TabId,PaneId,SplitId,FloatRect} from '../vendor/dsh/dockkit/contract/types.ts'
 
 export type Coordinate = {action:string;[key:string]:unknown}
+function tabKind(c:Coordinate) {return c.action==='compaction_summary'?'compaction-summary':'rsi'}
 export interface DockSnapshot {kind:'session-dock';version:2;counter:number;state:LayoutState}
 export interface DockDocument extends DockSnapshot {history:History}
 export type DockIntent = {kind:'dock';operation:string;[key:string]:unknown}
 export const guideContentId=JSON.stringify({action:'resources'})
 export function guideInPane(state:LayoutState,pane:PaneId) {
   return plan.findPaneContentTab(state,pane,guideContentId)
+}
+function soleDockedTab(state:LayoutState,tab:TabId) {
+  const pane=findTabPane(state,tab)
+  return pane.host==='dock'&&pane.tabs.length===1&&dockPaneIds(state).length===1
+}
+export function canCloseTab(state:LayoutState,tab:TabId) {
+  const record=state.tabs[tab]
+  return !!record&&(record.contentId!==guideContentId||!soleDockedTab(state,tab))
 }
 function focusTab(state:LayoutState,tab:TabId):readonly LayoutOp[] {
   const pane=findTabPane(state,tab)
@@ -39,6 +48,7 @@ export function coordinate(value:unknown):Coordinate {
   const valid=v.action==='terminal' ? keys(v,'action,terminal')&&text(v.terminal) :
     v.action==='resources' ? keys(v,'action') :
     v.action==='schedule_task' ? keys(v,'action,task')&&text(v.task) :
+    v.action==='compaction_summary' ? keys(v,'action,sequence')&&typeof v.sequence==='string'&&/^[1-9]\d{0,19}$/.test(v.sequence) :
     (v.action==='file_image'||v.action==='workspace_document') ? keys(v,'action,path')&&text(v.path,16*1024) :
     ['surface','application_surface','remote_surface'].includes(v.action) ? keys(v,'action,bundle,name')&&text(v.bundle,128)&&text(v.name,128) :
     ['ui_block','inspect_block'].includes(v.action) ? keys(v,'action,key')&&text(v.key,512) :
@@ -67,7 +77,18 @@ export function validateDock(value:unknown):DockSnapshot {
 }
 export function restoreDock(value:unknown):DockDocument {
   const saved=validateDock(value)
-  return {...saved,history:EMPTY_HISTORY}
+  let state=saved.state
+  for(const tab of Object.values(saved.state.tabs)){
+    if(tab.kind==='compaction-summary'){
+      state=applyOp(state,{type:'closeTab',tabId:tab.id}).state
+    }
+  }
+  if(state!==saved.state){
+    for(const op of plan.planSettle(state,createIdMinter(saved.counter).next))state=applyOp(state,op).state
+    const root=state.nodes[state.rootId]
+    if(root?.kind==='pane'&&!root.tabs.length)state={...state,expanded:false,mode:'push'}
+  }
+  return {...saved,state,history:EMPTY_HISTORY}
 }
 export function dockStorageKey(identity:string,session:string) {
   return 'rsi.dock.v1.'+JSON.stringify([identity,session])
@@ -101,7 +122,13 @@ function validateState(state:LayoutState,counter:number) {
       if(!floating)docked++
       if(floating)checkedFloatRect(node.rect);else if(node.rect!==undefined)fail()
       if(node.tabs.length?!node.tabs.includes(node.activeTabId!):node.activeTabId!==undefined)fail()
-      for(const tabId of node.tabs){if(!id(tabId)||Number(tabId.replace(/^[a-z]+/,''))>counter||tabs.has(tabId))fail();tabs.add(tabId);const tab=state.tabs[tabId];if(!keys(tab,'id,kind,contentId,title')||tab.id!==tabId||tab.kind!=='rsi'||!text(tab.title,512))fail();coordinate(JSON.parse(tab.contentId))}
+      for(const tabId of node.tabs){
+        if(!id(tabId)||Number(tabId.replace(/^[a-z]+/,''))>counter||tabs.has(tabId))fail()
+        tabs.add(tabId)
+        const tab=state.tabs[tabId]
+        if(!keys(tab,'id,kind,contentId,title')||tab.id!==tabId||!text(tab.title,512))fail()
+        if(tab.kind!==tabKind(coordinate(JSON.parse(tab.contentId))))fail()
+      }
     }else fail()
   }
   visit(state.rootId,false);state.floats.forEach(float=>visit(float,true))
@@ -119,13 +146,17 @@ export function dockIntent(value:DockDocument,intent:DockIntent):DockDocument {
       const c=coordinate(intent.coordinate),isGuide=c.action==='resources'
       const held=isGuide?guideInPane(s,p??plan.activeDockPaneId(s)):undefined
       ops=held?focusTab(s,held):plan.planOpenContent(s,next,{
-        kind:'rsi',contentId:JSON.stringify(c),title:text(intent.title,512)?intent.title:'Resource',
+        kind:tabKind(c),contentId:JSON.stringify(c),title:text(intent.title,512)?intent.title:'Resource',
         revealIfOpened:!isGuide&&intent.duplicate!==true,paneId:p,
       }).ops
       if(!s.expanded)ops=[...plan.planSetExpanded(s,true),...ops]
       break
     }
-    case 'close':ops=[{type:'closeTab',tabId:t}];break
+    case 'close':
+      if(!canCloseTab(s,t))return value
+      ops=[{type:'closeTab',tabId:t}]
+      if(soleDockedTab(s,t))ops=[...ops,...plan.planSetMode(s,'push'),...plan.planSetExpanded(s,false)]
+      break
     case 'focus':ops=focusTab(s,t);break
     case 'focus-pane':
       if(p===s.activePaneId)return value

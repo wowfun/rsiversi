@@ -1,8 +1,36 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {emptyDock,dockIntent,savedDock,validateDock,dockStorageKey,readDock,writeDock,dockPaneIds,floatingTab,narrowDock,displayDock} from '../src/dock-state.ts';
+import {emptyDock,dockIntent,savedDock,validateDock,restoreDock,dockStorageKey,readDock,writeDock,dockPaneIds,floatingTab,narrowDock,displayDock} from '../src/dock-state.ts';
 const act=(doc,operation,fields={})=>dockIntent(doc,{kind:'dock',operation,...fields});
 const open=doc=>act(doc,'open',{coordinate:{action:'surface',bundle:'files',name:'browser'},title:'Files',duplicate:true});
+test('a summary is keyed to its event and disappears on reload without losing sibling tabs',()=>{
+  const summary={coordinate:{action:'compaction_summary',sequence:'9007199254740993'},title:'Context summary'};
+  const show=doc=>act(doc,'open',summary);
+  const reload=doc=>restoreDock(JSON.parse(JSON.stringify(savedDock(doc))));
+  const only=show(emptyDock());
+  assert.deepEqual(Object.keys(show(only).state.tabs),Object.keys(only.state.tabs));
+  assert.equal(reload(only).state.expanded,false);
+  assert.deepEqual(reload(only).state.tabs,{});
+  const fullscreen=act(only,'toggle-fullscreen');
+  const closed=act(fullscreen,'close',{tab:fullscreen.state.nodes[fullscreen.state.rootId].activeTabId});
+  assert.equal(closed.state.expanded,false);
+  assert.equal(closed.state.mode,'push');
+  assert.deepEqual(act(closed,'undo').state,fullscreen.state);
+  const files=open(emptyDock());
+  const mixed=show(files),tab=mixed.state.nodes[mixed.state.activePaneId].activeTabId;
+  const floated=act(mixed,'float',{tab});
+  const restored=reload(floated);
+  assert.deepEqual(restored.state.tabs,files.state.tabs);
+  assert.deepEqual(restored.state.floats,[]);
+  assert.equal(restored.state.expanded,true);
+  assert.throws(()=>act(files,'open',{...summary,coordinate:{...summary.coordinate,text:'private summary'}}));
+});
+test('the sole guide stays open and a vanished tab can be closed twice',()=>{
+  const guide=act(emptyDock(),'open',{coordinate:{action:'resources'},title:'Resources'});
+  const tab=guide.state.nodes[guide.state.rootId].activeTabId;
+  assert.equal(act(guide,'close',{tab}),guide);
+  assert.equal(act(guide,'close',{tab:'tab999'}),guide);
+});
 test('revealing a resource from a collapsed column is one undoable edit',()=>{
  const start=emptyDock();
  assert.equal(start.state.expanded,false);

@@ -62,8 +62,12 @@ Manual compaction occupies one chronological row in the issuing conversation.
 Its command identity anchors progress and settlement across observation, paging
 and reopen. A live start shows progress. A start recovered from history reports
 that the outcome is unrecorded until a later fact establishes it.
-An installation marker enables disclosure of the cited summary
-when its text is present in the loaded window. A busy or empty command shows
+Once the loaded history contains both the installation and its settlement, the
+marker opens the cited summary as a temporary Markdown tab in the session's
+right sidebar. Reopening the same marker focuses its tab. Reload closes summary
+tabs. Leaving the marker while it is loading cancels the read. A read failure
+appears at the marker and can be retried.
+A busy or empty command shows
 its outcome in the issuing pane without publishing an empty session.
 
 Non-human messages that start a Turn appear above its process disclosure. The
@@ -778,6 +782,9 @@ step. Independent resource views, including Files, can still be duplicated.
 Splitting the resource dock opens the guide in the new pane. One Undo removes
 the split and its guide together. At the sixteen-tab limit the new pane stays
 available as a drop target for an existing tab.
+Closing the last docked resource also collapses the column and exits fullscreen.
+The guide stays available when it is the only docked tab. Floating panels
+remain independent.
 When a narrow right-hand pane cannot fit its tab and the dock-wide controls on
 one row, the controls use a second row. The tab and its close button stay
 reachable by pointer along with undo, redo, fullscreen and hide.

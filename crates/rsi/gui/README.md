@@ -243,6 +243,13 @@ Internal summary text and its request metadata stay outside the conversational
 process classification. Summary text uses a Context compaction status block, never an Assistant
 answer block; raw source paging preserves its exact Fact provenance.
 
+For manual compaction the transcript publishes the settled Fact sequence after
+installation. Opening the marker reads that Fact in the attached Session and
+returns its visible text in content-block order, with Markdown rendered on
+demand. Closing the reader or retiring the attachment releases the pending
+history read and its admission slot. Summary bodies are absent from ordinary
+transcript frames.
+
 When composed, ordinary [workbench feature plugins](../workbench-ui/README.md)
 supply navigation and redacted model-setup projections. Closed commands forward
 to those owners; the GUI does not duplicate configuration policy or Store cursors.

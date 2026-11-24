@@ -38,7 +38,7 @@ pub(crate) struct Block {
     pub(crate) images: Option<Arc<Vec<MessageImage>>>,
     presented: Option<Arc<rsi_session_files_ui::PresentedCards>>,
     request: Option<rsi_conversation::RequestPresentation>,
-    compact: Option<(u64, rsi_agent_turn_protocol::CompactionOutcome)>,
+    compact: Option<Box<CompactionMarker>>,
     tool_start_seq: Option<u64>,
     tool_argument_bytes: usize,
     sources: SourceIndex,
@@ -47,6 +47,12 @@ pub(crate) struct Block {
     encoded: OnceLock<Option<Arc<CachedBlock>>>,
     #[cfg(test)]
     markdown_parses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+#[derive(Clone, Debug)]
+struct CompactionMarker {
+    latest: u64,
+    outcome: rsi_agent_turn_protocol::CompactionOutcome,
+    settlement: Option<u64>,
 }
 #[derive(Debug)]
 pub(crate) struct CachedBlock {
@@ -85,24 +91,23 @@ impl Serialize for BlockView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let block = self.0;
-        let installed = block.compact.is_some_and(|(_, outcome)| {
-            outcome == rsi_agent_turn_protocol::CompactionOutcome::Compacted
-        });
-        let text = if block.compact.is_none() || installed {
-            block.text.as_str()
-        } else {
-            ""
-        };
-        let markdown = (matches!(block.role, "assistant" | "reasoning")
-            || installed && !text.is_empty())
-        .then(|| {
-            #[cfg(test)]
-            block
-                .markdown_parses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::markdown::parse(text)
-        })
-        .flatten();
+        let summary_seq = block
+            .compact
+            .as_ref()
+            .filter(|marker| {
+                marker.outcome == rsi_agent_turn_protocol::CompactionOutcome::Compacted
+            })
+            .and_then(|marker| marker.settlement);
+        let text = block.text.as_str();
+        let markdown = matches!(block.role, "assistant" | "reasoning")
+            .then(|| {
+                #[cfg(test)]
+                block
+                    .markdown_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::markdown::parse(text)
+            })
+            .flatten();
         let request_seq = block
             .request
             .as_ref()
@@ -125,6 +130,7 @@ impl Serialize for BlockView<'_> {
                 + usize::from(block.images.is_some())
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
+                + usize::from(summary_seq.is_some())
                 + usize::from(schedule.is_some())
                 + usize::from(presented.is_some())
                 + usize::from(trigger.is_some())
@@ -141,6 +147,9 @@ impl Serialize for BlockView<'_> {
         }
         view.serialize_field("title", &block.title)?;
         view.serialize_field("text", text)?;
+        if let Some(seq) = summary_seq {
+            view.serialize_field("summary_seq", &seq.to_string())?;
+        }
         if let Some(images) = &block.images {
             view.serialize_field("images", images.as_slice())?;
         }
@@ -457,6 +466,7 @@ impl Transcript {
                     .as_ref()
                     .map_or(0, rsi_conversation::RequestPresentation::owned_bytes)
                 + block.sources.owned_bytes()
+                + block.compact.as_deref().map_or(0, std::mem::size_of_val)
                 + block.source_bytes.capacity() * std::mem::size_of::<usize>();
             if text > MAX_TEXT || metadata > MAX_METADATA {
                 break;
@@ -914,6 +924,41 @@ pub(crate) fn short(text: &str, maximum: usize) -> &str {
     &text[..end]
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(super) enum SummaryDocument {
+    Markdown {
+        markdown: Vec<crate::markdown::Node>,
+    },
+    Plain {
+        text: String,
+    },
+}
+
+pub(super) fn summary_document(fact: &SessionFact) -> Option<SummaryDocument> {
+    let SessionFactBody::ManualCompaction {
+        event: rsi_agent_session_protocol::ManualCompactionEvent::Settled { attempt },
+        ..
+    } = fact.body()
+    else {
+        return None;
+    };
+    if !matches!(
+        attempt.terminal(),
+        rsi_ai_protocol::LanguageEvent::Finished { .. }
+    ) {
+        return None;
+    }
+    let (text, clipped) = rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
+    if clipped || text.trim().is_empty() {
+        return None;
+    }
+    Some(match crate::markdown::parse(&text) {
+        Some(markdown) => SummaryDocument::Markdown { markdown },
+        None => SummaryDocument::Plain { text },
+    })
+}
+
 impl Transcript {
     pub(crate) fn command_feedback(
         &mut self,
@@ -936,27 +981,35 @@ impl Transcript {
         use rsi_agent_session_protocol::ManualCompactionEvent;
         use rsi_agent_turn_protocol::CompactionOutcome;
         let key = rsi_conversation::compaction_key(command);
-        if !self.blocks.iter().any(|block| block.key == key) {
-            self.add(key.clone(), "compaction", "", "", false);
-        }
-        let block = self
-            .blocks
-            .iter_mut()
-            .find(|block| block.key == key)
-            .expect("newest command row");
+        let index = self.blocks.iter().position(|block| block.key == key);
+        let block = match index {
+            Some(index) => &mut self.blocks[index],
+            None => self
+                .blocks
+                .push_back_mut(Block::new(key, "compaction", "", fact.seq())),
+        };
+        let previous_first = block.first_seq;
         block.first_seq = if block.compact.is_some() {
             block.first_seq.min(fact.seq())
         } else {
             fact.seq()
         };
-        if block.compact.is_none_or(|(seq, _)| seq < fact.seq()) {
-            let outcome = CompactionOutcome::recorded(fact).expect("command fact");
+        let outcome = CompactionOutcome::recorded(fact).expect("command fact");
+        let marker = block.compact.get_or_insert_with(|| {
+            Box::new(CompactionMarker {
+                latest: 0,
+                outcome,
+                settlement: None,
+            })
+        });
+        if marker.latest < fact.seq() {
             block.title = match outcome {
                 CompactionOutcome::Started if live => "Compacting context…",
                 _ => outcome.message(),
             }
             .into();
-            block.compact = Some((fact.seq(), outcome));
+            marker.latest = fact.seq();
+            marker.outcome = outcome;
         }
         if let ManualCompactionEvent::Settled { attempt } = event
             && matches!(
@@ -964,13 +1017,14 @@ impl Transcript {
                 rsi_ai_protocol::LanguageEvent::Finished { .. }
             )
         {
-            (block.text, block.clipped) =
-                rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
+            marker.settlement = Some(fact.seq());
         }
         block.invalidate();
-        self.blocks
-            .make_contiguous()
-            .sort_by_key(|block| block.first_seq);
+        if index.is_none() || previous_first != block.first_seq {
+            self.blocks
+                .make_contiguous()
+                .sort_by_key(|block| block.first_seq);
+        }
         self.trim();
     }
 
@@ -1147,9 +1201,11 @@ mod tests {
         );
         forward.fact(&settled);
         assert_eq!(view(&forward)[0]["text"], "");
+        assert!(view(&forward)[0].get("summary_seq").is_none());
         let mut backward = Transcript::default();
         backward.fact(&installed);
         assert_eq!(view(&backward)[0]["text"], "");
+        assert!(view(&backward)[0].get("summary_seq").is_none());
         forward.fact(&installed);
         backward.fact(&settled);
         backward.fact(&fact(2, Event::Started));
@@ -1160,7 +1216,13 @@ mod tests {
         assert_eq!(view(&forward), view(&backward));
         let rows = view(&forward);
         assert_eq!(rows.as_array().unwrap().len(), 1);
-        assert_eq!(rows[0]["text"], "first second");
+        assert_eq!(rows[0]["text"], "");
+        assert!(rows[0].get("markdown").is_none());
+        assert_eq!(rows[0]["summary_seq"], "3");
+        let summary = serde_json::to_value(super::summary_document(&settled).unwrap()).unwrap();
+        assert!(summary["markdown"].to_string().contains("first second"));
+        assert!(summary.get("text").is_none());
+        assert!(super::summary_document(&installed).is_none());
         assert_eq!(rows[0]["title"], "Compacted conversation history.");
     }
 

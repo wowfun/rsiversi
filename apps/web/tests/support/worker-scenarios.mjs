@@ -11,7 +11,7 @@ const gate = () => {
   const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
   return {promise, resolve, reject};
 };
-const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','read_pending_interaction','read_session_resource','prepare_submission','export_input','reference_input','file_input','transcript_file','archive_session','directory_input','scheduled_tasks','background_job','background_output','message_feedback','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
+const names = ['default','build_family','connect','connect_local','command','resource_open','terminal','restore_session','read_pending_interaction','read_session_resource','prepare_submission','export_input','reference_input','file_input','transcript_file','archive_session','directory_input','scheduled_tasks','background_job','background_output','message_feedback','compaction_summary','automation_artifact','dispatch_submission','ui_source','import_image','read_image','next_view','acknowledge_frame','commit_renderer','disconnect','resource_snapshot'];
 async function fixture(overrides = {}) {
   const view = gate(), messages = [], failures = [];
   let terminated = 0, disposed = 0;
@@ -64,6 +64,22 @@ test('background output releases its stream on replacement and collapse', async 
   second.postMessage(null);
   await closed;
   assert.deepEqual(stopped,['first','second']);
+  await f.owner.retire();
+});
+
+test('closing a transcript marker cancels its pending summary without another request slot', async () => {
+  const started = gate();
+  const f = await fixture({compaction_summary: async (pane,generation,sequence,closed) => {
+    started.resolve([pane,generation,sequence]);
+    await closed;
+    throw Error('Summary closed');
+  }});
+  const {port1,port2} = new MessageChannel();
+  const pending = f.owner.request('compaction_summary', {pane:'main',generation:'1',sequence:'9007199254740993',port:port2}, [port2]);
+  assert.deepEqual(await started.promise,['main','1','9007199254740993']);
+  port1.postMessage(null);
+  await assert.rejects(pending,/Summary closed/);
+  port1.close();
   await f.owner.retire();
 });
 

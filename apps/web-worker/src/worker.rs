@@ -821,6 +821,31 @@ pub async fn message_feedback(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Reads the cited summary only when its transcript marker is opened.
+#[wasm_bindgen]
+pub async fn compaction_summary(
+    pane: String,
+    generation: String,
+    sequence: String,
+    closed: js_sys::Promise,
+) -> Result<String, JsValue> {
+    let stop = tokio_util::sync::CancellationToken::new();
+    let read = application()?.compaction_summary(
+        rsi_gui::SurfaceId::parse(&pane).map_err(failure)?,
+        generation,
+        sequence.parse().map_err(failure)?,
+        stop.clone(),
+    );
+    tokio::select! {
+        biased;
+        _ = wasm_bindgen_futures::JsFuture::from(closed) => {
+            stop.cancel();
+            Err(failure("Summary closed"))
+        }
+        result = read => result.map_err(failure),
+    }
+}
+
 /// Reads one caller-scoped screenshot outside the shared frame stream.
 #[wasm_bindgen]
 pub async fn automation_artifact(source: String) -> Result<String, JsValue> {
