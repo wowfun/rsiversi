@@ -238,17 +238,7 @@ impl AgentSessionDraft {
 
     /// Lists metadata from the pinned generation, including non-draft-safe commands.
     pub fn command_descriptors(&self) -> Vec<SessionCommandDescriptor> {
-        self.composition
-            .contributions()
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry.kind() {
-                ContributionKind::Command(command) if !command.is_continuation_only() => {
-                    Some(command.descriptor().clone())
-                }
-                _ => None,
-            })
-            .collect()
+        self.composition.contributions().command_descriptors()
     }
 
     /// Queries a previously applied command without invoking callbacks.

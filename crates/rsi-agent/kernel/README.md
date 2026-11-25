@@ -328,6 +328,10 @@ The executor-facing claim seam
 returns that resident pin only after validating the issuer seal, live claim
 identity, and pointer identity of the one resident Header allocation.
 
+Session command discovery lists the public descriptors in the prepared composition
+and reads the current durable control cursor from Store metadata. Command execution
+reads the Domain states used by the callback.
+
 The independent Session projection read service reports `ProjectionCapacity`
 when concurrent capture admission is exhausted.
 Its change subscriptions use the shared observer pool and report `ObserverCapacity`.

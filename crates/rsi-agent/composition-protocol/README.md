@@ -205,10 +205,9 @@ captured command context, alongside the invocation's request identity, and must
 compare them with the reservation they propose.
 Ordinary and draft commands receive no continuation input.
 
-Command registrations distinguish ordinary application dispatch from internal
-continuation dispatch as process-local metadata. Internal commands remain pure
-state proposals, are omitted from ordinary discovery, and cannot run through
-ordinary draft or durable command endpoints. This metadata grants no scheduling
+The frozen catalog supplies draft and durable Sessions with the same ordered
+public command descriptors. Internal continuation commands remain pure state
+proposals and require their own dispatch path. This metadata grants no scheduling
 authority: Kernel separately authenticates continuation leases and reservations.
 
 This package owns the process-local interface between Agent composition,

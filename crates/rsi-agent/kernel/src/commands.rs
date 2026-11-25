@@ -110,24 +110,10 @@ impl SessionCommands for AgentKernel {
 
     async fn list(&self, session: PreparedResumeSession) -> TurnResult<SessionCommandsView> {
         let (header, composition) = self.inner.resume_issuer.inspect(&session)?;
-        let page = observation::read_domain_states_bounded(&self.inner, header.session_id(), None)
-            .await
-            .map_err(turn_store_error)?;
+        let control_seq = observation::control_tail(&self.inner, header.session_id()).await?;
         SessionCommandsView::new(
-            CommandRevision::Durable {
-                control_seq: page.durable_control_seq,
-            },
-            composition
-                .contributions()
-                .entries()
-                .iter()
-                .filter_map(|entry| match entry.kind() {
-                    ContributionKind::Command(command) if !command.is_continuation_only() => {
-                        Some(command.descriptor().clone())
-                    }
-                    _ => None,
-                })
-                .collect(),
+            CommandRevision::Durable { control_seq },
+            composition.contributions().command_descriptors(),
         )
         .map_err(|error| TurnError::Invariant(error.to_string()))
     }

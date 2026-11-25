@@ -2,7 +2,7 @@ use super::{
     ContextContributor, ContributionError, ContributionResult, MAXIMUM_AGENT_CONTRIBUTIONS,
     PostToolContributor, ToolPolicy, ToolSettlementContributor,
 };
-use rsi_agent_session_protocol::ContributionId;
+use rsi_agent_session_protocol::{ContributionId, SessionCommandDescriptor};
 use rsi_meta::{
     RegistrationContext, RegistrationLease, RegistrationOrderSnapshot, RegistrationPosition,
 };
@@ -159,6 +159,19 @@ impl ContributionCatalog {
     /// Borrows all callbacks in frozen execution order.
     pub fn entries(&self) -> &[ContributionRegistration] {
         &self.entries
+    }
+
+    /// Lists public session commands in this generation's frozen order.
+    pub fn command_descriptors(&self) -> Vec<SessionCommandDescriptor> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry.kind() {
+                ContributionKind::Command(command) if !command.is_continuation_only() => {
+                    Some(command.descriptor().clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 

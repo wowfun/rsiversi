@@ -73,7 +73,7 @@ async fn store_admission_command_refusal_preserves_known_prewrite_capacity() {
 }
 
 #[tokio::test]
-async fn current_domain_reads_reject_a_structurally_valid_historical_page() {
+async fn command_discovery_reads_the_control_tail_without_domain_state() {
     let store = Arc::new(FactReadRaceStore::new(Arc::new(MemoryStore::new())));
     let fixture = Fixture::start(store.clone(), false).await;
     let historical = store
@@ -88,22 +88,38 @@ async fn current_domain_reads_reject_a_structurally_valid_historical_page() {
         .prepare_resume(&fixture.session_id)
         .await
         .unwrap();
+    let committed = fixture
+        .kernel
+        .execute(
+            fixture
+                .kernel
+                .prepare_resume(&fixture.session_id)
+                .await
+                .unwrap(),
+            fixture.invocation("advance-catalog-cursor", true).await,
+        )
+        .await
+        .unwrap();
+    assert!(committed.control_seq() > historical.durable_control_seq);
     store.stale_domain_read.store(true, Ordering::Release);
-    assert!(fixture.kernel.list(prepared).await.is_err());
-    store.stale_domain_read.store(false, Ordering::Release);
     assert!(
         fixture
             .kernel
-            .list(
-                fixture
-                    .kernel
-                    .prepare_resume(&fixture.session_id)
-                    .await
-                    .unwrap()
-            )
+            .domain_states(&fixture.session_id)
             .await
-            .is_ok()
+            .is_err()
     );
+    let body_reads = store.projection_reads.load(Ordering::SeqCst);
+    let view = fixture.kernel.list(prepared).await.unwrap();
+    assert_eq!(store.projection_reads.load(Ordering::SeqCst), body_reads);
+    assert_eq!(
+        view.revision(),
+        rsi_agent_session_protocol::CommandRevision::Durable {
+            control_seq: committed.control_seq(),
+        }
+    );
+    assert_eq!(view.commands().len(), 1);
+    assert_eq!(view.commands()[0].name(), "toggle");
     fixture.stop().await;
 }
 
