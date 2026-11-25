@@ -10,7 +10,8 @@ async function waitClosed(closed) {
   finally {clearTimeout(timer);}
 }
 export async function holdGeneration(bundle, environment=process.env, launch=spawn) {
-  const binary=environment.RSI_APP_TOOLS_BINARY ?? resolve(root,`target/debug/rsi-app-tools${process.platform==='win32'?'.exe':''}`);
+  const binary=environment.RSI_APP_TOOLS_BINARY ?? resolve(root,environment.CARGO_TARGET_DIR || 'target','debug',
+    process.platform==='win32'?'rsi-app-tools.exe':'rsi-app-tools');
   await access(binary).catch(()=>{throw Error('Build the fixture lease helper: cargo build --locked -p rsi-app-tools, or set RSI_APP_TOOLS_BINARY');});
   const helper=launch(binary,['fixture-lease',bundle],{stdio:['pipe','pipe','pipe'],windowsHide:true});
   let closing=false,diagnostic='',ready=false;

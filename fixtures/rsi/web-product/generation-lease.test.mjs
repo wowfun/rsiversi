@@ -3,6 +3,9 @@ import {test} from 'node:test';
 import {spawn} from 'node:child_process';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
+import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {holdGeneration} from './generation-lease.mjs';
 
 function launch(source) {
@@ -12,6 +15,22 @@ function launch(source) {
   };
 }
 const environment={RSI_APP_TOOLS_BINARY:process.execPath};
+test('lease startup uses the Cargo target directory unless the helper is explicit',async t=>{
+  const target=await mkdtemp(join(tmpdir(),'rsi-lease-target-'));
+  t.after(()=>rm(target,{recursive:true,force:true}));
+  const debug=join(target,'debug');
+  await mkdir(debug);
+  const built=join(debug,process.platform==='win32'?'rsi-app-tools.exe':'rsi-app-tools');
+  await writeFile(built,'fixture');
+  for(const override of [undefined,process.execPath]){
+    const lease=await holdGeneration('selected-bundle',{CARGO_TARGET_DIR:target,RSI_APP_TOOLS_BINARY:override},
+      (binary,args,options)=>{
+        assert.equal(binary,override??built);
+        return launch("process.stdout.write('ready\\n');process.stdin.resume();")(process.execPath,args,options);
+      });
+    await lease.close();
+  }
+});
 test('early exit waits for stderr drain before diagnosing failure',async()=>{
   const fake=()=>{
     const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>{};

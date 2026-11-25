@@ -188,8 +188,9 @@ Running fixtures select one paired publication and hold its
 [generation lease](../../../apps/devtools/README.md) through Node lifetime,
 including service restarts. Receipt hashes are checked after lease acquisition;
 all launches use the original binary and adjacent artifacts. Build the supervisor
-with `cargo build --locked -p rsi-app-tools` or set `RSI_APP_TOOLS_BINARY` for a
-custom target directory. The readiness handshake is bounded to 30 seconds and
+with `cargo build --locked -p rsi-app-tools`. The fixture finds the debug binary
+under `CARGO_TARGET_DIR` (default `target`, relative to the checkout).
+`RSI_APP_TOOLS_BINARY` selects an explicit supervisor. The readiness handshake is bounded to 30 seconds and
 32 bytes; helper failure fails the fixture. Explicit cleanup allows five seconds
 for EOF, then kills and reaps the helper within another five seconds and reports
 the timeout. Only deliberate asset-mutation probes
