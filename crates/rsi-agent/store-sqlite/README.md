@@ -17,6 +17,8 @@ derived index contains names only, never a second snapshot payload. The initial
 Domain commit always anchors membership, including an empty name set. Replay
 checks that one baseline row as well as subsequent membership changes; later
 commits with unchanged membership create no row.
+For each canonical request, replay checks its control position, originating
+Turn and logical byte count in one indexed lookup.
 
 Message feedback is stored once in its canonical control. A partial index on
 Session, answer sequence and control sequence seeks the last change for one

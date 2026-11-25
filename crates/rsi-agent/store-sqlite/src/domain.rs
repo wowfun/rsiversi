@@ -738,17 +738,27 @@ impl Projection {
         }
         self.removals += removed.len() as u64;
         if let Some(request) = commit.request_id() {
-            if request_position(connection, session, request)? != Some(record.seq()) {
-                return Err(StoreError::Corrupt(
-                    "domain request index differs from canonical control".into(),
-                ));
-            }
-            let valid = connection.query_row("SELECT source_turn_id IS ?3 AND control_bytes = ?4 FROM domain_requests WHERE session_id = ?1 AND request_id = ?2",
-                params![session.as_str(), request.as_str(), source_turn(commit), i64::try_from(record.encoded_len()).unwrap()],
-                |row| row.get::<_, bool>(0)).map_err(sql_error)?;
+            let valid = connection
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM domain_requests
+                     WHERE session_id = ?1 AND request_id = ?2 AND control_seq = ?3
+                       AND source_turn_id IS ?4 AND control_bytes = ?5)",
+                )
+                .map_err(sql_error)?
+                .query_row(
+                    params![
+                        session.as_str(),
+                        request.as_str(),
+                        sqlite_u64("domain sequence", record.seq())?,
+                        source_turn(commit),
+                        i64::try_from(record.encoded_len()).unwrap(),
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sql_error)?;
             if !valid {
                 return Err(StoreError::Corrupt(
-                    "domain usage index differs from canonical control".into(),
+                    "domain request index differs from canonical control".into(),
                 ));
             }
             self.requests += 1;

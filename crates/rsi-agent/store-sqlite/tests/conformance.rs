@@ -93,6 +93,7 @@ async fn cold_domain_reads_and_offline_verify_reject_corrupted_canonical_indexes
         "UPDATE domain_versions SET update_index = 1 WHERE domain_id = 'a' AND control_seq = 1",
         "DELETE FROM domain_versions WHERE domain_id = 'a' AND control_seq = 1",
         "UPDATE domain_requests SET control_seq = 1",
+        "UPDATE domain_requests SET request_id = 'renamed'",
         "DELETE FROM domain_requests",
         "INSERT INTO domain_requests VALUES ('domains', 'fabricated', 99, NULL, 1)",
         "UPDATE domain_requests SET source_turn_id = NULL",
