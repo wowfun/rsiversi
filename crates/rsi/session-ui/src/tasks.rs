@@ -38,6 +38,7 @@ fn goal_evidence(elements: &mut Vec<UiElement>, goal: &rsi_agent_goal::Goal) {
     if let Some(source) = &goal.completed_by {
         let source = match source {
             rsi_agent_goal::GoalCompleter::Owner => "Host owner",
+            rsi_agent_goal::GoalCompleter::Participant => "Session participant",
             rsi_agent_goal::GoalCompleter::Plugin { name } => name,
         };
         elements.push(field("Completed by", source));
@@ -158,6 +159,9 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
         if !goal.constraints.is_empty() {
             elements.push(field("Constraints", &goal.constraints));
         }
+        if goal.phase == GoalPhase::Paused && goal.unsettled() {
+            elements.push(text("The allocated round is still settling."));
+        }
         goal_evidence(&mut elements, goal);
     }
     if let rsi_client::GoalControlState::Pending(pending) = &control {
@@ -168,9 +172,7 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
     let Some(armed) = armed else {
         return Ok(view("Goal", elements));
     };
-    if let Some(goal) = &state.goal
-        && goal.phase != GoalPhase::Completed
-    {
+    if let Some(goal) = &state.goal {
         let mut control = |label: &str, action| -> Result<()> {
             elements.push(goal_button(
                 label,
@@ -185,41 +187,54 @@ async fn goal_view(controller: &SessionController) -> Result<UiView> {
             ));
             Ok(())
         };
-        if goal.phase == GoalPhase::Active && armed {
-            control(
-                "Pause after current round",
-                Control::Pause {
-                    id: goal.id.clone(),
-                },
-            )?;
-        } else if goal.allocated_rounds < goal.max_rounds || goal.unsettled() {
-            control(
-                "Resume Goal",
-                Control::Resume {
-                    id: goal.id.clone(),
-                },
-            )?;
-        }
-        if controller.is_host_owner().await.unwrap_or(false) {
+        if goal.phase != GoalPhase::Completed {
+            if goal.phase == GoalPhase::Active && armed {
+                control(
+                    "Pause after current round",
+                    Control::Pause {
+                        id: goal.id.clone(),
+                    },
+                )?;
+            } else if goal.has_round_capacity() {
+                control(
+                    "Resume Goal",
+                    Control::Resume {
+                        id: goal.id.clone(),
+                    },
+                )?;
+            }
+            let owner = controller.is_host_owner().await.unwrap_or(false);
             control(
                 "Mark complete",
                 Control::Complete {
                     id: goal.id.clone(),
-                    source: rsi_agent_goal::GoalCompleter::Owner,
+                    source: if owner {
+                        rsi_agent_goal::GoalCompleter::Owner
+                    } else {
+                        rsi_agent_goal::GoalCompleter::Participant
+                    },
                 },
             )?;
-            control(
-                "Cancel automatic round",
-                Control::Cancel {
-                    id: goal.id.clone(),
-                },
-            )?;
+            if owner {
+                control(
+                    "Cancel automatic round",
+                    Control::Cancel {
+                        id: goal.id.clone(),
+                    },
+                )?;
+            }
         }
+        control(
+            "Clear Goal",
+            Control::Clear {
+                id: goal.id.clone(),
+            },
+        )?;
     }
     if state
         .goal
         .as_ref()
-        .is_none_or(|goal| goal.phase != GoalPhase::Active && !goal.unsettled())
+        .is_none_or(|goal| goal.phase == GoalPhase::Completed)
     {
         for (name, label, multiline) in [
             ("objective", "Goal objective", true),

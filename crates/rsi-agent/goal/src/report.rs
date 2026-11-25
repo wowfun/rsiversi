@@ -26,8 +26,8 @@ struct ReportArguments {
 }
 
 impl ReportArguments {
-    fn parse(value: serde_json::Value) -> Result<Self, String> {
-        let args: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    fn parse<'de>(value: impl serde::Deserializer<'de>) -> Result<Self, String> {
+        let args = Self::deserialize(value).map_err(|error| error.to_string())?;
         safe_text(&args.evidence, 4096, false)?;
         Ok(args)
     }
@@ -56,7 +56,7 @@ async fn owns_round(context: &ContributionContext, goal: &Goal) -> ContributionR
     let Some(reservation) = goal
         .reservation
         .as_ref()
-        .filter(|reservation| reservation.settlement.is_none())
+        .filter(|reservation| reservation.settlement.is_none() && !reservation.edited)
     else {
         return Ok(false);
     };
@@ -66,7 +66,7 @@ async fn owns_round(context: &ContributionContext, goal: &Goal) -> ContributionR
         .await?;
     Ok(page.facts.iter().any(|fact| fact.seq() == context.accepted_fact_seq
         && matches!(fact.body(), SessionFactBody::MessageTurnAccepted { turn_id, message_ids, .. }
-            if turn_id == &context.turn_id && message_ids.as_slice() == [reservation.message_id.clone()])))
+            if turn_id == &context.turn_id && message_ids.as_slice() == std::slice::from_ref(&reservation.message_id))))
 }
 
 #[async_trait]
@@ -84,10 +84,8 @@ impl ToolPolicy for GoalPlugin {
             return Ok(ToolPolicyDecision::Abstain);
         }
         let (_, state) = self.current(&context.domains)?;
-        if let (Some(goal), Ok(args)) = (
-            &state.goal,
-            ReportArguments::parse(request.arguments.clone()),
-        ) && goal.id == args.goal_id
+        if let (Some(goal), Ok(args)) = (&state.goal, ReportArguments::parse(request.arguments))
+            && goal.id == args.goal_id
             && owns_round(context, goal).await?
         {
             return Ok(ToolPolicyDecision::Abstain);
@@ -107,13 +105,6 @@ impl PostToolContributor for GoalPlugin {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
-        let (view, mut state) = self.current(&context.domains)?;
-        let Some(goal) = &mut state.goal else {
-            return Ok(ContributionOutput::default());
-        };
-        if !owns_round(context, goal).await? {
-            return Ok(ContributionOutput::default());
-        }
         let mut reports = Vec::new();
         for fact in settled {
             if let SessionFactBody::ToolResult {
@@ -128,13 +119,20 @@ impl PostToolContributor for GoalPlugin {
                 && let Some(envelope) = result.value.get("goal_report")
                 && envelope.get("version").and_then(serde_json::Value::as_u64) == Some(1)
                 && let Some(report) = envelope.get("report")
-                && let Ok(args) = ReportArguments::parse(report.clone())
-                && args.goal_id == goal.id
+                && let Ok(args) = ReportArguments::parse(report)
             {
-                reports.push((fact.seq(), effect_id.clone(), identity.clone(), args));
+                reports.push((fact.seq(), effect_id, identity, report, args));
             }
         }
         if reports.is_empty() {
+            return Ok(ContributionOutput::default());
+        }
+        let (view, mut state) = self.current(&context.domains)?;
+        let Some(goal) = &mut state.goal else {
+            return Ok(ContributionOutput::default());
+        };
+        reports.retain(|(_, _, _, _, args)| args.goal_id == goal.id);
+        if reports.is_empty() || !owns_round(context, goal).await? {
             return Ok(ContributionOutput::default());
         }
         let mut cursor = context.accepted_fact_seq;
@@ -159,11 +157,11 @@ impl PostToolContributor for GoalPlugin {
                     && turn_id == &context.turn_id
                     && name == "report_goal"
                 {
-                    for (seq, expected_effect, expected_identity, args) in &reports {
+                    for (seq, expected_effect, expected_identity, report, _) in &reports {
                         if fact.seq() < *seq
-                            && effect_id == expected_effect
-                            && identity == expected_identity
-                            && serde_json::to_value(args).map_err(invalid)? == *arguments
+                            && effect_id == *expected_effect
+                            && identity == *expected_identity
+                            && arguments == *report
                         {
                             authenticated.insert(*seq);
                         }
@@ -172,7 +170,7 @@ impl PostToolContributor for GoalPlugin {
             }
             cursor = page.through_seq;
         }
-        let Some((_, _, _, args)) = reports
+        let Some((_, _, _, _, args)) = reports
             .into_iter()
             .rev()
             .find(|(seq, ..)| authenticated.contains(seq))

@@ -344,7 +344,10 @@ fn tool_start(fixture: &Fixture) -> rsi_tools_protocol::ToolStart {
 }
 
 #[derive(Debug)]
-struct Facts(Vec<Arc<rsi_agent_session_protocol::SessionFact>>);
+struct Facts {
+    entries: Vec<Arc<rsi_agent_session_protocol::SessionFact>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
 #[async_trait::async_trait]
 impl rsi_agent_composition_protocol::ContributionFactReader for Facts {
     async fn read(
@@ -354,8 +357,10 @@ impl rsi_agent_composition_protocol::ContributionFactReader for Facts {
     ) -> rsi_agent_composition_protocol::ContributionResult<
         rsi_agent_composition_protocol::ContributionFactPage,
     > {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let facts = self
-            .0
+            .entries
             .iter()
             .filter(|fact| fact.seq() > after_seq)
             .take(limit)
@@ -474,6 +479,7 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
         "wrong-args",
         "wrong-message",
         "wrong-turn",
+        "ordinary-result",
     ] {
         let accepted = Arc::new(
             SessionFact::new(
@@ -509,12 +515,20 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
                     },
                     effect_id: effect.clone(),
                     identity: identity.clone(),
-                    result: result.clone(),
+                    result: if fault == "ordinary-result" {
+                        ToolResult::new(serde_json::json!({"lines": 12}), vec![], false).unwrap()
+                    } else {
+                        result.clone()
+                    },
                     conclusion: None,
                 },
             )
             .unwrap(),
         );
+        let facts = Arc::new(Facts {
+            entries: vec![accepted, intent, settled.clone()],
+            reads: 0.into(),
+        });
         let context = ContributionContext {
             working_directory: None,
             execution: None,
@@ -528,12 +542,15 @@ async fn report_contribution_authenticates_tool_name_identity_arguments_and_sour
                 control_seq: 2,
             },
             domains: domains.clone().into(),
-            facts: Arc::new(Facts(vec![accepted, intent, settled.clone()])),
+            facts: facts.clone(),
         };
         let output = post
             .contribute(&context, &[settled], CancellationToken::new())
             .await
             .unwrap();
+        if matches!(fault, "ordinary-result" | "wrong-turn") {
+            assert_eq!(facts.reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
         assert_eq!(
             output.domains.len(),
             usize::from(fault == "valid"),

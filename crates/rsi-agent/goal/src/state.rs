@@ -15,7 +15,7 @@ pub struct GoalState {
     pub goal: Option<Goal>,
 }
 
-/// Frozen task and bounded current progress.
+/// Current task specification and its charged progress.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -53,6 +53,8 @@ pub struct Goal {
 pub enum GoalCompleter {
     /// The Host operator requested completion.
     Owner,
+    /// A participant with access to the addressed Session requested completion.
+    Participant,
     /// A trusted application identifies the Cordis entry invoking the public Goal service.
     Plugin {
         /// Loader package or module name.
@@ -119,12 +121,18 @@ pub struct GoalReport {
 pub struct GoalReservation {
     /// One-based allocation number.
     pub round: u64,
+    /// Reissues of this charged round after an edit invalidated unclaimed input.
+    #[serde(default, skip_serializing_if = "initial_attempt")]
+    pub attempt: u64,
     /// Deterministic identity bound to Goal and round.
     pub message_id: MessageId,
     /// Deterministic internal reserve receipt, absent only for the staged first baseline.
     pub request_id: Option<DomainRequestId>,
     /// SHA-256 of the exact UTF-8 input.
     pub input_sha256: String,
+    /// The current specification was edited after this round was allocated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edited: bool,
     /// Absent while acceptance, claim or terminal outcome remains unresolved.
     pub settlement: Option<RoundSettlement>,
 }
@@ -132,6 +140,7 @@ pub struct GoalReservation {
 /// Newly prepared Kernel input with its exact reservation identity and digest.
 #[derive(Debug)]
 pub struct PreparedGoalRound {
+    attempt: u64,
     /// Complete input moved to the Kernel upon admission.
     pub input: ContinuationInput,
     /// Deterministic identity for the reserve command.
@@ -149,6 +158,9 @@ pub enum RoundSettlement {
     Abandoned,
     /// Canonically discarded before claim; the allocation remains charged.
     Discarded,
+    /// A queued continuation lost its revision before claim. When recorded by
+    /// the armed controller for an edit, its charged round can be reissued.
+    ContinuationDisarmed,
     /// Canonical terminal classification; full diagnostics remain in Turn Facts.
     Turn {
         /// Exact admitted Turn.
@@ -213,7 +225,7 @@ pub fn validate_max_rounds(rounds: u64) -> Result<(), String> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalAction {
-    /// Create a new bounded Goal, replacing only an inactive, settled predecessor.
+    /// Create a new bounded Goal in an empty slot or after explicit completion.
     Create {
         /// Fresh logical identity.
         id: DomainRequestId,
@@ -224,6 +236,22 @@ pub enum GoalAction {
         /// Explicit maximum round allocation.
         #[serde(default)]
         max_rounds: Option<u64>,
+    },
+    /// Update the objective, the allocation limit, or both without resetting progress.
+    Edit {
+        /// Exact current Goal identity.
+        id: DomainRequestId,
+        /// Replacement objective.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective: Option<String>,
+        /// Replacement positive round limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rounds: Option<u64>,
+    },
+    /// Remove the current Goal and retain its historical events.
+    Clear {
+        /// Exact current Goal identity.
+        id: DomainRequestId,
     },
     /// Re-enable eligibility without resetting allocated rounds.
     Resume {
@@ -343,10 +371,14 @@ impl GoalState {
                 constraints,
                 max_rounds,
             } => {
-                if self.goal.as_ref().is_some_and(|goal| {
-                    goal.id == id || goal.phase == GoalPhase::Active || goal.unsettled()
-                }) {
-                    return Err("settle and stop the previous Goal before replacing it".into());
+                if self
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.id == id || goal.phase != GoalPhase::Completed)
+                {
+                    return Err(
+                        "complete or clear the previous Goal before creating another".into(),
+                    );
                 }
                 let goal = Goal {
                     id,
@@ -365,12 +397,57 @@ impl GoalState {
                 self.goal = Some(goal);
                 return Ok(());
             }
+            GoalAction::Clear { id } => {
+                self.current_mut(&id)?;
+                self.goal = None;
+            }
+            GoalAction::Edit {
+                id,
+                objective,
+                max_rounds,
+            } => {
+                let goal = self.current_mut(&id)?;
+                if objective.is_none() && max_rounds.is_none() {
+                    return Err("Goal edit requires an objective or maximum rounds".into());
+                }
+                let previous_limit =
+                    max_rounds.map(|value| std::mem::replace(&mut goal.max_rounds, value));
+                let previous_objective =
+                    objective.map(|value| std::mem::replace(&mut goal.objective, value));
+                let previous_report = if goal.unsettled() {
+                    goal.report.take()
+                } else {
+                    None
+                };
+                let previous_edit = goal
+                    .reservation
+                    .as_mut()
+                    .map(|r| std::mem::replace(&mut r.edited, true));
+                if let Err(error) = goal.validate() {
+                    if let Some(value) = previous_limit {
+                        goal.max_rounds = value;
+                    }
+                    if let Some(value) = previous_objective {
+                        goal.objective = value;
+                    }
+                    if let Some(value) = previous_report {
+                        goal.report = Some(value);
+                    }
+                    if let Some((reservation, edited)) =
+                        goal.reservation.as_mut().zip(previous_edit)
+                    {
+                        reservation.edited = edited;
+                    }
+                    return Err(error);
+                }
+                return Ok(());
+            }
             GoalAction::Resume { id } => {
                 let goal = self.current_mut(&id)?;
                 if goal.phase == GoalPhase::Completed {
                     return Err("a completed Goal cannot resume".into());
                 }
-                if !goal.unsettled() && goal.allocated_rounds == goal.max_rounds {
+                if !goal.has_round_capacity() {
                     return Err("all Goal rounds have been allocated".into());
                 }
                 goal.phase = GoalPhase::Active;
@@ -434,6 +511,17 @@ impl GoalState {
 }
 
 impl Goal {
+    /// Policy reason used when no further automatic round can be allocated.
+    pub fn round_limit_reason(&self) -> (&'static str, String) {
+        (
+            "round-limit",
+            format!(
+                "Goal reached its configured limit of {} rounds.",
+                self.max_rounds
+            ),
+        )
+    }
+
     fn validate_block(&self, code: &str, message: &str) -> Result<(), String> {
         if !code.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
             || !code.split('-').all(|part| {
@@ -474,19 +562,32 @@ impl Goal {
 
     fn validate(&self) -> Result<(), String> {
         self.validate_fields()?;
-        if let Some(reservation) = &self.reservation {
-            let expected = self.make_reservation(reservation.round)?;
-            if reservation.round != self.allocated_rounds
-                || reservation.message_id != expected.input.message_id
-                || (reservation.request_id.is_none() && reservation.round != 1)
-                || reservation
-                    .request_id
-                    .as_ref()
-                    .is_some_and(|id| id != &expected.request_id)
-                || reservation.input_sha256 != expected.input_sha256
-            {
-                return Err("Goal reservation does not match frozen task and round".into());
-            }
+        let Some(reservation) = &self.reservation else {
+            return Ok(());
+        };
+        let digest = &reservation.input_sha256;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("invalid Goal input digest".into());
+        }
+        let round = reservation.round;
+        let valid_request = match &reservation.request_id {
+            Some(id) => *id == round_request_id(&reservation.message_id, "reserve")?,
+            None => round == 1 && reservation.attempt == 0,
+        };
+        if round != self.allocated_rounds
+            || !valid_request
+            || reservation.message_id
+                != self.round_message_id(round, reservation.attempt, digest)?
+            || (reservation.settlement == Some(RoundSettlement::ContinuationDisarmed)
+                && !reservation.edited)
+            || (!reservation.edited
+                && *digest != format!("{:x}", Sha256::digest(self.round_text(round).as_bytes())))
+        {
+            return Err("Goal reservation does not match frozen task and round".into());
         }
         Ok(())
     }
@@ -495,7 +596,9 @@ impl Goal {
         safe_text(&self.objective, 8192, false)?;
         safe_text(&self.constraints, 4096, true)?;
         validate_max_rounds(self.max_rounds)?;
-        if self.allocated_rounds > self.max_rounds
+        if self.allocated_rounds > MAXIMUM_GOAL_ROUNDS
+            || (self.allocated_rounds > self.max_rounds
+                && self.reservation.as_ref().is_none_or(|r| !r.edited))
             || (self.allocated_rounds == 0) != self.reservation.is_none()
         {
             return Err("invalid Goal allocation state".into());
@@ -531,6 +634,18 @@ impl Goal {
             .is_some_and(|reservation| reservation.settlement.is_none())
     }
 
+    fn reissue(&self) -> Option<&GoalReservation> {
+        self.reservation
+            .as_ref()
+            .filter(|r| r.settlement == Some(RoundSettlement::ContinuationDisarmed))
+    }
+
+    /// Whether a new round or the revised input of an unclaimed round fits the cap.
+    pub fn has_round_capacity(&self) -> bool {
+        self.allocated_rounds < self.max_rounds
+            || (self.allocated_rounds == self.max_rounds && self.reissue().is_some())
+    }
+
     /// Proposes the next allocation for atomic publication with its input.
     ///
     /// # Errors
@@ -541,9 +656,11 @@ impl Goal {
         self.allocated_rounds = input.round;
         self.reservation = Some(GoalReservation {
             round: input.round,
+            attempt: prepared.attempt,
             message_id: input.message_id,
             request_id: Some(prepared.request_id),
             input_sha256: prepared.input_sha256,
+            edited: false,
             settlement: None,
         });
         self.report = None;
@@ -555,30 +672,50 @@ impl Goal {
     /// # Errors
     /// Rejects invalid Goal fields, a stopped Goal, an unsettled input or an exhausted budget.
     pub fn next_reservation(&self) -> Result<PreparedGoalRound, String> {
-        if self.phase != GoalPhase::Active
-            || self.unsettled()
-            || self.allocated_rounds >= self.max_rounds
-        {
+        if self.phase != GoalPhase::Active || self.unsettled() || !self.has_round_capacity() {
             return Err("Goal cannot allocate another round".into());
         }
         self.validate_fields()?;
-        self.make_reservation(self.allocated_rounds + 1)
+        let (round, attempt) = match self.reissue() {
+            Some(previous) => (
+                previous.round,
+                previous
+                    .attempt
+                    .checked_add(1)
+                    .ok_or("Goal attempt sequence exhausted")?,
+            ),
+            None => (self.allocated_rounds + 1, 0),
+        };
+        self.make_reservation(round, attempt)
     }
 
-    fn make_reservation(&self, round: u64) -> Result<PreparedGoalRound, String> {
-        if round == 0 || round > self.max_rounds {
-            return Err("invalid Goal round".into());
-        }
-        let identity = serde_json::to_vec(&(&self.id, round)).map_err(|error| error.to_string())?;
-        let message_id = MessageId::new(format!("goal-{:x}", Sha256::digest(identity)))
+    fn round_message_id(
+        &self,
+        round: u64,
+        attempt: u64,
+        input_sha256: &str,
+    ) -> Result<MessageId, String> {
+        let identity = serde_json::to_vec(&(&self.id, round, attempt, input_sha256))
             .map_err(|error| error.to_string())?;
-        let input = format!(
+        MessageId::new(format!("goal-{:x}", Sha256::digest(identity)))
+            .map_err(|error| error.to_string())
+    }
+
+    fn round_text(&self, round: u64) -> String {
+        format!(
             "Continue Goal {}. Automatic round {round}/{}.\nObjective:\n{}\nConstraints:\n{}\nCheck current results. Verify the whole objective before marking it complete. Leave unfinished work active. Follow the configured Goal tool policy for blockers.",
             self.id, self.max_rounds, self.objective, self.constraints
-        );
+        )
+    }
+
+    fn make_reservation(&self, round: u64, attempt: u64) -> Result<PreparedGoalRound, String> {
+        let input = self.round_text(round);
+        let input_sha256 = format!("{:x}", Sha256::digest(input.as_bytes()));
+        let message_id = self.round_message_id(round, attempt, &input_sha256)?;
         Ok(PreparedGoalRound {
-            request_id: round_request_id(&self.id, round, "reserve")?,
-            input_sha256: format!("{:x}", Sha256::digest(input.as_bytes())),
+            attempt,
+            request_id: round_request_id(&message_id, "reserve")?,
+            input_sha256,
             input: ContinuationInput {
                 owner: self.id.clone(),
                 round,
@@ -594,8 +731,12 @@ impl Goal {
     /// Rejects unbounded evidence or the absence of an unresolved round.
     pub fn record_report(&mut self, report: GoalReport) -> Result<(), String> {
         safe_text(&report.evidence, 4096, false)?;
-        if !self.unsettled() {
-            return Err("Goal has no unresolved round".into());
+        if self
+            .reservation
+            .as_ref()
+            .is_none_or(|r| r.settlement.is_some() || r.edited)
+        {
+            return Err("Goal has no unresolved round for the current specification".into());
         }
         self.report = Some(report);
         Ok(())
@@ -622,6 +763,12 @@ impl Goal {
                 Err("Goal settlement conflict".into())
             };
         }
+        let edited = reservation.edited;
+        if settlement == RoundSettlement::ContinuationDisarmed
+            && (!edited || self.phase != GoalPhase::Active)
+        {
+            return Err("reissuing input requires an edited active Goal".into());
+        }
         reservation.settlement = Some(settlement.clone());
         if self.completed_by.is_some()
             || self.block_code.is_some()
@@ -632,6 +779,7 @@ impl Goal {
             return self.validate();
         }
         match settlement {
+            RoundSettlement::ContinuationDisarmed => {}
             RoundSettlement::Abandoned => {
                 self.phase = GoalPhase::Paused;
                 self.reason =
@@ -655,7 +803,7 @@ impl Goal {
                 if let Some(report) = self
                     .report
                     .as_ref()
-                    .filter(|report| report.source_turn == turn_id)
+                    .filter(|report| !edited && report.source_turn == turn_id)
                 {
                     self.phase = match report.kind {
                         GoalReportKind::Complete => GoalPhase::Completed,
@@ -664,10 +812,12 @@ impl Goal {
                     };
                     self.reason = Some(report.evidence.clone());
                 } else if self.phase == GoalPhase::Active
-                    && self.allocated_rounds == self.max_rounds
+                    && self.allocated_rounds >= self.max_rounds
                 {
                     self.phase = GoalPhase::Blocked;
-                    self.reason = Some("All automatic rounds have been allocated without a verified completion report".into());
+                    let (code, reason) = self.round_limit_reason();
+                    self.reason = Some(reason);
+                    self.block_code = Some(code.into());
                 }
             }
             RoundSettlement::Turn { outcome, .. } => {
@@ -699,22 +849,19 @@ impl Goal {
     }
 }
 
-/// Stable logical identity for one reserve or settlement, including after a lost reply.
+fn initial_attempt(attempt: &u64) -> bool {
+    *attempt == 0
+}
+
+/// Stable receipt identity for a single frozen message attempt.
 ///
 /// # Errors
-/// Rejects zero rounds or an unsupported operation name.
-pub fn round_request_id(
-    owner: &DomainRequestId,
-    round: u64,
-    operation: &str,
-) -> Result<DomainRequestId, String> {
-    if round == 0 || !matches!(operation, "reserve" | "settle") {
+/// Rejects an unsupported operation or an oversized caller-supplied identity.
+pub fn round_request_id(message: &MessageId, operation: &str) -> Result<DomainRequestId, String> {
+    if !matches!(operation, "reserve" | "settle") {
         return Err("invalid Goal round operation".into());
     }
-    let identity =
-        serde_json::to_vec(&(owner, round, operation)).map_err(|error| error.to_string())?;
-    DomainRequestId::new(format!("goal-{operation}-{:x}", Sha256::digest(identity)))
-        .map_err(|error| error.to_string())
+    DomainRequestId::new(format!("{operation}-{message}")).map_err(|error| error.to_string())
 }
 
 pub(crate) fn safe_text(text: &str, maximum: usize, empty: bool) -> Result<(), String> {
@@ -790,8 +937,32 @@ rsi_persistence_testkit::payload_contract!(
             .unwrap();
         samples.push(blocked);
 
+        let mut edited = samples[1].clone();
+        edited.goal.as_mut().unwrap().reserve().unwrap();
+        edited
+            .apply(
+                GoalAction::Edit {
+                    id: DomainRequestId::new("fixture").unwrap(),
+                    objective: Some("Review the revised objective".into()),
+                    max_rounds: Some(20),
+                },
+                3,
+                false,
+            )
+            .unwrap();
+        samples.push(edited.clone());
+        let queued = edited.goal.as_mut().unwrap();
+        let message = queued.reservation.as_ref().unwrap().message_id.clone();
+        queued
+            .settle(&message, RoundSettlement::ContinuationDisarmed)
+            .unwrap();
+        samples.push(edited.clone());
+        edited.goal.as_mut().unwrap().reserve().unwrap();
+        samples.push(edited);
+
         for source in [
             GoalCompleter::Owner,
+            GoalCompleter::Participant,
             GoalCompleter::Plugin {
                 name: "@fixture/goal".into(),
             },

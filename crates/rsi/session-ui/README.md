@@ -47,12 +47,12 @@ rounds, model report and process-local driving separately. When the stopping
 reason repeats the model's report, the card shows the text once with the report's
 source Turn. A distinct controller reason and a model claim both remain visible.
 An explicit completion
-names the Host owner or the plugin that made the decision. Create requires an
+names the Host owner, a Session participant or the plugin that made the decision. Create requires an
 explicit positive round cap; Pause leaves claimed work running, Cancel targets
 the automatic round, and Resume never resets allocations. An active, armed Goal
-offers Pause. A paused or disarmed Goal with a remaining or unsettled round offers
-Resume. The owner can mark an active, paused or blocked Goal complete while its
-current round finishes. Unknown controls keep
+offers Pause. A paused or disarmed Goal with an unallocated round offers
+Resume. A participant can mark an active, paused or blocked Goal complete while its
+current round finishes. A paused Goal identifies an outstanding round until its settlement arrives. Clear releases the Goal slot. The creation form is available when the slot is empty or the previous Goal is complete. Unknown controls keep
 their exact identity and expose receipt checking without automatic resubmission.
 Known control rejections remain visible across live and durable refreshes until
 the next explicit control. Live Disarmed alone does not prove that the independent

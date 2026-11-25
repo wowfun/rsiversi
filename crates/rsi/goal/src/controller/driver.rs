@@ -31,6 +31,27 @@ impl GoalService {
                 if !live.lease.is_armed() || goal.phase != GoalPhase::Active {
                     return Ok(());
                 }
+                if !goal.has_round_capacity() {
+                    let (code, message) = goal.round_limit_reason();
+                    let block = crate::GoalControl {
+                        request_id: rsi_agent_session_protocol::DomainRequestId::new(format!(
+                            "goal-round-limit-{}",
+                            snapshot.domain.revision.get()
+                        ))
+                        .map_err(invalid)?,
+                        expected_revision: snapshot.revision,
+                        action: rsi_agent_goal::GoalAction::Block {
+                            id: goal.id.clone(),
+                            code: code.into(),
+                            message,
+                        },
+                        published_at_ms: None,
+                    };
+                    live.session
+                        .application_command(block.invocation()?)
+                        .await?;
+                    return Ok(());
+                }
                 match self.reserve(owner, live, &snapshot, goal).await {
                     Ok(()) => {}
                     Err(GoalError::Busy) => {
@@ -143,12 +164,22 @@ impl GoalService {
             .filter(|reservation| &reservation.message_id == message)
             .ok_or(GoalError::Conflict)?;
         if let Some(previous) = &reservation.settlement {
-            return if previous == &outcome {
+            return if previous == &outcome
+                || (previous == &RoundSettlement::Discarded
+                    && outcome == RoundSettlement::ContinuationDisarmed)
+            {
                 Ok(())
             } else {
                 Err(GoalError::Conflict)
             };
         }
+        let outcome = if outcome == RoundSettlement::ContinuationDisarmed
+            && !(live.lease.is_armed() && goal.phase == GoalPhase::Active && reservation.edited)
+        {
+            RoundSettlement::Discarded
+        } else {
+            outcome
+        };
         owner.publish(live, GoalDriverStage::Settling, Some(message.clone()), None);
         let invocation = settlement_invocation(&snapshot, goal, message, outcome)?;
         live.begin_mutation(&invocation, message, "settle", None)?;
@@ -289,10 +320,9 @@ fn settlement_invocation(
     message: &rsi_agent_session_protocol::MessageId,
     outcome: RoundSettlement,
 ) -> GoalResult<SessionCommandInvocation> {
-    let reservation = goal.reservation.as_ref().ok_or(GoalError::Conflict)?;
     Ok(SessionCommandInvocation {
         command: ContributionId::new(GOAL_SETTLE).map_err(invalid)?,
-        request_id: round_request_id(&goal.id, reservation.round, "settle").map_err(invalid)?,
+        request_id: round_request_id(message, "settle").map_err(invalid)?,
         expected_revision: snapshot.revision,
         arguments: CommandArguments::new(
             serde_json::to_value(SettleGoal {

@@ -138,6 +138,8 @@ impl GoalSession for PausedSession {
         if let Some(input) = input {
             self.reserve(lease, invocation, input).await?;
         } else {
+            let args: rsi_agent_goal::SettleGoal =
+                serde_json::from_value(invocation.arguments.value().clone()).unwrap();
             self.snapshot
                 .lock()
                 .unwrap()
@@ -145,10 +147,8 @@ impl GoalSession for PausedSession {
                 .goal
                 .as_mut()
                 .unwrap()
-                .reservation
-                .as_mut()
-                .unwrap()
-                .settlement = Some(RoundSettlement::Abandoned);
+                .settle(&args.message_id, args.settlement)
+                .unwrap();
         }
         Ok(self.receipt.lock().unwrap().clone().unwrap())
     }
@@ -287,6 +287,85 @@ async fn driver_fixture(
         receipt: Mutex::new(None),
     });
     (fiber, session, lease)
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_an_armed_edit_reissues_a_discarded_unclaimed_round() {
+    for armed in [true, false] {
+        let (fiber, session, lease) = driver_fixture(false, false).await;
+        let service = GoalService::default();
+        let owner = service.owner(&session.id).unwrap();
+        let live = Live {
+            session: session.clone(),
+            lease: lease.clone(),
+            stop: service.inner.stopped.child_token(),
+            pending: Arc::default(),
+        };
+        let snapshot = session.snapshot().await.unwrap();
+        let goal = snapshot.state.goal.as_ref().unwrap();
+        let proposal = goal.next_reservation().unwrap();
+        let invocation = SessionCommandInvocation {
+            command: ContributionId::new(rsi_agent_goal::GOAL_RESERVE).unwrap(),
+            request_id: proposal.request_id,
+            expected_revision: snapshot.revision,
+            arguments: CommandArguments::new(serde_json::json!({"id": goal.id})).unwrap(),
+        };
+        session.release.add_permits(1);
+        assert!(matches!(
+            session.reserve(&lease, invocation, proposal.input).await,
+            Err(GoalError::OutcomeUnknown(_))
+        ));
+        let message = {
+            let mut snapshot = session.snapshot.lock().unwrap();
+            snapshot
+                .state
+                .apply(
+                    GoalAction::Edit {
+                        id: goal.id.clone(),
+                        objective: Some("Revised".into()),
+                        max_rounds: None,
+                    },
+                    1,
+                    false,
+                )
+                .unwrap();
+            snapshot
+                .state
+                .goal
+                .as_ref()
+                .unwrap()
+                .reservation
+                .as_ref()
+                .unwrap()
+                .message_id
+                .clone()
+        };
+        if !armed {
+            lease.revoke();
+        }
+        service
+            .settle(
+                &owner,
+                &live,
+                &message,
+                RoundSettlement::ContinuationDisarmed,
+            )
+            .await
+            .unwrap();
+        let goal = session.snapshot().await.unwrap().state.goal.unwrap();
+        if armed {
+            let next = goal.next_reservation().unwrap();
+            assert_eq!(next.input.round, 1);
+            assert_ne!(next.input.message_id, message);
+            assert!(next.input.text.contains("Revised"));
+        } else {
+            assert_eq!(goal.phase, GoalPhase::Paused);
+            assert!(!goal.has_round_capacity());
+        }
+        service.stop().await.unwrap();
+        drop((live, owner, service, session, lease));
+        assert!(fiber.dispose().await.is_clean());
+    }
 }
 
 #[tokio::test(start_paused = true)]

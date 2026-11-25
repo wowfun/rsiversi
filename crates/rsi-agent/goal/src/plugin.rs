@@ -190,7 +190,7 @@ impl ContextContributor for GoalPlugin {
             goal.constraints,
             goal.allocated_rounds,
             goal.max_rounds,
-            goal.max_rounds - goal.allocated_rounds
+            goal.max_rounds.saturating_sub(goal.allocated_rounds)
         );
         Ok(ContributionOutput {
             inputs: vec![ContributionInput::context(text)],

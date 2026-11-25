@@ -291,6 +291,15 @@ pub trait GoalController: fmt::Debug + Send + Sync + 'static {
         &self,
         session: Arc<dyn GoalSession>,
         request: GoalControl,
+    ) -> GoalResult<GoalControlReceipt> {
+        self.control_with_activation(session, request, false).await
+    }
+    /// The trusted application can carry its upstream activation through a committed edit.
+    async fn control_with_activation(
+        &self,
+        session: Arc<dyn GoalSession>,
+        request: GoalControl,
+        activate_edit: bool,
     ) -> GoalResult<GoalControlReceipt>;
     /// Revokes live scheduling for this Session, preserving the Goal and admitted work.
     async fn disarm(&self, session: &SessionId) -> GoalResult<()>;

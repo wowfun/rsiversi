@@ -1766,13 +1766,13 @@ impl SessionHandle for LocalSessionHandle {
         if request.requires_application() {
             return Err(SessionError::Api(rsi_api_protocol::ApiError::Unauthorized));
         }
-        self.dispatch_goal(request).await
+        self.dispatch_goal(request, false).await
     }
     async fn control_application_goal(
         &self,
         request: rsi_goal::GoalControl,
     ) -> Result<rsi_goal::GoalControlReceipt> {
-        self.dispatch_goal(request).await
+        self.dispatch_goal(request, true).await
     }
     async fn disarm_application_goal(&self) -> Result<()> {
         self.require_host_owner()?;
@@ -1987,7 +1987,7 @@ impl SessionHandle for LocalSessionHandle {
         if invocation.command.as_str() == rsi_agent_goal::GOAL_COMMAND
             && matches!(
                 invocation.arguments.value()["action"].as_str(),
-                Some("complete" | "block")
+                Some("complete" | "block" | "clear")
             )
         {
             return Err(SessionError::Invalid(

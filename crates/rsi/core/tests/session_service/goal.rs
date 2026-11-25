@@ -84,6 +84,14 @@ async fn cancel_uncharged_draft_or_published_goal_without_provider_spend() {
         assert_eq!(goal.allocated_rounds, 0);
         assert!(goal.reservation.is_none());
         assert!(!handle.goal_status().await.unwrap().armed);
+        control(
+            &handle,
+            "clear-before-replacement",
+            GoalAction::Clear {
+                id: DomainRequestId::new("test-goal").unwrap(),
+            },
+        )
+        .await;
         handle
             .execute_command(SessionCommandInvocation {
                 command: ContributionId::new(rsi_agent_goal::GOAL_COMMAND).unwrap(),
@@ -560,6 +568,108 @@ async fn pause_keeps_claimed_round_running_then_resume_preserves_allocation() {
     assert_eq!(goal.allocated_rounds, 2);
     assert_eq!(goal.phase, GoalPhase::Blocked);
     assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(running.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn application_edit_extends_a_claimed_goal_and_clear_leaves_the_current_turn_running() {
+    let (fixture, gate, provider) = gated().await;
+    let running = RunningRsi::boot(composition(fixture.paths.clone()), &fixture.profile)
+        .await
+        .unwrap();
+    let handle = create(&running, &fixture, "goal-edit").await;
+    start(&handle, 1).await;
+    entered(&gate).await;
+    let old = state(&handle).await.goal.unwrap();
+    let first = old.reservation.unwrap();
+    let edit = GoalControl {
+        request_id: DomainRequestId::new("edit-current").unwrap(),
+        expected_revision: handle.commands().await.unwrap().revision(),
+        published_at_ms: Some(12.try_into().unwrap()),
+        action: GoalAction::Edit {
+            id: old.id.clone(),
+            objective: Some("Review the amended objective".into()),
+            max_rounds: Some(20),
+        },
+    };
+    let committed = handle
+        .execute_command(edit.invocation().unwrap())
+        .await
+        .unwrap();
+    let replay = handle.control_application_goal(edit).await.unwrap();
+    assert_eq!(replay.command, committed);
+    assert!(replay.live.armed);
+    let direct = GoalControl {
+        request_id: DomainRequestId::new("edit-amendment").unwrap(),
+        expected_revision: replay.command.revision(),
+        published_at_ms: Some(13.try_into().unwrap()),
+        action: GoalAction::Edit {
+            id: old.id.clone(),
+            objective: Some("Review the final amendment".into()),
+            max_rounds: None,
+        },
+    };
+    let amended = handle
+        .control_application_goal(direct.clone())
+        .await
+        .unwrap();
+    assert!(amended.live.armed);
+    assert_eq!(
+        handle
+            .control_application_goal(direct)
+            .await
+            .unwrap()
+            .command,
+        amended.command
+    );
+    let after = state(&handle).await.goal.unwrap();
+    assert_eq!(after.allocated_rounds, 1);
+    assert_eq!(
+        after.reservation.as_ref().unwrap().message_id,
+        first.message_id
+    );
+    assert_eq!(after.reservation.unwrap().input_sha256, first.input_sha256);
+    gate.release.notify_one();
+    entered(&gate).await;
+    let second = state(&handle).await.goal.unwrap().reservation.unwrap();
+    assert_eq!(second.round, 2);
+    let receipt = handle.message_status(&second.message_id).await.unwrap();
+    let input = handle
+        .read_message(&second.message_id, receipt.accepted_control_seq)
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&input.content).unwrap();
+    assert!(text.contains("2/20") && text.contains("Review the final amendment"));
+    control(&handle, "clear-current", GoalAction::Clear { id: old.id }).await;
+    assert!(state(&handle).await.goal.is_none());
+    assert!(matches!(
+        handle
+            .message_status(&second.message_id)
+            .await
+            .unwrap()
+            .state,
+        rsi_agent_turn_protocol::MessageState::Claimed { .. }
+    ));
+    control(
+        &handle,
+        "replacement",
+        GoalAction::Create {
+            id: DomainRequestId::new("next-goal").unwrap(),
+            objective: "Review a fresh draft".into(),
+            constraints: String::new(),
+            max_rounds: Some(1),
+        },
+    )
+    .await;
+    gate.release.notify_one();
+    entered(&gate).await;
+    gate.release.notify_one();
+    assert_eq!(stopped(&handle).await.stage, GoalDriverStage::Disarmed);
+    let final_goal = state(&handle).await.goal.unwrap();
+    assert_eq!(final_goal.id.as_str(), "next-goal");
+    assert_eq!(final_goal.allocated_rounds, 1);
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert!(running.shutdown().await.is_clean());
     provider.abort();
 }
@@ -1071,6 +1181,26 @@ async fn remote_stale_cancel_is_known_rejection_and_fresh_cancel_settles_exact_r
             ..
         })
     ));
+    assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let participant = serde_json::json!({
+        "request_id":"participant-complete", "expected_revision":handle.commands().await.unwrap().revision(),
+        "action":{"action":"complete","id":"test-goal","source":{"kind":"participant"}}
+    });
+    session_wire(
+        &daemon.running,
+        caller,
+        rsi_session_api::Operation::GoalControl,
+        &target,
+        participant,
+    )
+    .await
+    .unwrap();
+    let completed = state(&handle).await.goal.unwrap();
+    assert_eq!(
+        completed.completed_by,
+        Some(rsi_agent_goal::GoalCompleter::Participant)
+    );
+    assert_eq!(completed.phase, GoalPhase::Completed);
     assert_eq!(gate.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     daemon.shutdown().await;
     provider.abort();

@@ -20,11 +20,18 @@ impl LocalSessionHandle {
     pub(super) async fn dispatch_goal(
         &self,
         request: rsi_goal::GoalControl,
+        activate_edit: bool,
     ) -> super::Result<rsi_goal::GoalControlReceipt> {
         use rsi_agent_goal::GoalAction;
         if matches!(
             request.action,
-            GoalAction::Cancel { .. } | GoalAction::Complete { .. } | GoalAction::Block { .. }
+            GoalAction::Cancel { .. }
+                | GoalAction::Block { .. }
+                | GoalAction::Complete {
+                    source: rsi_agent_goal::GoalCompleter::Owner
+                        | rsi_agent_goal::GoalCompleter::Plugin { .. },
+                    ..
+                }
         ) {
             self.require_host_owner()?;
         }
@@ -34,7 +41,7 @@ impl LocalSessionHandle {
         self.goals
             .as_ref()
             .ok_or_else(|| SessionError::NotFound("Goal controller".into()))?
-            .control(Arc::new(self.clone()), request)
+            .control_with_activation(Arc::new(self.clone()), request, activate_edit)
             .await
             .map_err(|error| match error {
                 GoalError::Conflict => SessionError::CommandConflict { request_id },
@@ -149,6 +156,10 @@ impl LocalSessionHandle {
             .map_err(turn_error)?;
         match receipt.state {
             MessageState::Pending => Ok(None),
+            MessageState::Discarded {
+                reason: rsi_agent_session_protocol::MessageDiscardReason::ContinuationDisarmed,
+                ..
+            } => Ok(Some(RoundSettlement::ContinuationDisarmed)),
             MessageState::Discarded { .. } => Ok(Some(RoundSettlement::Discarded)),
             MessageState::Claimed { turn_id, .. } => {
                 let outcome = self

@@ -179,20 +179,18 @@ impl GoalService {
         session: Arc<dyn GoalSession>,
         request: &GoalControl,
         invocation: SessionCommandInvocation,
+        activate_edit: bool,
     ) -> GoalResult<GoalControlReceipt> {
-        let starts = matches!(
-            request.action,
-            GoalAction::Create { .. } | GoalAction::Resume { .. }
-        );
         let cancel = matches!(request.action, GoalAction::Cancel { .. });
         let stopped_phase = match request.action {
             GoalAction::Complete { .. } => Some(GoalPhase::Completed),
             GoalAction::Block { .. } => Some(GoalPhase::Blocked),
             _ => None,
         };
-        if !starts
-            && stopped_phase.is_none()
-            && let Some(live) = owner.live()
+        if matches!(
+            request.action,
+            GoalAction::Pause { .. } | GoalAction::Cancel { .. }
+        ) && let Some(live) = owner.live()
             && live.lease.binding().owner == *action_id(&request.action)
         {
             live.lease.revoke();
@@ -207,7 +205,16 @@ impl GoalService {
         if self.inner.stopped.is_cancelled() {
             return Err(GoalError::ShuttingDown);
         }
-        if starts && owner.live().is_some() {
+        let same_driver = || {
+            owner
+                .live()
+                .is_some_and(|live| &live.lease.binding().owner == action_id(&request.action))
+        };
+        let start_command = matches!(
+            request.action,
+            GoalAction::Create { .. } | GoalAction::Resume { .. }
+        );
+        if start_command && same_driver() {
             if let Some(receipt) = session.command_status(&request.request_id).await?
                 && receipt.invocation_sha256() == invocation.digest().map_err(invalid)?
             {
@@ -218,6 +225,10 @@ impl GoalService {
             }
             return Err(GoalError::Conflict);
         }
+        let starts = start_command
+            || (activate_edit
+                && matches!(request.action, GoalAction::Edit { .. })
+                && !same_driver());
         let receipt = match session.application_command(invocation).await {
             Ok(receipt) => receipt,
             Err(error) => match session.command_status(&request.request_id).await {
@@ -233,19 +244,23 @@ impl GoalService {
             },
         };
         let completion = async {
+            if !starts && matches!(request.action, GoalAction::Edit { .. }) {
+                return Ok(GoalControlReceipt {
+                    command: receipt,
+                    live: owner.snapshot(),
+                });
+            }
             let snapshot = session.snapshot().await?;
             if starts {
                 if snapshot.revision != receipt.revision() {
-                    owner.status.send_replace(GoalLiveState {
-                    detail: Some(
+                    let mut live = owner.snapshot();
+                    live.detail = Some(
                         "The command was followed by newer state; resume from the current revision"
                             .into(),
-                    ),
-                    ..GoalLiveState::default()
-                });
+                    );
                     return Ok(GoalControlReceipt {
                         command: receipt,
-                        live: owner.snapshot(),
+                        live,
                     });
                 }
                 let goal = snapshot
@@ -256,6 +271,7 @@ impl GoalService {
                         &goal.id == action_id(&request.action) && goal.phase == GoalPhase::Active
                     })
                     .ok_or(GoalError::Conflict)?;
+                owner.retire_previous(&self.inner.stopped).await?;
                 let lease = session.arm(binding(&snapshot, goal)?).await?;
                 self.start(
                     owner,
@@ -266,6 +282,10 @@ impl GoalService {
                         pending: Arc::default(),
                     },
                 )?;
+            } else if matches!(request.action, GoalAction::Clear { .. }) {
+                if snapshot.state.goal.is_none() {
+                    owner.retire_previous(&self.inner.stopped).await?;
+                }
             } else if stopped_phase.is_none_or(|phase| {
                 snapshot.state.goal.as_ref().is_some_and(|goal| {
                     &goal.id == action_id(&request.action) && goal.phase == phase
@@ -388,8 +408,13 @@ impl GoalService {
                     biased;
                     () = live.stop.cancelled() => {
                         live.lease.revoke();
-                        tokio::time::timeout_at(controller.stop_deadline(), drive.as_mut()).await
-                            .map_err(|_| live.deadline_error())
+                        if controller.inner.stopped.is_cancelled() {
+                            tokio::time::timeout_at(controller.stop_deadline(), drive.as_mut()).await
+                                .map_err(|_| live.deadline_error())
+                        } else {
+                            // The previous Goal was cleared or replaced under the control gate.
+                            Ok(Ok(Ok(())))
+                        }
                     }
                     result = drive.as_mut() => Ok(result),
                 };
@@ -405,7 +430,7 @@ impl GoalService {
                 result => result,
             };
             live.lease.revoke();
-            let result = if live.stop.is_cancelled() {
+            let result = if controller.inner.stopped.is_cancelled() {
                 let pending = live.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some();
                 let cleanup = if tokio::time::Instant::now() >= controller.stop_deadline() {
                     Err(live.deadline_error())
@@ -438,20 +463,22 @@ impl GoalService {
             let _gate = if live.stop.is_cancelled() { None } else {
                 tokio::select! { biased; () = live.stop.cancelled() => None, guard = owner.gate.lock() => Some(guard) }
             };
-            owner.publish(
-                &live,
-                if result.is_ok() {
+            let finished = GoalLiveState {
+                available: !controller.inner.stopped.is_cancelled(),
+                armed: false,
+                stage: if result.is_ok() {
                     GoalDriverStage::Disarmed
                 } else {
                     GoalDriverStage::Failed
                 },
-                None,
-                result.err().map(|error| live.failure_detail(&error)).or_else(|| preempted.then(|| "Automatic scheduling was preempted. Resume Goal to reconcile the charged round, or Cancel to abandon unaccepted input.".into())),
-            );
-            *owner
-                .live
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                message_id: None,
+                detail: result.err().map(|error| live.failure_detail(&error)).or_else(|| preempted.then(|| "Automatic scheduling was preempted. Resume Goal to reconcile the charged round, or Cancel to abandon unaccepted input.".into())),
+            };
+            // A replacement may acquire a lease as soon as the empty slot becomes visible.
+            let mut slot = owner.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = None;
+            drop(live);
+            owner.status.send_replace(finished);
         });
         Ok(())
     }
@@ -499,6 +526,23 @@ impl Live {
 }
 
 impl Owner {
+    /// Called under the control gate after the old Goal lost its durable slot.
+    async fn retire_previous(&self, shutdown: &CancellationToken) -> GoalResult<()> {
+        let Some(live) = self.live() else {
+            return Ok(());
+        };
+        let mut status = self.status.subscribe();
+        live.lease.revoke();
+        live.stop.cancel();
+        drop(live);
+        while self.live().is_some() {
+            tokio::select! {
+                () = shutdown.cancelled() => return Err(GoalError::ShuttingDown),
+                changed = status.changed() => changed.map_err(|_| GoalError::ShuttingDown)?,
+            }
+        }
+        Ok(())
+    }
     fn disarm_live(&self) -> bool {
         let slot = self
             .live
@@ -554,10 +598,11 @@ fn admission_error(error: &tokio::sync::TryAcquireError) -> GoalError {
 
 #[async_trait]
 impl GoalController for GoalService {
-    async fn control(
+    async fn control_with_activation(
         &self,
         session: Arc<dyn GoalSession>,
         request: GoalControl,
+        activate_edit: bool,
     ) -> GoalResult<GoalControlReceipt> {
         let invocation = request.invocation()?;
         let permit = self
@@ -578,7 +623,7 @@ impl GoalController for GoalService {
             self.inner.tasks.spawn(async move {
                 let _permit = permit;
                 let unknown = || Err(GoalError::OutcomeUnknown(request.request_id.to_string()));
-                let call = std::panic::AssertUnwindSafe(controller.control_owned(&owner, session, &request, invocation)).catch_unwind();
+                let call = std::panic::AssertUnwindSafe(controller.control_owned(&owner, session, &request, invocation,activate_edit)).catch_unwind();
                 let result = tokio::select! {
                     biased;
                     () = controller.inner.stopped.cancelled() => unknown(),
@@ -656,6 +701,8 @@ impl GoalController for GoalService {
 fn action_id(action: &GoalAction) -> &DomainRequestId {
     match action {
         GoalAction::Create { id, .. }
+        | GoalAction::Edit { id, .. }
+        | GoalAction::Clear { id }
         | GoalAction::Resume { id }
         | GoalAction::Pause { id }
         | GoalAction::Cancel { id }

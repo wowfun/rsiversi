@@ -186,7 +186,7 @@ fn plugin_completion_stops_rounds_without_verifying_or_replacing_the_model_repor
 }
 
 #[test]
-fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
+fn a_paused_goal_must_be_cleared_before_replacement() {
     let mut state = create(1, true);
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
     assert!(state.goal.as_ref().unwrap().reservation.is_none());
@@ -195,19 +195,91 @@ fn cancelling_an_uncharged_draft_allows_replacement_without_execution() {
         .unwrap();
     assert_eq!(state.goal.as_ref().unwrap().allocated_rounds, 0);
     assert!(state.goal.as_ref().unwrap().reservation.is_none());
+    let replacement = GoalAction::Create {
+        id: id("replacement"),
+        objective: "Different task".into(),
+        constraints: String::new(),
+        max_rounds: Some(1),
+    };
+    assert!(state.apply(replacement.clone(), 256, true).is_err());
+    assert_eq!(state.goal.as_ref().unwrap().id, id("task"));
+    state
+        .apply(GoalAction::Clear { id: id("task") }, 256, true)
+        .unwrap();
+    state.apply(replacement, 256, true).unwrap();
+    assert_eq!(state.goal.unwrap().id, id("replacement"));
+}
+
+#[test]
+fn edits_preserve_charged_inputs_and_use_the_new_objective_and_budget_for_later_rounds() {
+    let mut state = reserved(2);
+    report(&mut state, GoalReportKind::Complete);
+    let prior = state.clone();
+    assert!(
+        state
+            .apply(
+                GoalAction::Edit {
+                    id: id("task"),
+                    objective: Some("invalid".into()),
+                    max_rounds: Some(0)
+                },
+                256,
+                false
+            )
+            .is_err()
+    );
+    assert_eq!(state, prior);
+    let original = state.goal.as_ref().unwrap().reservation.clone().unwrap();
     state
         .apply(
-            GoalAction::Create {
-                id: id("replacement"),
-                objective: "Different task".into(),
-                constraints: String::new(),
+            GoalAction::Edit {
+                id: id("task"),
+                objective: Some("Revised task".into()),
+                max_rounds: Some(20),
+            },
+            256,
+            false,
+        )
+        .unwrap();
+    state.validate().unwrap();
+    let goal = state.goal.as_mut().unwrap();
+    assert_eq!(goal.phase, GoalPhase::Active);
+    assert_eq!(goal.allocated_rounds, 1);
+    let reservation = goal.reservation.as_ref().unwrap();
+    assert_eq!(reservation.message_id, original.message_id);
+    assert_eq!(reservation.input_sha256, original.input_sha256);
+    assert!(goal.report.is_none());
+    assert!(
+        goal.record_report(prior.goal.unwrap().report.unwrap())
+            .is_err()
+    );
+    goal.settle(&original.message_id, terminal(RoundOutcome::Completed))
+        .unwrap();
+    let text = goal.reserve().unwrap();
+    assert!(text.contains("2/20") && text.contains("Revised task"));
+    state
+        .apply(
+            GoalAction::Edit {
+                id: id("task"),
+                objective: None,
                 max_rounds: Some(1),
             },
             256,
-            true,
+            false,
         )
         .unwrap();
-    assert_eq!(state.goal.unwrap().id, id("replacement"));
+    let goal = state.goal.as_mut().unwrap();
+    let message = goal.reservation.as_ref().unwrap().message_id.clone();
+    goal.settle(&message, terminal(RoundOutcome::Completed))
+        .unwrap();
+    assert_eq!(goal.phase, GoalPhase::Blocked);
+    assert_eq!(goal.allocated_rounds, 2);
+    assert_eq!(goal.block_code.as_deref(), Some("round-limit"));
+    assert!(
+        state
+            .apply(GoalAction::Resume { id: id("task") }, 256, false)
+            .is_err()
+    );
 }
 fn report(state: &mut GoalState, kind: GoalReportKind) {
     state
@@ -220,6 +292,78 @@ fn report(state: &mut GoalState, kind: GoalReportKind) {
             source_turn: TurnId::new("source").unwrap(),
         })
         .unwrap();
+}
+
+#[test]
+fn edits_reissue_an_unclaimed_round_once_per_attempt_with_the_same_budget() {
+    let mut state = reserved(1);
+    let mut messages = std::collections::BTreeSet::new();
+    let mut receipts = std::collections::BTreeSet::new();
+    for attempt in 0..2 {
+        let before = state.goal.as_ref().unwrap().reservation.clone().unwrap();
+        assert_eq!((before.round, before.attempt), (1, attempt));
+        assert!(messages.insert(before.message_id.clone()));
+        assert!(receipts.insert(before.request_id.unwrap()));
+        state
+            .apply(
+                GoalAction::Edit {
+                    id: id("task"),
+                    objective: Some("Revised".into()),
+                    max_rounds: None,
+                },
+                1,
+                false,
+            )
+            .unwrap();
+        let goal = state.goal.as_mut().unwrap();
+        goal.settle(&before.message_id, RoundSettlement::ContinuationDisarmed)
+            .unwrap();
+        let cold: GoalState = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        cold.validate().unwrap();
+        state = cold;
+        let goal = state.goal.as_mut().unwrap();
+        let next = goal.next_reservation().unwrap();
+        assert_eq!(next.input.round, 1);
+        assert_eq!(goal.reserve().unwrap(), next.input.text);
+        assert!(next.input.text.contains("round 1/1") && next.input.text.contains("Revised"));
+    }
+    let goal = state.goal.as_mut().unwrap();
+    let latest = goal.reservation.clone().unwrap();
+    assert!(messages.insert(latest.message_id.clone()));
+    assert!(receipts.insert(latest.request_id.unwrap()));
+    goal.settle(&latest.message_id, terminal(RoundOutcome::Completed))
+        .unwrap();
+    assert_eq!((goal.phase, goal.allocated_rounds), (GoalPhase::Blocked, 1));
+    assert!(!goal.has_round_capacity());
+
+    let mut superseded = reserved(1);
+    let cancelled = superseded
+        .goal
+        .as_ref()
+        .unwrap()
+        .reservation
+        .as_ref()
+        .unwrap()
+        .message_id
+        .clone();
+    superseded
+        .goal
+        .as_mut()
+        .unwrap()
+        .settle(&cancelled, RoundSettlement::Discarded)
+        .unwrap();
+    superseded
+        .apply(
+            GoalAction::Edit {
+                id: id("task"),
+                objective: Some("Changed after discard".into()),
+                max_rounds: None,
+            },
+            1,
+            false,
+        )
+        .unwrap();
+    assert!(!superseded.goal.unwrap().has_round_capacity());
 }
 
 #[test]

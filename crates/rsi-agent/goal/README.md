@@ -15,20 +15,33 @@ The frozen round input carries the objective, constraints, round number and
 request for verified progress. The selected preset tells the model how to
 report a result through its own Goal tools.
 
-A Goal freezes its resolved positive safe-integer round maximum (at most
+A Goal has a positive safe-integer round maximum (at most
 9,007,199,254,740,991). Omitted creation limits use the Goal plugin default,
 256 unless configured otherwise. There is no aggregate Turn allowance. Round
 reservation and input acceptance commit together, without refunds after acceptance.
 Busy admission changes neither the allocated count nor the live lease. Resume
-preserves that count. Each reservation records its deterministic message identity
-and input digest. Its exact input follows from the frozen objective, constraints,
-Goal identity, round and codec. A canonical accepted Session message owns its
-text. A lost acknowledgement cannot allocate a new round.
+preserves that count. Editing the objective or maximum preserves the phase,
+existing allocations and current scheduling authority. A lower cap can fall
+below the number of rounds already started. An armed Goal that has exhausted
+its current allowance becomes blocked with the policy code `round-limit`.
+If an edit invalidates an armed Goal input before its Turn is claimed, the
+controller uses the same charged round for the revised prompt. Each attempt
+has its own message, reservation and settlement receipts, even when the new
+text is identical. A human supersession, explicit stop or claimed Turn keeps
+its original charge. The next allocation uses the current objective and cap.
+The canonical accepted Session message owns the
+frozen input of each earlier round. A lost acknowledgement cannot allocate
+a new round.
 Allocation constructs this reservation once. The reserve command compares the
 caller's owner, round, message identity and text with that frozen input. Reading
-a durable snapshot independently reconstructs the reservation to verify it.
+a durable snapshot verifies the reserved identity against its input digest.
+For an unedited reservation the current specification also verifies its text.
 
-Application commands create, resume, pause, cancel, block or explicitly complete a Goal.
+Application commands create, edit, resume, pause, cancel, block, clear or
+explicitly complete a Goal. Creating a new Goal requires an empty slot or a
+completed predecessor. Clearing the current Goal retains its command history
+and stops future allocations. A revision change during an automatic round
+prevents that round from reporting completion for an edited objective.
 A trusted application can block an active Goal with a lower-kebab-case code
 and a normalized stopping explanation. The code and explanation survive
 settlement of an earlier round and cold recovery. Resume or completion clears
@@ -49,7 +62,9 @@ zero; the controller later uses the same idle admission as every durable round.
 `report_goal` accepts only complete, blocked or pause plus bounded evidence/reason
 text. It cannot create a Goal, increase its cap or arm a driver. The
 call must be the sole, final Tool call after the model's work and checks. A post-Tool
-contribution checks the exact named Tool intent/result before recording a report
+contribution reads the owning Turn and intent only for a candidate report from
+that Turn. Ordinary Tool results require no Goal history reads. It checks
+the exact named Tool intent/result before recording a report
 with its source Turn. Completion is a claim until that Turn is canonically
 Completed. Blocked, Failed, PartialFailed, Interrupted and MaxTokens block an
 active Goal. A failed Turn retains its unverified claim and its outcome even

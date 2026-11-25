@@ -19,6 +19,8 @@ For published Sessions, cancellation checks the calling device against the curre
 managed Web slot, or admits a Local caller, before delegating to Kernel. Explicit
 Workflow and Goal cancellation apply this check before transferring work or
 revoking the Goal scheduling lease.
+A caller with access to the addressed Session can mark its Goal complete as a
+participant. Operator and plugin attribution require their respective authorities.
 Session-wide cancellation delegates one atomic durable inbox/Turn stop to Kernel.
 For an unpublished draft, clearing input drops all held command inputs in one
 revision while retaining command receipts and domain state; keeping input is a
@@ -143,7 +145,8 @@ Page semantics and bounds belong to the [shared Jobs contract](../session-protoc
 Model selection, Goal state and workflow readiness read their own named domain
 from a draft or durable Session.
 
-Goal controls delegate to the separately owned Host Goal controller. The Session
+Goal controls delegate to the separately owned Host Goal controller. Clearing a Goal
+releases its slot and retires its scheduling lease. The Session
 adapter supplies a narrow `GoalSession` bridge: current typed domain plus command
 revision from one Store snapshot, staged draft freeze under its mutation lock,
 ordinary command receipt reconciliation, Workspace preparation and exact Kernel
