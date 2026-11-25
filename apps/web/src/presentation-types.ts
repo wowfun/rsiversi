@@ -16,6 +16,7 @@ export interface TranscriptBlock {
   role: string;
   title: string;
   text: string;
+  recall?: 'text' | 'recorded';
   images?: {media:Media;name?:string}[];
   markdown?: MarkdownEvent[];
   clipped?: boolean;

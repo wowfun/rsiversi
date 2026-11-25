@@ -20,7 +20,7 @@ impl Transcript {
         title: &str,
         source: SourceRef,
         text: &str,
-        display_seq: Option<u64>,
+        prepared: Option<(u64, Option<super::PromptRecall>)>,
     ) {
         let position = self
             .blocks
@@ -81,8 +81,12 @@ impl Transcript {
         block.source_bytes.insert(position, text_window.len());
         block.clipped |= text_window.len() < text.len();
         block.title = short(title, 512).into();
-        block.first_seq =
-            display_seq.unwrap_or_else(|| block.sources.get(0).expect("inserted source").seq);
+        if let Some((seq, recall)) = prepared {
+            block.first_seq = seq;
+            block.recall = recall;
+        } else {
+            block.first_seq = block.sources.get(0).expect("inserted source").seq;
+        }
         self.blocks
             .make_contiguous()
             .sort_by_key(|block| block.first_seq);
@@ -260,7 +264,7 @@ mod tests {
                 field: FactField::InputText { index: 0 },
             },
             "first",
-            Some(5),
+            Some((5, None)),
         );
         transcript.put_source_at(
             "prepared:5:1:0".into(),
@@ -271,7 +275,7 @@ mod tests {
                 field: FactField::TurnInput,
             },
             "second",
-            Some(5),
+            Some((5, None)),
         );
         transcript.put_source(
             BlockIdentity::Terminal { turn: &turn }.key(),

@@ -7,7 +7,7 @@ import { chromium, firefox } from "playwright";
 import { sourceFixture } from "./source-fixture.mjs";
 import { verifyFrameCommit } from "./frame-commit.mjs";
 import { verifyImageDom } from "./images-dom.mjs";
-import { verifyComposer } from "./composer.mjs";
+import { verifyComposer, verifyPromptRecall } from "./composer.mjs";
 import { verifyComposerBindings } from "./composer-bindings.mjs";
 import { verifyConnectionDom } from "./connection-dom.mjs";
 import { verifyRendererDom } from "./renderer-dom.mjs";
@@ -65,6 +65,7 @@ export async function verifyDom(browser, root, report, name) {
     for (const [scenario, verify] of Object.entries({
       ownership: page => page.evaluate(() => window.verifyReferenceOwnership()),
       composer: verifyComposer,
+      recall: verifyPromptRecall,
       bindings: (page) => verifyComposerBindings(page, report, name),
       images: verifyImageDom,
       renderer: (page) => verifyRendererDom(page, offer, report, name),

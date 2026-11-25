@@ -1,5 +1,9 @@
+#[path = "prompt_recall.rs"]
+mod prompt_recall;
 #[path = "spans.rs"]
 mod spans;
+use prompt_recall::prompt_recall;
+pub(crate) use prompt_recall::{PromptRecall, recorded_text};
 #[path = "turns.rs"]
 mod turns;
 
@@ -34,6 +38,7 @@ pub(crate) struct Block {
     pub title: String,
     pub text: String,
     pub clipped: bool,
+    pub(crate) recall: Option<PromptRecall>,
     pub tool: Option<ToolState>,
     pub(crate) images: Option<Arc<Vec<MessageImage>>>,
     presented: Option<Arc<rsi_session_files_ui::PresentedCards>>,
@@ -127,6 +132,7 @@ impl Serialize for BlockView<'_> {
         let mut view = serializer.serialize_struct(
             "Block",
             7 + usize::from(block.tool.is_some())
+                + usize::from(block.recall.is_some())
                 + usize::from(block.images.is_some())
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
@@ -147,6 +153,15 @@ impl Serialize for BlockView<'_> {
         }
         view.serialize_field("title", &block.title)?;
         view.serialize_field("text", text)?;
+        if let Some(recall) = block.recall {
+            view.serialize_field(
+                "recall",
+                match recall {
+                    PromptRecall::Text => "text",
+                    PromptRecall::Recorded { .. } => "recorded",
+                },
+            )?;
+        }
         if let Some(seq) = summary_seq {
             view.serialize_field("summary_seq", &seq.to_string())?;
         }
@@ -192,6 +207,7 @@ impl Block {
             title: short(title, 512).into(),
             text: String::new(),
             clipped: false,
+            recall: None,
             tool: None,
             images: None,
             presented: None,
@@ -542,14 +558,15 @@ impl Transcript {
     pub(crate) fn entered(&mut self, fact: &SessionFact, row: rsi_conversation::EnteredInput<'_>) {
         let (role, attribution) = row.presentation();
         let title = attribution.as_deref().unwrap_or("You");
-        let mut parts = row.parts().peekable();
+        let mut parts = row.parts().enumerate().peekable();
         let seq = fact.seq();
         self.seq = self.seq.max(seq);
+        let recall = prompt_recall(&row);
         if role == "user"
             && matches!(row.content, rsi_conversation::EnteredContent::Blocks(blocks)
             if blocks.iter().any(|part| matches!(part, rsi_agent_session_protocol::AgentMessageContent::Image { .. })))
         {
-            self.entered_image_message(seq, row, title);
+            self.entered_image_message(seq, row, title, recall);
             return;
         }
         if parts.peek().is_none() {
@@ -561,7 +578,7 @@ impl Transcript {
                 false,
             );
         }
-        for (index, (source, value)) in parts.enumerate() {
+        while let Some((index, (source, value))) = parts.next() {
             let image;
             let text = match value {
                 rsi_conversation::InputPart::Text(text) => text,
@@ -580,7 +597,7 @@ impl Transcript {
                 title,
                 source,
                 text,
-                Some(seq),
+                Some((seq, if parts.peek().is_none() { recall } else { None })),
             );
         }
     }
@@ -590,12 +607,14 @@ impl Transcript {
         seq: u64,
         row: rsi_conversation::EnteredInput<'_>,
         title: &str,
+        recall: Option<PromptRecall>,
     ) {
         let key = format!("prepared:{seq}:{}:0", row.index);
         if self.blocks.iter().any(|block| block.key == key) {
             return;
         }
         let mut block = Block::new(key, "user", title, seq);
+        block.recall = recall;
         let mut images = Vec::new();
         for (source, part) in row.parts() {
             let file_label;

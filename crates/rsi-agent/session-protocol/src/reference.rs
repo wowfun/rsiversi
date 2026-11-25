@@ -93,6 +93,25 @@ pub struct FrozenReference {
     pub preview: String,
 }
 impl FrozenReference {
+    /// Text presented to a model for this occurrence of the reference.
+    #[must_use]
+    pub fn prompt_text(&self, fact_seq: u64, content_index: usize) -> String {
+        format!(
+            "Referenced conversation data from {} through record {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
+            self.metadata.source,
+            self.metadata.through_seq(),
+            if self.metadata.omissions().is_empty() {
+                ""
+            } else {
+                " Earlier material was omitted by capture limits."
+            },
+            self.preview,
+            serde_json::to_string(&self.metadata.target.session_id).expect("Session identity"),
+            fact_seq,
+            content_index,
+        )
+    }
+
     /// Checks finite input bounds without reading the Store.
     pub fn validate(&self) -> Result<()> {
         self.snapshot.validate()?;

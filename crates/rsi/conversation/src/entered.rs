@@ -63,6 +63,38 @@ pub struct EnteredInput<'a> {
 }
 
 impl<'a> EnteredInput<'a> {
+    /// Whether the final message is attributed to the human composer.
+    pub fn is_human(&self) -> bool {
+        let source = match self.source {
+            EnteredSource::Direct
+            | EnteredSource::Claim(InputMessageSource::Human {
+                attribution: None, ..
+            }) => return true,
+            EnteredSource::Application(source) => source,
+            EnteredSource::Claim(InputMessageSource::PluginContext {
+                tool: Some(tool), ..
+            }) => &tool.source,
+            EnteredSource::Claim(
+                InputMessageSource::Human {
+                    attribution: Some(attribution),
+                    ..
+                }
+                | InputMessageSource::Application {
+                    attribution: Some(attribution),
+                    ..
+                },
+            ) => &attribution.source,
+            EnteredSource::Claim(InputMessageSource::Command { source, .. }) => {
+                return source
+                    .attribution
+                    .as_ref()
+                    .is_some_and(|a| a.source["kind"] == "user");
+            }
+            EnteredSource::Claim(_) => return false,
+        };
+        source["kind"] == "user"
+    }
+
     /// Display role and participant label derived from the recorded input source.
     pub fn presentation(&self) -> (&'static str, Option<std::borrow::Cow<'a, str>>) {
         use EnteredSource::{Application, Claim};

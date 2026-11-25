@@ -102,6 +102,15 @@ fn input_tool_and_generated_images_keep_distinct_exact_provenance() {
     assert_eq!(transcript.blocks.len(), 3);
     let message = &transcript.blocks[0];
     assert_eq!(message.text, "before\nafter");
+    let Some(PromptRecall::Recorded { offset, count }) = message.recall else {
+        panic!("mixed input must retain its original message coordinates");
+    };
+    assert_eq!(message.sources.get(0).unwrap().seq, input.seq());
+    assert_eq!(
+        recorded_text(&input, offset, count).as_deref(),
+        Some("beforeafter")
+    );
+    assert_eq!(serde_json::to_value(message).unwrap()["recall"], "recorded");
     assert_eq!(message.sources.len(), 4);
     assert!(
         message

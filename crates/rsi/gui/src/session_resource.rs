@@ -14,6 +14,53 @@ struct Read {
 }
 
 impl GuiApplication {
+    /// Reads an entered prompt whose full text is outside the displayed block.
+    pub fn recall_prompt(
+        self: &Arc<Self>,
+        index: crate::SurfaceId,
+        generation: String,
+        key: String,
+    ) -> BoxFuture<'static, Result<String>> {
+        self.admit_reply(move |app| async move {
+            let pane = app.pane(index)?;
+            let attached = pane.attachment(&generation)?;
+            let (seq, offset, count) = {
+                let state = attached.renderer.state.lock().expect("renderer poisoned");
+                let transcript = state.history.as_ref().unwrap_or(&state.transcript);
+                let block = transcript
+                    .blocks
+                    .iter()
+                    .find(|block| block.key == key)
+                    .ok_or("The prompt is no longer in this transcript")?;
+                let Some(crate::projection::PromptRecall::Recorded { offset, count }) =
+                    block.recall
+                else {
+                    return Err("The block has no recorded prompt".into());
+                };
+                (
+                    block.sources().get(0).expect("entered prompt source").seq,
+                    offset,
+                    count,
+                )
+            };
+            let page = tokio::select! {
+                biased;
+                () = attached.stop.cancelled() => return Err("This pane changed".into()),
+                result = rsi_client::read_with_capacity_retry(&app.execution, || {
+                    attached.handle.history_before(seq.checked_add(1), 1)
+                }) => result.map_err(error)?,
+            };
+            let fact = page
+                .facts
+                .first()
+                .filter(|fact| fact.seq() == seq)
+                .ok_or("The prompt is unavailable")?;
+            pane.attachment(&generation)?;
+            crate::projection::recorded_text(fact, offset, count)
+                .ok_or_else(|| "The prompt is unavailable".into())
+        })
+    }
+
     /// Opens the exact summary cited by a transcript marker in the current pane.
     pub fn compaction_summary(
         self: &Arc<Self>,

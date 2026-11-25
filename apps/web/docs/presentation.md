@@ -136,6 +136,15 @@ On the first keyboard submission, the composer keeps its keyboard position
 while the starting draft binds to a Session. Its text is read-only during that
 handoff. A user who moves to another control keeps focus there.
 
+With an empty draft, Up recalls the latest human prompt in the loaded
+transcript. Up and Down step through earlier and later prompts while the caret
+is at the end. Down past the latest prompt restores an empty draft. Adjacent
+identical prompts occupy one step. Editing or undoing a recall ends that
+sequence. Completions and input-method composition keep their keyboard gestures.
+Recall inserts plain text and keeps images and files out of the recalled draft.
+A conversation reference contributes its recorded model-visible preview,
+source and read locator. Sending that text creates an ordinary user message.
+
 At a composer width of 460 px or less, the access selector retains its shield,
 chevron and full accessible name. When the expanded controls need more than one
 line, the model selector first replaces its name and effort with the Models

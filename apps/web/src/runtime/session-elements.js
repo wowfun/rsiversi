@@ -1,5 +1,5 @@
 import { closeDisclosure } from "../../disclosure.js";
-import { composerKeydown } from "../../composer-actions.js";
+import { composerKeydown, recallPrompt } from "../../composer-actions.js";
 import { awayFromBottom } from "../../turn-presentation.js";
 export function mount(pane, context, elements) {
   Object.assign(pane, elements);
@@ -57,6 +57,7 @@ export function mount(pane, context, elements) {
   });
   listen(pane.input, "compositionend", () => {
     pane.composing = false;
+    pane.composingUntil = Date.now() + 10;
     pane.updateCompletions();
   });
   const retainSelection = () => {
@@ -77,6 +78,7 @@ export function mount(pane, context, elements) {
     if (pane.input.readOnly) return;
     const choice = composerKeydown(event, pane);
     if (choice) context.perform(() => pane.submit(choice));
+    else recallPrompt(event, pane, context);
   });
   listen(pane.input, "click", () => pane.updateCompletions());
   listen(pane.input, "keyup", (event) => {

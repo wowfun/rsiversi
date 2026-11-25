@@ -821,6 +821,23 @@ pub async fn message_feedback(source: String) -> Result<String, JsValue> {
         .map_err(failure)
 }
 
+/// Recalls the text of a loaded human prompt from its canonical input.
+#[wasm_bindgen]
+pub async fn recall_prompt(
+    pane: String,
+    generation: String,
+    key: String,
+) -> Result<String, JsValue> {
+    application()?
+        .recall_prompt(
+            rsi_gui::SurfaceId::parse(&pane).map_err(failure)?,
+            generation,
+            key,
+        )
+        .await
+        .map_err(failure)
+}
+
 /// Reads the cited summary only when its transcript marker is opened.
 #[wasm_bindgen]
 pub async fn compaction_summary(

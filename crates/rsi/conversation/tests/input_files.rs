@@ -43,6 +43,7 @@ fn running_and_deleting_a_schedule_use_their_distinct_transcript_roles() {
         };
         let (actual_role, actual_title) = input.presentation();
         assert_eq!((actual_role, actual_title.as_deref()), (role, title));
+        assert!(!input.is_human());
     }
 }
 
@@ -61,6 +62,7 @@ fn runtime_context_label_follows_provenance_instead_of_message_text() {
         content: EnteredContent::Direct("Runtime context"),
     };
     assert_eq!(input.presentation(), ("user", None));
+    assert!(input.is_human());
     assert_eq!(
         EnteredInput {
             source: rsi_conversation::EnteredSource::Claim(&runtime),

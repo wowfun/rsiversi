@@ -1746,16 +1746,16 @@ fn input_content(
         .enumerate()
         .map(|(index, content)| match content {
             AgentMessageContent::Text { text } => Ok(MessageContent::Text { text: text.clone() }),
-            AgentMessageContent::File { file } => Ok(MessageContent::File { file: file.clone(), local_execution }),
+            AgentMessageContent::File { file } => Ok(MessageContent::File {
+                file: file.clone(),
+                local_execution,
+            }),
             AgentMessageContent::Image { media, .. } => {
                 media_descriptor(media).map(MessageContent::Image)
             }
-            AgentMessageContent::Reference { reference } => Ok(MessageContent::Text { text: format!(
-                "Referenced conversation data from {} through record {}.{}\n{}\nRead more with reference_read using recorded_session_id={}, fact_seq=\"{}\", content_index={}.",
-                reference.metadata.source, reference.metadata.through_seq(),
-                if reference.metadata.omissions().is_empty() { "" } else { " Earlier material was omitted by capture limits." },
-                reference.preview, serde_json::to_string(&reference.metadata.target.session_id).expect("Session identity"), seq, offset + index,
-            ) }),
+            AgentMessageContent::Reference { reference } => Ok(MessageContent::Text {
+                text: reference.prompt_text(seq, offset + index),
+            }),
         })
         .collect()
 }

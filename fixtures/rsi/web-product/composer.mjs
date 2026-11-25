@@ -1,5 +1,50 @@
 import assert from "node:assert/strict";
 
+export async function verifyPromptRecall(page) {
+  await page.evaluate(async () => {
+    const blocks = [
+      {key:"first", text:"first", recall:"text"},
+      {key:"tool", text:"tool input", role:"user"},
+      {key:"mixed", text:"file.txt", recall:"recorded"},
+      {key:"repeat", text:"latest\nsecond line", recall:"text"},
+      {key:"latest", text:"latest\nsecond line", recall:"text"}
+    ].map(block => ({role:"user",title:"You",sources:1,...block}));
+    fixture.setReply("recall_prompt", ({key}) => {
+      if (key !== "mixed") throw Error("Unexpected recorded prompt");
+      return "text around the attachment";
+    });
+    await fixture.surface("recall", {transcript:{...fixture.view.surfaces.main.transcript,blocks}});
+    await fixture.runtime.panes.get("main").binding;
+  });
+  const input = page.getByRole("textbox", {name:"Main message",exact:true});
+  await input.click();
+  const value = expected => page.waitForFunction(text => document.activeElement?.value === text, expected, {timeout:4000});
+  const latest = "latest\nsecond line", mixed = "text around the attachment";
+  for (const [key,expected] of [["ArrowUp",latest],["ArrowUp",mixed],["ArrowUp","first"],
+    ["ArrowDown",mixed],["ArrowDown",latest],["ArrowDown",""],["Control+z",latest]]) {
+    await input.press(key);
+    await value(expected);
+  }
+  await input.fill("my unsent draft");
+  await input.press("ArrowUp");
+  assert.equal(await input.inputValue(),"my unsent draft");
+  await input.fill("");
+  await input.press("Shift+ArrowUp");
+  assert.equal(await input.inputValue(),"");
+  await input.press("ArrowUp");
+  await value(latest);
+  await page.evaluate(() => {
+    fixture.setReply("recall_prompt", () => new Promise(resolve => {window.finishRecall = resolve;}));
+  });
+  await input.press("ArrowUp");
+  await page.waitForFunction(() => typeof window.finishRecall === "function");
+  await input.fill("keep writing");
+  await page.evaluate(() => window.finishRecall("late response"));
+  await page.waitForFunction(() => !fixture.runtime.panes.get("main").editor.readingPrompt);
+  assert.equal(await input.inputValue(),"keep writing");
+  return {multiline:true,duplicates:true,multipart:true,undo:true,lateRead:true};
+}
+
 // Actual document methods and IndexedDB, with gated persistence and Worker replies.
 export async function verifyComposer(page) {
   const switching = await page.evaluate(async () => {
