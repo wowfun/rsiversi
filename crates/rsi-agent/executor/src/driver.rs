@@ -552,7 +552,7 @@ impl Driver {
                 }
                 scheduled.push_back((call, scheduling));
             }
-            let parallel_limit = self.parallelism.limit()?;
+            let parallel_limit = self.parallelism.limit().await?;
             let mut settled = Vec::new();
             while let Some((call, scheduling)) = scheduled.pop_front() {
                 self.turns

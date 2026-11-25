@@ -11,6 +11,9 @@ use rsi_settings_protocol::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug)]
 pub(super) struct Parallelism {
     base: usize,
@@ -36,19 +39,23 @@ impl Parallelism {
         Ok(limits)
     }
 
-    pub(super) fn limit(&self) -> Result<usize, DriveFailure> {
-        let settings = self.settings.lock().expect("loop settings poisoned");
-        let Some(registration) = settings.as_ref() else {
+    pub(super) async fn limit(&self) -> Result<usize, DriveFailure> {
+        let scope = self
+            .settings
+            .lock()
+            .expect("loop settings poisoned")
+            .as_ref()
+            .map(|registration| registration.scope.clone());
+        let Some(scope) = scope else {
             return Ok(self.base);
         };
-        let snapshot = registration
-            .scope
-            .get()
+        let (_, selected) = scope
+            .user_value(Some("max_parallel_tool_calls"))
+            .await
             .map_err(|error| failed("loop_settings", error.to_string()))?;
-        // Rust saturates this conversion. Each parallel run sizes its queue to its actual call count.
-        Ok(snapshot.value["max_parallel_tool_calls"]
-            .as_f64()
-            .expect("validated tool limit") as usize)
+        Ok(selected.map_or(self.base, |value| {
+            value.as_f64().expect("validated tool limit") as usize
+        }))
     }
 }
 

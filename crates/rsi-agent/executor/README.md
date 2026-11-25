@@ -263,7 +263,9 @@ composed, the Host owner can save a positive integer in
 `rsi.agent-loop.max_parallel_tool_calls`. Each provider batch reads its limit
 once before dispatch, including across exclusive tools in that batch. A save
 affects subsequent batches across Sessions, and clearing the override restores
-the active executor's configured value.
+the active executor's configured value. If a previous save has an uncertain
+outcome, the next batch reads back the stored choice before starting tools.
+Ordinary batches read the committed in-memory setting.
 It replenishes free slots while results awaiting ordered publication fit the
 batch's count and byte budgets. If preparation waits for a policy or human
 decision, preceding ready calls form their own durable wave. Later calls wait
