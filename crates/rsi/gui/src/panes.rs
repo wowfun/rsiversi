@@ -723,7 +723,6 @@ impl GuiApplication {
         turns: rsi_agent_session_protocol::ForkTurnSelection,
     ) -> Result<()> {
         let attached = self.pane(pane)?.attachment(generation)?;
-        let header = attached.handle.header().await.map_err(error)?;
         let id = SessionId::new(rsi_ui::fresh_identity("fork")?).map_err(error)?;
         let request = rsi_session_protocol::CreateSession {
             session_id: id.clone(),
@@ -734,7 +733,7 @@ impl GuiApplication {
                 .map_err(error)?
                 .ok_or("Workspace is not registered")?
                 .id,
-            agent_preset_id: Some(header.agent_preset_id().clone()),
+            agent_preset_id: None,
             fork: Some(rsi_session_protocol::ForkDraft {
                 source_session_id: attached.id.clone(),
                 point: rsi_agent_session_protocol::ForkPoint::through(&turn),

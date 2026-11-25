@@ -54,6 +54,10 @@ async fn manual_fork_binds_source_generation_and_passes_the_exact_cut_to_creatio
         assert_eq!(requests.len(), before + 1);
         let created = requests.last().unwrap();
         assert_eq!(created.workspace_id, registration);
+        assert_eq!(
+            created.agent_preset_id, None,
+            "inherit the effective source preset at the fork boundary"
+        );
         assert_ne!(
             created.session_id.as_str(),
             initial["session"].as_str().unwrap()

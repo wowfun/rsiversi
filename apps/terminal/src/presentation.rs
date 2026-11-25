@@ -620,7 +620,7 @@ mod tests {
                 seq,
                 rsi_conversation::EnteredInput {
                     index: 0,
-                    source: None,
+                    source: rsi_conversation::EnteredSource::Direct,
                     seq,
                     offset: 0,
                     content: rsi_conversation::EnteredContent::Direct(&"word ".repeat(50_000)),

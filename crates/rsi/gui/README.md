@@ -381,6 +381,7 @@ original target Header and must be released before changing that Header.
 For a published Session before its first Turn, selection preserves the Header
 and the queue. The replacement controller subscribes to durable history,
 including queued inputs and subsequent activity from another client.
+Forking a conversation inherits its effective preset through the Session service.
 
 Repeated new-conversation actions in a workspace may reuse the pane's current
 empty draft or one it previously created and left untouched. Candidates must

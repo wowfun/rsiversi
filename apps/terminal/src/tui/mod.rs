@@ -2234,7 +2234,7 @@ async fn run_inner(
                             if let Some(osc) = delivery.osc && terminal.commands.try_send(osc).is_err() { client.state.notice("Copy failed: terminal command queue is busy"); }
                         },
                         Ok(Update::Menu(menu)) => client.state.menu = Some(menu),
-                        Ok(Update::Plugins(view)) => client.state.show_plugins(*view),
+                        Ok(Update::Plugins(view)) => client.state.show_plugins(*view, client.projections.as_ref()),
                         Ok(Update::Automation(stop,result))=>match result {
                             Ok(value) if !stop.is_cancelled() => client.show_automation(&value),
                             Ok(value) if !value.is_null() => client.state.info(format!("Deployment operation settled: {}",transcript::json_window(&value))),

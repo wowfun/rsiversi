@@ -98,7 +98,7 @@ later live revisions and settlement resume the same event cursor exactly once.
 Settlement or turn completion releases pending output. Durable replay remains
 authoritative, and a late live update cannot repeat an already settled attempt.
 
-The Plugins view displays the shared workbench last-update guidance separately from current Profile health and watcher status.
+The Plugins view opens the configuration of the Session's selected preset. It displays the shared workbench last-update guidance separately from current Profile health and watcher status.
 
 `/export [PATH] [-f markdown|md|json] [-i INCLUDE]` exports the selected native
 Session without submitting a message. Quoted paths are supported; the default

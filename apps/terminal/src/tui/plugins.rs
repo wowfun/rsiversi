@@ -22,7 +22,11 @@ impl State {
         clippy::too_many_lines,
         reason = "One exhaustive projection keeps related state transitions and ownership visible together"
     )]
-    pub(super) fn show_plugins(&mut self, view: PluginsView) {
+    pub(super) fn show_plugins(
+        &mut self,
+        view: PluginsView,
+        projections: Option<&rsi_session_protocol::ProjectionSnapshot>,
+    ) {
         use std::fmt::Write as _;
         let mut text = String::from("Plugins");
         self.open_detail(String::new());
@@ -43,7 +47,10 @@ impl State {
             "Current preset configuration".into(),
             Action::Plugins(PluginsCommand::Select {
                 target: rsi_configuration_api::PluginStatusTarget::Preset {
-                    id: self.header.agent_preset_id().to_string(),
+                    id: projections
+                        .and_then(|view| view.snapshot().selected_preset())
+                        .unwrap_or_else(|| self.header.agent_preset_id())
+                        .to_string(),
                 },
             }),
         ));

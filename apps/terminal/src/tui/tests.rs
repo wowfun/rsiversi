@@ -736,6 +736,49 @@ async fn registered_slash_command_retains_unknown_identity_without_submitting_a_
 }
 
 #[tokio::test]
+async fn plugin_inspection_opens_the_current_session_preset() {
+    use rsi_agent_session_protocol::{AgentPresetId, ProjectionCursor, SessionProjectionSnapshot};
+    let (mut client, _, runtime, surface) = client().await;
+    let header = &client.state.header;
+    let pool = rsi_session_protocol::ProjectionRetention::default();
+    let changed = SessionProjectionSnapshot::with_preset(
+        header.session_id().clone(),
+        header.fingerprint().unwrap(),
+        "b".repeat(64),
+        Some(AgentPresetId::new("review").unwrap()),
+        ProjectionCursor::Durable {
+            fact_seq: 0,
+            control_seq: 3,
+        },
+        vec![],
+    )
+    .unwrap();
+    let retained = pool.reserve_capture().unwrap().retain(changed).unwrap();
+    for (view, expected) in [
+        (None, header.agent_preset_id().to_string()),
+        (Some(&retained), "review".into()),
+    ] {
+        client.state.show_plugins(Default::default(), view);
+        assert!(
+            client
+                .state
+                .detail_actions
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .any(|(_, action)| matches!(
+                    action, Action::Plugins(rsi_workbench_ui::PluginsCommand::Select {
+                        target: rsi_configuration_api::PluginStatusTarget::Preset { id },
+                    }) if id == &expected
+                ))
+        );
+    }
+    surface.stop().await;
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn extension_inspection_tracks_replacements_without_reopening_a_closed_detail() {
     use rsi_agent_session_protocol::{
         ContributionId, ProjectionCursor, ProjectionEntry, ProjectionValue,
