@@ -9,6 +9,19 @@ struct GatedTool {
     release: Semaphore,
 }
 
+impl GatedTool {
+    fn channel() -> (Arc<Self>, mpsc::UnboundedReceiver<()>) {
+        let (started, events) = mpsc::unbounded_channel();
+        (
+            Arc::new(Self {
+                started,
+                release: Semaphore::new(0),
+            }),
+            events,
+        )
+    }
+}
+
 #[async_trait]
 impl ToolExecutor for GatedTool {
     async fn execute(&self, args: Value, _: ToolExecution) -> ToolResultType<ToolResult> {
@@ -31,15 +44,17 @@ async fn started(events: &mut mpsc::UnboundedReceiver<()>, count: usize) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_parallel_limit_is_sampled_once_per_provider_batch() {
     let stack = BaseStack::activate().await;
-    let (tx, mut events) = mpsc::unbounded_channel();
-    let tool = Arc::new(GatedTool {
-        started: tx,
-        release: Semaphore::new(0),
-    });
+    let (tool, mut events) = GatedTool::channel();
+    let (other_tool, mut other_events) = GatedTool::channel();
     let mut leases = Vec::new();
-    for (name, scheduling) in [
-        ("hold", ToolScheduling::Exclusive),
-        ("read_probe", ToolScheduling::ParallelSafe),
+    for (name, scheduling, executor) in [
+        ("hold", ToolScheduling::Exclusive, tool.clone()),
+        ("read_probe", ToolScheduling::ParallelSafe, tool.clone()),
+        (
+            "other_read",
+            ToolScheduling::ParallelSafe,
+            other_tool.clone(),
+        ),
     ] {
         leases.push(
             stack
@@ -56,13 +71,16 @@ async fn live_parallel_limit_is_sampled_once_per_provider_batch() {
                     run_policy: rsi_tools_protocol::ToolRunPolicy::execution(Duration::from_secs(
                         30,
                     )),
-                    executor: tool.clone(),
+                    executor,
                 })
                 .unwrap(),
         );
     }
     let mut scripts = Vec::new();
-    for batch in 0..3 {
+    for (batch, name) in ["read_probe", "read_probe", "other_read", "read_probe"]
+        .into_iter()
+        .enumerate()
+    {
         let ids: Vec<_> = (0..10)
             .map(|index| format!("read-{batch}-{index}"))
             .collect();
@@ -70,8 +88,11 @@ async fn live_parallel_limit_is_sampled_once_per_provider_batch() {
         if batch == 0 {
             calls.push(("hold-first", "hold", "{}"));
         }
-        calls.extend(ids.iter().map(|id| (id.as_str(), "read_probe", "{}")));
+        calls.extend(ids.iter().map(|id| (id.as_str(), name, "{}")));
         scripts.push(StartOutcome::Stream(tool_calls_script(&calls)));
+        if name == "other_read" {
+            scripts.push(StartOutcome::Stream(answer_script()));
+        }
     }
     scripts.push(StartOutcome::Stream(answer_script()));
     let language = stack
@@ -79,7 +100,7 @@ async fn live_parallel_limit_is_sampled_once_per_provider_batch() {
         .await;
     let executor = stack
         .activate_executor_with_config(
-            json!({"executor_id":"limit","maximum_parallel_tool_calls":2}),
+            json!({"executor_id":"limit","maximum_parallel_tool_calls":2,"maximum_active_turns":2}),
         )
         .await;
     let provider = activate_fixture(
@@ -142,7 +163,26 @@ async fn live_parallel_limit_is_sampled_once_per_provider_batch() {
                 "batch {batch} admitted a third blocked tool"
             );
         } else {
+            let other_turn = stack
+                .submit_fresh(&turns, "second-session", "read in another session")
+                .await;
+            started(&mut other_events, 10).await;
             assert_eq!(scope.clear(saved.revision).await.unwrap().value, base.value);
+            other_tool.release.add_permits(10);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                turns.wait_idle(&other_turn.session_id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                turns
+                    .outcome(&other_turn.session_id, &other_turn.turn_id)
+                    .await
+                    .unwrap(),
+                Some(TurnOutcome::Completed)
+            );
         }
         tool.release.add_permits(10);
         started(&mut events, 10 - expected).await;
