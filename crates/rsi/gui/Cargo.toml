@@ -51,6 +51,8 @@ rsi-host = { path = "../../rsi-host/core" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-meta-execution = { path = "../../rsi-meta/execution" }
 rsi-session-protocol = { path = "../session-protocol" }
+rsi-goal = { path = "../goal" }
+rsi-agent-goal = { path = "../../rsi-agent/goal" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-agent-session-protocol = { path = "../../rsi-agent/session-protocol" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
@@ -70,8 +72,6 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
-rsi-goal = { path = "../goal" }
-rsi-agent-goal = { path = "../../rsi-agent/goal" }
 image.workspace = true
 sha2.workspace = true
 rsi-process = { path = "../../rsi-process/core" }

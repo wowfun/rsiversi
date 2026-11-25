@@ -75,7 +75,7 @@ export function CreatedTaskCards({rows,pane,generation}: {
   });
   const schedule = projectedSchedule(projection);
   const cutoff = projection?.cursor.fact_seq;
-  const covered = cutoff !== undefined && Number.isSafeInteger(cutoff) ? BigInt(cutoff) : undefined;
+  const covered = cutoff === undefined ? undefined : BigInt(cutoff);
   return <div className={css.cards}>{rows.map(({key,task,seq})=>{
     const current = schedule?.reminders.find(row=>row.id===task.id);
     const deleted = !!schedule && !current && covered !== undefined && covered >= BigInt(seq);

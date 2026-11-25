@@ -18,6 +18,8 @@ const usedSymbols = [
   'dsw-icon-chevrons-up-down-outline-regular',
   'dsw-icon-clock-outline-regular',
   'dsw-icon-goal-outline-regular',
+  'dsw-icon-pause-outline-regular',
+  'dsw-icon-play-outline-regular',
   'dsw-icon-plan-outline-regular',
   'dsw-icon-fullscreen-outline-regular',
   'dsw-icon-stop-fill-regular',

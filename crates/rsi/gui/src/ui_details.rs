@@ -205,16 +205,16 @@ impl GuiApplication {
         }
         match result {
             Ok(snapshot) => {
-                if !settled
-                    && detail
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|previous| previous.revision() == snapshot.revision())
+                if detail
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|previous| previous.revision() < snapshot.revision())
                 {
+                    detail.model = Some(snapshot.model().model);
+                    detail.snapshot = Some(snapshot);
+                } else if !settled {
                     return;
                 }
-                detail.model = Some(snapshot.model().model);
-                detail.snapshot = Some(snapshot);
                 detail.error = None;
             }
             Err(failure) => detail.error = Some(failure),
@@ -327,7 +327,11 @@ impl GuiApplication {
                 invocation
             };
             self.changed();
-            let result = admitted.await.map_err(error);
+            // A refresh may have published since the action returned its pin.
+            let result = admitted
+                .await
+                .and_then(|reply| Ok(lease.snapshot()?.unwrap_or(reply)))
+                .map_err(error);
             self.model_result(&lease, result, true);
             return Ok(());
         }

@@ -38,6 +38,31 @@
 }
 .item {font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary);}
 .glyph {display: grid; flex: none; place-items: center; width: 16px; height: 16px;}
-.goal {display: flex; align-items: center; gap: 10px; min-height: 36px;}
-.goal > svg {flex: none;}
-.goal button {flex: none; margin-inline-start: auto;}
+.goal {display: flex; align-items: center; gap: 10px; min-height: 36px; padding:4px 5px 4px 12px; border-radius:var(--dsw-radius-md);}
+.goal > svg {flex: none; color:var(--dsw-alias-label-tertiary);}
+.goal .progress {color:var(--dsw-alias-label-primary-dimmed);}
+.goal:has(textarea) {align-items:flex-end;}
+.goalLabel {flex:none; font:inherit; font-size:13px; font-weight:500; color:var(--dsw-alias-label-primary); border:0; padding:0; background:transparent; cursor:pointer;}
+.goalActions {display:flex; align-items:center; flex:none; gap:8px; margin-inline-start:auto;}
+.goalActions button {display:grid; place-items:center; width:28px; height:28px; border:0; border-radius:50%; padding:0; background:transparent; color:var(--dsw-alias-label-tertiary); cursor:pointer;}
+@media (hover:hover) {.goalActions button:hover {background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-secondary);}}
+.goalActions button:disabled {opacity:0.4; cursor:default;}
+.editor {
+  box-sizing:border-box;
+  flex:1 1 auto;
+  min-width:0;
+  min-height:28px;
+  max-height:127px;
+  field-sizing:content;
+  resize:none;
+  overflow-y:auto;
+  margin:0;
+  padding:3px 8px;
+  border:0.5px solid var(--dsw-alias-border-l4);
+  border-radius:var(--dsw-radius-sm);
+  background:var(--dsw-alias-bg-base);
+  color:var(--dsw-alias-label-primary);
+  font:var(--dsw-font-xs-13);
+}
+.editor:focus {border-color:var(--dsw-alias-state-business-primary); outline:none;}
+.goalError {min-width:0; font-size:12px; color:var(--dsw-alias-state-error-primary); overflow-wrap:anywhere;}

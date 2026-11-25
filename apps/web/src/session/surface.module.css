@@ -635,19 +635,6 @@
   background: var(--secondary-surface);
   color: var(--ink);
 }
-:global(.queue-row textarea):where(.scope, .scope *) {
-  flex: 1;
-  min-width: 0;
-  max-height: 8lh;
-  field-sizing: content;
-  resize: none;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--paper);
-  color: var(--ink);
-  font: inherit;
-}
 :global(.queue-editor):where(.scope, .scope *) {
   width: min(680px, calc(100vw - 32px));
   max-height: 85vh;

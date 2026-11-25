@@ -1,5 +1,5 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
-import { Tooltip } from "../../vendor/dsh/dockkit-primitives/Tooltip.tsx";
+import { useEffect, useId, useState } from "react";
+import {DockButton, InlineEditor} from "./dock-controls.tsx";
 import {
   IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular,
   IconCloseOutlineRegular, IconEditOutlineRegular, IconQueueOutlineRegular,
@@ -8,17 +8,6 @@ import {
 import { run } from "../bridge.ts";
 import type { ProjectionActions, SessionProjections } from "./projection-types.ts";
 import type { QueueEditorState } from "./queue-editor.tsx";
-
-function QueueButton({ label, disabled, onClick, children }: {
-  label: string;
-  disabled: boolean;
-  onClick(): void;
-  children: ReactNode;
-}) {
-  return <Tooltip label={label} portal side="bottom" delayMs={500} disabled={disabled}>
-    <button type="button" aria-label={label} disabled={disabled} onClick={onClick}>{children}</button>
-  </Tooltip>;
-}
 
 function InlineEdit({ editor }: { editor: QueueEditorState }) {
   const block = editor.blocks[0]!;
@@ -29,20 +18,10 @@ function InlineEdit({ editor }: { editor: QueueEditorState }) {
     if (canSave) void run(() => editor.save());
   }
   return <>
-    <textarea autoFocus rows={1} aria-label="Edit queued message" value={text}
-      readOnly={editor.saving} onChange={event => editor.edit(block.key, event.currentTarget.value)}
-      onKeyDown={event => {
-        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-        if (event.key === "Enter" && !event.shiftKey) {
-          event.preventDefault();
-          save();
-        } else if (event.key === "Escape" && !editor.saving) {
-          event.preventDefault();
-          editor.close();
-        }
-      }}/>
-    <QueueButton label="Save queued message" disabled={!canSave} onClick={save}><IconCheckOutlineRegular size={14}/></QueueButton>
-    <QueueButton label="Cancel editing" disabled={editor.saving} onClick={() => editor.close()}><IconCloseOutlineRegular size={14}/></QueueButton>
+    <InlineEditor label="Edit queued message" value={text} pending={editor.saving} onChange={value=>editor.edit(block.key,value)}
+      onSave={save} onCancel={()=>editor.close()}/>
+    <DockButton label="Save queued message" disabled={!canSave} onClick={save}><IconCheckOutlineRegular size={14}/></DockButton>
+    <DockButton label="Cancel editing" disabled={editor.saving} onClick={() => editor.close()}><IconCloseOutlineRegular size={14}/></DockButton>
     {editor.status && <span role="status">{editor.status}</span>}
   </>;
 }
@@ -81,13 +60,13 @@ export function PendingInputs({ items, owner, editor }: {
               </span>
               {inline && <InlineEdit editor={inline}/>}
               <div className="queue-actions" hidden={!!inline}>
-                <QueueButton label={read} disabled={disabled} onClick={() => action("read")}>
+                <DockButton label={read} disabled={disabled} onClick={() => action("read")}>
                   {item.editable ? <IconEditOutlineRegular size={14}/> : item.read_label}
-                </QueueButton>
-                {item.withdraw_label && <QueueButton label="Remove queued message" disabled={disabled}
-                  onClick={() => action("withdraw")}><IconTrashOutlineRegular size={14}/></QueueButton>}
-                {item.convert_label && <QueueButton label={item.convert_label} disabled={disabled}
-                  onClick={() => action("convert_to_steer")}><IconSendOutlineRegular size={14}/></QueueButton>}
+                </DockButton>
+                {item.withdraw_label && <DockButton label="Remove queued message" disabled={disabled}
+                  onClick={() => action("withdraw")}><IconTrashOutlineRegular size={14}/></DockButton>}
+                {item.convert_label && <DockButton label={item.convert_label} disabled={disabled}
+                  onClick={() => action("convert_to_steer")}><IconSendOutlineRegular size={14}/></DockButton>}
               </div>
             </li>
           );

@@ -24,6 +24,32 @@ pub fn display_error(value: impl std::fmt::Display) -> String {
 pub(crate) use display_error as error;
 
 #[derive(Deserialize)]
+#[serde(
+    remote = "rsi_agent_session_protocol::CommandRevision",
+    tag = "kind",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum WebCommandRevision {
+    Draft {
+        #[serde(deserialize_with = "decimal_watermark")]
+        revision: u64,
+    },
+    Durable {
+        #[serde(deserialize_with = "decimal_watermark")]
+        control_seq: u64,
+    },
+}
+
+fn decimal_watermark<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<u64, D::Error> {
+    <&str>::deserialize(input)?
+        .parse()
+        .map_err(serde::de::Error::custom)
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
     Automation {
@@ -200,6 +226,14 @@ pub(crate) enum Command {
         pane: crate::SurfaceId,
         generation: String,
     },
+    GoalControl {
+        pane: crate::SurfaceId,
+        generation: String,
+        request_id: rsi_agent_session_protocol::DomainRequestId,
+        #[serde(with = "WebCommandRevision")]
+        expected_revision: rsi_agent_session_protocol::CommandRevision,
+        control: rsi_agent_goal::GoalAction,
+    },
     Commands {
         pane: crate::SurfaceId,
         generation: String,
@@ -307,6 +341,7 @@ impl Command {
             | Self::Metrics { pane, .. }
             | Self::Cancel { pane, .. }
             | Self::History { pane, .. }
+            | Self::GoalControl { pane, .. }
             | Self::Commands { pane, .. }
             | Self::Completions { pane, .. }
             | Self::ResourceRead { pane, .. }

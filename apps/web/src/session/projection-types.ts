@@ -33,7 +33,7 @@ export interface SessionProjections {
     outcome: { kind: string; revision?: string; control_seq?: string };
   };
   projections?: {
-    cursor: { kind: string; fact_seq?: number };
+    cursor: {kind:'draft';revision:string;fact_seq?:never} | {kind:'durable';control_seq:string;fact_seq:string};
     generation_rejection?: string | null;
     generation_rebuilding?: boolean;
     entries: {

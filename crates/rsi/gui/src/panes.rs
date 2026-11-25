@@ -432,6 +432,16 @@ impl Pane {
             "history_more":state.history_more, "active":state.transcript.active, "notice":state.notice(),
             "pending":state.pending(!current.protected),
         });
+        if let Some(cursor) = metadata["projections"]
+            .get_mut("cursor")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for field in cursor.values_mut() {
+                if let Some(watermark) = field.as_u64() {
+                    *field = watermark.to_string().into();
+                }
+            }
+        }
         if current.can_stop_without_navigation {
             metadata["can_stop_work"] = true.into();
         }
@@ -760,6 +770,26 @@ impl GuiApplication {
                     .await
             }
             Command::SourcePage { ticket, forward } => self.source_page(&ticket, forward).await,
+            Command::GoalControl {
+                pane,
+                generation,
+                request_id,
+                expected_revision,
+                control,
+            } => {
+                let attached = self.pane(pane)?.attachment(&generation)?;
+                attached
+                    .controller
+                    .control_goal(rsi_goal::GoalControl {
+                        request_id,
+                        expected_revision,
+                        action: control,
+                        published_at_ms: None,
+                    })
+                    .await
+                    .map_err(error)?;
+                Ok(())
+            }
             Command::Commands { pane, generation } => {
                 let attached = self.pane(pane)?.attachment(&generation)?;
                 let commands = attached.controller.commands().await.map_err(error)?;

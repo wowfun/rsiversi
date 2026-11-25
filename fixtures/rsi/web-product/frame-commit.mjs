@@ -709,7 +709,7 @@ export async function verifyFrameCommit(browser, url, report, name) {
       await page.screenshot({ path: join(report, `${name}-references.png`) });
     } else if (scenario === "claimed-queue") {
       await page.evaluate(async () => {
-        fixture.view.surfaces.main.projections = {cursor: {kind: "draft"}, entries: [{producer: "rsi.todo.view",
+        fixture.view.surfaces.main.projections = {cursor: {kind: "draft", revision:"1"}, entries: [{producer: "rsi.todo.view",
           content: {kind: "value", value: [{content: "Review", status: "pending"}]}}]};
         await fixture.frame();
       });
@@ -718,13 +718,15 @@ export async function verifyFrameCommit(browser, url, report, name) {
       const goal = page.getByRole("region", {name:"Goal",exact:true});
       const showGoal = (phase, reason) => page.evaluate(async ({phase, reason}) => {
         const entries=fixture.view.surfaces.main.projections.entries;
-        entries.splice(1,entries.length-1,{producer:'rsi.goal.view',content:{kind:'value',value:{goal:{objective:'Check the edited draft',phase,reason}}}});
+        entries.splice(1,entries.length-1,{producer:'rsi.goal.view',content:{kind:'value',value:{goal:{id:'review',objective:'Check the edited draft',phase,reason}}}});
         await fixture.frame();
       },{phase,reason});
       assert.equal(await goal.count(),0);
       await showGoal('active');
       await goal.getByText('Active Goal',{exact:true}).waitFor();
-      assert.equal(await goal.getByRole('button').count(),0,'a missing surface cannot offer controls');
+      assert.equal(await goal.getByRole('button',{name:'Open goal controls'}).count(),0);
+      assert(await goal.getByRole('button',{name:'Edit goal'}).isEnabled());
+      assert(await goal.getByRole('button',{name:'Pause goal'}).isDisabled());
       for (const [armed, label] of [[false, 'Inactive Goal'], [true, 'Active Goal']]) {
         await page.evaluate(async armed => {
           fixture.view.surfaces.main.goal_armed = armed;
@@ -760,6 +762,16 @@ export async function verifyFrameCommit(browser, url, report, name) {
         assert.equal(await pending.count(), 0, "claimed input leaves the composer");
         assert.equal(await todo.getByRole("button").getAttribute("aria-expanded"), "true");
       }
+      await showGoal('paused');
+      await goal.getByRole('button',{name:'Edit goal'}).click();
+      await goal.getByRole('textbox',{name:'Goal objective'}).fill('Unsaved text for the first session');
+      await page.evaluate(()=>fixture.surface('second-goal-session',{
+        projections:{cursor:{kind:'draft',revision:'1'},entries:[{producer:'rsi.goal.view',
+          content:{kind:'value',value:{goal:{id:'review',objective:'Review a different draft',phase:'paused'}}}}]},
+      }));
+      await page.locator('[data-session-id="second-goal-session"]').waitFor();
+      assert.equal(await goal.getByRole('textbox').count(),0,'Goal editor belongs to its attached session');
+      assert(await goal.getByText('Review a different draft',{exact:true}).isVisible());
     } else if (scenario === "projections") {
       await page.evaluate(async () => {
         Object.assign(fixture.view.surfaces.main, {

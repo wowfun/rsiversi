@@ -162,7 +162,7 @@ try {
       assert.equal(service.provider.requests.length, 0);
       await plan.filter({ hasText: '"enabled": false' }).waitFor({state:'attached'});
       assert.equal(await extensions.locator(".hint").first().textContent(), 'Draft state');
-      assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()),{kind:'draft',revision:0});
+      assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()),{kind:'draft',revision:'0'});
       await page.screenshot({ path: join(report, `${name}-plan-draft.png`) });
       await left.getByRole("textbox", { name: "Main message" }).fill("A saved left draft");
       await page.locator('.conversation-menu').evaluate(node=>node.open=true);await page.locator('#add-surface').click();await page.locator('.conversation-menu').evaluate(node=>node.open=false);
@@ -236,7 +236,8 @@ try {
       assert.equal(await extensions.locator(".hint").first().innerText(), 'Recorded session state');
       const durableCursor=JSON.parse(await extensions.locator('.projection-coordinates pre').textContent());
       assert.equal(durableCursor.kind,'durable');
-      assert(durableCursor.fact_seq>0 && Number.isSafeInteger(durableCursor.control_seq));
+      assert.match(durableCursor.control_seq,/^\d+$/);
+      assert(BigInt(durableCursor.fact_seq)>0n);
       await page.screenshot({ path: join(report, `${name}-plan-durable.png`) });
       await left.getByRole("textbox", { name: "Main message" }).fill("Keep this draft while switching");
       const leftIdentity = await left.locator(".pane-session").textContent();

@@ -28,8 +28,13 @@ A conversation with an active, paused or blocked Goal shows its recorded phase
 and objective above the composer. A blocked Goal exposes its recorded stopping
 reason as the strip's tooltip. Completed goals, protected interactions and
 global workbench pages leave the strip out of the composer. A current Goal
-surface lets the user open its controls from the strip. Reading the strip uses
-the attached conversation's projection without opening a resource.
+surface lets the user open its details from the phase label. The strip offers
+inline objective editing, clear, and pause or resume against the displayed Goal
+and revision. Enter saves, Shift+Enter inserts a line break, and Escape cancels
+the edit. The inline editors for Goals and queued messages grow through six lines
+and scroll within the field for longer text. Replacing the attached conversation
+or its Goal discards the open editor, including when two sessions use the same Goal ID. Actions use the
+attached conversation's Goal controller and retain its uncertain-commit recovery.
 
 A conversation with a nonempty to-do projection shows its progress above the
 composer. The panel starts collapsed and names each status with a nonzero

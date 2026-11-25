@@ -66,7 +66,7 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.match(await draftReceipt.innerText(), /Revision\s+1/);
     await plan.filter({ hasText: '"enabled": true' }).waitFor({state:'attached'});
     assert.equal(await extensions.locator(".hint").first().textContent(), 'Draft state');
-    assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()), {kind:'draft',revision:1});
+    assert.deepEqual(JSON.parse(await extensions.locator('.projection-coordinates pre').textContent()), {kind:'draft',revision:'1'});
     assert.equal(requests.length, 0);
     await page.screenshot({ path: join(destination, "draft.png") });
     await pane.getByRole("textbox", { name: "Main message" }).fill("Inspect independent addon");
@@ -85,7 +85,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     assert.equal(await extensions.locator(".hint").first().innerText(), 'Recorded session state');
     const cursor = JSON.parse(await extensions.locator('.projection-coordinates pre').textContent());
     assert.equal(cursor.kind, 'durable');
-    assert(cursor.fact_seq > 0 && Number.isSafeInteger(cursor.control_seq));
+    assert.match(cursor.control_seq,/^\d+$/);
+    assert(BigInt(cursor.fact_seq)>0n);
     assert.equal(requests.length, 1);
     await plan.scrollIntoViewIfNeeded();
     await page.screenshot({ path: join(destination, "durable.png") });

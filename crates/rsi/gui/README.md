@@ -201,6 +201,10 @@ external peer. External panes have text submission, exact peer permission choice
 observed history and explicit cancel/close/resume/load controls. Native model,
 Goal, preset, terminal and extension controls are absent from external panes.
 Every action and raw source delivery checks the surface attachment generation.
+Native panes submit Goal actions through their attached Session controller with
+the displayed projection revision and the caller's request identity. GUI projection
+watermarks cross the JavaScript boundary as decimal strings so a control targets
+the exact 64-bit revision shown in the document.
 External catalog pages contain at most 64 observations and only configured endpoint
 identities. The document cannot supply launch paths, environment or commands.
 
@@ -624,7 +628,10 @@ withdrawal cancels observation and joins its task before connection cleanup.
 Executable admission and DOM mounting grant no Session or credential authority.
 
 Surface details hold the UI owner's asynchronous PresentationLease and an exact
-SnapshotPin. Their watcher updates only captured model data; document rendering
+SnapshotPin. An action that settles while its contribution refreshes releases the
+busy state and displays the latest published snapshot. Observations and action
+replies advance the displayed revision monotonically within the same lease.
+Their watcher updates only captured model data; document rendering
 performs no business reads. Closing or replacing the detail cancels its watcher,
 joins lease cleanup, and fences escaped input. Source requests name the displayed
 detail ticket and model-local source, with windows of at most 64 KiB. Actions name

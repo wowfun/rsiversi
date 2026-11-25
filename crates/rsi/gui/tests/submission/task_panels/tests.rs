@@ -35,6 +35,56 @@ fn detail(app: &rsi_gui::GuiApplication) -> Value {
 }
 
 #[tokio::test]
+async fn goal_dock_submits_only_from_its_attachment_and_exact_displayed_revision() {
+    let (runtime, backend, app) = prepared().await;
+    let scenario = &backend.task_panels;
+    let revision = u64::MAX - 2;
+    let id = DomainRequestId::new("review").unwrap();
+    {
+        let mut state = scenario.state.lock().unwrap();
+        state
+            .apply(
+                GoalAction::Create {
+                    id: id.clone(),
+                    objective: "First draft".into(),
+                    constraints: String::new(),
+                    max_rounds: Some(1),
+                },
+                1,
+                true,
+            )
+            .unwrap();
+        state.apply(GoalAction::Pause { id }, 1, true).unwrap();
+    }
+    scenario.changed.send_replace(revision);
+    let pane = || view(&app)["surfaces"]["main"].clone();
+    until(|| pane()["projections"]["cursor"]["revision"] == revision.to_string()).await;
+    let mut edit = json!({"action":"goal_control","pane":"main","generation":"0",
+        "request_id":"inline-edit","expected_revision":pane()["projections"]["cursor"],
+        "control":{"action":"edit","id":"review","objective":"Edited draft"}});
+    assert!(app.command(&edit.to_string()).await.is_err());
+    assert!(scenario.controls.lock().unwrap().is_empty());
+    edit["generation"] = pane()["generation"].clone();
+    app.command(&edit.to_string()).await.unwrap();
+    until(|| pane()["projections"]["cursor"]["revision"] == (revision + 1).to_string()).await;
+    edit["request_id"] = "stale-edit".into();
+    edit["control"]["objective"] = "Stale draft".into();
+    assert!(app.command(&edit.to_string()).await.is_err());
+    {
+        let state = scenario.state.lock().unwrap();
+        let goal = state.goal.as_ref().unwrap();
+        assert_eq!(goal.objective, "Edited draft");
+        assert_eq!(goal.phase, rsi_agent_goal::GoalPhase::Paused);
+    }
+    edit["request_id"] = "inline-clear".into();
+    edit["control"] = json!({"action":"clear","id":"review"});
+    edit["expected_revision"] = pane()["projections"]["cursor"].clone();
+    app.command(&edit.to_string()).await.unwrap();
+    assert!(scenario.state.lock().unwrap().goal.is_none());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn composer_observes_goal_activation_without_opening_the_detail_or_changing_the_projection() {
     let (runtime, backend, app) = prepared().await;
     let pane = || view(&app)["surfaces"]["main"].clone();
@@ -161,6 +211,61 @@ async fn owner_can_complete_a_goal_without_a_model_report() {
     assert!(panel.contains("Host owner") && !panel.contains("Model report"));
     assert!(!panel.contains("Mark complete"));
     assert_eq!(backend.task_panels.controls.lock().unwrap().len(), 1);
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn a_session_participant_can_complete_or_clear_a_paused_goal_before_creating_another() {
+    async fn wait_panel(app: &rsi_gui::GuiApplication, label: &str, absent: Option<&str>) -> Value {
+        let mut changes = app.changes();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                changes.borrow_and_update();
+                let panel = detail(app);
+                let elements = panel["model"]["standard_view"]["elements"].to_string();
+                if elements.contains(label) && absent.is_none_or(|value| !elements.contains(value))
+                {
+                    return panel;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Waiting for {label}, observed {}", detail(app)))
+    }
+    let (runtime, backend, app) = prepared().await;
+    let id = DomainRequestId::new("review").unwrap();
+    {
+        let mut state = backend.task_panels.state.lock().unwrap();
+        state
+            .apply(
+                GoalAction::Create {
+                    id: id.clone(),
+                    objective: "Review the draft".into(),
+                    constraints: String::new(),
+                    max_rounds: Some(2),
+                },
+                2,
+                true,
+            )
+            .unwrap();
+        state.apply(GoalAction::Pause { id }, 2, true).unwrap();
+    }
+    backend.task_panels.changed.send_replace(1);
+    app.command(&open(&app, "goal")).await.unwrap();
+    let panel = wait_panel(&app, "Mark complete", None).await;
+    assert!(panel.to_string().contains("Clear Goal"));
+    assert!(!panel.to_string().contains("Create and start Goal"));
+    assert!(!panel.to_string().contains("Cancel automatic round"));
+    app.command(&crate::ui::button(&panel, Some("Mark complete")).to_string())
+        .await
+        .unwrap();
+    let completed = wait_panel(&app, "Session participant", None).await;
+    app.command(&crate::ui::button(&completed, Some("Clear Goal")).to_string())
+        .await
+        .unwrap();
+    wait_panel(&app, "Create and start Goal", Some("Clear Goal")).await;
+    assert!(backend.task_panels.state.lock().unwrap().goal.is_none());
     assert!(runtime.shutdown().await.is_clean());
 }
 
@@ -411,8 +516,19 @@ async fn goal_rejection_survives_disarmed_then_delayed_settlement_projection() {
         rejected.expected_revision,
         CommandRevision::Draft { revision: 2 }
     );
+    assert!(
+        detail(&app)
+            .to_string()
+            .contains("The allocated round is still settling.")
+    );
     scenario.projection_release.notify_one();
-    until(|| detail(&app).to_string().contains("Create and start Goal")).await;
+    until(|| {
+        !detail(&app)
+            .to_string()
+            .contains("The allocated round is still settling.")
+    })
+    .await;
+    assert!(!detail(&app).to_string().contains("Create and start Goal"));
     assert!(
         detail(&app)
             .to_string()
