@@ -31,7 +31,8 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
   await page.getByRole('button',{name:/^Access mode/}).click();
   await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.waitForFunction(()=>fixture.createEntered);
-  assert.equal(await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).isDisabled(),true,'Access choices must wait for the draft editor');
+  assert.equal(await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/^Access mode/}).isDisabled(),true,'Access changes must wait for the draft editor');
   await page.screenshot({path:join(report,name+'-preparing.png')});
   await page.evaluate(()=>fixture.releaseCreate());
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();

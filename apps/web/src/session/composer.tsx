@@ -143,7 +143,7 @@ export function Composer({
       <div ref={row} className="composer-bar">
         <div className={css.tools}>
           <ComposerAdd owner={owner} data={data} empty={empty} id={addListId} choice={addChoice} choose={setAddChoice}/>
-          {state?.access && <ComposerAccess owner={owner}/>}
+          {state?.access && <ComposerAccess key={state.accessDisabled ? "locked" : state.generation} owner={owner}/>}
           {planEnabled
             ? <PlanModeControl key={state?.generation} owner={owner} locked={!state || state.disabled || state.sendBusy || !!state.pending}/>
             : null}

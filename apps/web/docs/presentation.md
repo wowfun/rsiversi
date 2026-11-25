@@ -987,8 +987,9 @@ Expanding a turn preserves the reading anchor without itself enabling this
 control. Scroll, transcript updates and viewport resize recalculate visibility.
 
 An attached Session shows the access picker while its preset provides the
-permission projection. Withdrawing the projection also closes any pending
-confirmation. Full access opens an
+permission projection. Changing Sessions or losing permission to edit closes
+the open picker and clears any pending confirmation. Withdrawing the projection
+removes the picker. Selecting an option closes the menu. Full access opens an
 acknowledgement dialog with its checkbox initially unchecked. Cancel or Escape
 preserves the current mode. Confirming updates the Session for all clients.
 Steering keeps the active Turn's policy. The permission command and executor

@@ -114,11 +114,11 @@ export function ComposerAccess({owner}:{owner:ComposerOwner}) {
   const state=owner.composerView,mode=state?.access;
   const disabled=busy||!mode||state?.accessDisabled;
   const apply=async(value:typeof modes[number][0],close:()=>void)=>{
+    close();
     setBusy(true);
     await run(async()=>{
       if (!await owner.prepareComposer()) return;
       await owner.action('document_command',{name:'permission',input:value});
-      close();
     });
     setBusy(false);
   };

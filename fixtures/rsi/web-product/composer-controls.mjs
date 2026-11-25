@@ -113,7 +113,30 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
   assert.equal(await acknowledgement.isChecked(),false);
+  await acknowledgement.check();
+  const editPermission=allowed=>page.evaluate(async allowed=>{
+    fixture.view.setup.allowed=allowed;
+    await fixture.frame();
+  },allowed);
+  await editPermission(false);
+  assert.equal(await access.isDisabled(),true);
+  await confirmation.waitFor({state:'detached',timeout:5000});
+  await editPermission(true);
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
+  assert.equal(await acknowledgement.isChecked(),false);
   await page.keyboard.press('Escape');
+  await access.click();
+  await editPermission(false);
+  await page.getByRole('menuitemradio',{name:'Full access',exact:true}).waitFor({state:'detached',timeout:5000});
+  await editPermission(true);
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
+  await acknowledgement.check();
+  await page.evaluate(async()=>{
+    Object.assign(fixture.view.surfaces.main,{generation:'3',selection:'3',session:'another-session',creation:null});
+    await fixture.frame();
+  });
+  await confirmation.waitFor({state:'detached'});
+  await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   await input.fill('permission request');await page.getByTestId('composer-send').click();await page.waitForFunction(()=>fixture.prepared.length===1);
   assert.equal(await page.evaluate(()=>Object.hasOwn(fixture.prepared[0],'sandbox')),false);
   assert.equal(await page.getByRole('button',{name:/^Access mode/}).isDisabled(),true);
@@ -127,7 +150,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
    await page.getByRole('button',{name:/^Select model/}).click();
    const bounds=await page.getByRole('menu',{name:/^Select model/}).boundingBox();assert(bounds.x>=0&&bounds.x+bounds.width<=width);
    await page.screenshot({path:join(report,name+'-'+width+'.png')});await page.keyboard.press('Escape');}
-  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','permission withdrawal removes the control and resets confirmation','ordinary messages follow Host permission','pending access lock','Escape focus','narrow menu bounds']});
+  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','permission withdrawal removes the control and resets confirmation','edit authority loss closes the menu and confirmation','other sessions cannot inherit an acknowledgement','ordinary messages follow Host permission','pending access lock','Escape focus','narrow menu bounds']});
  }catch(error){await page.screenshot({path:join(report,name+'-failure.png')}).catch(()=>{});await writeFile(join(report,name+'-failure.txt'),String(error.stack));throw error;}finally{await browser.close();}
 }}finally{await scene.close();}
 await writeFile(join(report,'document-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));
