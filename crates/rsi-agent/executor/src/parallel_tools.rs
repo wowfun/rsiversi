@@ -174,10 +174,11 @@ impl Batch<'_> {
     async fn run(
         &self,
         calls: Vec<ModelToolCall>,
+        batch_limit: usize,
         fold: &mut ModelContextState,
     ) -> DriveResult<Vec<Arc<SessionFact>>> {
-        let limit = self.driver.config.maximum_parallel_tool_calls;
         let count = calls.len();
+        let limit = batch_limit.min(count);
         let mut running = FuturesUnordered::new();
         let mut results = OrderedResults::default();
         {
@@ -282,6 +283,7 @@ impl Driver {
         jobs: Option<&JobScopeAuthority>,
         fold: &mut ModelContextState,
         calls: Vec<ModelToolCall>,
+        batch_limit: usize,
         policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
         stop: &CancellationToken,
@@ -296,7 +298,7 @@ impl Driver {
             cancellation,
             stop,
         }
-        .run(calls, fold)
+        .run(calls, batch_limit, fold)
         .await
     }
 }

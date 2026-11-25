@@ -11,6 +11,7 @@ mod manual_compaction;
 mod controlled_work;
 mod jobs;
 mod observation;
+mod parallelism;
 
 use checkpoint::{CheckpointRequest, CheckpointScheduler, run_checkpoint_writer};
 
@@ -279,6 +280,7 @@ struct Driver {
     controlled_work: Mutex<BTreeMap<(SessionId, TurnId), Arc<controlled_work::Tracker>>>,
     retirement_tasks: Mutex<Vec<JoinHandle<()>>>,
     observations: observation::Observations,
+    parallelism: Arc<parallelism::Parallelism>,
     checkpoints: Arc<CheckpointScheduler>,
     config: ExecutorConfig,
     context_budget: rsi_agent_context::ContextBudget,
@@ -749,6 +751,9 @@ impl PluginFactory for ExecutorFactory {
 
     async fn activate(&self, mut plan: ActivationPlan) -> rsi_meta::Result<()> {
         let config = plan.take_state::<ExecutorConfig>()?;
+        let parallelism =
+            parallelism::Parallelism::attach(plan.context(), config.maximum_parallel_tool_calls)
+                .await?;
         let context_budget = plan
             .local::<rsi_agent_context::ContextBudgetContract>()?
             .as_ref()
@@ -782,6 +787,7 @@ impl PluginFactory for ExecutorFactory {
             controlled_work: Mutex::new(BTreeMap::new()),
             retirement_tasks: Mutex::new(Vec::new()),
             observations: observation::Observations::default(),
+            parallelism,
             checkpoints: Arc::clone(&checkpoints),
             context_budget,
             config,

@@ -257,8 +257,13 @@ can still block; these diagnostics do not promise nonblocking I/O.
 For external effects, the executor follows the
 [complete-prefix ordering contract](../docs/subsystems/turns-and-agent-trees.md),
 including one ordered intent/start publication and durability wait per group
-admitted into a parallel-safe run. The executor admits at most
-`maximum_parallel_tool_calls` bodies per batch (default 10, range 1–256).
+admitted into a parallel-safe run. The executor starts with the Host's
+`maximum_parallel_tool_calls` (default 10, range 1–256). When Settings is
+composed, the Host owner can save a positive integer in
+`rsi.agent-loop.max_parallel_tool_calls`. Each provider batch reads its limit
+once before dispatch, including across exclusive tools in that batch. A save
+affects subsequent batches across Sessions, and clearing the override restores
+the active executor's configured value.
 It replenishes free slots while results awaiting ordered publication fit the
 batch's count and byte budgets. If preparation waits for a policy or human
 decision, preceding ready calls form their own durable wave. Later calls wait

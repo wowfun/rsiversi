@@ -26,6 +26,7 @@ rsi-jobs = { path = "../../rsi-jobs/core" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
+rsi-settings-protocol = { path = "../../rsi-settings/protocol" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
 serde.workspace = true
 serde_json.workspace = true
@@ -34,6 +35,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tokio-util.workspace = true
 
 [dev-dependencies]
+rsi-settings = { path = "../../rsi-settings/core" }
+rsi-settings-testkit = { path = "../../rsi-settings/testkit" }
 rsi-workspace-path = { path = "../../rsi-workspace/path" }
 rsi-spill-policy = { path = "../../rsi-spill/policy" }
 rsi-spill-local = { path = "../../rsi-spill/local" }
