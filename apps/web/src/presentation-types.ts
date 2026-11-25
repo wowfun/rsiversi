@@ -11,6 +11,7 @@ export interface MediaLimits {images:number;upload_bytes:number;preview_objects:
 export interface SettingsCatalog {ticket:string;namespace:string|null;page:{namespaces:string[];next:string|null}|null;error:string|null}
 export interface TranscriptBlock {
   summary_seq?: string;
+  compacting?: boolean;
   trigger?: 'schedule' | 'goal' | 'agent' | 'completion' | 'request';
   key: string;
   role: string;

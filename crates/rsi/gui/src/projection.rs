@@ -58,6 +58,7 @@ struct CompactionMarker {
     latest: u64,
     outcome: rsi_agent_turn_protocol::CompactionOutcome,
     settlement: Option<u64>,
+    running: bool,
 }
 #[derive(Debug)]
 pub(crate) struct CachedBlock {
@@ -96,6 +97,7 @@ impl Serialize for BlockView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let block = self.0;
+        let compacting = block.compact.as_ref().is_some_and(|marker| marker.running);
         let summary_seq = block
             .compact
             .as_ref()
@@ -137,6 +139,7 @@ impl Serialize for BlockView<'_> {
                 + usize::from(markdown.is_some())
                 + usize::from(request_seq.is_some())
                 + usize::from(summary_seq.is_some())
+                + usize::from(compacting)
                 + usize::from(schedule.is_some())
                 + usize::from(presented.is_some())
                 + usize::from(trigger.is_some())
@@ -164,6 +167,9 @@ impl Serialize for BlockView<'_> {
         }
         if let Some(seq) = summary_seq {
             view.serialize_field("summary_seq", &seq.to_string())?;
+        }
+        if compacting {
+            view.serialize_field("compacting", &true)?;
         }
         if let Some(images) = &block.images {
             view.serialize_field("images", images.as_slice())?;
@@ -1019,12 +1025,15 @@ impl Transcript {
                 latest: 0,
                 outcome,
                 settlement: None,
+                running: false,
             })
         });
         if marker.latest < fact.seq() {
-            block.title = match outcome {
-                CompactionOutcome::Started if live => "Compacting context…",
-                _ => outcome.message(),
+            marker.running = live && outcome == CompactionOutcome::Started;
+            block.title = if marker.running {
+                "Compacting context…"
+            } else {
+                outcome.message()
             }
             .into();
             marker.latest = fact.seq();
@@ -1212,8 +1221,14 @@ mod tests {
         );
         let installed = fact(4, Event::Installed);
         let view = |t: &Transcript| serde_json::to_value(&t.blocks).unwrap();
+        let mut live = Transcript::default();
+        live.project_fact(&fact(2, Event::Started), true);
+        assert_eq!(view(&live)[0]["compacting"], true);
+        live.fact(&settled);
+        assert!(view(&live)[0].get("compacting").is_none());
         let mut forward = Transcript::default();
         forward.fact(&fact(2, Event::Started));
+        assert!(view(&forward)[0].get("compacting").is_none());
         assert_eq!(
             view(&forward)[0]["title"],
             rsi_agent_turn_protocol::CompactionOutcome::Started.message()

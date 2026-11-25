@@ -47,7 +47,8 @@ try {
   const send = async text => { await composer.fill(text); await page.getByTestId('composer-send').click(); };
   await send('/compact');
   const transcript=page.getByRole('region',{name:'Conversation transcript'});
-  await transcript.getByRole('button',{name:/No eligible history to compact/}).waitFor();
+  await transcript.getByText('No eligible history to compact.',{exact:true}).waitFor();
+  assert.equal(await transcript.getByRole('button',{name:/No eligible history to compact/}).count(),0);
   assert.equal(await page.getByText('No eligible history to compact.',{exact:true}).count(),1);
   assert.equal(calls,0);
   await page.screenshot({path:join(report,'compact-empty.png')});

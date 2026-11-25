@@ -475,17 +475,24 @@ button.rsi-button[data-rsi-size="sm"] {
 .history-edge { display:flex; justify-content:center; margin-block:0 12px; }
 /* The header remains within reach while the cited summary scrolls. */
 .compaction-row, .message.context { --compact-height:calc(24px + var(--dsh-content-font-delta, 0px)); padding:2px 0; }
-.compaction-toggle { display:flex; align-items:center; width:100%; height:var(--compact-height); padding:0; border:0; border-radius:var(--radius-compact); background:none; color:var(--muted); text-align:left; font:inherit; font-size:var(--dsh-content-font-size-secondary,13px); }
+.compaction-toggle, .compaction-status { display:flex; align-items:center; width:100%; height:var(--compact-height); padding:0; border:0; border-radius:var(--radius-compact); background:none; color:var(--muted); text-align:left; font:inherit; font-size:var(--dsh-content-font-size-secondary,13px); }
 .compaction-toggle:disabled { opacity:1; }
 .compaction-toggle:not(:disabled) { cursor:pointer; }
 .compaction-toggle[aria-expanded=true] { position:sticky; top:0; z-index:7; background:var(--paper); border-radius:0; }
 .compaction-icon { flex:none; display:grid; place-items:center; width:16px; height:16px; margin-right:6px; }
 .compaction-icon svg { grid-area:1/1; width:14px; height:14px; }
-.compaction-icon svg:last-child { visibility:hidden; }
+.compaction-icon svg + svg { visibility:hidden; }
 .compaction-toggle:not(:disabled):is(:hover,:focus-visible) .compaction-icon svg:first-child { visibility:hidden; }
 .compaction-toggle:not(:disabled):is(:hover,:focus-visible) .compaction-icon svg:last-child { visibility:visible; }
 .compaction-separator { flex:none; width:2px; height:2px; margin:0 8px; border-radius:50%; background:currentColor; }
 .compaction-caption { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  .compaction-caption[data-shimmer=true], .model-retry-caption[data-shimmer=true] {
+    background:linear-gradient(105deg, var(--muted) 40%, var(--ink) 50%, var(--muted) 60%) 100% 0 / 250% 100%;
+    background-clip:text; color:transparent; animation:transcript-shimmer 2s linear infinite;
+  }
+}
+@keyframes transcript-shimmer { to { background-position:-65% 0; } }
 .compaction-document { height:100%; overflow:auto; padding:12px 16px; overflow-wrap:anywhere; }
 @media (hover:hover) {
   .compaction-toggle:not(:disabled):hover { background:var(--dsw-alias-interactive-bg-hover-solid); color:var(--ink); }

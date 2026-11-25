@@ -106,23 +106,32 @@ function EarlierHistory({owner}: {owner:TranscriptOwner}) {
   </button></div>;
 }
 
-function TranscriptRowButton({label,caption,icon,open,busy,hint,onClick}: {
+function TranscriptRow({label,caption,icon,open,busy,hint,onClick,status}: {
   label:string; caption:string; icon:ReactNode; open?:boolean; busy?:boolean; hint?:string; onClick?:()=>void;
+  status?:'running'|'settled';
 }) {
+  const content=<>
+    <span className="compaction-icon" aria-hidden="true">{icon}
+      {!status&&(open ? <IconChevronDownOutlineRegular/> : <IconChevronRightOutlineRegular/>)}</span>
+    <span>{label}</span><span className="compaction-separator" aria-hidden="true"/>
+    <span className="compaction-caption" data-shimmer={status==='running'||undefined}>{caption}</span>
+    {hint&&<span className="sr-only">{hint}</span>}
+  </>;
+  if(status)return <div className="compaction-status" role={status==='running'?'status':undefined}>{content}</div>;
   return <button className="compaction-toggle" type="button" disabled={!onClick||busy}
-      aria-expanded={onClick?open:undefined} aria-busy={busy} title={hint} onClick={onClick}>
-      <span className="compaction-icon" aria-hidden="true">{icon}
-        {open ? <IconChevronDownOutlineRegular/> : <IconChevronRightOutlineRegular/>}</span>
-      <span>{label}</span><span className="compaction-separator" aria-hidden="true"/>
-      <span className="compaction-caption">{caption}</span>
-      {hint&&<span className="sr-only">{hint}</span>}
-    </button>;
+    aria-expanded={onClick?open:undefined} aria-busy={busy} title={hint} onClick={onClick}>{content}</button>;
 }
 
 function CompactionRow({block,pane,generation}: {block:TranscriptBlock; pane?:string; generation?:string}) {
+  return <article className="compaction-row">{block.summary_seq===undefined
+    ? <TranscriptRow label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
+        status={block.compacting?'running':'settled'}/>
+    : <CompactionSummary caption={block.title} sequence={block.summary_seq} pane={pane} generation={generation}/>}
+  </article>;
+}
+function CompactionSummary({caption,sequence,pane,generation}: {caption:string;sequence:string;pane?:string;generation?:string}) {
   const dock=useSyncExternalStore(activeResourceDock.subscribe,activeResourceDock.getSnapshot);
-  const sequence=block.summary_seq;
-  const available=dock!==undefined&&dock.pane===pane&&dock.generation===generation&&sequence!==undefined;
+  const available=dock!==undefined&&dock.pane===pane&&dock.generation===generation;
   const pending=useRef<AbortController|null>(null);
   const [opening,setOpening]=useState(false);
   const [failure,setFailure]=useState('');
@@ -145,12 +154,12 @@ function CompactionRow({block,pane,generation}: {block:TranscriptBlock; pane?:st
       if(pending.current===request){pending.current=null;setOpening(false)}
     }
   }
-  return <article className="compaction-row">
-    <TranscriptRowButton label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
+  return <>
+    <TranscriptRow label="compact" caption={caption} icon={<IconApiOutlineRegular/>}
       busy={opening} hint={available?'View compaction summary in the sidebar':undefined}
       onClick={available?()=>void open():undefined}/>
     {failure&&<p role="alert">{failure}</p>}
-  </article>;
+  </>;
 }
 
 function hasSources(block: TranscriptBlock, cards: boolean) {
@@ -268,7 +277,7 @@ const Message = memo(function Message({
       className={`message ${block.role}${block.trigger ? " turn-trigger" : ""}${block.external ? " delegation" : ""}${expanded ? " turn-expanded" : ""}${summary ? " summary-expanded" : ""}`}
       hidden={hidden && !block.external}
     >
-      {context && <TranscriptRowButton label="Context injection" caption={block.title} icon={<IconContextInjectionOutlineRegular/>}
+      {context && <TranscriptRow label="Context injection" caption={block.title} icon={<IconContextInjectionOutlineRegular/>}
         open={summary} onClick={()=>setSummary(value=>!value)}/>}
       {block.trigger && <TurnTrigger block={block} kind={block.trigger} time={time} open={summary} toggle={()=>setSummary(value=>!value)}/>}
       {showHeader && !block.trigger && <DocumentTranscript block={block}>{foldable ? (

@@ -29,7 +29,7 @@ function Countdown({delay}: {delay: number}) {
 
 export function ModelRetryRow({retry}: {retry: ModelRetry}) {
   return <details className={css.row} data-active={retry.state === 'scheduled' || undefined}>
-    <summary><span role="status">{labels[retry.state]} ({retry.number}{retry.maximum != null && `/${retry.maximum}`}) · {retry.state === 'scheduled'
+    <summary><span role="status" className="model-retry-caption" data-shimmer={retry.state === 'scheduled' || undefined}>{labels[retry.state]} ({retry.number}{retry.maximum != null && `/${retry.maximum}`}) · {retry.state === 'scheduled'
       ? <Countdown key={retry.number} delay={retry.delay_ms}/>
       : `${Math.max(1, Math.ceil(retry.delay_ms / 1000))}s`}</span></summary>
     <div className={css.details}><div>Retry delay: {retry.delay_ms} ms</div>

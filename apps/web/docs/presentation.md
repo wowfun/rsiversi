@@ -65,7 +65,9 @@ immutable message coordinate bind every request. Feedback has no browser persist
 
 Manual compaction occupies one chronological row in the issuing conversation.
 Its command identity anchors progress and settlement across observation, paging
-and reopen. A live start shows progress. A start recovered from history reports
+and reopen. A live start shows a status with motion that follows the user's
+motion preference. Progress and single-line outcomes without a summary are
+plain transcript rows. A start recovered from history reports
 that the outcome is unrecorded until a later fact establishes it.
 Once the loaded history contains both the installation and its settlement, the
 marker opens the cited summary as a temporary Markdown tab in the session's

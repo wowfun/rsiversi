@@ -253,7 +253,8 @@ Internal summary text and its request metadata stay outside the conversational
 process classification. Summary text uses a Context compaction status block, never an Assistant
 answer block; raw source paging preserves its exact Fact provenance.
 
-For manual compaction the transcript publishes the settled Fact sequence after
+For manual compaction the transcript marks progress only while observing a live
+start. The transcript publishes the settled Fact sequence after
 installation. Opening the marker reads that Fact in the attached Session and
 returns its visible text in content-block order, with Markdown rendered on
 demand. Closing the reader or retiring the attachment releases the pending
