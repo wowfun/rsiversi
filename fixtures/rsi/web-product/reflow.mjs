@@ -11,7 +11,8 @@ const server=await sourceFixture({name:'reflow',source});
 const geometry=()=>({width:innerWidth,overflow:document.documentElement.scrollWidth-innerWidth,
   textSize:getComputedStyle(document.querySelector('.message-text')??document.body).fontSize,
   clipped:[...document.querySelectorAll('button,input,textarea,select,summary')].filter(node=>{
-    const box=node.getBoundingClientRect();return box.width&&box.height&&getComputedStyle(node).visibility!=='hidden'&&(box.left < -1 || box.right > innerWidth+1);
+    if(!node.checkVisibility({visibilityProperty:true}))return false;
+    const box=node.getBoundingClientRect();return box.width&&box.height&&(box.left < -1 || box.right > innerWidth+1);
   }).map(node=>node.getAttribute('aria-label')||node.textContent.slice(0,80))});
 try {
   for(const [name,engine] of Object.entries({chromium,firefox})) {
@@ -68,6 +69,13 @@ try {
       await search.fill('');
       assert.equal(await page.getByRole('menuitemradio').count(),9,'current model remains available outside the page');
       await search.press('Escape');
+      const options=page.getByLabel('Conversation options',{exact:true});
+      await page.setViewportSize({width:320,height:844});
+      await options.click();
+      await page.getByLabel('Detail level',{exact:true}).waitFor();
+      assert.deepEqual((await page.evaluate(geometry)).clipped,[],'open conversation options fit the narrow toolbar');
+      await page.screenshot({path:join(report,name+'-conversation-options.png')});
+      await options.click();
       for(const width of [320,390])for(const size of [12,14,17])for(const mode of ['light','dark','forced']) {
         await page.setViewportSize({width,height:844});
         await page.emulateMedia({colorScheme:mode==='dark'?'dark':'light',forcedColors:mode==='forced'?'active':'none',reducedMotion:'reduce'});
@@ -97,7 +105,7 @@ try {
       await page.evaluate(async()=>{fixture.view.surfaces.main.external.busy=true;await fixture.frame();});assert(await allow.isDisabled());
       await page.evaluate(async()=>{fixture.view.surfaces.main.external.busy=false;await fixture.frame();});assert(await allow.isEnabled());
       await page.evaluate(()=>fixture.surface('terminal-session'));
-      const options=page.getByLabel('Conversation options',{exact:true});await options.focus();await options.press('Enter');
+      await options.focus();await options.press('Enter');
       const terminal=page.getByRole('button',{name:'Terminal',exact:true});await terminal.focus();await terminal.press('Enter');
       const more=page.getByRole('button',{name:'More tools',exact:true});await more.focus();await more.press('Enter');
       const list=page.getByRole('menuitem',{name:'List terminals',exact:true});await list.focus();await list.press('Enter');
