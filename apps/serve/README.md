@@ -304,9 +304,11 @@ its configuration. A retiring process cannot overwrite a different root set.
 The successful application handshake retains the exact application and importer
 as separate bootstrap roots. Inspecting the importer manifest for retention
 does not start or materialize its process or npm payload.
-Every browser logged into this Host enters its application as the same owner.
-This includes the operator's filesystem and package-install capabilities.
-Each browser request and streaming attachment retains its own lifetime.
+The [HTTP forwarder](../../crates/rsi-api/http/README.md) identifies the
+configured browser owner on each authenticated application request. An
+application can offer a separate entry to other paired devices and reserve
+operator actions, including package installation, for the owner. Each request
+and streaming attachment retains its own lifetime.
 Session reads use `application.session` with the active HTTP request handle
 and a Session ID. Native Session ingress resolves the durable Header under
 the shared owner's authority. For an unpublished Session it reads the existing
