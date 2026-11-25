@@ -92,6 +92,100 @@ async fn until(mut condition: impl FnMut() -> bool) {
 async fn cmd(app: &Arc<rsi_gui::GuiApplication>, value: Value) {
     app.command(&value.to_string()).await.unwrap();
 }
+
+#[tokio::test]
+async fn cold_queue_preview_reuses_accepted_blocks_and_scopes_image_reads_to_the_current_version() {
+    let (runtime, backend, app) = sources::fixture().await;
+    let pane = view(&app)["surfaces"]["main"].clone();
+    let picture = app
+        .import_image(
+            rsi_gui::SurfaceId::MAIN,
+            pane["generation"].as_str().unwrap(),
+            png(3),
+        )
+        .await
+        .unwrap();
+    let id = MessageId::new("pending").unwrap();
+    let slot = QueueSlot::initial(&id, 1, 1);
+    let blocks = vec![
+        AgentMessageContent::Text {
+            text: "a queued image".into(),
+        },
+        AgentMessageContent::Image {
+            media: picture,
+            presentation: None,
+        },
+    ];
+    *backend.queue_read_reply.lock().unwrap() = Some((
+        1,
+        AgentMessage {
+            message_id: id.clone(),
+            source: AgentMessageSource::Human { attribution: None },
+            content: blocks.clone(),
+            options: MessageOptions::default(),
+        },
+    ));
+    backend
+        .pending_messages
+        .lock()
+        .unwrap()
+        .push(rsi_agent_store_protocol::StorePendingMessage {
+            queue_slot: slot.clone(),
+            source_kind: AgentMessageSourceKind::Human,
+            has_turn_options: false,
+            message_id: id.clone(),
+            delivery: MessageDelivery::NextTurn,
+            target: MessageTarget::NextTurn,
+            permits_promotion: false,
+            bound_turn_id: None,
+            accepted_control_seq: 1,
+        });
+    cmd(
+        &app,
+        json!({"action":"open","pane":"main","session":pane["session"]}),
+    )
+    .await;
+    let generation = view(&app)["surfaces"]["main"]["generation"].clone();
+    let selection = |id: &str, index: usize| {
+        json!({"kind":"queue","pane":"main","generation":generation,
+        "slot":slot.id,"message":id,"index":index})
+        .to_string()
+    };
+    assert!(app.read_image(&selection(id.as_str(), 1)).await.is_err());
+    let input = json!({"pane":"main","generation":generation,"queue":{"action":"read","items":[
+        {"slot_id":slot.id,"expected_message_id":"old"},
+        {"slot_id":slot.id,"expected_message_id":id}
+    ]}})
+    .to_string();
+    let changes = app.changes();
+    for _ in 0..2 {
+        let rows: Value =
+            serde_json::from_str(&app.prepare_submission(&input).await.unwrap()).unwrap();
+        assert_eq!(rows, json!([null, blocks]));
+    }
+    assert!(
+        !changes.has_changed().unwrap(),
+        "Queue reads only return accepted content"
+    );
+    assert!(backend.queue_read_reply.lock().unwrap().is_none());
+    assert!(app.read_image(&selection("old", 1)).await.is_err());
+    assert!(app.read_image(&selection(id.as_str(), 0)).await.is_err());
+    assert_eq!(
+        app.read_image(&selection(id.as_str(), 1))
+            .await
+            .unwrap()
+            .bytes,
+        png(3)
+    );
+    backend.pending_messages.lock().unwrap().clear();
+    cmd(
+        &app,
+        json!({"action":"open","pane":"main","session":pane["session"]}),
+    )
+    .await;
+    assert!(app.read_image(&selection(id.as_str(), 1)).await.is_err());
+    assert!(runtime.shutdown().await.is_clean());
+}
 #[tokio::test]
 async fn ordered_images_and_image_only_retry_freeze_complete_content() {
     for resolution in [1, 2] {
@@ -190,7 +284,14 @@ async fn ordered_images_and_image_only_retry_freeze_complete_content() {
         );
         assert_eq!(backend.media.objects.lock().unwrap().len(), 3);
         assert_eq!(
-            prepare(&app, generation, "/unknown task", vec![first.clone()], false).await["kind"],
+            prepare(
+                &app,
+                generation,
+                "/unknown task",
+                vec![first.clone()],
+                false
+            )
+            .await["kind"],
             "message"
         );
         let nine = json!({"pane":"main","generation":generation,"text":"","images":vec![first;9],"steer":false});

@@ -11,6 +11,7 @@ export async function verifyQueue(page,pane,service,report,name) {
   const count=pane.getByRole('button',{name:'2 queued messages',exact:true});
   await send('Queue original editable input');
   await rows.first().waitFor();
+  await rows.first().getByText('Queue original editable input',{exact:true}).waitFor();
   assert.equal(await count.count(),0);
   await send('UI Goal hold queue survivor after Stop');
   await count.waitFor();
@@ -26,7 +27,8 @@ export async function verifyQueue(page,pane,service,report,name) {
   await count.press('Space');
   await rows.first().waitFor();
   const initialSlot=await rows.first().getAttribute('data-slot');
-  const initialMessage=await rows.first().locator('.queue-summary').innerText();
+  await rows.first().getByText('Queue original editable input',{exact:true}).waitFor();
+  await rows.last().getByText('UI Goal hold queue survivor after Stop',{exact:true}).waitFor();
   await composer.fill('Ordinary composer draft survives every queue operation');
   const edit=rows.first().getByRole('button',{name:'Edit queued message',exact:true});
   await edit.click();
@@ -64,7 +66,7 @@ export async function verifyQueue(page,pane,service,report,name) {
   await field.waitFor({state:'hidden'});
   await waitUntil(async()=>await rows.count()===2,'replacement retains slot count');
   assert.equal(await rows.first().getAttribute('data-slot'),initialSlot);
-  await waitUntil(async()=>await rows.first().locator('.queue-summary').innerText()!==initialMessage,'replacement message identity');
+  await rows.first().getByText('Queue replacement content',{exact:true}).waitFor();
   await edit.click();
   assert.equal(await field.inputValue(),'Queue replacement\ncontent');
   await field.fill('Discard this edit');
@@ -74,9 +76,7 @@ export async function verifyQueue(page,pane,service,report,name) {
   assert.equal(await pane.locator('.message.user').filter({hasText:'Queue original editable input'}).count(),0);
   assert.equal(await pane.locator('.message.user').filter({hasText:'Queue replacement content'}).count(),0);
   assert.equal(await composer.inputValue(),'Ordinary composer draft survives every queue operation');
-  // The composer freezes the selected access policy on every next-Turn input.
-  // Converting it to steering would silently discard that policy.
-  assert.equal(await rows.first().getByRole('button',{name:'Steer now',exact:true}).count(),0);
+  assert.equal(await rows.first().getByRole('button',{name:'Steer now',exact:true}).isEnabled(),true);
   await rows.first().getByRole('button',{name:'Remove queued message',exact:true}).click();
   await waitUntil(async()=>await rows.count()===1,'withdraw removes only selected slot');
   assert.equal(await count.count(),0);
@@ -91,5 +91,5 @@ export async function verifyQueue(page,pane,service,report,name) {
   await page.screenshot({path:join(report,`${name}-queue-after-stop.png`)});
   await pane.getByRole('button',{name:'Stop',exact:true}).click();
   await pane.locator('.pane-status').filter({hasText:'Cancelled'}).waitFor({state:'attached'});
-  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({singleRowVisible:true,multipleCollapsed:true,keyboardToggle:true,inlineEdit:true,imeAndNewline:true,cancelRestoresFocus:true,replacementKeepsSlot:true,pendingOnlyInQueue:true,replacementReadback:true,explicitAccessPreventsSteering:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
+  await writeFile(join(report,`${name}-queue.json`),JSON.stringify({singleRowVisible:true,multipleCollapsed:true,keyboardToggle:true,inlineEdit:true,imeAndNewline:true,cancelRestoresFocus:true,replacementKeepsSlot:true,pendingOnlyInQueue:true,replacementReadback:true,sessionDefaultsPermitSteering:true,withdrawPendingOnly:true,stopPreservesSuccessorTurn:true,composerPreserved:true,requests:service.provider.requests.filter(request=>request.prompt.includes('queue survivor') || request.prompt.includes('Queue replacement'))},null,2));
 }

@@ -8,6 +8,11 @@ export interface CompletionEntry {
   resource?: unknown;
   composer_input?: ComposerCommandInput | null;
 }
+export type QueuedBlock =
+  | {type:"text"; text:string}
+  | {type:"image"; media:import("./composer-state.ts").Media; presentation?:{name?:string}}
+  | {type:"file"; file:{name:string; bytes:number}}
+  | {type:"reference"; reference:{preview:string}};
 export interface SessionProjections {
   protected?: boolean;
   queue?: {
@@ -52,15 +57,18 @@ export interface SessionProjections {
   };
 }
 export interface ProjectionActions {
+  generation?: string;
   commandsExpanded?: boolean;
   action(name: string, fields?: Record<string, unknown>): Promise<unknown>;
   queueAction(slot: string, action: string): Promise<unknown>;
+  readQueueContent(slot:string, messageId:string): Promise<QueuedBlock[] | null>;
+  acquireQueueImage(media:import("./composer-state.ts").Media, generation:string, slot:string, messageId:string, index:number): import("../details/model.ts").ImageInterest;
   selectCommand(command: ComposerCommand): Promise<void>;
   captureCommandSelection(): void;
   focusInput(): void;
   pickCompletion(item: CompletionEntry): void;
   updateCompletions(refresh: boolean): void;
-  queueBinding?: unknown;
+  queueBinding?: {generation:string; items:NonNullable<SessionProjections["queue"]>};
   completions?: {
     entries?: CompletionEntry[];
     selected: number;

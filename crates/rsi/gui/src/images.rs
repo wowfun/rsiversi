@@ -42,6 +42,13 @@ enum Preview {
         key: String,
         index: usize,
     },
+    Queue {
+        pane: crate::SurfaceId,
+        generation: String,
+        slot: rsi_agent_session_protocol::QueueSlotId,
+        message: rsi_agent_session_protocol::MessageId,
+        index: usize,
+    },
     Source {
         ticket: String,
     },
@@ -147,6 +154,31 @@ impl GuiApplication {
                         .and_then(|block| block.images.as_ref()?.get(index))
                         .ok_or("This image is no longer in the retained message")?;
                     (reference.media.clone(), attached.stop.clone())
+                }
+                Preview::Queue {
+                    pane,
+                    generation,
+                    slot,
+                    message,
+                    index,
+                } => {
+                    let attached = self.pane(pane)?.attachment(&generation)?;
+                    if attached.protected {
+                        return Err("This pane has no queue preview".into());
+                    }
+                    let state = attached.renderer.state.lock().expect("GUI queue");
+                    let content = state
+                        .transcript
+                        .queue
+                        .content(&slot, &message)
+                        .and_then(|content| content.get(index));
+                    let Some(rsi_agent_session_protocol::AgentMessageContent::Image {
+                        media, ..
+                    }) = content
+                    else {
+                        return Err("This queued image is no longer available".into());
+                    };
+                    (media.clone(), attached.stop.clone())
                 }
                 Preview::Draft {
                     pane,

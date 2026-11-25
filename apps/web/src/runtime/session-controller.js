@@ -749,6 +749,11 @@ export function createPaneClass(context) {
       if (this.generation !== generation) throw new Error("This conversation changed");
       return context.previews(context.connection).acquire(media, {kind:"transcript", pane:this.index, generation, key, index});
     }
+    acquireQueueImage(media, generation, slot, message, index) {
+      if (this.generation !== generation || !showsQueuedMessage(this.staged?.data, message))
+        throw new Error("This queued image is no longer available");
+      return context.previews(context.connection).acquire(media, {kind:"queue", pane:this.index, generation, slot, message, index});
+    }
     showFilePicker() {
       return showFilePicker(this, context);
     }
@@ -772,8 +777,43 @@ export function createPaneClass(context) {
     }
     renderQueue(data) {
       if (data?.protected) this.queueBinding = undefined;
+      if (this.queueContents?.size) {
+        const current = new Set(data?.protected ? [] : data?.queue?.map(item => item.message_id));
+        for (const id of this.queueContents.keys()) {
+          if (!current.has(id)) this.queueContents.delete(id);
+        }
+      }
       if (this.queueDialog && !showsQueuedMessage(data, this.queueDialog.messageId))
         this.queueDialog.close();
+    }
+    async readQueueContent(slot, messageId) {
+      const generation = this.generation;
+      const binding = this.queueBinding;
+      if (binding?.generation !== generation ||
+          !binding?.items.some(item => item.queue_slot.id === slot && item.message_id === messageId))
+        throw new Error("Wait for the current queue view");
+      const contents = this.queueContents ??= new Map();
+      if (!contents.has(messageId)) {
+        const items = binding.items.filter(row => !contents.has(row.message_id))
+          .map(row => ({slot_id:row.queue_slot.id, expected_message_id:row.message_id}));
+        const queue = {action:"read",items};
+        const read = context.call("prepare_submission", JSON.stringify({pane:this.index, generation, queue}))
+          .then(reply => {
+            const rows = JSON.parse(reply);
+            items.forEach(({expected_message_id:id}, index) => {
+              if (rows[index] && contents.get(id) === read) contents.set(id, rows[index]);
+            });
+          }).finally(() => {
+            for (const {expected_message_id:id} of items) {
+              if (contents.get(id) === read) contents.delete(id);
+            }
+          });
+        for (const item of items) contents.set(item.expected_message_id, read);
+      }
+      const cached = contents.get(messageId);
+      if (Array.isArray(cached)) return cached;
+      await cached;
+      return contents.get(messageId) ?? null;
     }
     async queueAction(slot, action) {
       const binding = this.queueBinding;
@@ -796,23 +836,18 @@ export function createPaneClass(context) {
         current = context.connection;
       const sequence = (this.queueDialogSequence ?? 0) + 1;
       this.queueDialogSequence = sequence;
-      const detail = JSON.parse(
-        await context.call(
-          "prepare_submission",
-          JSON.stringify({ pane: this.index, generation, queue }),
-        ),
-      );
+      const content = await this.readQueueContent(slot, item.message_id);
       if (
         generation !== this.generation ||
         current !== context.connection ||
         current.closing ||
         sequence !== this.queueDialogSequence ||
-        !showsQueuedMessage(this.staged?.data, item.message_id)
+        !content || !showsQueuedMessage(this.staged?.data, item.message_id)
       )
         return;
       this.queueDialog?.close();
       const editor = createQueueEditor({
-        content: detail.content,
+        content,
         editable: item.editable,
         submit: (content) =>
           this.submitQueue(
@@ -826,7 +861,7 @@ export function createPaneClass(context) {
         },
       });
       editor.messageId = item.message_id;
-      if (item.editable && detail.content.length === 1 && detail.content[0].type === "text")
+      if (item.editable && content.length === 1 && content[0].type === "text")
         editor.inlineSlot = slot;
       editor.restoreFocus = () => {
         if (
@@ -926,6 +961,7 @@ export function createPaneClass(context) {
         this.commandsExpanded = false;
         this.queueDialog?.close();
         this.queueBinding = undefined;
+        this.queueContents = undefined;
         this.referenceDialog?.close();
         this.historyDialog?.close();
         this.fileDialog?.close();

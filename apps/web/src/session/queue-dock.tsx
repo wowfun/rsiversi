@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { memo, useEffect, useId, useState } from "react";
 import {DockButton, InlineEditor} from "./dock-controls.tsx";
 import {
   IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular,
@@ -6,8 +6,62 @@ import {
   IconSendOutlineRegular, IconTrashOutlineRegular,
 } from "../../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { run } from "../bridge.ts";
-import type { ProjectionActions, SessionProjections } from "./projection-types.ts";
+import {fileSizeText} from "../../vendor/dsh/primitives/file-size.ts";
+import {PaperGlyph} from "../../vendor/dsh/dockkit-primitives/FileGlyphs.tsx";
+import type { ProjectionActions, QueuedBlock, SessionProjections } from "./projection-types.ts";
 import type { QueueEditorState } from "./queue-editor.tsx";
+
+function QueueThumb({owner,slot,id,block,index,generation}:{
+  owner:ProjectionActions; slot:string; id:string; block:Extract<QueuedBlock,{type:"image"}>; index:number; generation:string;
+}) {
+  const [preview,setPreview] = useState<{url:string; release():void}>();
+  useEffect(() => {
+    let live = true;
+    let interest: ReturnType<ProjectionActions["acquireQueueImage"]>;
+    try {interest = owner.acquireQueueImage(block.media,generation,slot,id,index);}
+    catch {return;}
+    void interest.result.then(url => {
+      if (live && url) setPreview({url, release:() => interest.release()});
+    }, () => {});
+    return () => {live = false; interest.release();};
+  }, [owner,generation,slot,id,block,index]);
+  const label = block.presentation?.name ?? "Queued image";
+  return preview ? <img className="queue-thumb" src={preview.url} alt={label}
+    onLoad={preview.release} onError={() => {preview.release(); setPreview(undefined);}}/> :
+    <span className="queue-thumb" role="img" aria-label={label}/>;
+}
+
+const QueueSummary = memo(function QueueSummary({slot,id,label,owner,ready,generation}: {
+  slot:string; id:string; label:string; owner:ProjectionActions; ready:boolean; generation?:string;
+}) {
+  const [content,setContent] = useState<QueuedBlock[]>();
+  const [failed,setFailed] = useState(false);
+  useEffect(() => {
+    if (!ready || content) return;
+    let live = true;
+    void owner.readQueueContent(slot,id).then(
+      blocks => {if (live && blocks) setContent(blocks);},
+      () => {if (live) setFailed(true);},
+    );
+    return () => {live = false;};
+  }, [owner,ready,slot,id,content]);
+  if (!content) return <span className="queue-summary">{failed ? "Preview unavailable" : label}</span>;
+  const text = content.flatMap(block => block.type === "text" ? [block.text] :
+    block.type === "reference" ? [block.reference.preview] : []).join(" ").replace(/\s+/g," ").trim();
+  const attachments = content.flatMap((block,index) => {
+    if (block.type === "image" && generation) return [<QueueThumb key={index} {...{owner,slot,id,block,index,generation}}/>];
+    if (block.type === "file") return [
+      <span key={index} className="queue-file" title={block.file.name}>
+        <PaperGlyph/><span>{block.file.name}</span><small>{fileSizeText(block.file.bytes)}</small>
+      </span>,
+    ];
+    return [];
+  });
+  return <>
+    {attachments.length>0 && <span className="queue-attachments">{attachments}</span>}
+    <span className="queue-summary">{text}</span>
+  </>;
+});
 
 function InlineEdit({ editor }: { editor: QueueEditorState }) {
   const block = editor.blocks[0]!;
@@ -35,6 +89,7 @@ export function PendingInputs({ items, owner, editor }: {
   const listId = useId();
   const single = items.length === 1;
   const visible = single || expanded || !!editor;
+  const ready = owner.queueBinding?.items === items && owner.queueBinding.generation === owner.generation;
   return (
     <section className="queue-list" aria-label="Pending inputs">
       {!single && (
@@ -51,13 +106,12 @@ export function PendingInputs({ items, owner, editor }: {
           const inline = editor?.inlineSlot === slot ? editor : undefined;
           const action = (name: string) => void run(() => owner.queueAction(slot, name));
           const read = item.editable ? "Edit queued message" : "View queued message";
-          const disabled = !owner.queueBinding || !!editor?.saving;
+          const disabled = !ready || !!editor?.saving;
           return (
             <li key={slot} className="queue-row" data-slot={slot}>
               {single && <IconQueueOutlineRegular size={16}/>}
-              <span hidden={!!inline} className="queue-summary">
-                {item.source_kind} · {item.delivery_label} · {item.message_id}
-              </span>
+              {!inline && <QueueSummary key={owner.generation + ":" + item.message_id} id={item.message_id}
+                label={item.delivery_label} generation={owner.generation} {...{slot,owner,ready}}/>}
               {inline && <InlineEdit editor={inline}/>}
               <div className="queue-actions" hidden={!!inline}>
                 <DockButton label={read} disabled={disabled} onClick={() => action("read")}>

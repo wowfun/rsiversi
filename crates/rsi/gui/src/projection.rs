@@ -1527,6 +1527,11 @@ mod tests {
         };
         observe(&mut transcript, 1, acceptance(message.clone()));
         assert!(transcript.blocks.is_empty());
+        let slot = QueueSlot::initial(&original, 1, 1).id;
+        assert_eq!(
+            transcript.queue.content(&slot, &original).unwrap().as_ref(),
+            message.content
+        );
         observe(
             &mut transcript,
             2,
@@ -1546,6 +1551,15 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].message.queue_slot.id.as_str(), "original");
         assert_eq!(queue[0].message.message_id, successor);
+        assert!(transcript.queue.content(&slot, &original).is_none());
+        assert_eq!(
+            transcript
+                .queue
+                .content(&slot, &successor)
+                .unwrap()
+                .as_ref(),
+            message.content
+        );
         let fact = SessionFact::new(
             1,
             4,

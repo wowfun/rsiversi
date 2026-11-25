@@ -194,6 +194,10 @@ already admitted by the Host remain Host-owned and are never resent on detach.
 Queue presentation borrows pending routing metadata and the displayed Turn from
 its bounded projection. Sorting a view does not clone message identifiers or Turn
 identities; controls that outlive the view explicitly capture their own values.
+Live acceptance supplies the current slot's content. A cold inspection carries
+only routing metadata. A reader can fill the slot from its exact acceptance
+record. Content lives in the client until the message leaves the queue and is
+excluded from ordinary routing frames.
 
 Exact queue-slot lookup borrows its indexed entry without allocating or sorting a view.
 

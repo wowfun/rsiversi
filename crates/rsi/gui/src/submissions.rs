@@ -112,11 +112,17 @@ struct Prepare {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueuedVersion {
+    slot_id: rsi_agent_session_protocol::QueueSlotId,
+    expected_message_id: MessageId,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum QueuePreparation {
     Read {
-        slot_id: rsi_agent_session_protocol::QueueSlotId,
-        expected_message_id: MessageId,
+        items: Vec<QueuedVersion>,
     },
     Replace {
         slot_id: rsi_agent_session_protocol::QueueSlotId,
@@ -333,12 +339,14 @@ impl GuiApplication {
             Ok(input) => input,
             Err(error) => return Box::pin(async { Err(error) }),
         };
+        if let Some(queue) = input.queue.take() {
+            return self.admit_reply(move |app| async move {
+                let attached = app.pane(input.pane)?.attachment(&input.generation)?;
+                app.prepare_queue_submission(&attached, queue).await
+            });
+        }
         self.admit(false, None, move |app| async move {
             let attached = app.pane(input.pane)?.attachment(&input.generation)?;
-            if let Some(queue)=input.queue {
-                return app.prepare_queue_submission(&attached,queue).await;
-            }
-
             let header = attached.handle.header().await.map_err(error)?.fingerprint().map_err(error)?;
             let image_count = input.images.len();
             let mut command = None;
@@ -512,27 +520,46 @@ impl GuiApplication {
         };
         let new_id = || MessageId::new(rsi_ui::fresh_identity("message")?).map_err(error);
         let (slot_id, expected_message_id, mutation) = match queue {
-            QueuePreparation::Read {
-                slot_id,
-                expected_message_id,
-            } => {
-                let accepted_control_seq = attached
-                    .renderer
-                    .state
-                    .lock()
-                    .expect("GUI queue")
-                    .transcript
-                    .queue
-                    .get(&slot_id)
-                    .filter(|message| message.message_id == expected_message_id)
-                    .map(|message| message.accepted_control_seq)
-                    .ok_or("Queue slot changed; reopen its current version")?;
-                let message = attached
-                    .handle
-                    .read_message(&expected_message_id, accepted_control_seq)
-                    .await
-                    .map_err(error)?;
-                return serde_json::to_string(&serde_json::json!({"slot_id":slot_id,"message_id":message.message_id,"content":message.content})).map_err(error);
+            QueuePreparation::Read { items } => {
+                if attached.protected
+                    || items.len() > rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
+                {
+                    return Err("Queue preview is unavailable for this selection".into());
+                }
+                let mut rows = Vec::with_capacity(items.len());
+                for item in &items {
+                    let slot = &item.slot_id;
+                    let id = &item.expected_message_id;
+                    let sequence = {
+                        let state = attached.renderer.state.lock().expect("GUI queue");
+                        let queue = &state.transcript.queue;
+                        if let Some(body) = queue.content(slot, id) {
+                            rows.push(Some(body.clone()));
+                            continue;
+                        }
+                        queue
+                            .get(slot)
+                            .filter(|route| &route.message_id == id)
+                            .map(|route| route.accepted_control_seq)
+                    };
+                    let Some(sequence) = sequence else {
+                        rows.push(None);
+                        continue;
+                    };
+                    let message = attached
+                        .handle
+                        .read_message(id, sequence)
+                        .await
+                        .map_err(error)?;
+                    let body: Arc<[AgentMessageContent]> = message.content.into();
+                    let mut state = attached.renderer.state.lock().expect("GUI queue");
+                    let current = state.transcript.queue.cache_content(slot, id, body.clone());
+                    rows.push(current.then_some(body));
+                }
+                return serde_json::to_string(
+                    &rows.iter().map(Option::as_deref).collect::<Vec<_>>(),
+                )
+                .map_err(error);
             }
             QueuePreparation::Replace {
                 slot_id,

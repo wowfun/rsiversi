@@ -614,6 +614,41 @@
   font-size: 12px;
   color: var(--muted);
 }
+:global(.queue-attachments):where(.scope, .scope *) {
+  display: flex;
+  gap: 4px;
+  max-width: 55%;
+  overflow: hidden;
+}
+:global(.queue-thumb):where(.scope, .scope *) {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  object-fit: cover;
+}
+:global(.queue-file):where(.scope, .scope *) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 180px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+}
+:global(.queue-file > span):where(.scope, .scope *) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:global(.queue-file small):where(.scope, .scope *) {
+  flex: none;
+  color: var(--muted);
+}
 :global(.queue-actions:not([hidden])):where(.scope, .scope *) {
   display: flex;
   align-items: center;

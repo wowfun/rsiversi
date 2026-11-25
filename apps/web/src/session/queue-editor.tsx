@@ -3,13 +3,9 @@ import { useLayoutEffect, useRef } from "react";
 import { useOwnedDialog } from "./use-owned-dialog.ts";
 import { run } from "../bridge.ts";
 import { fileSizeText } from "../../vendor/dsh/primitives/file-size.ts";
+import type {QueuedBlock} from "./projection-types.ts";
 
-type Attachment =
-  | { type: "file"; file: { name: string; bytes: number } }
-  | { type: "image" }
-  | { type: "reference"; reference: { preview: string } };
-
-function attachmentLabel(block: Attachment): string {
+function attachmentLabel(block: Exclude<QueuedBlock,{type:"text"}>): string {
   switch (block.type) {
     case "file": return `${block.file.name} · ${fileSizeText(block.file.bytes)}`;
     case "image": return "Attached image retained";
@@ -26,7 +22,7 @@ export interface QueueEditorState {
   status: string;
   blocks: {
     key: string;
-    value: { type: "text"; text: string } | Attachment;
+    value: QueuedBlock;
   }[];
   edit(key: string, text: string): void;
   remove(key: string): void;

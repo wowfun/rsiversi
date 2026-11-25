@@ -132,6 +132,7 @@ struct Backend {
     queue_unknown: std::sync::atomic::AtomicBool,
     queue_conflict: std::sync::atomic::AtomicBool,
     pending_messages: Mutex<Vec<rsi_agent_store_protocol::StorePendingMessage>>,
+    queue_read_reply: Mutex<Option<(u64, AgentMessage)>>,
     released_references: Mutex<Vec<ReferenceSnapshotRef>>,
     active_turn: Mutex<Option<TurnId>>,
     receipt_sequence: std::sync::atomic::AtomicU64,
@@ -535,10 +536,15 @@ impl SessionHandle for Backend {
     }
     async fn read_message(
         &self,
-        _: &MessageId,
-        _: u64,
+        id: &MessageId,
+        seq: u64,
     ) -> rsi_session_protocol::Result<AgentMessage> {
-        missing()
+        self.queue_read_reply
+            .lock()
+            .unwrap()
+            .take_if(|(accepted, message)| *accepted == seq && &message.message_id == id)
+            .map(|(_, message)| message)
+            .map_or_else(missing, Ok)
     }
     async fn generate_image(
         &self,

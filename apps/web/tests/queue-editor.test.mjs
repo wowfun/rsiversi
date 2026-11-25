@@ -38,9 +38,10 @@ test('queue reads follow the last selection through a frame update and retire re
   globalThis.document={activeElement:null};
   t.after(()=>{if(previous===undefined)delete globalThis.document;else globalThis.document=previous;});
   const reads=[];
-  const pane=new (createPaneClass({connection:{},call(){
+  const pane=new (createPaneClass({connection:{},call(_,input){
     const reply=Promise.withResolvers();
-    reads.push(text=>reply.resolve(JSON.stringify({content:[{type:'text',text}]})));
+    const {queue}=JSON.parse(input);
+    reads.push(text=>reply.resolve(JSON.stringify(queue.items.map(()=>[{type:'text',text}]))));
     return reply.promise;
   }}))('main');
   const items=['first','next'].map(id=>({queue_slot:{id},message_id:id,editable:true}));
@@ -48,21 +49,53 @@ test('queue reads follow the last selection through a frame update and retire re
   const data={generation:'1',queue:items};
   pane.staged={data};
   const bind=()=>pane.bindActions(undefined,{generation:'1',items:data.queue});
-  bind();
+  pane.bindActions(undefined,{generation:'1',items:[items[0]]});
+  const preview=pane.readQueueContent('first','first');
   const first=pane.queueAction('first','read');
+  bind();
   const next=pane.queueAction('next','read');
+  assert.equal(reads.length,2,'preview and editor share one acceptance read');
   pane.bindActions(undefined,undefined);
   reads[1]('Selected second');
   await next;
   assert.equal(pane.queueDialog?.inlineSlot,'next');
   reads[0]('Selected first');
   await first;
+  assert.equal((await preview)[0].text,'Selected first');
   assert.equal(pane.queueDialog.inlineSlot,'next');
   bind();
+  assert.equal((await pane.readQueueContent('first','first'))[0].text,'Selected first');
+  data.queue=[{...items[0],message_id:'replacement'}];
+  pane.renderQueue(data);
+  bind();
+  await assert.rejects(pane.readQueueContent('first','first'),/current queue view/);
   const retired=pane.queueAction('first','read');
   data.queue=[];
   pane.renderQueue(data);
   reads[2]('Removed from queue');
   await retired;
   assert.equal(pane.queueDialog,undefined);
+});
+
+test('one expanded queue reads all missing visible slots together and reuses their content',async()=>{
+  const requests=[];
+  const pane=new (createPaneClass({connection:{},async call(_,input){
+    const {items}=JSON.parse(input).queue;
+    requests.push(items);
+    return JSON.stringify(items.map(({expected_message_id:text})=>[{type:'text',text}]));
+  }}))('main');
+  pane.generation='1';
+  const items=Array.from({length:64},(_,i)=>({queue_slot:{id:'slot-'+i},message_id:'v-'+i}));
+  pane.bindActions(undefined,{generation:'1',items});
+  const read=()=>Promise.all(items.map(item=>pane.readQueueContent(item.queue_slot.id,item.message_id)));
+  assert.deepEqual((await read()).map(row=>row[0].text),items.map(row=>row.message_id));
+  await read();
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].length,64);
+  items[17]={...items[17],message_id:'replaced'};
+  pane.renderQueue({queue:items});
+  assert.equal((await read())[17][0].text,'replaced');
+  assert.deepEqual(requests[1],[{slot_id:'slot-17',expected_message_id:'replaced'}]);
+  pane.renderQueue({protected:true});
+  assert.equal(pane.queueContents.size,0);
 });

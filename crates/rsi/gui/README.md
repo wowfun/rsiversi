@@ -1,8 +1,13 @@
 # rsi-gui
 
 Conversation rows follow the final input order of each durable preparation.
-The queue shows accepted submissions while waiting. A rejected or omitted
-input contributes no conversation row. Text, image and reference details use
+The queue shows the text and attachments of each visible accepted submission.
+Multiple pending messages start collapsed. The first visible row reads missing
+versions in one document request. Editing reuses the accepted content.
+Replacing or withdrawing a message retires its preview.
+An image preview belongs to the current pane, slot, message and content index.
+A rejected or omitted input contributes no conversation row.
+Text, image and reference details use
 the Fact that owns each final block. A history page resolves unchanged inputs
 outside its interval from the same Session.
 

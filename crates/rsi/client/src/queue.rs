@@ -1,7 +1,8 @@
 //! Shared bounded queue projection and exact-envelope reconciliation.
 use rsi_agent_session_protocol::{
-    AgentControlRecord, AgentControlRecordBody as Body, AgentMessageSourceKind, MessageOptions,
-    QueueMutationReceipt, QueueMutationRequest, QueueSlot, QueueSlotId, TurnId,
+    AgentControlRecord, AgentControlRecordBody as Body, AgentMessageContent,
+    AgentMessageSourceKind, MessageId, MessageOptions, QueueMutationReceipt, QueueMutationRequest,
+    QueueSlot, QueueSlotId, TurnId,
 };
 use rsi_agent_store_protocol::StorePendingMessage;
 use rsi_session_protocol::{Result, SessionError, SessionHandle};
@@ -51,22 +52,42 @@ impl<'a> QueueItem<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PendingEntry {
+    route: StorePendingMessage,
+    content: Option<Arc<[AgentMessageContent]>>,
+}
+
 /// At most 64 current slots and one adjacent successor link; old versions are not retained.
 #[derive(Clone, Debug, Default)]
 pub struct QueueProjection {
-    entries: BTreeMap<QueueSlotId, StorePendingMessage>,
+    entries: BTreeMap<QueueSlotId, PendingEntry>,
     revision: Arc<()>,
     successor: Option<(rsi_agent_session_protocol::MessageId, QueueSlot)>,
 }
 impl QueueProjection {
     /// Seeds from the same atomic inspection horizon used by the observation cursor.
     pub fn seed(&mut self, pending: Vec<StorePendingMessage>) {
-        let entries = pending
-            .into_iter()
-            .map(|entry| (entry.queue_slot.id.clone(), entry))
-            .collect();
-        if self.entries != entries {
-            self.entries = entries;
+        if self.entries.len() != pending.len()
+            || pending
+                .iter()
+                .any(|route| self.get(&route.queue_slot.id) != Some(route))
+        {
+            self.entries = pending
+                .into_iter()
+                .map(|route| {
+                    let slot = route.queue_slot.id.clone();
+                    let content = self
+                        .entries
+                        .remove(&slot)
+                        .filter(|entry| {
+                            entry.route.message_id == route.message_id
+                                && entry.route.accepted_control_seq == route.accepted_control_seq
+                        })
+                        .and_then(|entry| entry.content);
+                    (slot, PendingEntry { route, content })
+                })
+                .collect();
             self.revision = Arc::new(());
         }
         self.successor = None;
@@ -82,7 +103,7 @@ impl QueueProjection {
             } => {
                 let before = self.entries.len();
                 self.entries
-                    .retain(|_, entry| &entry.message_id != predecessor_id);
+                    .retain(|_, entry| &entry.route.message_id != predecessor_id);
                 changed = before != self.entries.len();
                 self.successor = Some((successor_id.clone(), slot.clone()));
             }
@@ -125,20 +146,29 @@ impl QueueProjection {
                 if self.entries.len() < rsi_agent_session_protocol::MAXIMUM_PENDING_AGENT_MESSAGES
                     || self.entries.contains_key(&slot.id)
                 {
-                    changed = self.entries.get(&slot.id) != Some(&entry);
-                    self.entries.insert(slot.id, entry);
+                    changed = self.get(&slot.id) != Some(&entry);
+                    if changed {
+                        self.entries.insert(
+                            slot.id,
+                            PendingEntry {
+                                route: entry,
+                                content: Some(Arc::from(message.content.as_slice())),
+                            },
+                        );
+                    }
                 }
             }
             Body::MessageClaimed { message_id, .. } | Body::MessageDiscarded { message_id, .. } => {
                 let before = self.entries.len();
                 self.entries
-                    .retain(|_, entry| &entry.message_id != message_id);
+                    .retain(|_, entry| &entry.route.message_id != message_id);
                 changed = before != self.entries.len();
             }
             Body::MessagePromoted { message_id } => {
                 if let Some(entry) = self
                     .entries
                     .values_mut()
+                    .map(|entry| &mut entry.route)
                     .find(|entry| &entry.message_id == message_id)
                 {
                     changed = entry.target != rsi_agent_session_protocol::MessageTarget::NextTurn;
@@ -157,14 +187,43 @@ impl QueueProjection {
     }
     /// Borrows one exact current slot without sorting or allocating a presentation view.
     pub fn get(&self, slot: &QueueSlotId) -> Option<&StorePendingMessage> {
-        self.entries.get(slot)
+        self.entries.get(slot).map(|entry| &entry.route)
+    }
+    /// Returns the live or previously read acceptance body for this version of a slot.
+    pub fn content(
+        &self,
+        slot: &QueueSlotId,
+        id: &MessageId,
+    ) -> Option<&Arc<[AgentMessageContent]>> {
+        self.entries
+            .get(slot)
+            .filter(|entry| &entry.route.message_id == id)?
+            .content
+            .as_ref()
+    }
+    /// Keeps an exact cold read only while its original message still occupies the slot.
+    pub fn cache_content(
+        &mut self,
+        slot: &QueueSlotId,
+        id: &MessageId,
+        content: Arc<[AgentMessageContent]>,
+    ) -> bool {
+        if let Some(entry) = self
+            .entries
+            .get_mut(slot)
+            .filter(|entry| &entry.route.message_id == id)
+        {
+            entry.content = Some(content);
+            return true;
+        }
+        false
     }
     /// Returns stable scheduling order and exact displayed-Turn actions.
     pub fn view<'a>(&'a self, turn: Option<&'a TurnId>) -> Vec<QueueItem<'a>> {
         let mut entries = self
             .entries
             .values()
-            .map(|entry| QueueItem::new(entry, turn))
+            .map(|entry| QueueItem::new(&entry.route, turn))
             .collect::<Vec<_>>();
         entries.sort_by_key(|item| {
             (
@@ -244,7 +303,7 @@ mod tests {
         for item in &view {
             assert!(std::ptr::eq(
                 item.message,
-                std::ptr::from_ref(&projection.entries[&item.message.queue_slot.id])
+                std::ptr::from_ref(&projection.entries[&item.message.queue_slot.id].route)
             ));
             assert!(std::ptr::eq(
                 item.convert_turn.unwrap(),
@@ -256,6 +315,16 @@ mod tests {
         assert_eq!(encoded[0]["convert_turn"], "displayed");
         assert_eq!(encoded[0]["convert_label"], "Steer now");
         let revision = projection.revision();
+        let id = MessageId::new("b").unwrap();
+        let slot = QueueSlotId::new("b").unwrap();
+        let body = Arc::from([AgentMessageContent::Text {
+            text: "cold acceptance".into(),
+        }]);
+        assert!(projection.content(&slot, &id).is_none());
+        assert!(projection.cache_content(&slot, &id, Arc::clone(&body)));
+        assert!(Arc::ptr_eq(projection.content(&slot, &id).unwrap(), &body));
+        assert!(!projection.cache_content(&slot, &MessageId::new("old").unwrap(), body));
+        assert!(Arc::ptr_eq(&revision, &projection.revision()));
         let control = AgentControlRecord::new(
             200,
             1,
@@ -279,6 +348,7 @@ mod tests {
         projection.observe(&control);
         assert!(!Arc::ptr_eq(&revision, &projection.revision()));
         assert_eq!(projection.view(None).len(), 2);
+        assert!(projection.content(&slot, &id).is_none());
         let revision = projection.revision();
         projection.observe(&control);
         assert!(Arc::ptr_eq(&revision, &projection.revision()));
