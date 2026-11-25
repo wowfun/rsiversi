@@ -318,6 +318,7 @@ impl Operation {
                     | Self::IsHostOwner
                     | Self::ExecuteCommand
                     | Self::PrepareApplicationCommands
+                    | Self::SelectPreset
                     | Self::SelectPublishedPreset
                     | Self::Compact
             ) {
@@ -640,6 +641,8 @@ mod setup_tests {
             Operation::GoalControl,
             Operation::CancelWorkflow,
             Operation::ExecuteCommand,
+            Operation::SelectPreset,
+            Operation::SelectPublishedPreset,
             Operation::Compact,
         ] {
             assert_eq!(

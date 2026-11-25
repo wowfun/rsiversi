@@ -971,8 +971,9 @@ Escape and outside interaction dismiss open menus.
 The new-conversation composer offers the installed Agent presets next to its workspace.
 Opening the menu reads the current catalog, including the effective default and
 descriptions. Broken presets are omitted from selection. An explicit choice is
-staged in the current blank surface and applied by Session creation. The picker
-remains available to the owner after a permission choice or a queued message,
+staged in the current blank surface and applied by Session creation. On an
+existing Session, a paired reader sees the applied preset as a label. The picker
+remains available to the Host owner after a permission choice or a queued message,
 until the first Turn starts. The same pane then displays the selected preset
 in its header. The starting page resolves a custom default's display name on
 first appearance. Conversation defaults displays the current roster when opened.

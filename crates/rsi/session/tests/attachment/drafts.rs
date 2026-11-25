@@ -219,7 +219,10 @@ async fn shared_blank_restores_its_selected_preset_for_another_authorized_device
         .unwrap();
     let draft = handle.draft_snapshot().await.unwrap();
     assert_eq!(draft.header.coordinates(), &input.coordinates);
-    let changed = handle
+    let changed = first
+        .attach(&input.session_id)
+        .await
+        .unwrap()
         .select_preset(rsi_session_protocol::SelectDraftPreset {
             preset_id: AgentPresetId::new("selected").unwrap(),
             expected_revision: draft.revision,

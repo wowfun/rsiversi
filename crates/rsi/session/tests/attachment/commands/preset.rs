@@ -9,6 +9,57 @@ fn select(preset: &str, revision: u64) -> SelectDraftPreset {
 }
 
 #[tokio::test]
+async fn a_paired_creator_can_choose_the_initial_preset_but_only_the_host_can_change_it() {
+    use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, DeviceId};
+    use rsi_session_protocol::SessionIngress as _;
+
+    let fixture = Fixture::new().await;
+    let mut request = Fixture::request("paired-preset");
+    request.agent_preset_id = Some(AgentPresetId::new("other").unwrap());
+    let id = request.session_id.clone();
+    let guest = fixture
+        .service
+        .create_from(
+            request,
+            CallOrigin::Device(AuthenticatedDevice {
+                id: DeviceId::from_bytes([7; 16]),
+                revoked: CancellationToken::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    let initial = guest.draft_snapshot().await.unwrap();
+    assert_eq!(initial.header.agent_preset_id().as_str(), "other");
+    assert!(matches!(
+        guest
+            .select_preset(select("fixture", initial.revision))
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert_eq!(guest.draft_snapshot().await.unwrap(), initial);
+
+    let owner = fixture.service.attach(&id).await.unwrap();
+    let selected = owner
+        .select_preset(select("fixture", initial.revision))
+        .await
+        .unwrap();
+    assert_eq!(guest.draft_snapshot().await.unwrap(), selected);
+    submit_text(guest.clone(), "accepted", "queued")
+        .await
+        .unwrap();
+    let cut = fixture.store.read_watermarks(&id).await.unwrap();
+    assert_eq!(cut.durable_fact_seq, 0);
+    assert!(matches!(
+        guest
+            .select_agent_preset(AgentPresetId::new("other").unwrap())
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert_eq!(fixture.store.read_watermarks(&id).await.unwrap(), cut);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn published_input_checks_the_selected_workflow_before_acceptance() {
     use rsi_agent_turn_protocol::SessionCommands;
 

@@ -75,8 +75,8 @@ function NativeSurface({
   const empty = !data?.transcript.blocks.length;
   const ownerMaySwitch = useView(view=>view?.navigation?.can_archive ?? data?.can_stop_work ?? view?.setup?.allowed);
   const cursor = data?.projections?.cursor;
-  const presetEditable = !data || (!data.historical && !data.protected && (cursor?.kind === 'durable'
-    ? ownerMaySwitch && cursor.fact_seq === '0' : data.draft !== false));
+  const presetEditable = !data || (ownerMaySwitch && !data.historical && !data.protected && (cursor?.kind === 'durable'
+    ? cursor.fact_seq === '0' : data.draft !== false));
   const earlier = !!data?.history_more || (!data?.historical && !!data?.transcript.omitted);
   const [tab, setTab] = useConversationTab(data?.session);
   const [announcements] = useState(() => new ConversationAnnouncements());

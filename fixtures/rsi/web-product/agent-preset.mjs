@@ -3,7 +3,7 @@ import {cp, mkdir, writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService, waitUntil} from './service.mjs';
-import {chooseStartingWorkspace, connectHostOwner, registerFixtureWorkspace} from './browser-fixture.mjs';
+import {chooseStartingWorkspace, connectHostOwner, connectWorkbench, registerFixtureWorkspace} from './browser-fixture.mjs';
 import {openConversation, openSettings} from './controls.mjs';
 
 const {RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: assets, RSI_WEB_REPORT: output} = process.env;
@@ -23,6 +23,25 @@ try {
       await writeFile(join(broken,'agent.profile.toml'),'invalid TOML [');
     }});
   browser = await chromium.launch();
+  const paired = await browser.newPage();
+  try {
+    const device = service.register('Paired preset creator');
+    await registerFixtureWorkspace(paired.request,service,device);
+    await connectWorkbench(paired,service,device);
+    const pane = paired.locator('.pane.selected');
+    await pane.locator('button.preset-choice').click();
+    await paired.getByRole('menuitemradio',{name:/Editing/}).click();
+    await pane.getByRole('button',{name:'Add files or run commands'}).click();
+    await paired.getByRole('option',{name:'File',exact:true}).click();
+    const dialog = paired.getByRole('dialog',{name:'Insert workspace file path'});
+    await dialog.waitFor();
+    await dialog.press('Escape');
+    await pane.locator('.session-preset').filter({hasText:'Editing'}).waitFor();
+    assert(await pane.getAttribute('data-session-id'));
+    assert.equal(await pane.locator('button.preset-choice').count(),0);
+    await paired.screenshot({path:join(report,'paired-draft-preset.png')});
+    checks.push('a paired creator chooses the initial preset and sees the applied preset on the attached empty draft');
+  } finally { await paired.close(); }
   const context = await browser.newContext({viewport:{width:1280,height:880},colorScheme:'dark'});
   page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));

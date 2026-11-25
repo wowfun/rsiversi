@@ -228,7 +228,9 @@ expire with the draft lease. An owner application's durable command preparation
 publishes the selected baseline and its held inputs under the same session
 admission as the first prompt. The caller receives a durable revision for
 its edit, and a cold attachment can read the eventual receipt without a Turn.
-An owner may select another Agent preset until the first Turn starts. Saving
+The creator may choose the initial Agent preset. Once a Session exists, only
+the Host owner may change its preset, including on a paired device's own
+unpublished draft. The selection stays editable until the first Turn starts. Saving
 a permission choice or queuing a message preserves that choice window. The
 first Turn uses the most recently accepted preset, including for messages
 already queued. Selection and Turn acceptance share Session admission, so a

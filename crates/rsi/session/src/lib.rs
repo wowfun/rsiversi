@@ -1843,6 +1843,7 @@ impl SessionHandle for LocalSessionHandle {
         &self,
         request: rsi_session_protocol::SelectDraftPreset,
     ) -> Result<rsi_session_protocol::SessionDraftView> {
+        self.require_host_owner()?;
         let _admission = self.admit_mutation()?;
         self.draft_commands
             .select_preset(self.clone(), request)
