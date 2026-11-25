@@ -68,7 +68,7 @@ Runtime-composed implementations are independent ordinary plugins; protocol
 and test-support packages are libraries.
 The product supplies read-only application tool receipts to Agent Kernel cold
 recovery independently of the application process and its browser routes.
-The [Agent Goal domain](../crates/rsi-agent/goal/README.md) owns frozen objectives,
+The [Agent Goal domain](../crates/rsi-agent/goal/README.md) owns Goal state,
 round allocation and report settlement through those composition contracts.
 Kernel continuation admission provides live authority separately from durable
 state. Kernel also consumes the public Jobs status types to relay an executor's
