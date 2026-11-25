@@ -523,6 +523,23 @@ export class DraftStore {
       return saved;
     });
   }
+  async moveWorkspaceInput(source, destination) {
+    const moved = await this.mutateMany([source.key, destination.key], ([from, to]) => {
+      to = this.materialize(destination, to);
+      samePending(source, from);
+      samePending(destination, to);
+      require(!from.pending && !to.pending, "A submission is pending. The draft is saved in its original conversation.");
+      if (source.text) to.text = source.text;
+      to.images = to.images.concat(source.images);
+      from.text = "";
+      from.images = [];
+      from.editRevision = bump(from.editRevision);
+      to.editRevision = bump(to.editRevision);
+      return [from, to];
+    });
+    this.ephemeral.delete(destination);
+    return moved;
+  }
   async moveFresh(expected, replacement) {
     const [, moved] = await this.mutateMany([expected.key, replacement.key], ([old, next]) => {
       next = this.materialize(replacement, next);
@@ -675,6 +692,15 @@ export class DraftEditor {
       this.failure = undefined; this.pump(); this.changed();
       await this.flush();
     } finally { this.resolving = false; this.changed(); }
+  }
+  adoptMoved(record) {
+    this.record = record;
+    this.windowInput = undefined;
+    this.text = record.text;
+    this.images = clone(record.images);
+    this.references = clone(record.references);
+    this.revision = bump(this.revision);
+    this.changed();
   }
   async transfer(operation) {
     require(!this.transferring, "This draft is already moving to another conversation");

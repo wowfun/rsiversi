@@ -8,6 +8,52 @@ beforeEach(() => clearDraftRecords());
 const open = () => DraftStore.open('a'.repeat(32), {kind:'local'});
 const header = 'b'.repeat(64);
 
+test('a workspace change carries text and images atomically and preserves a pending request', async () => {
+  const store = await open();
+  const image = {id:'f'.repeat(64), mime:'image/png', bytes:100, width:5, height:5};
+  const original = await store.edit(await store.ensure('main','first',header), 'carry me', [image]);
+  const destination = await store.ensure('main','second','c'.repeat(64));
+  const [from, to] = await store.moveWorkspaceInput(original, destination);
+  assert.equal(from.text, '');
+  assert.deepEqual(from.images, []);
+  assert.equal(to.text, 'carry me');
+  assert.deepEqual(to.images, [image]);
+  const frozen = await store.startDispatch(to, {kind:'message',id:'stable',opaque:'original request',text_bytes:8,images:1,captures:[]});
+  await assert.rejects(store.moveWorkspaceInput(frozen, from), /pending/);
+  assert.equal((await store.get('main','second')).pending.opaque, 'original request');
+  assert.equal((await store.get('main','first')).text, '');
+  await store.verify();
+});
+
+test('moving uses the input visible in the source window when a peer last saved other text', async () => {
+  const store = await open();
+  const from = new DraftEditor(store, await store.ensure('main','first',header));
+  from.edit('my workspace draft');
+  await from.flush();
+  const peer = new DraftEditor(store, await store.get('main','first'));
+  peer.edit('another window');
+  await peer.flush();
+  const to = await store.ensure('main','second',header);
+  const [cleared, moved] = await store.moveWorkspaceInput(from.savedInput, to);
+  from.adoptMoved(cleared);
+  assert.equal(moved.text, 'my workspace draft');
+  assert.equal(peer.text, 'another window');
+  assert.equal((await store.get('main','first')).text, '');
+  assert.equal((await store.get('main','second')).text, moved.text);
+  await store.verify();
+});
+
+test('an overfull destination keeps both workspace drafts intact', async () => {
+  const store = await open();
+  const image = {id:'d'.repeat(64), mime:'image/png', bytes:90, width:4, height:4};
+  const from = await store.edit(await store.ensure('main','first',header), 'old', [image]);
+  const to = await store.edit(await store.ensure('main','second',header), 'target', Array(8).fill(image));
+  await assert.rejects(store.moveWorkspaceInput(from, to), /eight images/);
+  assert.deepEqual(await store.get('main','first'), from);
+  assert.deepEqual(await store.get('main','second'), to);
+  await store.verify();
+});
+
 test('a maximum-size Session command survives reopening its submission journal', async () => {
   const store = await open();
   const task = 'a'.repeat(64 * 1024 - 2);

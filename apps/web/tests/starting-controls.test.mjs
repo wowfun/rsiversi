@@ -3,6 +3,39 @@ import assert from 'node:assert/strict';
 import {prepareComposer,restoreStartingDraft} from '../src/runtime/starting-conversation.js';
 import {createPaneClass} from '../src/runtime/session-controller.js';
 import {StartingDraft} from '../starting-draft.js';
+import 'fake-indexeddb/auto';
+import {DraftEditor,DraftStore} from '../drafts.js';
+
+test('switching workspaces waits for the destination binding before transferring unsent input', async () => {
+  const store = await DraftStore.open('e'.repeat(32), {kind:'local'});
+  const old = new DraftEditor(store, await store.ensure('main','source','a'.repeat(64)));
+  const target = new DraftEditor(store, await store.ensure('main','target','b'.repeat(64)));
+  old.edit('carry to target');
+  const entered = Promise.withResolvers();
+  const connection = {drafts:store};
+  const context = {connection, view:{catalog:{workspaces:[{id:'second'}]}},
+    boundCall: () => async (_method, value) => {
+      assert.deepEqual(JSON.parse(value), {action:'create',pane:'main',workspace:'second'});
+      entered.resolve();
+    }};
+  const pane = new (createPaneClass(context))('main');
+  pane.renderComposer = () => pane.invalidate();
+  pane.generation = '1';
+  pane.editor = old;
+  const selecting = pane.selectWorkspace('second');
+  await entered.promise;
+  assert.equal(old.text, 'carry to target');
+  pane.generation = '2';
+  pane.staged = {data:{creation:{workspace_id:'second'}}};
+  pane.editor = target;
+  pane.invalidate();
+  await selecting;
+  assert.equal(old.text, '');
+  assert.equal(target.text, 'carry to target');
+  assert.equal((await store.get('main','target')).text, target.text);
+  assert.equal(pane.submitting, undefined);
+  store.database.close();
+});
 
 test('starting recovery stops after connection replacement or closing its recovery panel',async t=>{
   for(const replacement of [false,true]) {

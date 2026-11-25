@@ -303,10 +303,7 @@ export async function recreateDraft(pane, context, record, current) {
             "Saved input was restored while you were typing; choose which editor to keep",
           );
         } else {
-          pane.editor.record = moved;
-          pane.editor.text = moved.text;
-          pane.editor.images = structuredClone(moved.images);
-          pane.editor.references = structuredClone(moved.references);
+          pane.editor.adoptMoved(moved);
         }
       }
       if (pane.editor === source) pane.editor = undefined;

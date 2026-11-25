@@ -14,6 +14,58 @@ export function startingWorkspace(pane, context) {
   const entries = context.view?.catalog.workspaces ?? [];
   return entries.find(entry => entry.id === pane.starting?.workspace) ?? entries[0];
 }
+async function openWorkspaceEditor(pane, context, workspace, preset, current) {
+  const generation = pane.generation;
+  await context.boundCall(context.connection)('command', JSON.stringify({action:'create', pane:pane.index, workspace, agent_preset_id:preset}));
+  // The command can finish before React has bound the new editor.
+  return new Promise((resolve, reject) => {
+    const finish = (callback, value) => { clearTimeout(timer); unsubscribe(); callback(value); };
+    const timer = setTimeout(() => finish(reject, new Error('Conversation is still opening. Your draft is saved.')), 15000);
+    const check = () => {
+      try { current(); }
+      catch (error) { finish(reject, error); return; }
+      const data = pane.staged?.data;
+      if (pane.generation && pane.generation !== generation && pane.editor && data?.creation?.workspace_id === workspace && (!preset || data.agent_preset === preset))
+        finish(resolve, pane.editor);
+    };
+    const unsubscribe = pane.subscribe(check);
+    check();
+  });
+}
+export async function selectWorkspace(pane, context, id) {
+  if (pane.submitting || pane.switching || pane.uploading) throw new Error('Wait for this conversation’s current operation');
+  if (!context.view?.catalog.workspaces.some(entry => entry.id === id)) throw new Error('Workspace is unavailable');
+  if (!pane.generation) {
+    pane.starting?.edit(pane.starting.text, id);
+    return;
+  }
+  const source = pane.editor, connection = context.connection;
+  const current = () => {
+    if (context.connection !== connection || connection?.closing) throw new Error('Connection changed; your draft is saved.');
+  };
+  if (!source || source.record.pending || (!source.text && !source.images.length)) {
+    await pane.flush();
+    current();
+    return context.command({action:'create', pane:pane.index, workspace:id});
+  }
+  pane.submitting = 'Opening conversation';
+  pane.renderComposer();
+  try {
+    await source.transfer(async () => {
+      current();
+      if (pane.editor !== source) throw new Error('The selected conversation changed; your draft is saved.');
+      const target = await openWorkspaceEditor(pane, context, id, undefined, current);
+      if (target === source || target.record.pending) return;
+      await target.transfer(async () => {
+        current();
+        if (pane.editor !== target) throw new Error('The selected conversation changed; your draft is saved.');
+        const [from, to] = await source.store.moveWorkspaceInput(source.savedInput, target.savedInput);
+        source.adoptMoved(from);
+        target.adoptMoved(to);
+      });
+    });
+  } finally { pane.submitting = undefined; pane.renderComposer(); }
+}
 export async function prepareComposer(pane, context) {
   if (pane.openingComposer) return pane.openingComposer;
   if (pane.generation && pane.editor) return true;
@@ -58,24 +110,13 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
   try {
     await draft.flush();
     current();
-    const text = draft.text, serial = draft.serial, generation = pane.generation;
+    const text = draft.text, serial = draft.serial;
     const selection = draft === pane.starting && pane.input?.value === text
       ? [pane.input.selectionStart,pane.input.selectionEnd] : undefined;
     const preset = draft === pane.starting ? pane.stagedPreset : undefined;
-    await context.boundCall(connection)('command', JSON.stringify({action:'create', pane:pane.index, workspace:workspace.id, agent_preset_id:preset}));
-    // A command response may precede its React frame/attachment commit.
-    await new Promise((resolve, reject) => {
-      let unsubscribe;
-      const timer = setTimeout(() => { unsubscribe?.(); reject(new Error('Conversation is still opening. Your starting draft is saved.')); }, 15000);
-      const check = () => {
-        try { current(); }
-        catch(error) { clearTimeout(timer); unsubscribe?.(); reject(error); return; }
-        if (pane.generation && pane.generation !== generation && pane.editor && pane.staged?.data?.creation?.workspace_id === workspace.id && (!preset || pane.staged.data.agent_preset === preset)) { clearTimeout(timer); unsubscribe?.(); resolve(); }
-      };
-      unsubscribe = pane.subscribe(check); check();
-    });
+    const editor = await openWorkspaceEditor(pane, context, workspace.id, preset, current);
     current();
-    const editor = pane.editor;
+    if (pane.editor !== editor) throw new Error('Conversation changed; your starting draft is saved');
     if (editor.text || editor.images.length || editor.references.length || editor.record.pending)
       throw new Error('Conversation already has input. Your starting draft is saved.');
     if (text) { editor.edit(text, [], []); await editor.flush(); }

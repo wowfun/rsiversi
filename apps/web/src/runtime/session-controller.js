@@ -1,4 +1,4 @@
-import {bindStarting, startingWorkspace, startConversation, prepareComposer} from './starting-conversation.js';
+import {bindStarting, startingWorkspace, startConversation, prepareComposer, selectWorkspace} from './starting-conversation.js';
 import {assertDraftStorageActive, draftStorageRetired} from '../../draft-databases.js';
 import {commandSelection, claimedCommand, commandToken} from '../../command-input.js';
 import {formatQuoteText} from '../../vendor/dsh/quote/format-quote.ts';
@@ -374,12 +374,7 @@ export function createPaneClass(context) {
         );
       }
     }
-    async selectWorkspace(id) {
-      if (this.submitting || this.switching || this.uploading) throw new Error("Wait for this conversation’s current operation");
-      if (!context.view?.catalog.workspaces.some(entry => entry.id === id)) throw new Error("Workspace is unavailable");
-      if (this.generation) { await this.flush(); return context.command({action:"create", pane:this.index, workspace:id}); }
-      this.starting?.edit(this.starting.text, id);
-    }
+    selectWorkspace(id) { return selectWorkspace(this, context, id); }
     startConversation() { return startConversation(this, context); }
     async selectPreset(id) {
       if (this.submitting || this.switching || this.uploading) throw new Error('Wait for the current operation before selecting a preset');
