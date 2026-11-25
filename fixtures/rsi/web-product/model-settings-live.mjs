@@ -33,7 +33,7 @@ try{
  await page.getByRole('button',{name:'Edit deepseek',exact:true}).click();editor=page.getByRole('form',{name:'Edit model provider'});assert.equal(await editor.getByRole('textbox',{name:'API key'}).inputValue(),'');
  await editor.getByRole('button',{name:'Apply',exact:true}).click();await editor.waitFor({state:'detached',timeout:60000});
  await page.getByRole('button',{name:'Close settings'}).click();
- await page.getByRole('button',{name:/^Conversation workspace,/}).click();await page.getByRole('menuitemradio',{name:'Live workspace',exact:true}).click();
+ await page.getByRole('button',{name:/^Conversation workspace,/}).click();await page.getByRole('menu').getByText('Live workspace',{exact:true}).click();
  await page.getByRole('textbox',{name:'Main message',exact:true}).fill('Reply exactly RSI_MODEL_SETUP_OK. Do not use tools.');await page.getByTestId('composer-send').click();await page.locator('.message.assistant').filter({hasText:'RSI_MODEL_SETUP_OK'}).waitFor({timeout:180000});await page.waitForFunction(()=>document.querySelector('.pane-status')?.textContent==='Completed',{},{timeout:180000});
  await page.screenshot({path:join(report,'live-conversation.png')});
  // Settlement invalidates the paged navigation; settle that explicit refresh before hovering a row.

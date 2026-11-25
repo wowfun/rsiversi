@@ -1,5 +1,8 @@
 .trigger {border:0;background:transparent;color:var(--ink);gap:5px;white-space:nowrap;}
 .trigger:hover,.trigger[aria-expanded=true] {background:var(--hover);}
+.workspaceLabel {display:flex;gap:4px;min-width:0;}
+.workspaceLabel > span {min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.workspaceLabel > span:last-child {color:var(--muted);flex:none;max-width:75%;}
 .trigger svg,.panel svg {width:14px;height:14px;flex-shrink:0;}
 .tools,.submission {display:flex;align-items:center;min-width:0;gap:12px;}
 .submission {margin-inline-start:auto;max-width:100%;}

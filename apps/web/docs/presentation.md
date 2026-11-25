@@ -837,8 +837,11 @@ summary; no Session dock or terminal is allocated for the starting page.
 The first-use composer selects the Service-provided default workspace, or an
 existing registered workspace when available. Its input remains usable before
 model configuration; the model control opens setup when no model is available.
-The workspace selector chooses registered workspaces and offers the directory
-picker for adding one. Composer controls expose only implemented actions.
+The workspace selector searches all listed workspaces by title or path when
+there is more than one. Up to six rows are visible before scrolling. The add
+action stays available below the results. Same-titled rows show a distinguishing
+path suffix. Closing the menu clears its search. Composer controls expose only
+implemented actions.
 Completion hints appear only for an attached, available conversation: `/` offers
 commands and `@` offers Agents. Draft and switching composers use a plain prompt.
 Conversation headings and underlined tabs separate the transcript from execution

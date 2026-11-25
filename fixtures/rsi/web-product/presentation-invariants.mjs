@@ -18,7 +18,7 @@ import {SessionCommands} from '/src/session/projections.tsx';
 import {DraftImages,DraftReferences} from '/src/session/draft-attachments.tsx';
 import {ResourcePresentations} from '/src/details/resources.tsx';
 import {resourceHosts,resources,publishResources} from '/src/resource-hosts.ts';
-import {notices,observable} from '/src/bridge.ts';
+import {notices,observable,source} from '/src/bridge.ts';
 import {usePresentation,presentationIdentity,ResizeHandle} from '/src/presentation.tsx';
 import {PresentationStore} from '/presentation-store.js';
 import {installDisclosures} from '/disclosure.js';
@@ -33,6 +33,12 @@ import chat from '/src/session/chat.module.css';
 import resourceCss from '/src/resources.module.css';
 import '/styles.css';
 window.actions=[];
+const workspaces=Array.from({length:8},(_,i)=>({
+ id:'ws-'+i,name:i<2?'Release workspace':'Other '+i,
+ coordinates:{location:{kind:'local'},path:'/projects/'+i+'/build'},
+}));
+source.set({catalog:{workspaces}});
+window.pickWorkspace=id=>{window.pickedWorkspace=id};
 // Observe only the real component's offset Maps; no production test port is added.
 const mapSet=Map.prototype.set,offsetMaps=new Set();
 Map.prototype.set=function(key,value){if(typeof key==='string'&&key.startsWith('offset-probe-pane')&&typeof value==='number')offsetMaps.add(this);return mapSet.call(this,key,value)};
@@ -92,7 +98,7 @@ function App(){
  const notice=useSyncExternalStore(notices.subscribe,notices.getSnapshot),layout=usePresentation();
  window.layout=layout;window.enableStorage=()=>{fail=false;layout.retry()};
  return <main><output aria-label="Member value">{memberValue}</output><section className={session.scope+' mode-standard'}><Transcript owner={owner} transcript={transcript} generation="1" mode="standard" cards={false} register={()=>{}}/><button hidden={!owner.readingSummary} onClick={()=>owner.setReadingSummary(false)}>Back to bottom</button></section>
- <section aria-label="Disclosure checks" className={session.scope+' '+chat.scope}><WorkspaceChoice owner={owner}/><ForkTurn turn="turn" owner={owner}/><div className="mode-verbose"><ForkTurn turn="verbose" owner={owner}/></div></section>
+ <section aria-label="Disclosure checks" className={session.scope+' '+chat.scope}><WorkspaceChoice owner={{...owner,selectWorkspace:window.pickWorkspace}} workspace="ws-7"/><ForkTurn turn="turn" owner={owner}/><div className="mode-verbose"><ForkTurn turn="verbose" owner={owner}/></div></section>
  <SessionCommands data={{commands:{revision:{kind:'draft'},commands:[{name:'help',description:'Help',draft_safe:true,composer_input:{kind:'none'}}]}}} owner={owner}/>
  <DraftImages owner={owner} state={{images:[{width:1,height:1,bytes:4}]}}/>
  <DraftReferences owner={owner} state={{references:[{id:'r',label:'Reference'}]}}/>
@@ -157,6 +163,19 @@ try {
       assert.equal(await forks.last().locator('summary').isVisible(),true,'Verbose retains the fork disclosure');
       const workspace=disclosures.getByRole('button',{name:/^Conversation workspace/});
       await workspace.click();
+      const search=page.getByRole('searchbox',{name:'Search workspaces'});
+      await search.fill('6/build',{timeout:3500});
+      const result=page.getByRole('menuitem',{name:'Other 6',exact:true});
+      await result.waitFor();
+      await result.click();
+      assert.equal(await page.evaluate(()=>window.pickedWorkspace),'ws-6');
+      await workspace.click();
+      assert.equal(await search.inputValue(),'');
+      await search.fill('no such workspace');
+      await page.getByRole('status').filter({hasText:'No matching workspaces'}).waitFor();
+      await page.getByRole('menuitem',{name:'Add workspace…',exact:true}).waitFor();
+      await search.fill('release');
+      assert.equal(await page.getByRole('menuitem',{name:/Release workspace/}).count(),2);
       await page.keyboard.press('Escape');
       assert.equal(await workspace.getAttribute('aria-expanded'),'false');
       await workspace.click();

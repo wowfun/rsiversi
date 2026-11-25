@@ -4,7 +4,7 @@
     "Source revisions are pinned per file. Import aliases target the selected local closure.",
     "ScopedStandardSourceBinding.ctx is an opaque RSI object instead of a Cordis Context.",
     "Dockkit keeps upstream geometry and gestures; imports use its local primitive closure. exports.ts is an RSI import adapter.",
-    "Menu accepts an explicit portal container so navigation actions opened in a native modal stay in its interactive layer.",
+    "Menu accepts an explicit portal container so navigation actions opened in a native modal stay in its interactive layer. A navigation row can identify the current destination through MenuRow.",
     "Product SVG artwork and icon components are unchanged. The RSI root mounts the static sprite; no DSH brand or font assets are imported.",
     "theme-base.css omits the unused brand font declaration; system text/code fonts and focus rules remain.",
     "dockkit-tokens.css adapts the platform palette and menu fills to RSI appearance selectors, repeats dark declarations for system appearance, and omits unused token families.",
@@ -278,9 +278,9 @@
     {
       "path": "dockkit-primitives/input-modality.ts",
       "source": "packages/client/ui-primitives/src/input-modality.ts",
-      "source_sha256": "91268be3f5ddb7b9a1defb13628d96082477e8771cdaa5df37d6d8b16bbbf2ba",
-      "adapted_sha256": "91268be3f5ddb7b9a1defb13628d96082477e8771cdaa5df37d6d8b16bbbf2ba",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "7fc2e4cc61c8287933ed4619261c5d860251415bc72242b2c89a2fa7a55fbcc7",
+      "adapted_sha256": "7fc2e4cc61c8287933ed4619261c5d860251415bc72242b2c89a2fa7a55fbcc7",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     },
     {
       "path": "dockkit-primitives/keyboard-composition.ts",
@@ -299,9 +299,9 @@
     {
       "path": "dockkit-primitives/useModalLayer.ts",
       "source": "packages/client/ui-primitives/src/useModalLayer.ts",
-      "source_sha256": "c584a5cde081548fadaedbf703c205915e924a7b67a0488d45b56cfe960718e4",
-      "adapted_sha256": "c584a5cde081548fadaedbf703c205915e924a7b67a0488d45b56cfe960718e4",
-      "revision": "22ddee3792402c3e70ec5f86a63c3e3e895a2f60"
+      "source_sha256": "9ac3878e1abfc8e7612c75720ef8b4aaf326e27f9a8a2ae2bf47f1c79eaba573",
+      "adapted_sha256": "9ac3878e1abfc8e7612c75720ef8b4aaf326e27f9a8a2ae2bf47f1c79eaba573",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     },
     {
       "path": "dockkit-primitives/Tooltip.module.css",
@@ -467,16 +467,16 @@
     {
       "path": "dockkit-primitives/Menu.tsx",
       "source": "packages/client/ui-primitives/src/Menu.tsx",
-      "source_sha256": "cf8a9596aec14563bf1b6ca807d1e26c8b82feb90b5f7e740a5290d8fa422499",
-      "adapted_sha256": "10fa5e717477cd908d3a7788d57ad041b268f82d54be61d96fc9f771a6ee7f62",
-      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+      "source_sha256": "f234b43ecb90bf07065cdae952d185b55d31dbb24e03f5841a0601ce67f7a34f",
+      "adapted_sha256": "6f6b025d6b09bc735ac1653f96eaa40a679d85089401cbef6744043ec854c2a3",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     },
     {
       "path": "dockkit-primitives/Menu.module.css",
       "source": "packages/client/ui-primitives/src/Menu.module.css",
-      "source_sha256": "ac03c6b4777b1b86e0e2ae09591fd2fe3c0da5718c493b458f67cbc7990b7649",
-      "adapted_sha256": "ac03c6b4777b1b86e0e2ae09591fd2fe3c0da5718c493b458f67cbc7990b7649",
-      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+      "source_sha256": "6f12769a8423ddae37fe563a34cb0e20842da3b6aaea80029c5b17c5b5fc0efe",
+      "adapted_sha256": "6f12769a8423ddae37fe563a34cb0e20842da3b6aaea80029c5b17c5b5fc0efe",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     },
     {
       "path": "dockkit-primitives/MenuRow.tsx",
@@ -495,9 +495,9 @@
     {
       "path": "dockkit-primitives/useMenuSubmenu.ts",
       "source": "packages/client/ui-primitives/src/useMenuSubmenu.ts",
-      "source_sha256": "fe95da7625e73191de1a852527363a60032be6fa05d9ec7192c1a3a969ce4f6e",
-      "adapted_sha256": "fe95da7625e73191de1a852527363a60032be6fa05d9ec7192c1a3a969ce4f6e",
-      "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+      "source_sha256": "c3dcc4d1ce4d5a5183cf681490f9c89cf0d6262ca0c51d7731bd623eb2465532",
+      "adapted_sha256": "c3dcc4d1ce4d5a5183cf681490f9c89cf0d6262ca0c51d7731bd623eb2465532",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     },
     {
       "path": "dockkit-primitives/pointer-grace.ts",
@@ -771,6 +771,27 @@
       "source_sha256": "21278a1b8b8303d8e7817e59b416cb9a11317fdd5ac0f7490bd0e67bbdc99e67",
       "adapted_sha256": "21278a1b8b8303d8e7817e59b416cb9a11317fdd5ac0f7490bd0e67bbdc99e67",
       "revision": "2e39e70496aa02986ca6a820c5d497e816b69d7e"
+    },
+    {
+      "path": "dockkit-primitives/SearchField.tsx",
+      "source": "packages/client/ui-primitives/src/SearchField.tsx",
+      "source_sha256": "e7c2a6d15b148175ec59de56f393951a44327500ee3da44c6b34a7069f3d93b0",
+      "adapted_sha256": "e7c2a6d15b148175ec59de56f393951a44327500ee3da44c6b34a7069f3d93b0",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
+    },
+    {
+      "path": "dockkit-primitives/SearchField.module.css",
+      "source": "packages/client/ui-primitives/src/SearchField.module.css",
+      "source_sha256": "24f985ed01f3e06681805a0cbdace7f0bace171898750f7624c6fd2b782d07b7",
+      "adapted_sha256": "24f985ed01f3e06681805a0cbdace7f0bace171898750f7624c6fd2b782d07b7",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
+    },
+    {
+      "path": "workspace/path-suffix.ts",
+      "source": "packages/client/ui-workspace/src/client/path-suffix.ts",
+      "source_sha256": "31b29940b1ef5a2a223d83d5b354d63cc7dbfd54853315cc3535d689a7ac6a21",
+      "adapted_sha256": "31b29940b1ef5a2a223d83d5b354d63cc7dbfd54853315cc3535d689a7ac6a21",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     }
   ]
 }

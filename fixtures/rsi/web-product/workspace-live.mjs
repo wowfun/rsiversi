@@ -29,7 +29,7 @@ try {
  await page.getByRole('navigation',{name:'Directory breadcrumbs'}).waitFor();
  await page.locator('.directory-picker footer').getByRole('button',{name:'Open',exact:true}).click();
  await page.getByRole('button',{name:/^Conversation workspace,/}).click();
- await page.getByRole('menuitemradio',{name:'workspace',exact:true}).click();
+ await page.getByRole('menu').getByText('workspace',{exact:true}).click();
  assert.match(await input.inputValue(),/RSI_WORKSPACE_UI_OK/);
  await page.getByTestId('composer-send').click();
  await page.locator('.message.assistant').filter({hasText:'RSI_WORKSPACE_UI_OK'}).waitFor({timeout:180000});

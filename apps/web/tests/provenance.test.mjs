@@ -10,7 +10,7 @@ const root = new URL('../vendor/dsh/', import.meta.url);
 test('vendored DSH bytes retain their reviewed provenance', async () => {
   const manifest = JSON.parse(await readFile(new URL('provenance.json', root), 'utf8'));
   assert(manifest.files.some(file => file.path === 'LICENSE'));
-  assert.deepEqual([...new Set(manifest.files.map(file=>file.revision))], ['22ddee3792402c3e70ec5f86a63c3e3e895a2f60','2e39e70496aa02986ca6a820c5d497e816b69d7e']);
+  assert.deepEqual([...new Set(manifest.files.map(file=>file.revision))], ['22ddee3792402c3e70ec5f86a63c3e3e895a2f60','2e39e70496aa02986ca6a820c5d497e816b69d7e','4b399c39a6d1479cd84ca591b4d7c88e24d38a96']);
   const upstream=process.env.RSI_DSH_REFERENCE;
   const revision = upstream && execFileSync('git',['-C',upstream,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
   const actual = (await readdir(root, {recursive:true,withFileTypes:true})).filter(entry => entry.isFile()).map(entry => relative(fileURLToPath(root),join(entry.parentPath,entry.name)).split(sep).join('/')).filter(path => path !== 'provenance.json').sort();

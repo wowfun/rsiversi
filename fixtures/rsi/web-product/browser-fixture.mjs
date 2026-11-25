@@ -73,5 +73,5 @@ export async function chooseStartingWorkspace(page, service) {
   await dialog.locator('footer').getByRole('button',{name:'Open',exact:true}).click();
   await dialog.waitFor({state:'hidden'});
   await page.locator('.pane.selected').getByRole('button',{name:/Conversation workspace,/}).click();
-  await page.getByRole('menuitemradio',{name:'workspace',exact:true}).click();
+  await page.getByRole('menu').getByText('workspace',{exact:true}).click();
 }
