@@ -554,7 +554,7 @@ impl UnpublishedGeneration {
         };
         self.domains = Some(
             self.domain_stage
-                .seal()
+                .seal(inputs.seed.states())
                 .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
         );
         self.contributions = Some(

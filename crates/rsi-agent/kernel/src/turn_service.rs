@@ -1,6 +1,66 @@
 use super::observation::durable_message_entry;
 use super::*;
-use rsi_agent_session_protocol::{AgentMessageSourceKind, MessageDelivery};
+use rsi_agent_session_protocol::{AgentMessageSourceKind, MessageDelivery, SessionPermission};
+
+impl AgentKernel {
+    pub(super) async fn current_permission(
+        &self,
+        header: &SessionHeader,
+        composition: &AgentCompositionPin,
+    ) -> TurnResult<Option<SessionPermission>> {
+        if !composition.domains().contains(SessionPermission::DOMAIN) {
+            return Ok(None);
+        }
+        let Some((_, state)) = self
+            .domain_state(header.session_id(), SessionPermission::DOMAIN)
+            .await?
+        else {
+            return Ok(None);
+        };
+        SessionPermission::from_snapshot(&state.snapshot)
+            .map_err(|error| TurnError::Invalid(error.to_string()))
+    }
+
+    async fn session_sandbox(
+        &self,
+        session: &SubmitSession,
+        explicit: Option<rsi_sandbox::SandboxMode>,
+    ) -> TurnResult<rsi_sandbox::SandboxMode> {
+        if let Some(mode) = explicit {
+            return delegated_sandbox(session.header(), mode);
+        }
+        let selected = match session {
+            SubmitSession::Fresh(prepared) => prepared
+                .baseline()
+                .initial_state(SessionPermission::DOMAIN)
+                .map(SessionPermission::from_snapshot)
+                .transpose()
+                .map_err(|error| TurnError::Invalid(error.to_string()))?
+                .flatten(),
+            SubmitSession::Resume(prepared) => {
+                let (header, composition) = self.inner.resume_issuer.inspect(prepared)?;
+                self.current_permission(header, composition).await?
+            }
+        };
+        Ok(SessionPermission::bounded_sandbox(
+            session.header(),
+            selected.map_or(session.header().settings().sandbox(), |value| value.sandbox),
+        ))
+    }
+}
+
+fn delegated_sandbox(
+    header: &SessionHeader,
+    mode: rsi_sandbox::SandboxMode,
+) -> TurnResult<rsi_sandbox::SandboxMode> {
+    if SessionPermission::bounded_sandbox(header, mode) == mode {
+        Ok(mode)
+    } else {
+        Err(TurnError::Invalid(
+            "Requested sandbox exceeds the delegated Session ceiling".into(),
+        ))
+    }
+}
 
 pub(super) enum MessageAdmission<'a> {
     Session,
@@ -69,6 +129,30 @@ impl TurnService for AgentKernel {
                 .as_deref()
                 .cloned(),
         };
+        let preset = match (request.preset, caller) {
+            (Some(id), _) => Some(id),
+            (None, Some(caller)) => Some(self.composition(caller.claim())?.preset_id().clone()),
+            (None, None) => match self
+                .inner
+                .store
+                .read_executable_generation(parent.session_id())
+                .await
+            {
+                Ok((_, generation)) => generation.and_then(|row| row.selection.preset().cloned()),
+                Err(StoreError::NotFound(_)) => None,
+                Err(error) => return Err(turn_store_error(error)),
+            },
+        };
+        let selected = match self
+            .domain_state(parent.session_id(), SessionPermission::DOMAIN)
+            .await
+        {
+            Ok(Some((_, value))) => SessionPermission::from_snapshot(&value.snapshot)
+                .map_err(|error| TurnError::Invalid(error.to_string()))?,
+            Ok(None) => None,
+            Err(TurnError::SessionNotFound(_)) if caller.is_none() => None,
+            Err(error) => return Err(error),
+        };
         let child = parent
             .plugin_child(
                 request.session_id,
@@ -82,7 +166,7 @@ impl TurnService for AgentKernel {
                 },
                 rsi_agent_session_protocol::PluginChildTarget {
                     coordinates: directory,
-                    preset: request.preset,
+                    preset,
                     offered_tools: caller.and_then(AgentCallerAuthority::source_tools),
                     selection: caller
                         .and_then(AgentCallerAuthority::source_selection)
@@ -90,6 +174,22 @@ impl TurnService for AgentKernel {
                         .unwrap_or_else(|| ModelSelection::baseline(parent.settings())),
                 },
             )
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let sandbox = SessionPermission::bounded_sandbox(
+            parent,
+            selected.map_or(parent.settings().sandbox(), |value| value.sandbox),
+        );
+        let (sandbox, require_approval) = if let Some(caller) = caller {
+            let input = rsi_agent_turn_protocol::initial_turn_input(self, caller.claim()).await?;
+            (
+                SessionPermission::narrower_sandbox(sandbox, input.sandbox),
+                parent.settings().require_approval() || input.require_approval,
+            )
+        } else {
+            (sandbox, parent.settings().require_approval())
+        };
+        let child = child
+            .with_execution_policy(sandbox, require_approval)
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         self.inner
             .composition
@@ -759,7 +859,7 @@ impl TurnService for AgentKernel {
         }
         let header = session.header();
         let profile = header.settings();
-        let sandbox = sandbox.unwrap_or(profile.sandbox());
+        let sandbox = self.session_sandbox(&session, sandbox).await?;
         let require_approval = profile.require_approval();
         let body = SessionFactBody::TurnAccepted {
             turn_id: turn_id.clone(),
@@ -1169,6 +1269,9 @@ impl AgentKernel {
             .or_else(|| source.and_then(|(caller, _)| caller.execution().cloned()));
         let execution_admission =
             execution_admission::admit(request.session.header(), execution.as_ref())?;
+        if let Some(mode) = request.message.options.sandbox {
+            delegated_sandbox(request.session.header(), mode)?;
+        }
         let session_id = request.session.session_id().clone();
         let requested_header = request.session.header().clone();
         let root_session_id = agent_root_and_path(&requested_header).0;
@@ -1587,17 +1690,25 @@ impl AgentKernel {
             }
         }
 
-        let expected_fact_seq = lock_state(&self.inner)
-            .sessions
-            .get(&session_id)
-            .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?
-            .durable_seq;
+        let (expected_fact_seq, composition) = {
+            let state = lock_state(&self.inner);
+            let session = state
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| TurnError::SessionNotFound(session_id.to_string()))?;
+            (session.durable_seq, session.composition.clone())
+        };
         let model = entry.message.options.model.clone();
-        let sandbox = entry
-            .message
-            .options
-            .sandbox
-            .unwrap_or(header.settings().sandbox());
+        let sandbox = SessionPermission::bounded_sandbox(
+            &header,
+            match entry.message.options.sandbox {
+                Some(mode) => mode,
+                None => self
+                    .current_permission(&header, &composition)
+                    .await?
+                    .map_or(header.settings().sandbox(), |value| value.sandbox),
+            },
+        );
         let require_approval = header.settings().require_approval();
         let selected = {
             let mut selected = scan.pending;
@@ -1996,6 +2107,15 @@ impl AgentKernel {
             path: path.clone(),
             task_name: request.task_name,
         };
+        let parent_composition = self.composition(request.caller.claim())?;
+        let selected = self
+            .current_permission(parent_header, &parent_composition)
+            .await?;
+        let input =
+            rsi_agent_turn_protocol::initial_turn_input(self, request.caller.claim()).await?;
+        let ceiling = selected.map_or(input.sandbox, |value| {
+            SessionPermission::narrower_sandbox(input.sandbox, value.sandbox)
+        });
         let child_header = parent_header
             .forked_child(
                 request.child_session_id.clone(),
@@ -2004,6 +2124,13 @@ impl AgentKernel {
                 selection,
                 parent_directory.as_deref(),
             )
+            .and_then(|header| header.with_agent_preset_id(parent_composition.preset_id().clone()))
+            .and_then(|header| {
+                header.with_execution_policy(
+                    ceiling,
+                    input.require_approval || parent_header.settings().require_approval(),
+                )
+            })
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
         let composition = self
             .inner
@@ -2132,6 +2259,10 @@ impl AgentKernel {
             ));
         }
         let parent = request.caller.header();
+        let preset = self
+            .composition(request.caller.claim())?
+            .preset_id()
+            .clone();
         let expected = parent
             .forked_child(
                 request.child_session_id.clone(),
@@ -2140,6 +2271,13 @@ impl AgentKernel {
                 spawn_selection(request, saved)?,
                 Some(header.coordinates()),
             )
+            .and_then(|expected| expected.with_agent_preset_id(preset))
+            .and_then(|expected| {
+                expected.with_execution_policy(
+                    header.settings().sandbox(),
+                    header.settings().require_approval(),
+                )
+            })
             .and_then(|header| header.with_delegation_policy(Some(policy.clone())))
             .and_then(|header| header.with_spawn_role(saved.cloned()))
             .and_then(|header| {

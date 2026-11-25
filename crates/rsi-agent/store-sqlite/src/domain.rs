@@ -9,7 +9,8 @@ use rsi_agent_session_protocol::{
     MAXIMUM_DOMAIN_CONTROL_BYTES, MAXIMUM_SESSION_DOMAINS,
 };
 use rsi_agent_store_protocol::{
-    StoreDomainHead, StoreDomainState, StoreDomainStatePage, domain_heads_after,
+    StoreDomainHead, StoreDomainState, StoreDomainStatePage, StoreDomainWatermarks,
+    domain_heads_after,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -101,6 +102,24 @@ fn generation_position(
         params![session.as_str(), sqlite_u64("generation horizon", horizon)?],
         |row| row.get::<_, i64>(0),
     ).optional().map_err(sql_error)?.map(|seq| decode_u64("generation position", seq)).transpose()
+}
+
+pub(super) fn read_executable_generation(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<(
+    StoreDomainWatermarks,
+    Option<rsi_agent_store_protocol::StoreGenerationSelection>,
+)> {
+    let cuts = read_watermarks(connection, session)?;
+    let pos = generation_position(connection, session, cuts.control_seq)?;
+    let selection = pos
+        .map(|seq| {
+            let record = read_control(connection, session, seq)?;
+            rsi_agent_store_protocol::StoreGenerationSelection::from_record(&record)
+        })
+        .transpose()?;
+    Ok((cuts, selection))
 }
 
 // A membership cut contains only bounded names, never Domain snapshot bytes.

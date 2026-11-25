@@ -60,6 +60,7 @@ pub use domain::{
     DomainBaseline, DomainBinding, DomainCatalog, DomainCatalogBuilder, DomainDefinition,
     DomainError, DomainForkPolicy, DomainHandle, DomainReferencePolicy, DomainRegistrar,
     DomainRegistrarContract, DomainRegistration, ValidatedDomainProposal,
+    session_permission_domain,
 };
 pub use projection::{SessionProjection, SessionProjectionAdapter, SessionProjectionContext};
 pub use resource::{SessionResourceAdapter, SessionResourceReader};
@@ -161,6 +162,14 @@ impl AgentCompositionPin {
         selection: rsi_agent_session_protocol::GenerationSelection,
     ) -> Self {
         self.selection = selection;
+        self
+    }
+
+    /// Binds the selected logical preset to this Session's creation identity.
+    #[must_use]
+    pub fn for_session_preset(mut self, initial: &AgentPresetId) -> Self {
+        let preset = (&self.preset_id != initial).then(|| self.preset_id.clone());
+        self.selection = self.selection.with_preset(preset);
         self
     }
 

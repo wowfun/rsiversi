@@ -17,12 +17,17 @@ struct Service {
 
 impl AgentSettingsSource for Service {
     fn current(&self) -> rsi_session_protocol::Result<FrozenAgentSettings> {
-        let snapshot = self
+        let mut snapshot = self
             .scope
             .get()
             .map_err(|error| SessionError::Backend(error.to_string()))?;
         if snapshot.value.get("default_model").is_none() {
             return Err(SessionError::SetupRequired);
+        }
+        if let Some(fields) = snapshot.value.as_object_mut()
+            && let Some(permission) = fields.remove("permission_default")
+        {
+            fields.insert("sandbox".into(), permission);
         }
         serde_json::from_value(snapshot.value)
             .map_err(|error| SessionError::Backend(error.to_string()))
@@ -94,6 +99,7 @@ fn metadata() -> rsi_settings_protocol::SettingsMetadata {
                 "output_budgets":{"type":"array","maxItems":256,"description":"Session-frozen exact model request caps; capacity reserves do not set request caps.","items":{"type":"object","additionalProperties":false,"required":["model","max_output_tokens"],"properties":{"model":{"type":"object","additionalProperties":false,"required":["deployment","model"],"properties":{"deployment":{"type":"string"},"model":{"type":"string"}}},"max_output_tokens":{"type":"integer","minimum":1,"maximum":1_000_000}}}},
                 "pricing":{"type":"array","maxItems":256,"description":"Session-frozen exact deployment/endpoint/model quotes in integer currency billionths per token; validated by the Agent price table."},
                 "sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},
+                "permission_default":{"type":"object","additionalProperties":false,"required":["preset","sandbox","approval"],"properties":{"preset":{"type":"string","minLength":1},"sandbox":{"enum":["read-only","workspace-write","danger-full-access"]},"approval":{"enum":["ask","never"]}}},
                 "require_approval":{"type":"boolean"},
 
             }
@@ -119,11 +125,21 @@ fn validate_settings(value: &Value) -> rsi_settings_protocol::Result<()> {
         _output_budgets: rsi_agent_session_protocol::OutputBudgetTable,
         #[serde(rename = "sandbox")]
         _sandbox: rsi_sandbox::SandboxMode,
+        permission_default: Option<rsi_agent_session_protocol::SessionPermission>,
         #[serde(rename = "require_approval")]
         _require_approval: bool,
     }
     let config: Configuration = serde_json::from_value(value.clone())
         .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
+    if let Some(permission) = config.permission_default {
+        permission
+            .validate()
+            .map_err(|error| SettingsError::InvalidInput(error.to_string()))?;
+    } else if value.get("permission_default").is_some() {
+        return Err(SettingsError::InvalidInput(
+            "permission_default requires a resolved preset".into(),
+        ));
+    }
     config
         .pricing
         .validate()

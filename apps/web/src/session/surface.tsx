@@ -73,6 +73,10 @@ function NativeSurface({
   useSyncExternalStore(owner.subscribe, owner.getSnapshot);
   const data = owner.staged?.data;
   const empty = !data?.transcript.blocks.length;
+  const ownerMaySwitch = useView(view=>view?.navigation?.can_archive ?? data?.can_stop_work ?? view?.setup?.allowed);
+  const cursor = data?.projections?.cursor;
+  const presetEditable = !data || (!data.historical && !data.protected && (cursor?.kind === 'durable'
+    ? ownerMaySwitch && cursor.fact_seq === '0' : data.draft !== false));
   const earlier = !!data?.history_more || (!data?.historical && !!data?.transcript.omitted);
   const [tab, setTab] = useConversationTab(data?.session);
   const [announcements] = useState(() => new ConversationAnnouncements());
@@ -138,7 +142,7 @@ function NativeSurface({
           <nav className="transcript-tabs" role="tablist" aria-label="Conversation view" hidden={empty}>
             {(['conversation','activity'] as const).map(value=><button key={value} type="button" role="tab" id={`${tabId}-${value}`} aria-controls={`${tabId}-panel`} aria-selected={tab===value} tabIndex={tab===value?0:-1} onClick={()=>setTab(value)} onKeyDown={event=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const next=event.key==='Home'?'conversation':event.key==='End'?'activity':tab==='conversation'?'activity':'conversation';setTab(next);document.getElementById(`${tabId}-${next}`)?.focus();}}}>{value==='conversation'?'Chat':'Trajectory'}</button>)}
           </nav>
-          {!empty && data?.agent_preset && <PresetLabel id={data.agent_preset}/>}
+          {!empty && data?.agent_preset && (presetEditable ? <PresetChoice owner={owner} applied={data.agent_preset}/> : <PresetLabel id={data.agent_preset}/>)}
           {selected && !empty && data && <SessionPanel key={`panel:${data.session}`} titleActions={titleActions} path={data.workspace.coordinates.path}
             local={data.workspace.coordinates.location.kind === 'local'} chat={tab === 'conversation'} pane={owner.index} generation={data.generation}
             jobs={data.background_jobs} jobNotice={data.job_notice}/>}
@@ -236,7 +240,7 @@ function NativeSurface({
       )}
       <div className="composer-context" hidden={!empty}>
         <WorkspaceChoice owner={owner} attached={data?.workspace} workspace={owner.composerView?.workspace}/>
-        {empty && (data && (data.draft === false || data.historical || data.protected) ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
+        {empty && (data && !presetEditable ? <PresetLabel id={data.agent_preset}/> : <PresetChoice owner={owner} applied={data?.agent_preset}/>)}
       </div>
       {data && !data.protected && !pageOpen && <>
         <TodoPanel key={`todo:${data.session}`} projections={data.projections}/>

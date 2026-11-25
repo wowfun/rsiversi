@@ -1,6 +1,6 @@
 use super::*;
 use rsi_agent_turn_protocol::TurnExecution;
-use rsi_session_protocol::{ForkDraft, SelectDraftPreset, SessionDraftControl, SessionIngress};
+use rsi_session_protocol::{ForkDraft, SessionDraftControl, SessionIngress};
 
 #[tokio::test]
 async fn revoking_a_device_releases_a_fork_waiting_for_its_preset() {
@@ -69,6 +69,8 @@ async fn manual_before_first_active_turn_creates_an_independent_empty_prefix() {
     submit_text(source.clone(), "parent-input", "keep working")
         .await
         .unwrap();
+    let selected = AgentPresetId::new("selected-before-turn").unwrap();
+    source.select_agent_preset(selected.clone()).await.unwrap();
     let registration = fixture.kernel.register("before-fork-test".into()).unwrap();
     let parent = fixture
         .kernel
@@ -85,6 +87,7 @@ async fn manual_before_first_active_turn_creates_an_independent_empty_prefix() {
     });
     let draft = fixture.service.create(request.clone()).await.unwrap();
     let header = draft.header().await.unwrap();
+    assert_eq!(header.agent_preset_id(), &selected);
     assert!(header.execution_owner().is_none());
     let history = header.history_origin().unwrap();
     assert_eq!(history.point, request.fork.as_ref().unwrap().point);
@@ -163,14 +166,13 @@ async fn manual_draft_retries_rebinds_captured_state_and_publishes_only_with_inp
     let mut conflict = request.clone();
     conflict.fork.as_mut().unwrap().turns = rsi_agent_session_protocol::ForkTurnSelection::None;
     assert!(fixture.service.create(conflict).await.is_err());
-    let header = draft
-        .select_preset(SelectDraftPreset {
-            preset_id: AgentPresetId::new("other").unwrap(),
-            expected_revision: 0,
-        })
+    let (revision, changed) = draft
+        .select_agent_preset(AgentPresetId::new("other").unwrap())
         .await
-        .unwrap()
-        .header;
+        .unwrap();
+    assert!(changed);
+    assert_eq!(revision, CommandRevision::Draft { revision: 1 });
+    let header = draft.header().await.unwrap();
     assert!(header.history_origin().is_some());
     assert!(header.execution_owner().is_none());
     submit_text(draft.clone(), "fork-input", "continue independently")

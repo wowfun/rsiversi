@@ -2554,6 +2554,14 @@ impl rsi_agent_turn_protocol::SessionProjections for UnavailableProjections {
 }
 #[async_trait]
 impl rsi_agent_turn_protocol::SessionCommands for UnavailableCommands {
+    async fn select_unstarted_preset(
+        &self,
+        _: &SessionId,
+        _: rsi_agent_session_protocol::AgentPresetId,
+        _: u64,
+    ) -> rsi_agent_turn_protocol::Result<u64> {
+        panic!("unexpected pre-Turn preset selection")
+    }
     async fn publish_baseline(
         &self,
         _: rsi_agent_composition_protocol::PreparedFreshSession,

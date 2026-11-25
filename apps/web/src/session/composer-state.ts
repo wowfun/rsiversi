@@ -61,7 +61,6 @@ export interface ComposerOwner extends ProjectionActions {
   showReferencePicker(): unknown;
   exportSession(args: string): unknown;
   prepareComposer(): Promise<boolean>;
-  setAccess(mode: string): void;
   clearCommand(): void;
   index: string;
   selectWorkspace(id: string): Promise<unknown> | void;

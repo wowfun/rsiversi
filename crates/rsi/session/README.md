@@ -34,7 +34,8 @@ publication or release. This blocks product purge while preserving source Turn
 admission. A Store validation lease alone is not collection ownership. Once the
 child Header commits, its canonical history reference retains the source instead.
 
-A manual ForkDraft requires an unprotected source at the authorized execution
+A manual fork with no explicit preset inherits the source's selected Agent
+preset at the fork boundary. A manual ForkDraft requires an unprotected source at the authorized execution
 location. Revoking the creating device cancels preparation. The draft captures an immutable completed-turn history boundary and prepares its transformed
 domain baseline without publishing a Session. Creation retries keep that exact
 draft cut. Its first input publishes an independent root with historical provenance;
@@ -227,6 +228,13 @@ expire with the draft lease. An owner application's durable command preparation
 publishes the selected baseline and its held inputs under the same session
 admission as the first prompt. The caller receives a durable revision for
 its edit, and a cold attachment can read the eventual receipt without a Turn.
+An owner may select another Agent preset until the first Turn starts. Saving
+a permission choice or queuing a message preserves that choice window. The
+first Turn uses the most recently accepted preset, including for messages
+already queued. Selection and Turn acceptance share Session admission, so a
+selection that loses that race returns a locked result. The original Header
+and accepted message identities remain available for receipt lookup and
+lineage after a change of composition.
 Submission defers execution dependencies
 until the selected operation requires them; fresh publication serializes the
 one transition from draft to durable attachment. Each fresh publication freezes

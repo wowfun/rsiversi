@@ -1938,6 +1938,19 @@ impl Driver {
         token: &CancellationToken,
         stop: &CancellationToken,
     ) -> std::result::Result<Option<rsi_approval_protocol::ApprovalOutcome>, DriveFailure> {
+        if self
+            .turns
+            .approval_prompt_policy(claim)
+            .await
+            .map_err(execution_support::turn_failure)?
+            == rsi_agent_session_protocol::ApprovalPromptPolicy::Never
+        {
+            return Ok(Some(rsi_approval_protocol::ApprovalOutcome {
+                decision: ApprovalDecision::Deny,
+                answerer: "rsi.permission.never".into(),
+                reason: Some("Session approval policy denies calls requiring approval".into()),
+            }));
+        }
         let parking = EXECUTOR_LANE_PARKING
             .try_with(Clone::clone)
             .map_err(|error| fatal(error.to_string()))?;

@@ -182,6 +182,7 @@ impl LiveRun {
                     .await?
                     .as_deref(),
             )
+            .and_then(|header| header.with_agent_preset_id(self.composition.preset_id().clone()))
             .and_then(|header| {
                 header.with_execution_policy(
                     self.descriptor.sandbox,
@@ -215,10 +216,15 @@ impl LiveRun {
         {
             return Err(invalid("catalog shadows the reserved output Tool"));
         }
-        let prepared = PreparedFreshSession::new(header.clone(), self.composition.clone())
-            .map_err(turn_composition_error)?
-            .with_baseline(self.baseline.clone())
-            .map_err(turn_composition_error)?;
+        let prepared = PreparedFreshSession::new(
+            header.clone(),
+            self.composition
+                .clone()
+                .for_session_preset(header.agent_preset_id()),
+        )
+        .map_err(turn_composition_error)?
+        .with_baseline(self.baseline.clone())
+        .map_err(turn_composition_error)?;
         Ok((prepared, root))
     }
     pub(super) async fn wait_child(&self, ordinal: u32) -> TurnResult<ProgramAgentResult> {

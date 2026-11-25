@@ -70,6 +70,8 @@ pub enum Operation {
     DraftObserve,
     DiscardDraftInputs,
     SelectPreset,
+    PresetView,
+    SelectPublishedPreset,
     Image,
     MutateQueue,
     QueueMutationStatus,
@@ -107,7 +109,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 71] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -143,6 +145,8 @@ impl Operation {
         Self::DraftObserve,
         Self::DiscardDraftInputs,
         Self::SelectPreset,
+        Self::PresetView,
+        Self::SelectPublishedPreset,
         Self::Image,
         Self::MutateQueue,
         Self::QueueMutationStatus,
@@ -235,6 +239,8 @@ impl Operation {
             Self::DraftSnapshot => ("draft-snapshot", Data, Read, 8192, DRAFT_REPLY),
             Self::DraftObserve => ("draft-observe", Subscription, Read, 8192, 8192),
             Self::SelectPreset => ("select-preset", Data, Mutation, 8192, DRAFT_REPLY),
+            Self::PresetView => ("preset-view", Data, Read, 8192, 8192),
+            Self::SelectPublishedPreset => ("select-published-preset", Data, Mutation, 8192, 8192),
             Self::Image => ("image", Data, Mutation, LARGE_REPLY, 16 * 1024),
             Self::MutateQueue => ("mutate-queue", Data, Mutation, 8 * 1024 * 1024, 8192),
             Self::QueueMutationStatus => ("queue-mutation-status", Control, Read, 8192, 8192),
@@ -306,6 +312,7 @@ impl Operation {
                     | Self::StopBackgroundJob
                     | Self::IsHostOwner
                     | Self::ExecuteCommand
+                    | Self::SelectPublishedPreset
                     | Self::Compact
             ) {
                 rsi_api_protocol::OperationAccess::Credential

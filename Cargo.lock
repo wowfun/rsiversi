@@ -4612,6 +4612,7 @@ dependencies = [
  "rsi-agent-goal",
  "rsi-agent-kernel",
  "rsi-agent-model-selection",
+ "rsi-agent-permission",
  "rsi-agent-plan-policy",
  "rsi-agent-presets",
  "rsi-agent-program",
@@ -5145,6 +5146,20 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tokio-util",
+]
+
+[[package]]
+name = "rsi-agent-permission"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "rsi-agent-composition-protocol",
+ "rsi-agent-session-protocol",
+ "rsi-meta",
+ "rsi-persistence-testkit",
+ "rsi-sandbox",
+ "serde",
  "tokio-util",
 ]
 

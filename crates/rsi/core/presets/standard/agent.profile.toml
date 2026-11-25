@@ -47,6 +47,11 @@ plugin = "rsi.agent.model-selection"
 
 [[steps]]
 kind = "plugin"
+id = "permission"
+plugin = "rsi.agent.permission"
+
+[[steps]]
+kind = "plugin"
 id = "plan-policy"
 plugin = "rsi.agent.plan-policy"
 

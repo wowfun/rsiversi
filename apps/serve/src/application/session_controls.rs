@@ -1,7 +1,7 @@
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody as Body, AgentMessage, DomainMutationSource,
     DomainStateCommit, MessageId, MessageTarget, ModelSelection, QueueSlot,
-    SessionCommandInvocation, SessionCommandReceipt, SessionHeader, TurnId,
+    SessionCommandInvocation, SessionCommandReceipt, SessionHeader, SessionPermission, TurnId,
 };
 use rsi_agent_store_protocol::{SessionStore, StoreError};
 use rsi_extension::{Error, Result};
@@ -16,12 +16,26 @@ struct ControlEvent<'a> {
     body: ControlBody<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     goal: Option<GoalChange<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission: Option<PermissionChange<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<&'a rsi_agent_session_protocol::AgentPresetId>,
+}
+
+#[derive(Serialize)]
+struct PermissionChange<'a> {
+    #[serde(flatten)]
+    selection: SessionPermission,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a rsi_agent_session_protocol::DomainRequestId>,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ControlBody<'a> {
     Goal,
+    Permission,
+    Preset,
     WorkingDirectoryChanged {
         cwd: &'a str,
     },
@@ -198,13 +212,32 @@ fn project_control<'a>(
     anchor: u64,
 ) -> Result<Option<ControlEvent<'a>>> {
     let mut goal = None;
+    let mut permission = None;
+    let mut preset = None;
     let body =
         if let Some(value) = mailbox_event(record.body()) {
             value
         } else if let Body::WorkingDirectoryChanged { cwd } = record.body() {
             ControlBody::WorkingDirectoryChanged { cwd }
         } else if let Body::DomainStateCommitted { commit } = record.body() {
+            if anchor == 0
+                && let DomainMutationSource::Recovery { selection } = commit.source()
+            {
+                preset = Some(selection.preset().unwrap_or(header.agent_preset_id()));
+            }
             goal = goal_change(commit)?;
+            if let Some(update) = commit
+                .updates()
+                .iter()
+                .find(|u| u.snapshot().identity().id() == SessionPermission::DOMAIN)
+            {
+                permission = SessionPermission::from_snapshot(update.snapshot())
+                    .map_err(|error| Error::Remote(error.to_string()))?
+                    .map(|selection| PermissionChange {
+                        selection,
+                        request_id: commit.request_id(),
+                    });
+            }
             if let Some(update) = commit.updates().iter().find(|update| {
                 update.snapshot().identity().id() == rsi_agent_model_selection::DOMAIN
             }) {
@@ -219,6 +252,10 @@ fn project_control<'a>(
                 }
             } else if goal.is_some() {
                 ControlBody::Goal
+            } else if permission.is_some() {
+                ControlBody::Permission
+            } else if preset.is_some() {
+                ControlBody::Preset
             } else {
                 return Ok(None);
             }
@@ -231,6 +268,8 @@ fn project_control<'a>(
         time: record.timestamp_ms(),
         body,
         goal,
+        permission,
+        preset,
     }))
 }
 

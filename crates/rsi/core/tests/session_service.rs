@@ -66,6 +66,8 @@ mod managed_providers;
 mod model_selection;
 #[path = "session_service/navigation.rs"]
 mod navigation;
+#[path = "session_service/permission.rs"]
+mod permission;
 #[path = "session_service/plan_policy.rs"]
 mod plan_policy;
 #[path = "session_service/pricing.rs"]

@@ -30,19 +30,28 @@ struct Baseline {
 }
 
 fn header(name: &str) -> SessionHeader {
+    let settings = FrozenAgentSettings::new(
+        "default",
+        "system",
+        ModelRef::new("deployment", "model").unwrap(),
+        SandboxMode::WorkspaceWrite,
+        false,
+    )
+    .unwrap();
+    let settings = if name == "mechanical" {
+        let mut wire = serde_json::to_value(&settings).unwrap();
+        wire["sandbox"] =
+            serde_json::json!({"preset":"full","sandbox":"danger-full-access","approval":"never"});
+        serde_json::from_value(wire).unwrap()
+    } else {
+        settings
+    };
     SessionHeader::new_local(
         SessionId::new(name).unwrap(),
         1,
         "/workspace",
         AgentPresetId::new("test-agent").unwrap(),
-        FrozenAgentSettings::new(
-            "default",
-            "system",
-            ModelRef::new("deployment", "model").unwrap(),
-            SandboxMode::WorkspaceWrite,
-            false,
-        )
-        .unwrap(),
+        settings,
     )
     .unwrap()
 }
@@ -633,6 +642,13 @@ async fn retained_writer_corpus() {
                     let _proof = store.prepare_session(session).await.unwrap();
                     let summary = store.session_summary(session).await.unwrap();
                     assert_eq!(summary.header.session_id(), session);
+                    if entry.file_name() == "mechanical" && session.as_str() == "mechanical" {
+                        let expected = header("mechanical");
+                        assert_eq!(
+                            summary.header.settings().permission(),
+                            expected.settings().permission()
+                        );
+                    }
                     if entry.file_name() == "plugin-child" && session.as_str() == "plugin-child" {
                         assert_eq!(summary.header.canonical_cwd(), "/sibling");
                         assert_eq!(summary.header.creation_cwd(), "/workspace");

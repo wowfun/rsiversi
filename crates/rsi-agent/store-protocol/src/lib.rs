@@ -2268,6 +2268,21 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
             "this Store does not support Domain watermarks".into(),
         ))
     }
+    /// Reads the current executable selection and its simultaneous stream cuts.
+    async fn read_executable_generation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(StoreDomainWatermarks, Option<StoreGenerationSelection>)> {
+        let page = self.read_domain_states(session_id, None, None).await?;
+        Ok((
+            StoreDomainWatermarks {
+                fact_seq: page.durable_fact_seq,
+                control_seq: page.durable_control_seq,
+                domain_seq: page.domain_control_seq,
+            },
+            page.generation,
+        ))
+    }
     /// Reads complete current heads and watermarks from one validated snapshot.
     async fn read_domain_admission(
         &self,

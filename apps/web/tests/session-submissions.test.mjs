@@ -35,6 +35,18 @@ test('failed dispatch persistence never sends a prepared submission',async()=>{
   assert.equal(editor.text,'input');
 });
 
+test('reopening with an old device Full access choice sends under the current Session policy',async()=>{
+  const {pane,context}=fixture();
+  pane.accessPreference={mode:'danger-full-access'};
+  pane.composerView.access='read-only';
+  const call=context.call;
+  context.call=async(method,payload)=>{
+    if(method==='prepare_submission')assert.equal(Object.hasOwn(JSON.parse(payload),'sandbox'),false);
+    return call(method,payload);
+  };
+  await submit(pane,context);
+});
+
 for(const mode of ['dispatch','retry_message','query'])test(`retirement before ${mode} preserves the correct admission knowledge`,async()=>{
   const {pane,context,editor,events,connection}=fixture();
   editor.record={pending:{opaque:'saved',phase:mode==='dispatch'?'prepared':'dispatching'}};

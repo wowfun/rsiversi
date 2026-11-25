@@ -104,6 +104,27 @@ fn matching_receipt(
 }
 
 impl SessionController {
+    /// Binds a composer command to its predecessor before the caller freezes its identity for retry.
+    pub async fn prepare_composer_command(
+        &self,
+        commands: &SessionCommandsView,
+        name: &str,
+        arguments: CommandArguments,
+        request_id: DomainRequestId,
+    ) -> Result<SessionCommandInvocation> {
+        let mut invocation = command_invocation(commands, name, arguments, request_id)?;
+        if invocation.command.as_str() == rsi_agent_session_protocol::SessionPermission::COMMAND
+            && let rsi_agent_session_protocol::CommandRevision::Draft { revision } =
+                invocation.expected_revision
+        {
+            invocation.expected_revision = self
+                .handle
+                .prepare_application_commands(Some(revision))
+                .await?;
+        }
+        Ok(invocation)
+    }
+
     /// Reads the current pinned descriptors and predecessor under bounded read admission.
     pub async fn commands(&self) -> Result<SessionCommandsView> {
         if self.stop.is_cancelled() {

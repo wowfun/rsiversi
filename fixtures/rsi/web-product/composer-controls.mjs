@@ -23,13 +23,14 @@ fixture.setReply('command',async payload=>{
 });
 fixture.setReply('prepare_submission',payload=>{const input=JSON.parse(payload);fixture.prepared.push(input);return JSON.stringify({kind:'message',id:'request-'+fixture.prepared.length,opaque:'opaque',text_bytes:input.text.length,images:0,captures: []});});
 fixture.setReply('dispatch_submission',()=>JSON.stringify({status:'not_admitted',error:'fixture retained request'}));
+fixture.permissionCommands(fixture.base);
 `;
 const scene=await sourceFixture({name:'composer-controls',source});const results=[];
 try {for(const [name,engine] of Object.entries({chromium,firefox})){
  const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1440,height:900},colorScheme:'dark'}),errors=[];
  page.on('pageerror',error=>errors.push(error.message));
  try{
-  await page.goto(scene.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+  await page.goto(scene.url,{waitUntil:'domcontentloaded',timeout:90000});await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
   const startingModel=page.getByRole('button',{name:/^Select model.*reasoning effort High/});
   await startingModel.waitFor();
   await page.evaluate(()=>{delete fixture.view.setup.agent.default_reasoning_effort;return fixture.frame();});
@@ -98,7 +99,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await access.click();await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   await input.fill('permission request');await page.getByTestId('composer-send').click();await page.waitForFunction(()=>fixture.prepared.length===1);
-  assert.equal(await page.evaluate(()=>fixture.prepared[0].sandbox),'read-only');
+  assert.equal(await page.evaluate(()=>Object.hasOwn(fixture.prepared[0],'sandbox')),false);
   assert.equal(await page.getByRole('button',{name:/^Access mode/}).isDisabled(),true);
   // A pending request disables changes without hiding the selected model or access.
   await page.screenshot({path:join(report,name+'-pending.png')});
@@ -110,7 +111,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
    await page.getByRole('button',{name:/^Select model/}).click();
    const bounds=await page.getByRole('menu',{name:/^Select model/}).boundingBox();assert(bounds.x>=0&&bounds.x+bounds.width<=width);
    await page.screenshot({path:join(report,name+'-'+width+'.png')});await page.keyboard.press('Escape');}
-  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','sandbox frozen into request','pending access lock','Escape focus','narrow menu bounds']});
+  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','ordinary messages follow Host permission','pending access lock','Escape focus','narrow menu bounds']});
  }catch(error){await page.screenshot({path:join(report,name+'-failure.png')}).catch(()=>{});await writeFile(join(report,name+'-failure.txt'),String(error.stack));throw error;}finally{await browser.close();}
 }}finally{await scene.close();}
 await writeFile(join(report,'document-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));

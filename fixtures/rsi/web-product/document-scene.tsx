@@ -259,6 +259,29 @@ window.fixture = {
     if (handler) replies.set(method, handler);
     else replies.delete(method);
   },
+  permissionCommands(surface) {
+    const entry = sandbox => ({producer:'rsi.permission.view',content:{kind:'value',value:{
+      preset:sandbox,sandbox,approval:sandbox==='danger-full-access'?'never':'ask',
+    }}});
+    view.setup.allowed = true;
+    surface.projections = {cursor:{kind:'draft',revision:'0'},entries:[entry('workspace-write')]};
+    const prepare = replies.get('prepare_submission'), dispatch = replies.get('dispatch_submission');
+    const choices = new Map();
+    replies.set('prepare_submission', (payload, message) => {
+      const {text} = JSON.parse(payload);
+      if (!text.startsWith('/permission ')) return prepare ? prepare(payload,message) : defaultReply(message);
+      const id = 'permission-' + (choices.size + 1);
+      choices.set(id,text.slice('/permission '.length));
+      return JSON.stringify({kind:'command',id,opaque:id,text_bytes:text.length,images:0,captures:[]});
+    });
+    replies.set('dispatch_submission', async (payload, message) => {
+      const {opaque} = typeof payload === 'string' ? JSON.parse(payload) : payload;
+      if (!choices.has(opaque)) return dispatch ? dispatch(payload,message) : defaultReply(message);
+      view.surfaces.main.projections = {cursor:{kind:'durable',fact_seq:'0',control_seq:String(choices.size)},entries:[entry(choices.get(opaque))]};
+      await this.frame();
+      return JSON.stringify({status:'complete',receipt:'{}'});
+    });
+  },
   nativeReply(handler) {
     nativeHandler = handler;
   },

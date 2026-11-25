@@ -172,12 +172,17 @@ pub(super) fn failure(
                 Operation::SelectModel
                     | Operation::ExecuteCommand
                     | Operation::SelectPreset
+                    | Operation::SelectPublishedPreset
                     | Operation::GoalControl
             ) && expected != actual
         }
         Failure::WorkflowUnavailable { .. } => matches!(
             operation,
-            Operation::Create | Operation::SelectPreset | Operation::Submit | Operation::Image
+            Operation::Create
+                | Operation::SelectPreset
+                | Operation::SelectPublishedPreset
+                | Operation::Submit
+                | Operation::Image
         ),
         Failure::WorkflowOutcomeUnknown { .. } => operation == Operation::CancelWorkflow,
         _ => true,
@@ -797,6 +802,24 @@ impl SessionHandle for Handle {
         request: rsi_session_protocol::SelectDraftPreset,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
         self.select_checked_preset(request).await
+    }
+    async fn preset_view(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionPresetView> {
+        self.frozen().call(Operation::PresetView, &()).await
+    }
+    async fn select_published_preset(
+        &self,
+        request: rsi_session_protocol::SelectPublishedPreset,
+    ) -> rsi_session_protocol::Result<u64> {
+        let seq = self
+            .frozen()
+            .call(Operation::SelectPublishedPreset, &request)
+            .await?;
+        if seq != request.control_seq && request.control_seq.checked_add(1) != Some(seq) {
+            return Err(malformed(Operation::SelectPublishedPreset));
+        }
+        Ok(seq)
     }
     async fn discard_draft_inputs(
         &self,

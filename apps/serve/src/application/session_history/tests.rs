@@ -81,6 +81,126 @@ fn metadata_header(id: &str) -> SessionHeader {
     .unwrap()
 }
 
+#[test]
+fn pre_turn_generation_history_includes_switches_back_to_the_creation_preset() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody, AgentPresetId, DomainMutationSource,
+        DomainStateCommit, GenerationSelection,
+    };
+    let header = metadata_header("queued-preset");
+    let records = [Some("editing"), None, Some("editing")]
+        .into_iter()
+        .zip(1..)
+        .map(|(id, seq)| {
+            let selection = GenerationSelection::new("a".repeat(64))
+                .unwrap()
+                .with_preset(id.map(|id| AgentPresetId::new(id).unwrap()));
+            let commit =
+                DomainStateCommit::new(None, DomainMutationSource::Recovery { selection }, vec![])
+                    .unwrap();
+            AgentControlRecord::new(
+                seq,
+                seq,
+                AgentControlRecordBody::DomainStateCommitted { commit },
+            )
+            .unwrap()
+        })
+        .collect();
+    let (_, encoded) = super::super::session_controls::encode_controls(
+        &header,
+        rsi_agent_store_protocol::StoreControlPage {
+            after_seq: 0,
+            records,
+            fact_cursors: vec![0, 0, 2],
+            durable_fact_seq: 2,
+            durable_seq: 3,
+        },
+        0,
+        3,
+    )
+    .unwrap();
+    let events: Vec<Value> = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        events,
+        vec![
+            json!({"seq":1,"after_fact_seq":0,"time":1,"kind":"preset","preset":"editing"}),
+            json!({"seq":2,"after_fact_seq":0,"time":2,"kind":"preset","preset":"test"}),
+        ]
+    );
+}
+
+#[test]
+fn permission_history_carries_the_authoritative_pair_and_the_committing_request() {
+    use rsi_agent_session_protocol::{
+        AgentControlRecord, AgentControlRecordBody, CommandArguments, CommandRevision,
+        ContributionId, DomainIdentity, DomainMutationSource, DomainRequestId, DomainRevision,
+        DomainSnapshot, DomainStateCommit, DomainStateUpdate, DomainStateValue,
+        SessionCommandInvocation, SessionPermission,
+    };
+    let header = metadata_header("permission-history");
+    let selected =
+        json!({"preset":"danger-full-access","sandbox":"danger-full-access","approval":"never"});
+    let request_id = DomainRequestId::new("switch").unwrap();
+    let invocation = SessionCommandInvocation {
+        command: ContributionId::new(SessionPermission::COMMAND).unwrap(),
+        request_id: request_id.clone(),
+        expected_revision: CommandRevision::Durable { control_seq: 1 },
+        arguments: CommandArguments::new(selected.clone()).unwrap(),
+    };
+    let snapshot = |value| {
+        DomainSnapshot::new(
+            DomainIdentity::new(SessionPermission::DOMAIN, SessionPermission::VERSION).unwrap(),
+            DomainStateValue::new(value).unwrap(),
+        )
+    };
+    let records = [
+        DomainStateCommit::new(
+            None,
+            DomainMutationSource::Baseline,
+            vec![DomainStateUpdate::new(DomainRevision::new(0), snapshot(Value::Null)).unwrap()],
+        )
+        .unwrap(),
+        DomainStateCommit::new(
+            Some(request_id),
+            DomainMutationSource::Command { invocation },
+            vec![DomainStateUpdate::new(DomainRevision::new(1), snapshot(selected)).unwrap()],
+        )
+        .unwrap(),
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|(commit, seq)| {
+        AgentControlRecord::new(
+            seq,
+            12,
+            AgentControlRecordBody::DomainStateCommitted { commit },
+        )
+        .unwrap()
+    })
+    .collect();
+    let (_, encoded) = super::super::session_controls::encode_controls(
+        &header,
+        rsi_agent_store_protocol::StoreControlPage {
+            after_seq: 0,
+            records,
+            fact_cursors: vec![0, 3],
+            durable_fact_seq: 3,
+            durable_seq: 2,
+        },
+        0,
+        2,
+    )
+    .unwrap();
+    assert_eq!(stored_header(&header)["sandbox"], "workspace-write");
+    assert_eq!(
+        serde_json::from_str::<Value>(&encoded).unwrap(),
+        json!([{
+            "kind":"permission","time":12,"seq":2,"after_fact_seq":3,
+            "permission":{"preset":"danger-full-access","sandbox":"danger-full-access","approval":"never","request_id":"switch"}
+        }])
+    );
+}
+
 #[tokio::test]
 async fn large_history_page_read_cost() {
     use rsi_agent_session_protocol::{SessionFact, SessionFactBody, TurnId};

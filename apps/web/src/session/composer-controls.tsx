@@ -115,10 +115,14 @@ export function ComposerAccess({owner}:{owner:ComposerOwner}) {
   const disabled=busy||!mode||state?.accessDisabled;
   const apply=async(value:typeof modes[number][0],close:()=>void)=>{
     setBusy(true);
-    await run(async()=>{if(await owner.prepareComposer()){owner.setAccess(value);close();}});
+    await run(async()=>{
+      if (!await owner.prepareComposer()) return;
+      await owner.action('document_command',{name:'permission',input:value});
+      close();
+    });
     setBusy(false);
   };
-  const label=modes.find(([value])=>value===mode)?.[1]??'Access';
+  const label=modes.find(([value])=>value===mode)?.[1]??(mode==='custom'?'Custom':'Access');
   const dismiss=()=>setConfirm(false);
   return <>
     <ComposerMenu name={`Access mode, current: ${label}`} disabled={state?.accessDisabled} label={<><Shield/><span className={css.accessLabel}>{label}</span><Down/></>}>
@@ -131,7 +135,7 @@ export function ComposerAccess({owner}:{owner:ComposerOwner}) {
     </ComposerMenu>
     {confirm&&<Modal label="Enable Full access?" className={css.confirm} initialFocus="input" close={dismiss}>
       <header><h2>Enable Full access?</h2><button type="button" aria-label="Close" onClick={dismiss}><IconCloseOutlineRegular/></button></header>
-      <p>Tools may operate outside the workspace. Session and tool approval requirements still apply to your next messages.</p>
+      <p>Tools may operate outside the workspace. Calls that require approval will be denied without a prompt.</p>
       <label><input type="checkbox" checked={acknowledged} onChange={event=>setAcknowledged(event.target.checked)}/>I understand the risks and want to continue</label>
       <footer><button type="button" onClick={dismiss}>Cancel</button><button type="button" className="primary" disabled={disabled||!acknowledged} onClick={()=>void apply('danger-full-access',dismiss)}>Enable Full access</button></footer>
     </Modal>}

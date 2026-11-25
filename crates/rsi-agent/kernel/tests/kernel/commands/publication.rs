@@ -6,6 +6,118 @@ use rsi_agent_composition_protocol::{
 use std::time::Duration;
 
 #[tokio::test]
+async fn queued_input_uses_the_last_unstarted_preset_and_keeps_its_identity_on_restart() {
+    use rsi_agent_turn_protocol::{ClaimMessage, SessionCommands as _};
+    #[derive(Debug)]
+    struct Presets;
+    #[async_trait]
+    impl AgentComposition for Presets {
+        async fn default_preset_id(&self) -> Result<AgentPresetId, AgentCompositionError> {
+            TestComposition.default_preset_id().await
+        }
+        async fn pin(
+            &self,
+            id: &AgentPresetId,
+            _: Option<&rsi_agent_composition_protocol::AgentGenerationSeed>,
+        ) -> Result<AgentCompositionPin, AgentCompositionError> {
+            let pin = test_pin(id);
+            Ok(if id.as_str() == "without-echo" {
+                pin.without_preset_tools(Some(Arc::new(["echo".to_owned()].into())))
+            } else {
+                pin
+            })
+        }
+    }
+    let store = Arc::new(MemoryStore::new());
+    let open =
+        || AgentKernel::recover_with_clock(store.clone(), Arc::new(Presets), Arc::new(FixedClock));
+    let initial = open().await.unwrap();
+    let worker = initial.start_workers();
+    let origin = header("pre-turn-preset");
+    let id = origin.session_id();
+    let message = mailbox_message("queued");
+    initial
+        .submit_message(SubmitMessage {
+            session: fresh(origin.clone()),
+            message: message.clone(),
+            delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        })
+        .await
+        .unwrap();
+    let before = store.session_summary(id).await.unwrap();
+    assert_eq!(before.durable_fact_seq, 0);
+    assert!(
+        test_pin(origin.agent_preset_id())
+            .tools()
+            .definition("echo")
+            .is_some()
+    );
+    let next = AgentPresetId::new("without-echo").unwrap();
+    let cut = initial
+        .select_unstarted_preset(id, next.clone(), before.durable_control_seq)
+        .await
+        .unwrap();
+    assert_eq!(cut, before.durable_control_seq + 1);
+    assert_eq!(initial.prepare_resume(id).await.unwrap().preset_id(), &next);
+    assert_eq!(store.session_summary(id).await.unwrap().header, origin);
+    let child = initial
+        .create_plugin_child(rsi_agent_turn_protocol::CreatePluginChild {
+            source: rsi_agent_turn_protocol::PluginChildSource::Session(Box::new(origin.clone())),
+            session_id: SessionId::new("idle-plugin-child").unwrap(),
+            directory: None,
+            task_name: "review".into(),
+            plugin: "fixture.delegator".into(),
+            preset: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(child.agent_preset_id(), &next);
+    initial.shutdown(worker).await.unwrap();
+
+    let restarted = open().await.unwrap();
+    let worker = restarted.start_workers();
+    let prepared = restarted.prepare_resume(id).await.unwrap();
+    assert_eq!(prepared.preset_id(), &next);
+    restarted
+        .claim_message(ClaimMessage {
+            session: prepared,
+            message_id: message.message_id.clone(),
+            path: AgentPath::root(),
+            activation_id: ActivationId::new("activation").unwrap(),
+            turn_id: TurnId::new("first").unwrap(),
+            step_id: StepId::new("first-step").unwrap(),
+        })
+        .await
+        .unwrap();
+    let _executor = restarted.register("preset-reader".into()).unwrap();
+    let claim = restarted
+        .claim("preset-reader", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let active = restarted.composition(&claim).unwrap();
+    assert_eq!(active.preset_id(), &next);
+    assert!(active.tools().definition("echo").is_none());
+    assert!(active.tools().definition("fixture_control").is_some());
+    let after = store.session_summary(id).await.unwrap();
+    assert!(matches!(
+        restarted
+            .select_unstarted_preset(
+                id,
+                origin.agent_preset_id().clone(),
+                after.durable_control_seq
+            )
+            .await,
+        Err(TurnError::SessionBusy)
+    ));
+    restarted
+        .finish_turn(&claim, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    restarted.shutdown(worker).await.unwrap();
+}
+
+#[tokio::test]
 async fn simultaneous_command_preparation_publishes_one_baseline_and_no_facts() {
     use rsi_agent_turn_protocol::SessionCommands;
     let store = Arc::new(MemoryStore::new());

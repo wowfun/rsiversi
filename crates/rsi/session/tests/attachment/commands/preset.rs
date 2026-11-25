@@ -9,6 +9,44 @@ fn select(preset: &str, revision: u64) -> SelectDraftPreset {
 }
 
 #[tokio::test]
+async fn published_input_checks_the_selected_workflow_before_acceptance() {
+    use rsi_agent_turn_protocol::SessionCommands;
+
+    let fixture = Fixture::new().await;
+    let handle = fixture.create("workflow-selection").await;
+    let header = handle.header().await.unwrap();
+    let id = header.session_id();
+    submit_text(handle.clone(), "original", "queued")
+        .await
+        .unwrap();
+    let cut = fixture.store.read_watermarks(id).await.unwrap();
+    // A previous Host with Workflow installed could have made this selection.
+    fixture
+        .kernel
+        .select_unstarted_preset(
+            id,
+            AgentPresetId::new("workflow").unwrap(),
+            cut.durable_control_seq,
+        )
+        .await
+        .unwrap();
+    let selected = fixture.store.read_watermarks(id).await.unwrap();
+    assert!(matches!(
+        submit_text(handle.clone(), "blocked", "follow up").await,
+        Err(SessionError::WorkflowUnavailable(
+            rsi_session_protocol::WorkflowRuntimeKind::Absent
+        ))
+    ));
+    assert_eq!(fixture.store.read_watermarks(id).await.unwrap(), selected);
+    handle
+        .select_agent_preset(header.agent_preset_id().clone())
+        .await
+        .unwrap();
+    submit_text(handle, "allowed", "follow up").await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn preset_failure_preserves_values_and_success_resets_defaults_on_the_same_lease() {
     let fixture = Fixture::new().await;
     let handle = fixture.create("preset").await;

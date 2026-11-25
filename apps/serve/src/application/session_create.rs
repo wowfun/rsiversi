@@ -1,7 +1,7 @@
 use super::{BoundSessions, Sessions};
 use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::{BlankSession, DraftClaim, SelectDraftPreset, SessionError};
+use rsi_session_protocol::{BlankSession, DraftClaim, SessionError};
 use rsi_workspace_protocol::{
     ExecutionCoordinates, ExecutionLocation, WorkspaceId, WorkspaceIngress,
 };
@@ -87,7 +87,7 @@ impl Sessions {
             self.routes
                 .caller(&input.request)
                 .map_err(|_| Error::Cancelled)?;
-            return Ok(receipt(&header, false));
+            return Ok(receipt(&header, None));
         }
         let coordinates = input.coordinates(self.workspaces.as_ref(), &origin).await?;
         let sessions = self.ingress.scoped(origin.clone());
@@ -102,43 +102,28 @@ impl Sessions {
                             "Session belongs to another Workspace or Agent".into(),
                         ));
                     }
-                    match handle.draft_snapshot().await {
-                        Ok(_)
-                            if self.navigation.archived_sessions().contains(&requested)
-                                || input.workspace.as_ref().is_some_and(|workspace| {
-                                    !self.navigation.workspace_contains(workspace, &requested)
-                                }) => {}
-                        Ok(mut draft) => {
-                            let preset = match &input.preset {
-                                Some(id) => id.clone(),
-                                None => self
-                                    .context
-                                    .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
-                                    .ok_or_else(|| {
-                                        Error::Remote(
-                                            "The Host default preset is unavailable".into(),
-                                        )
-                                    })?
-                                    .default_preset_id()
-                                    .await
-                                    .map_err(remote)?,
-                            };
-                            if draft.header.agent_preset_id() != &preset {
-                                draft = handle
-                                    .select_preset(SelectDraftPreset {
-                                        preset_id: preset,
-                                        expected_revision: draft.revision,
-                                    })
-                                    .await
-                                    .map_err(remote)?;
+                    if !self.navigation.archived_sessions().contains(&requested)
+                        && input.workspace.as_ref().is_none_or(|workspace| {
+                            self.navigation.workspace_contains(workspace, &requested)
+                        })
+                    {
+                        let preset = match &input.preset {
+                            Some(id) => id.clone(),
+                            None => self.context
+                                .lookup_local::<rsi_agent_composition_protocol::AgentCompositionContract>()
+                                .ok_or_else(|| Error::Remote("The Host default preset is unavailable".into()))?
+                                .default_preset_id().await.map_err(remote)?,
+                        };
+                        match handle.select_agent_preset(preset.clone()).await {
+                            Ok(_) => {
+                                self.routes
+                                    .caller(&input.request)
+                                    .map_err(|_| Error::Cancelled)?;
+                                return Ok(receipt(&header, Some(&preset)));
                             }
-                            self.routes
-                                .caller(&input.request)
-                                .map_err(|_| Error::Cancelled)?;
-                            return Ok(receipt(&draft.header, true));
+                            Err(SessionError::NotFound(_)) => {}
+                            Err(error) => return Err(remote(error)),
                         }
-                        Err(SessionError::NotFound(_)) => {}
-                        Err(error) => return Err(remote(error)),
                     }
                 }
                 Err(SessionError::NotFound(_)) => {
@@ -162,7 +147,7 @@ impl Sessions {
             .await
             .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
-        let mut result = receipt(&header, false);
+        let mut result = receipt(&header, None);
         if let Some(workspace) = input.workspace {
             let failure = |error| {
                 remote(format!(
@@ -261,15 +246,18 @@ impl BoundSessions {
             })
             .await
             .map_err(remote)?;
-        Ok(receipt(&header, false))
+        Ok(receipt(&header, None))
     }
 }
 
-fn receipt(header: &rsi_agent_session_protocol::SessionHeader, reused: bool) -> Value {
+fn receipt(
+    header: &rsi_agent_session_protocol::SessionHeader,
+    reused: Option<&AgentPresetId>,
+) -> Value {
     let blank = header
         .history_origin()
         .is_none_or(|origin| origin.effective_turns == 0);
-    json!({"id":header.session_id(),"preset":header.agent_preset_id(),"reused":reused,
+    json!({"id":header.session_id(),"preset":reused.unwrap_or_else(|| header.agent_preset_id()),"reused":reused.is_some(),
         "summary":{"id":header.session_id(),"cwd":header.canonical_cwd(),
             "createdAt":header.created_at_ms(),"updatedAt":header.created_at_ms(),"blank":blank,"running":false}})
 }

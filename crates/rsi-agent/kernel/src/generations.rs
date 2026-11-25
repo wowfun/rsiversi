@@ -175,6 +175,25 @@ impl AgentKernel {
                 "Domain state changed after resume preparation; prepare again".into(),
             ));
         }
+        if page
+            .generation
+            .as_ref()
+            .and_then(|current| current.selection.preset())
+            != composition.selection().preset()
+        {
+            return Err(TurnError::Composition(
+                "Session preset changed since resume preparation".into(),
+            ));
+        }
+        self.generation_commit(header, composition, &page).await
+    }
+
+    pub(super) async fn generation_commit(
+        &self,
+        header: &SessionHeader,
+        composition: &AgentCompositionPin,
+        page: &rsi_agent_store_protocol::StoreDomainStatePage,
+    ) -> TurnResult<Option<AtomicAgentCommit>> {
         let seq = page
             .durable_control_seq
             .checked_add(1)
@@ -300,10 +319,14 @@ impl AgentKernel {
                 }
                 state.sessions[claim.session_id()].composition.clone()
             };
+            let selected = claim
+                .header()
+                .for_preset(previous.preset_id())
+                .map_err(|error| TurnError::Invalid(error.to_string()))?;
             let candidate = match self
                 .inner
                 .composition
-                .prepare_update(claim.header(), &previous)
+                .prepare_update(&selected, &previous)
                 .await
             {
                 Ok(Some(candidate)) => candidate,
@@ -399,7 +422,11 @@ impl AgentKernel {
                 .collect(),
         )
         .map_err(turn_composition_error)?;
-        let composition = candidate.build(&seed).await.map_err(candidate_error)?;
+        let composition = candidate
+            .build(&seed)
+            .await
+            .map_err(candidate_error)?
+            .for_session_preset(claim.header().agent_preset_id());
         let seq = page
             .durable_control_seq
             .checked_add(1)

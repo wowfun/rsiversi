@@ -1,4 +1,4 @@
-use crate::{SessionController, command_invocation};
+use crate::SessionController;
 use rsi_agent_session_protocol::{
     CommandArguments, DomainRequestId, SessionCommandInvocation, SessionCommandReceipt,
 };
@@ -56,7 +56,9 @@ impl CommandSubmission {
         }
         let arguments = CommandArguments::new(arguments.into())
             .map_err(|error| SessionError::Invalid(error.to_string()))?;
-        let invocation = command_invocation(&view, name, arguments, request_id)?;
+        let invocation = controller
+            .prepare_composer_command(&view, name, arguments, request_id)
+            .await?;
         self.view
             .lock()
             .expect("command submission poisoned")

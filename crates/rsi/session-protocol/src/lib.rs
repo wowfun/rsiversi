@@ -228,6 +228,26 @@ impl SessionDraftView {
     }
 }
 
+/// Effective preset and editable predecessor at one observation.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPresetView {
+    /// Effective preset used by the next Turn.
+    pub preset_id: AgentPresetId,
+    /// Editable predecessor. A started or delegated Session has no selection action.
+    pub revision: Option<rsi_agent_session_protocol::CommandRevision>,
+}
+
+/// Compare-and-select request after publication and before the first Turn.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectPublishedPreset {
+    /// Requested executable preset.
+    pub preset_id: AgentPresetId,
+    /// Control watermark observed before the edit.
+    pub control_seq: u64,
+}
+
 /// Compare-and-select request for a new unpublished preset generation.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -864,6 +884,47 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     }
     /// Selects a fully prepared preset only at the expected unpublished revision.
     async fn select_preset(&self, request: SelectDraftPreset) -> Result<SessionDraftView>;
+    /// Reads the effective preset and the predecessor at which it can change.
+    async fn preset_view(&self) -> Result<SessionPresetView>;
+    /// Selects a generation while the published Session has no Turn.
+    async fn select_published_preset(&self, request: SelectPublishedPreset) -> Result<u64>;
+    /// Returns the resulting draft or durable revision and whether the preset changed.
+    async fn select_agent_preset(
+        &self,
+        preset_id: AgentPresetId,
+    ) -> Result<(rsi_agent_session_protocol::CommandRevision, bool)> {
+        use rsi_agent_session_protocol::CommandRevision;
+        let view = self.preset_view().await?;
+        let revision = view
+            .revision
+            .ok_or_else(|| SessionError::NotFound("editable Agent preset".into()))?;
+        if view.preset_id == preset_id {
+            return Ok((revision, false));
+        }
+        let selected = match revision {
+            CommandRevision::Draft { revision } => {
+                let draft = self
+                    .select_preset(SelectDraftPreset {
+                        preset_id,
+                        expected_revision: revision,
+                    })
+                    .await?;
+                CommandRevision::Draft {
+                    revision: draft.revision,
+                }
+            }
+            CommandRevision::Durable { control_seq } => {
+                let control_seq = self
+                    .select_published_preset(SelectPublishedPreset {
+                        preset_id,
+                        control_seq,
+                    })
+                    .await?;
+                CommandRevision::Durable { control_seq }
+            }
+        };
+        Ok((selected, true))
+    }
     /// Lists the pinned command catalog and exact draft or durable predecessor.
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView>;
     /// Prepares a durable edit, optionally requiring the exact unpublished draft.

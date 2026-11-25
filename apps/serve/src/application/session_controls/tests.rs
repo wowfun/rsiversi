@@ -87,6 +87,8 @@ fn goal_history_contains_the_completed_state_without_copying_the_reserved_prompt
         after_fact_seq: 0,
         time: 15,
         body: ControlBody::Goal,
+        permission: None,
+        preset: None,
         goal: goal_change(&commit).unwrap(),
     })
     .unwrap();
@@ -134,6 +136,8 @@ fn model_command_origin_distinguishes_identical_values_and_aggregate_baselines()
             after_fact_seq: 7,
             time: 10,
             goal: None,
+            permission: None,
+            preset: None,
             body: ControlBody::Model {
                 selection: serde_json::from_value(update.snapshot().state().value().clone())
                     .unwrap(),

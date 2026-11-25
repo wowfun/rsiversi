@@ -456,12 +456,16 @@ async fn plugin_tool_child_records_the_exact_started_effect_and_turn() {
     use rsi_agent_session_protocol::{ExecutionOwner, MessageDelivery, PluginToolOrigin};
     use rsi_agent_turn_protocol::{CreatePluginChild, PluginChildSource};
     let store = Arc::new(MemoryStore::new());
-    let kernel = kernel(store).await;
+    let kernel = kernel(store.clone()).await;
     let worker = kernel.start_workers();
     kernel
         .submit_message(SubmitMessage {
             session: fresh(header("plugin-tool-parent")),
-            message: mailbox_message("trigger-plugin"),
+            message: {
+                let mut input = mailbox_message("trigger-plugin");
+                input.options.sandbox = Some(rsi_sandbox::SandboxMode::ReadOnly);
+                input
+            },
             delivery: MessageDelivery::NextTurn,
         })
         .await
@@ -486,9 +490,42 @@ async fn plugin_tool_child_records_the_exact_started_effect_and_turn() {
         preset: None,
     };
     let child = kernel.create_plugin_child(make("worker")).await.unwrap();
+    assert_eq!(
+        child.settings().sandbox(),
+        rsi_sandbox::SandboxMode::ReadOnly
+    );
     assert!(
         matches!(child.execution_owner(), Some(ExecutionOwner::Plugin { session_id, plugin, tool: Some(origin) })
         if session_id == claim.session_id() && plugin == "@example/delegator" && origin == &expected)
+    );
+    let role_child = SessionId::new("native-role-child").unwrap();
+    for _ in 0..2 {
+        kernel
+            .spawn_agent(SpawnAgentRequest {
+                caller: caller.as_ref().clone(),
+                child_session_id: role_child.clone(),
+                task_name: "review".into(),
+                message_id: MessageId::new("review-input").unwrap(),
+                message: "review".into(),
+                fork_turns: ForkTurnSelection::None,
+                output_contract: None,
+                model: None,
+                role: None,
+                reasoning_effort: None,
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .session_summary(&role_child)
+            .await
+            .unwrap()
+            .header
+            .settings()
+            .sandbox(),
+        rsi_sandbox::SandboxMode::ReadOnly
     );
     kernel.release(&claim).unwrap();
     assert!(matches!(

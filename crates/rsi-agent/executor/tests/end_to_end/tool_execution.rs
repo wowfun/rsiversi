@@ -5,6 +5,8 @@ use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 mod around;
 #[path = "tool_execution/loop_settings.rs"]
 mod loop_settings;
+#[path = "tool_execution/permission.rs"]
+mod permission;
 
 fn approval_header() -> SessionHeader {
     let mut wire = serde_json::to_value(header()).unwrap();

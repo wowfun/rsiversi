@@ -161,9 +161,13 @@ operations reject a different Header under a reused Session identity. This
 fingerprint identifies canonical Header content, not a recoverable draft pin;
 the live draft lease remains the domain's idempotency boundary.
 Transport EndpointId/HostEpoch checks independently fence the deployment generation.
-Preset selection validates the returned Header as exactly the previous Header with
+Draft preset selection validates the returned Header as exactly the previous Header with
 the selected preset, validates the successor draft revision, and replaces that
-handle's binding atomically. Each stream checks its frames against the target
+handle's binding atomically. `preset-view` reads the active preset and its editable
+revision. After publication, `select-published-preset` compares the control
+revision under owner authority and returns the committed sequence. The original
+Header fingerprint continues to identify the same Session and its queued inputs.
+Each stream checks its frames against the target
 sent at admission. Frame validation needs only the Session identity and Header
 fingerprint. A stale selection response cannot overwrite a newer binding;
 another handle refreshes through attach after a remote switch. Creation replies
@@ -223,7 +227,7 @@ The authenticated `session/projections` version-3 Subscription returns complete 
 extension snapshots with a separate 5 MiB payload plus 64 KiB envelope limit.
 It includes transient generation rejection status without adding durable writes.
 Both the envelope and snapshot bind the captured Session/Header; the client also
-checks monotone draft or durable dual cursors. A preset change ends the old
+checks monotone draft or durable dual cursors. Changing a draft Header ends the old
 subscription. Each decoder reserves its bounded projection collection before
 JSON decode and retains the resulting snapshot before releasing wire ownership.
 Server capture admission belongs to the Session service, independently of API

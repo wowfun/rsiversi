@@ -73,7 +73,6 @@ export async function submit(pane, context, choice = "primary") {
               text: captured.text,
               images: captured.images,
               references: captured.references,
-              sandbox: action.id === 'steer' ? null : pane.composerView.access ?? null,
               action_revision: displayed.revision,
               action: action.id,
             }),

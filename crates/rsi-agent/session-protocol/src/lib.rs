@@ -30,6 +30,7 @@ pub use step_input::{
 };
 mod feedback;
 mod history;
+mod permission;
 pub use application_tools::{ApplicationToolBinding, ApplicationToolView};
 pub use feedback::{
     FeedbackCategory, FeedbackDecision, FeedbackNote, FeedbackRating, MessageFeedback,
@@ -37,6 +38,7 @@ pub use feedback::{
 };
 use history::SessionOrigin;
 pub use history::{AgentParent, ForkOrigin, ForkPoint, HistoryOrigin, MAXIMUM_FORK_HISTORY_DEPTH};
+pub use permission::{ApprovalPromptPolicy, SessionPermission};
 mod model_attempt;
 mod queue;
 pub use model_attempt::{
@@ -126,7 +128,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 44;
+pub const SESSION_FORMAT_VERSION: u32 = 45;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1415,6 +1417,22 @@ impl AsRef<str> for AgentPresetId {
     }
 }
 
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum FrozenFilePolicy {
+    Sandbox(SandboxMode),
+    Preset(SessionPermission),
+}
+
+impl FrozenFilePolicy {
+    const fn mode(&self) -> SandboxMode {
+        match self {
+            Self::Sandbox(mode) => *mode,
+            Self::Preset(permission) => permission.sandbox,
+        }
+    }
+}
+
 /// Immutable redacted settings captured when one session becomes durable.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1423,7 +1441,7 @@ pub struct FrozenAgentSettings {
     system_prompt: String,
     default_model: ModelRef,
     default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
-    sandbox: SandboxMode,
+    sandbox: FrozenFilePolicy,
     require_approval: bool,
 
     pricing: PriceTable,
@@ -1442,7 +1460,7 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
             system_prompt: String,
             default_model: ModelRef,
             default_reasoning_effort: Option<rsi_ai_protocol::ReasoningEffortId>,
-            sandbox: SandboxMode,
+            sandbox: FrozenFilePolicy,
             require_approval: bool,
 
             #[serde(default)]
@@ -1452,20 +1470,18 @@ impl<'de> Deserialize<'de> for FrozenAgentSettings {
         }
 
         let wire = WireSettings::deserialize(deserializer)?;
-        Self::new(
-            wire.settings_id,
-            wire.system_prompt,
-            wire.default_model,
-            wire.sandbox,
-            wire.require_approval,
-        )
-        .map(|mut settings| {
-            settings.default_reasoning_effort = wire.default_reasoning_effort;
-            settings.pricing = wire.pricing;
-            settings.output_budgets = wire.output_budgets;
-            settings
-        })
-        .map_err(serde::de::Error::custom)
+        let settings = Self {
+            settings_id: wire.settings_id,
+            system_prompt: wire.system_prompt,
+            default_model: wire.default_model,
+            default_reasoning_effort: wire.default_reasoning_effort,
+            sandbox: wire.sandbox,
+            require_approval: wire.require_approval,
+            pricing: wire.pricing,
+            output_budgets: wire.output_budgets,
+        };
+        settings.validate().map_err(serde::de::Error::custom)?;
+        Ok(settings)
     }
 }
 
@@ -1485,7 +1501,7 @@ impl FrozenAgentSettings {
             default_reasoning_effort: None,
             pricing: PriceTable::default(),
             output_budgets: OutputBudgetTable::default(),
-            sandbox,
+            sandbox: FrozenFilePolicy::Sandbox(sandbox),
             require_approval,
         };
         settings.validate()?;
@@ -1495,6 +1511,9 @@ impl FrozenAgentSettings {
     /// Revalidates decoded Agent settings.
     pub fn validate(&self) -> Result<()> {
         Self::validate_metadata(&self.settings_id, &self.system_prompt)?;
+        if let Some(permission) = self.permission() {
+            permission.validate()?;
+        }
         self.pricing.validate()?;
         self.default_model
             .validate()
@@ -1521,7 +1540,7 @@ impl FrozenAgentSettings {
         sandbox: SandboxMode,
         require_approval: bool,
     ) -> Result<Self> {
-        self.sandbox = sandbox;
+        self.sandbox = FrozenFilePolicy::Sandbox(sandbox);
         self.require_approval = require_approval;
         self.validate()?;
         Ok(self)
@@ -1580,7 +1599,15 @@ impl FrozenAgentSettings {
 
     /// Returns the creation-time sandbox default.
     pub const fn sandbox(&self) -> SandboxMode {
-        self.sandbox
+        self.sandbox.mode()
+    }
+
+    /// Selected Host preset frozen when this Session was created.
+    pub const fn permission(&self) -> Option<&SessionPermission> {
+        match &self.sandbox {
+            FrozenFilePolicy::Preset(value) => Some(value),
+            FrozenFilePolicy::Sandbox(_) => None,
+        }
     }
 
     /// Returns whether live approval was required at creation.
@@ -2005,6 +2032,17 @@ impl SessionHeader {
     /// Returns the durable Agent preset identity selected for this session.
     pub const fn agent_preset_id(&self) -> &AgentPresetId {
         &self.agent_preset_id
+    }
+
+    /// Supplies the effective pre-Turn preset to composition without changing the stored Header.
+    pub fn for_preset(&self, preset: &AgentPresetId) -> Result<std::borrow::Cow<'_, Self>> {
+        if preset == self.agent_preset_id() {
+            Ok(std::borrow::Cow::Borrowed(self))
+        } else {
+            self.clone()
+                .with_agent_preset_id(preset.clone())
+                .map(std::borrow::Cow::Owned)
+        }
     }
 
     /// Rebinds a process-local draft to a different validated preset identity.

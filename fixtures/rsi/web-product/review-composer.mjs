@@ -7,6 +7,7 @@ const report=resolve(process.env.RSI_REPORT_DIR??'.local/notes/1027/review-remed
 await mkdir(report,{recursive:true});
 const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')+`
 fixture.base=structuredClone(fixture.view.surfaces.main);
+fixture.permissionCommands(fixture.base);
 fixture.view.surfaces.main=null;fixture.view.setup.agent.sandbox='workspace-write';
 fixture.view.catalog.workspaces[0].id='f'.repeat(64);
 fixture.view.catalog.workspaces[0].coordinates.path='C:/projects/review-workspace/';
@@ -25,14 +26,14 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
  const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1440,height:900},colorScheme:'dark'}),errors=[];
  page.on('pageerror',error=>errors.push(error.message));
  try {
-  await page.goto(scene.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+  await page.goto(scene.url,{waitUntil:'domcontentloaded',timeout:90000});await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
   await page.getByRole('textbox',{name:'Main message',exact:true}).fill('Keep the starting draft');
-  await page.getByRole('button',{name:/^Access mode/}).click();await page.waitForFunction(()=>fixture.createEntered);
+  await page.getByRole('button',{name:/^Access mode/}).click();
+  await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
+  await page.waitForFunction(()=>fixture.createEntered);
   assert.equal(await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).isDisabled(),true,'Access choices must wait for the draft editor');
   await page.screenshot({path:join(report,name+'-preparing.png')});
   await page.evaluate(()=>fixture.releaseCreate());
-  await page.waitForFunction(()=>!document.querySelector('[role="menuitemradio"][aria-checked="false"]')?.disabled);
-  await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Main message',exact:true}).inputValue(),'Keep the starting draft');
   await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'review-workspace',exact:true}).waitFor();
@@ -40,8 +41,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})) {
   await page.getByRole('region',{name:'Conversations',exact:true}).getByRole('button',{name:'Named workspace',exact:true}).waitFor();
   await page.screenshot({path:join(report,name+'-ready.png')});
   await page.evaluate(async()=>{fixture.view.surfaces.main=null;fixture.view.setup.agent.default_model=null;await fixture.frame();});
-  await page.getByRole('button',{name:/^Access mode/}).click();
-  assert.equal(await page.getByRole('menuitemradio',{name:'Read Only',exact:true,includeHidden:true}).isDisabled(),true,'Unavailable preparation must not enable permission choices');
+  assert.equal(await page.getByRole('button',{name:/^Access mode/}).isDisabled(),true,'Unavailable preparation must not enable permission choices');
   assert.deepEqual(errors,[]);results.push({browser:name,checks:['preparation gates permission changes','unavailable preparation remains disabled','draft retained','access choice applied','trailing-separator conversation title','custom workspace name'],errors});
  } catch(error){await page.screenshot({path:join(report,name+'-failure.png')});throw error;}
  finally{await browser.close();}

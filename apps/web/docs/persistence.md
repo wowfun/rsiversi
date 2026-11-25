@@ -20,13 +20,10 @@ observation removes progress for settled requests. Suspended or unopened
 observations retain it. Untouched questions create no record. The question
 remains answerable when the browser cannot retain its progress.
 
-Composer access choices are bounded device preferences, keyed by connection
-namespace and Session, with at most 128 entries. They contain only a sandbox mode;
-eviction restores that Session's frozen default. Storage errors are reported and
-do not apply a new choice. Submission preparation copies the selected mode into
-the opaque request before its existing durable freeze; retry never rereads the
-current preference. These preferences grant no capability or exemption from
-tool approval, and do not change terminal policy or another client's messages.
+The composer displays the Host's current Session permission. The Host owner
+changes it through the Session command. All windows submit new messages under
+the Session policy. Older device-local access preferences are ignored. An
+already prepared request retains its identity and its original arguments on retry.
 
 IndexedDB schema 12 namespaces composer records by endpoint, real principal
 (`local` or authenticated DeviceId), stable surface key and SessionId. The first

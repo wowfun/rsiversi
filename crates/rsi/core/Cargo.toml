@@ -107,6 +107,7 @@ rsi-agent-time-context = { path = "../../rsi-agent/time-context" }
 rsi-agent-prompt-assembly = { path = "../../rsi-agent/prompt-assembly" }
 rsi-agent-todo = { path = "../../rsi-agent/todo" }
 rsi-agent-model-selection = { path = "../../rsi-agent/model-selection" }
+rsi-agent-permission = { path = "../../rsi-agent/permission" }
 rsi-agent-context-input = { path = "../../rsi-agent/context-input" }
 rsi-agent-plan-policy = { path = "../../rsi-agent/plan-policy" }
 rsi-agent-repeat-tool-reminder = { path = "../../rsi-agent/repeat-tool-reminder" }

@@ -13,6 +13,16 @@ Older schema corpora are retained shape evidence: their hashes are checked, but
 they are not serialized Session inputs and are not decoded as such. The Store
 corpus exercises runtime read/refusal using actual database and payload bytes.
 
+The executable generation records a selected preset when it differs from the
+preset in the immutable creation Header. Cold attachment resolves that preset
+through the current composition owner. The first Turn locks this choice.
+
+An ordinary Session freezes its creation-time file policy in the Header.
+The `sandbox` field carries either the configured sandbox mode or the selected
+permission preset with its resolved sandbox and approval policy. This keeps a
+blank Session's choice available after a Host restart. Later selections belong
+to the [Session permission domain](../permission/README.md).
+
 ## Message feedback
 
 Feedback belongs to the Session that produced the finalized assistant message.
@@ -82,7 +92,7 @@ these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.
 The serialized entered list has a 32 MiB prepared-input envelope. Typed
 construction and deserialization validate it; safe-Rust consumers borrow it
-without repeating serialization. Session format 44 retains verbatim files as
+without repeating serialization. The Session retains verbatim files as
 typed `FileRef` content, independently of image and conversation references.
 Image blocks may include optional display metadata independent of the raster identity. File bytes and provider-local paths do not enter Facts. It separates `InputMessageClaimed`
 and `ToolContextsClaimed` from `StepInputsPrepared`. Direct `TurnAccepted` text is
@@ -150,7 +160,7 @@ bounded like other non-human Agent messages and cannot carry execution overrides
 Command inputs retain one or more typed text, image or file blocks in their original
 order. Their external admission owner verifies referenced objects; the protocol
 validates descriptors, provenance and aggregate bounds without filesystem I/O.
-Session format 44 admits this content under both pending and claimed command
+The Session admits this content under both pending and claimed command
 provenance. Command input grants no execution overrides or frozen-reference authority.
 
 `ExtensionJournal` is the built-in version-2 envelope for a trusted process
@@ -257,6 +267,9 @@ inherits its parent's current working directory at admission. Manual history
 forks preserve the source Header coordinates. Coordinates identify a location
 and are independent of the execution lease.
 
+Children that inherit the parent's Agent preset use its active selection at
+creation. A Tool-owned child also inherits the invoking Turn's file-access
+ceiling. Subsequent selection changes leave the child's creation evidence intact.
 The Header freezes optional `DelegationPolicy` in child Headers: selected role,
 persona, normalized role digest and at most 64 ordered effective Tool names.
 This records a monotone restriction, not a permission grant or an executable
@@ -363,7 +376,7 @@ canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 44 is accepted; all other formats are unsupported. Header protection is
+format 45 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

@@ -143,10 +143,11 @@ impl SessionProjectionAdapter {
         if cancellation.is_cancelled() {
             return Err(ContributionError::Closed);
         }
-        SessionProjectionSnapshot::new(
+        SessionProjectionSnapshot::with_preset(
             context.header.session_id().clone(),
             context.header.fingerprint().map_err(invalid)?,
             self.pin.source_digest(),
+            self.pin.selection().preset().cloned(),
             context.cursor,
             entries,
         )

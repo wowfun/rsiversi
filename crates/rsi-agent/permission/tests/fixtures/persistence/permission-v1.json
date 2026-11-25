@@ -1,0 +1,81 @@
+{
+  "payload": {
+    "version": 1,
+    "schema": {
+      "root": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/0"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "definitions": [
+        {
+          "type": "object",
+          "properties": {
+            "preset": {
+              "type": "string"
+            },
+            "sandbox": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/1"
+                }
+              ]
+            },
+            "approval": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/2"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "preset",
+            "sandbox",
+            "approval"
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only"
+            },
+            {
+              "type": "string",
+              "const": "workspace-write"
+            },
+            {
+              "type": "string",
+              "const": "danger-full-access"
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ask"
+            },
+            {
+              "type": "string",
+              "const": "never"
+            }
+          ]
+        }
+      ]
+    },
+    "samples": [
+      "null",
+      "{\"preset\":\"danger-full-access\",\"sandbox\":\"danger-full-access\",\"approval\":\"never\"}",
+      "{\"preset\":\"workspace-write\",\"sandbox\":\"workspace-write\",\"approval\":\"ask\"}"
+    ]
+  },
+  "sha256": "eb04187fa9538790844c90d80c6838537cd16d19653b6b2f19d4ecd048cf9ba4"
+}

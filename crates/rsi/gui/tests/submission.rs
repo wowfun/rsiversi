@@ -343,6 +343,23 @@ impl SessionHandle for Backend {
             ))
         }
     }
+    async fn preset_view(
+        &self,
+    ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionPresetView> {
+        let draft = self.draft_snapshot().await?;
+        Ok(rsi_session_protocol::SessionPresetView {
+            preset_id: draft.header.agent_preset_id().clone(),
+            revision: Some(rsi_agent_session_protocol::CommandRevision::Draft {
+                revision: draft.revision,
+            }),
+        })
+    }
+    async fn select_published_preset(
+        &self,
+        _: rsi_session_protocol::SelectPublishedPreset,
+    ) -> rsi_session_protocol::Result<u64> {
+        panic!("unexpected published preset selection")
+    }
     async fn select_preset(
         &self,
         _: rsi_session_protocol::SelectDraftPreset,

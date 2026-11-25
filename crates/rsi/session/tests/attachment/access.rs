@@ -192,6 +192,24 @@ async fn remote_session_reads_are_offline_caller_bound_and_live_streams_recheck_
     drop(read);
     let handle = scoped.attach(remote).await.unwrap();
     assert_eq!(handle.header().await.unwrap(), headers[1]);
+    let attempted_override = SubmitInput {
+        origin: rsi_session_protocol::SubmissionOrigin::User,
+        attribution: None,
+        reasoning_effort: None,
+        delivery: rsi_agent_session_protocol::MessageDelivery::NextTurn,
+        message_id: MessageId::new("device-policy").unwrap(),
+        content: vec![SessionInput::Text {
+            text: "hello".into(),
+        }]
+        .try_into()
+        .unwrap(),
+        model: None,
+        sandbox: Some(rsi_sandbox::SandboxMode::DangerFullAccess),
+    };
+    assert!(matches!(
+        handle.submit(attempted_override).await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
     assert_eq!(handle.history_before(None, 8).await.unwrap().facts.len(), 1);
     store
         .append(AppendBatch {

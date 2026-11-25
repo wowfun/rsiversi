@@ -333,8 +333,9 @@ local directory through Workspace ingress for the live device. An unplaced
 conversation uses the first visible registered local Workspace in insertion
 order. A Home without one requires an explicit directory. Creation returns
 the native draft identity, preset, whether the identity was reused, and its
-creation-time list summary. Reusing a named blank Session selects the explicit preset or the current Host default
-after checking workspace placement. Opening a Session from history preserves its
+creation-time list summary. Reusing a named Session before its first Turn selects
+the explicit preset or the current Host default after checking workspace placement.
+An accepted mailbox message or a saved permission still permits reuse. Opening a Session from history preserves its
 recorded preset. Ordinary
 application conversations reserve their identity in the Host catalog before
 returning. Devices with access to that Workspace can discover an empty
@@ -417,6 +418,12 @@ It returns the configured base, the optional saved override and its Settings
 version. Saving and clearing use that version. After an uncertain save, reopening
 the form reads the provider's recorded choice through Settings recovery.
 
+`application.permission-settings` uses the same Host configuration authority
+and Settings revision checks. The workbench resolves its configured default
+preset into a name, sandbox and approval policy before saving that field in
+`rsi.agent`. Resetting the field restores the configured sandbox for new
+Sessions and preserves model, pricing and other Agent settings.
+
 Applications read and change the default for new Sessions through the Host's
 `rsi.agent-presets` Settings namespace. The callback returns the effective ID,
 the optional user override, and the Settings version. The caller needs Host
@@ -427,9 +434,10 @@ an existing Session preserves its selection. In an SSH workspace, an
 application-only default prompts the user to choose a native preset for that
 creation. The shared default remains available for local workspaces.
 Selecting a preset targets the existing Session's interactive handle. Only a
-blank draft accepts a change. The switch uses its current revision and never
-creates a replacement Session. Its receipt reports whether the Host actually
-changed the draft's preset.
+regular Session before its first Turn accepts a change. The switch uses the
+current draft or durable control revision. A queued message retains its ID,
+payload and position and runs with the newly selected composition. The
+receipt reports whether the selection changed.
 
 `application.model.select` executes the Session's pinned model-selection command
 with a caller-supplied request identity and the current command revision. The
@@ -538,6 +546,9 @@ fragments of one JSON event array. Pages contain at most 64 control records,
 normally within that ordinary page budget; one larger record uses its exact
 Store-reported size. Non-projected records still advance the returned watermark.
 Pages expose model-selection commits with their Store-owned Fact anchors;
+before the first Turn, a recovered executable generation also supplies its
+effective Agent preset. Readers can replay multiple switches at their actual
+control positions, including a return to the creation preset.
 the native model-selection codec resolves complete replacements. The same
 control position carries any change to the Goal domain. Its public summary
 contains the current identity, objective, phase, round cap and stopping reason.

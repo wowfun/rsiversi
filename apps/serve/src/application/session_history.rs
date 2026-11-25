@@ -474,8 +474,11 @@ fn stored_header(header: &rsi_agent_session_protocol::SessionHeader) -> Value {
         == &rsi_execution_protocol::ExecutionLocation::Local)
         .then(|| header.canonical_cwd());
     let mut meta = json!({"id":header.session_id(),"created_at":header.created_at_ms(),"cwd":cwd,
-        "preset":header.agent_preset_id(),"inherited":header.history_origin().is_some(),
+        "preset":header.agent_preset_id(),"sandbox":header.settings().sandbox(),"inherited":header.history_origin().is_some(),
         "parent":header.fork_origin().map(|origin| origin.parent.session_id()).or_else(|| header.history_origin().map(|history| &history.parent_session_id))});
+    if let Some(permission) = header.settings().permission() {
+        meta["permission"] = json!(permission);
+    }
     if let (Some(rsi_agent_session_protocol::ExecutionOwner::Plugin { .. }), Some(origin)) =
         (header.execution_owner(), header.fork_origin())
     {

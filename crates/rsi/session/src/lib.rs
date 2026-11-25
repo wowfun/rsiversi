@@ -679,7 +679,10 @@ impl LocalSessionService {
             Err(StoreError::NotFound(_)) => {}
             Err(error) => return Err(map_store_error(error)),
         }
-        let preset = preset.unwrap_or_else(|| source.agent_preset_id().clone());
+        let preset = match preset {
+            Some(preset) => preset,
+            None => published_preset(self.store.as_ref(), &source).await?.1,
+        };
         workflow::require_preset(self.workflow.as_deref(), &preset)?;
         let caller_revoked = match &self.origin {
             rsi_api_protocol::CallOrigin::Local => tokio_util::sync::CancellationToken::new(),
@@ -1162,6 +1165,23 @@ impl LocalSessionHandle {
 
     fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    async fn resume_for_input(&self, header: &SessionHeader) -> Result<SubmitSession> {
+        if !self
+            .workflow
+            .as_deref()
+            .is_some_and(rsi_session_protocol::WorkflowReadinessSource::available)
+        {
+            let (_, preset) = published_preset(self.store.as_ref(), header).await?;
+            workflow::require_preset(self.workflow.as_deref(), &preset)?;
+        }
+        let prepared = self
+            .turns
+            .prepare_resume(self.session_id())
+            .await
+            .map_err(map_turn_error)?;
+        Ok(SubmitSession::Resume(prepared))
     }
 
     async fn header_snapshot(&self) -> Result<Arc<SessionHeader>> {
@@ -1828,6 +1848,60 @@ impl SessionHandle for LocalSessionHandle {
             .select_preset(self.clone(), request)
             .await
     }
+    async fn preset_view(&self) -> Result<rsi_session_protocol::SessionPresetView> {
+        use rsi_agent_session_protocol::CommandRevision;
+        use rsi_session_protocol::SessionPresetView;
+        let _admission = self.admit()?;
+        let _activity = self.begin_read()?;
+        self.reconcile_fresh_read().await?;
+        let state = self.state.lock().await;
+        let ordinary = |header: &SessionHeader| {
+            header.history_origin().is_none()
+                && header.execution_owner().is_none()
+                && header.protection().is_none()
+        };
+        let header = match &*state {
+            HandleState::Fresh(draft) => {
+                return Ok(SessionPresetView {
+                    preset_id: draft.header().agent_preset_id().clone(),
+                    revision: (draft.header().execution_owner().is_none()
+                        && draft.header().protection().is_none())
+                    .then(|| draft.revision()),
+                });
+            }
+            HandleState::Attached(header) => Arc::clone(header),
+            HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
+        };
+        drop(state);
+        let (cut, preset_id) = published_preset(self.store.as_ref(), &header).await?;
+        Ok(SessionPresetView {
+            preset_id,
+            revision: (ordinary(&header) && cut.fact_seq == 0).then_some(
+                CommandRevision::Durable {
+                    control_seq: cut.control_seq,
+                },
+            ),
+        })
+    }
+    async fn select_published_preset(
+        &self,
+        request: rsi_session_protocol::SelectPublishedPreset,
+    ) -> Result<u64> {
+        self.require_host_owner()?;
+        let _admission = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        workflow::require_preset(self.workflow.as_deref(), &request.preset_id)?;
+        self.commands
+            .select_unstarted_preset(self.session_id(), request.preset_id, request.control_seq)
+            .await
+            .map_err(|error| match error {
+                TurnError::SessionBusy => SessionError::NotFound("editable Agent preset".into()),
+                TurnError::CommandRevisionConflict { expected, actual } => {
+                    SessionError::CommandRevisionConflict { expected, actual }
+                }
+                other => map_turn_error(other),
+            })
+    }
     async fn commands(&self) -> Result<rsi_agent_session_protocol::SessionCommandsView> {
         let _admission = self.admit()?;
         self.list_commands().await
@@ -2053,6 +2127,9 @@ impl SessionHandle for LocalSessionHandle {
 
     async fn submit(&self, request: SubmitInput) -> Result<MessageReceipt> {
         let _admission = self.admit_mutation()?;
+        if request.sandbox.is_some() {
+            self.require_host_owner()?;
+        }
         let _activity = self.begin_activity()?;
         let pending: Vec<_> = request
             .content
@@ -2090,15 +2167,10 @@ impl SessionHandle for LocalSessionHandle {
             self.validate_model_selection(&selected)?;
         }
         let mut state = self.state.lock().await;
-        if let HandleState::Attached(attached_header) = &*state {
-            workflow::require_preset(self.workflow.as_deref(), attached_header.agent_preset_id())?;
+        if let HandleState::Attached(header) = &*state {
+            let header = Arc::clone(header);
             drop(state);
-            let session = self
-                .turns
-                .prepare_resume(self.session_id())
-                .await
-                .map(SubmitSession::Resume)
-                .map_err(map_turn_error)?;
+            let session = self.resume_for_input(&header).await?;
             // These publication guards are GC roots until the awaited admission returns.
             let (message, execution, _publications) =
                 self.prepare_message(request, &header).await?;
@@ -2130,15 +2202,7 @@ impl SessionHandle for LocalSessionHandle {
         }
         let session = match &*state {
             HandleState::Fresh(draft) => SubmitSession::Fresh(draft.freeze()),
-            HandleState::Attached(attached) => {
-                workflow::require_preset(self.workflow.as_deref(), attached.agent_preset_id())?;
-                SubmitSession::Resume(
-                    self.turns
-                        .prepare_resume(self.session_id())
-                        .await
-                        .map_err(map_turn_error)?,
-                )
-            }
+            HandleState::Attached(header) => self.resume_for_input(header).await?,
             HandleState::Expired => return Err(SessionError::NotFound("draft lease".into())),
         };
         let result = self
@@ -2279,15 +2343,10 @@ impl SessionHandle for LocalSessionHandle {
             .describe(&request.model)
             .map_err(|error| map_ai_error(&error))?;
         let mut state = self.state.lock().await;
-        if let HandleState::Attached(attached_header) = &*state {
-            workflow::require_preset(self.workflow.as_deref(), attached_header.agent_preset_id())?;
+        if let HandleState::Attached(header) = &*state {
+            let header = Arc::clone(header);
             drop(state);
-            let session = self
-                .turns
-                .prepare_resume(self.session_id())
-                .await
-                .map(SubmitSession::Resume)
-                .map_err(map_turn_error)?;
+            let session = self.resume_for_input(&header).await?;
             return self
                 .turns
                 .submit_image(SubmitImage {
@@ -2781,6 +2840,25 @@ fn map_turn_error(error: TurnError) -> SessionError {
         TurnError::QueueOperationConflict => SessionError::QueueOperationConflict,
         other => SessionError::Backend(other.to_string()),
     }
+}
+
+async fn published_preset(
+    store: &dyn SessionStore,
+    header: &SessionHeader,
+) -> Result<(
+    rsi_agent_store_protocol::StoreDomainWatermarks,
+    AgentPresetId,
+)> {
+    let (cut, generation) = store
+        .read_executable_generation(header.session_id())
+        .await
+        .map_err(map_store_error)?;
+    let preset_id = generation
+        .as_ref()
+        .and_then(|row| row.selection.preset())
+        .unwrap_or_else(|| header.agent_preset_id())
+        .clone();
+    Ok((cut, preset_id))
 }
 
 fn map_store_error(error: StoreError) -> SessionError {

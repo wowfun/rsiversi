@@ -41,9 +41,10 @@ message and freezes it with the request. Steering rejects sandbox overrides;
 queue edits and uncertain retries retain their original options. Dispatch admits
 that same bounded mode without rewriting it. The Agent enforces the execution
 policy and its independent approval requirement as defined by the
-[security contract](../../rsi-agent/docs/security.md). Pane metadata
-exposes the immutable Header sandbox default; document preferences never mutate
-that Header or imply platform isolation support.
+[security contract](../../rsi-agent/docs/security.md). The pane publishes the
+creation-time sandbox and the current permission projection. The Web composer sends ordinary messages
+without an override. Its access picker commits the owner's choice through
+`/permission`. Only the Host owner can submit an explicit one-Turn sandbox.
 
 An interaction refresh that confirms settlement removes its panel and succeeds.
 Read failures preserve the panel and report the failed observation.
@@ -376,7 +377,10 @@ Choosing a different preset on an attached unpublished draft preserves the Sessi
 ID and its fork origin. The Session owner compares the current draft revision and
 returns the selected Header. The GUI reattaches its presentation controllers to
 that Header and rebuilds the completion catalog. References are bound to their
-original target Header and must be released before selecting another preset.
+original target Header and must be released before changing that Header.
+For a published Session before its first Turn, selection preserves the Header
+and the queue. The replacement controller subscribes to durable history,
+including queued inputs and subsequent activity from another client.
 
 Repeated new-conversation actions in a workspace may reuse the pane's current
 empty draft or one it previously created and left untouched. Candidates must

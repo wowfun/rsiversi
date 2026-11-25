@@ -476,6 +476,15 @@ fn handle_operations(
         add!(DraftSnapshot, |owner, (): ()| async move {
             owner.draft_snapshot().await
         }),
+        add!(PresetView, |owner, (): ()| async move {
+            owner.preset_view().await
+        }),
+        add!(
+            SelectPublishedPreset,
+            |owner, request: rsi_session_protocol::SelectPublishedPreset| async move {
+                owner.select_published_preset(request).await
+            }
+        ),
         add!(
             DiscardDraftInputs,
             |owner, request: rsi_session_protocol::DiscardDraftInputs| async move {

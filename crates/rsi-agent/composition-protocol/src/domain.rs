@@ -3,7 +3,7 @@
 use rsi_agent_session_protocol::{
     DomainIdentity, DomainMutationSource, DomainRevision, DomainSnapshot, DomainStateCommit,
     DomainStateUpdate, DomainStateValue, MAXIMUM_DOMAIN_BASELINE_BYTES, MAXIMUM_SESSION_DOMAINS,
-    ReferenceCollector,
+    ReferenceCollector, SessionPermission,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt, marker::PhantomData, sync::Arc};
@@ -47,6 +47,22 @@ pub enum DomainError {
 }
 
 type Result<T> = std::result::Result<T, DomainError>;
+
+/// Codec shared by the permission editor and previously selected execution policy.
+pub fn session_permission_domain() -> Result<DomainDefinition<Option<SessionPermission>>> {
+    DomainDefinition::new(
+        DomainIdentity::new(SessionPermission::DOMAIN, SessionPermission::VERSION)
+            .expect("static permission identity"),
+        &None::<SessionPermission>,
+        |state| {
+            state.as_ref().map_or(Ok(()), |value| {
+                value.validate().map_err(|error| error.to_string())
+            })
+        },
+        DomainReferencePolicy::None,
+    )
+    .map(|definition| definition.with_fork_policy(DomainForkPolicy::ResetToInitial))
+}
 
 /// Initial-state behavior selected by an immutable domain definition.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -277,6 +293,18 @@ pub struct DomainCatalogBuilder {
 }
 
 impl DomainCatalogBuilder {
+    /// Keeps an explicit file-access selection enforceable when a new preset omits its editor.
+    pub fn retain_permission(&mut self, states: &[DomainSnapshot]) -> Result<()> {
+        if !self.definitions.contains_key(SessionPermission::DOMAIN)
+            && let Some(snapshot) = states
+                .iter()
+                .find(|state| state.identity().id() == SessionPermission::DOMAIN)
+            && !snapshot.state().value().is_null()
+        {
+            self.register(session_permission_domain()?.registration())?;
+        }
+        Ok(())
+    }
     /// Creates one unique empty generation.
     pub fn new() -> Self {
         Self::default()
@@ -398,6 +426,11 @@ impl DomainCatalog {
     /// Borrows complete initial states in stable domain-name order.
     pub fn baseline(&self) -> &[DomainSnapshot] {
         &self.inner.baseline
+    }
+
+    /// Whether this composition has a codec for the named Session domain.
+    pub fn contains(&self, domain: &str) -> bool {
+        self.inner.definitions.contains_key(domain)
     }
 
     /// Checks codec availability and semantic state validity for execution admission.

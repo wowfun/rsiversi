@@ -965,10 +965,10 @@ Escape and outside interaction dismiss open menus.
 The new-conversation composer offers the installed Agent presets next to its workspace.
 Opening the menu reads the current catalog, including the effective default and
 descriptions. Broken presets are omitted from selection. An explicit choice is
-staged in the current blank surface and applied by Session creation. An attached
-unpublished draft can change its preset in place. The Host reports whether that
-draft is still editable. Published conversations display their recorded preset
-in the header. The starting page resolves a custom default's display name on
+staged in the current blank surface and applied by Session creation. The picker
+remains available to the owner after a permission choice or a queued message,
+until the first Turn starts. The same pane then displays the selected preset
+in its header. The starting page resolves a custom default's display name on
 first appearance. Conversation defaults displays the current roster when opened.
 Each preset shows its description and selection state. A broken preset retains
 its discovery diagnostic and cannot be chosen.
@@ -985,13 +985,12 @@ and reveals the button; the threshold includes one pixel of browser rounding.
 Expanding a turn preserves the reading anchor without itself enabling this
 control. Scroll, transcript updates and viewport resize recalculate visibility.
 
-Access selection applies to subsequent queued messages from this browser, never
-to an active Turn or a frozen retry. Read Only, Workspace Write and Full access
-map to the typed sandbox request modes. Full access opens an acknowledgement
-dialog with its checkbox initially unchecked. Cancel or Escape preserves the
-current mode. Enabling Full access requires a checked acknowledgement
-and preserves configured Session and Tool approval requirements. Steering keeps the active Turn's
-policy. The add menu exposes supported image import, workspace file references,
+The access picker shows the Session's current permission. Full access opens an
+acknowledgement dialog with its checkbox initially unchecked. Cancel or Escape
+preserves the current mode. Confirming updates the Session for all clients.
+Steering keeps the active Turn's policy. The permission command and executor
+follow the [Session permission contract](../../../crates/rsi-agent/permission/README.md).
+The add menu exposes supported image import, workspace file references,
 conversation references, history and the Session's actual command catalog.
 Picker lifetimes are distinct from the metrics and other dialog lifetimes;
 closing a picker removes its modal and returns focus to the original editor.

@@ -10,10 +10,10 @@ use rsi_web_control::Assets;
 use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 
+mod agent_settings;
 mod language;
 #[cfg(test)]
 mod lease_tests;
-mod loop_settings;
 mod model_catalog;
 mod presets;
 mod session_capture;
@@ -340,6 +340,7 @@ impl Sessions {
                 "application.models",
                 "application.presets",
                 "application.loop-settings",
+                "application.permission-settings",
                 "application.language",
                 "application.model.select",
                 "application.command",
@@ -387,7 +388,8 @@ impl rsi_extension::Handler for BoundSessions {
                     "application.workspaces"=>self.workspace_operation(payload).await,
                     "application.models"=>self.model_catalog(payload).await,
                     "application.presets"=>self.presets(payload).await,
-                    "application.loop-settings"=>self.loop_settings(payload).await,
+                    "application.loop-settings"=>self.agent_settings(agent_settings::Field::ToolConcurrency,payload).await,
+                    "application.permission-settings"=>self.agent_settings(agent_settings::Field::DefaultPermission,payload).await,
                     "application.language"=>self.language(payload,&stop).await,
                     "application.model.select"=>self.select_model(payload).await,
                     "application.command"=>self.command(payload).await,

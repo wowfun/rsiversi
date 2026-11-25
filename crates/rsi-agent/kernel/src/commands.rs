@@ -60,6 +60,90 @@ impl Drop for CommandGuard {
 
 #[async_trait]
 impl SessionCommands for AgentKernel {
+    async fn select_unstarted_preset(
+        &self,
+        id: &SessionId,
+        preset: rsi_agent_session_protocol::AgentPresetId,
+        expected_control_seq: u64,
+    ) -> TurnResult<u64> {
+        let admission = self.inner.submission_admission.acquire(id).await?;
+        let header = read_validated_header_bounded(&self.inner, id)
+            .await
+            .map_err(turn_store_error)?;
+        if header.execution_owner().is_some()
+            || header.history_origin().is_some()
+            || header.protection().is_some()
+        {
+            return Err(TurnError::Invalid(
+                "Only ordinary Sessions may select a new preset".into(),
+            ));
+        }
+        let page = observation::read_domain_states_bounded(&self.inner, id, None)
+            .await
+            .map_err(turn_store_error)?;
+        if page.durable_fact_seq != 0 {
+            return Err(TurnError::SessionBusy);
+        }
+        if page.durable_control_seq != expected_control_seq {
+            return Err(TurnError::CommandRevisionConflict {
+                expected: CommandRevision::Durable {
+                    control_seq: expected_control_seq,
+                },
+                actual: CommandRevision::Durable {
+                    control_seq: page.durable_control_seq,
+                },
+            });
+        }
+        let current = page
+            .generation
+            .as_ref()
+            .and_then(|current| current.selection.preset())
+            .unwrap_or(header.agent_preset_id());
+        if current == &preset {
+            return Ok(page.durable_control_seq);
+        }
+        let selected = header
+            .for_preset(&preset)
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let seed = rsi_agent_composition_protocol::AgentGenerationSeed::new(
+            page.states
+                .iter()
+                .map(|state| state.snapshot.clone())
+                .collect(),
+        )
+        .map_err(turn_composition_error)?;
+        let pin = self
+            .inner
+            .composition
+            .pin_session(&selected, Some(&seed))
+            .await
+            .map_err(turn_composition_error)?
+            .for_session_preset(header.agent_preset_id());
+        if pin.preset_id() != &preset {
+            return Err(TurnError::Composition(
+                "Composition did not resolve the selected preset".into(),
+            ));
+        }
+        let commit = self
+            .generation_commit(&header, &pin, &page)
+            .await?
+            .ok_or_else(|| {
+                TurnError::Invariant("Preset change requires a generation record".into())
+            })?;
+        let kernel = self.clone();
+        let id = id.clone();
+        self.owned_commit(async move {
+            let _admission = admission;
+            kernel.publish_cold_generation(commit).await?;
+            if let Some(resident) = lock_state(&kernel.inner).sessions.get_mut(&id) {
+                resident.composition = pin;
+                resident.generation_attempt = None;
+                resident.generation_rejection = None;
+            }
+            Ok(expected_control_seq + 1)
+        })
+        .await
+    }
     async fn publish_baseline(&self, fresh: PreparedFreshSession) -> TurnResult<u64> {
         let header = fresh.header();
         let id = header.session_id();

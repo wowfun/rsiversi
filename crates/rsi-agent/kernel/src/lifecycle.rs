@@ -1021,11 +1021,15 @@ impl AgentKernel {
         let composition = if let Some(pin) = self.retained_cold_composition(header, selection)? {
             pin
         } else {
+            let selected = header
+                .for_preset(selection.preset().unwrap_or(header.agent_preset_id()))
+                .map_err(|error| TurnError::Invalid(error.to_string()))?;
             self.inner
                 .composition
-                .pin_session(header, Some(&seed))
+                .pin_session(&selected, Some(&seed))
                 .await
                 .map_err(turn_composition_error)?
+                .for_session_preset(header.agent_preset_id())
         };
         // Only current owners interpret retained state. Removed owners are history-only;
         // the output catalog describes the current executable set and is replaced on adoption.
@@ -1066,7 +1070,9 @@ impl AgentKernel {
             if let Some(run) = run
                 && run.run_id() == run_id
             {
-                let pin = run.pinned_composition();
+                let pin = run
+                    .pinned_composition()
+                    .for_session_preset(header.agent_preset_id());
                 return Ok((pin.selection() == selection).then_some(pin));
             }
         }

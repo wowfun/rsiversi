@@ -3,8 +3,8 @@ import {cp, mkdir, writeFile} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {startService, waitUntil} from './service.mjs';
-import {chooseStartingWorkspace} from './browser-fixture.mjs';
-import {openSettings} from './controls.mjs';
+import {chooseStartingWorkspace, connectHostOwner, registerFixtureWorkspace} from './browser-fixture.mjs';
+import {openConversation, openSettings} from './controls.mjs';
 
 const {RSI_WEB_BINARY: binary, RSI_WEB_ASSETS: assets, RSI_WEB_REPORT: output} = process.env;
 assert(binary && assets && output, 'Set the binary, assets, and an isolated report directory');
@@ -13,8 +13,8 @@ await mkdir(report, {recursive:true});
 const checks = [], errors = [];
 let browser, page, service;
 try {
-  service = await startService({binary, assets, report, developmentHttp:true, foregroundHost:process.platform === 'win32',
-    registrationLabel:'preset selector', async configure({config}) {
+  service = await startService({binary, assets, report, localWeb:true, developmentHttp:true, foregroundHost:process.platform === 'win32',
+    async configure({config}) {
       const preset = join(config,'agent-presets','editing');
       await cp(new URL('../../../crates/rsi/core/presets/standard/',import.meta.url), preset, {recursive:true});
       await writeFile(join(preset,'preset.toml'),'name = "Editing"\ndescription = "Review and edit the fixture."\n');
@@ -23,12 +23,11 @@ try {
       await writeFile(join(broken,'agent.profile.toml'),'invalid TOML [');
     }});
   browser = await chromium.launch();
-  page = await browser.newPage({viewport:{width:1280,height:880},colorScheme:'dark'});
+  const context = await browser.newContext({viewport:{width:1280,height:880},colorScheme:'dark'});
+  page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto(service.origin);
-  await page.getByLabel('Device registration receipt').fill(JSON.stringify(service.registration));
-  await page.locator('#dev-http').check();
-  await page.getByRole('button',{name:'Connect',exact:true}).click();
+  await registerFixtureWorkspace(page.request,service,service.register('Preset selector fixture'));
+  await connectHostOwner(page,service);
   // Pick the private fixture folder before the replay can send any content.
   await chooseStartingWorkspace(page, service);
   const pane = page.locator('.pane.selected');
@@ -58,7 +57,7 @@ try {
   assert.equal(await editor.inputValue(),message);
   checks.push('browse model and access choices without creating a session or moving the starting draft');
   await access.click();await page.getByRole('menuitemradio',{name:'Read Only'}).click();
-  await waitUntil(async()=>!!(await pane.getAttribute('data-session-id')),'apply access to unpublished session');
+  await waitUntil(async()=>!!(await pane.getAttribute('data-session-id')),'apply access to the session');
   await pane.getByRole('button',{name:'Access mode, current: Read Only'}).waitFor();
   const session = await pane.getAttribute('data-session-id');
   const generation = await pane.getAttribute('data-session-generation');
@@ -69,19 +68,27 @@ try {
   await pane.getByRole('button',{name:'Standard mode',exact:true}).waitFor();
   assert.equal(await pane.getAttribute('data-session-id'),session);
   assert.equal(await editor.inputValue(),message);
-  checks.push('host-selected preset rebinds the same unpublished session with text intact');
-  await pane.getByTestId('composer-send').click();
+  checks.push('select a new preset on the same published pre-Turn session with the draft intact');
+  await page.screenshot({path:join(report,'preset-before-first-turn.png')});
+  const peer = await context.newPage();
+  peer.on('pageerror', error => errors.push(error.message));
+  await peer.goto(service.origin);
+  await peer.locator('#workbench').waitFor({state:'visible'});
+  const peerPane = peer.locator('.pane.selected');
+  await openConversation(peer,peerPane,session);
+  await peerPane.getByRole('textbox',{name:'Main message'}).fill(message);
+  await peerPane.getByTestId('composer-send').click();
   await pane.getByText('Reviewed: '+message,{exact:true}).waitFor();
+  await peer.close();
   await waitUntil(async()=>(await service.readSessionFacts(session)).some(fact=>fact.type==='turn_terminal'),'replay completes');
   await pane.locator('.pane-header .session-preset').getByText('Standard mode').waitFor();
   assert.equal(await pick.isVisible(),false);
   assert.equal((await service.readSessionFacts(session)).filter(fact=>fact.type==='turn_terminal').length,1);
-  checks.push('published session shows a read-only preset after one turn');
+  checks.push('the original pane observes the other window’s reply and locks its preset at the first turn');
   await page.screenshot({path:join(report,'published.png')});
   await pane.getByRole('tab',{name:'Trajectory',exact:true}).click();
   await page.reload({waitUntil:'domcontentloaded'});
-  await page.locator('#dev-http').check();
-  await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
+  await page.locator('#workbench').waitFor({state:'visible'});
   await pane.getByRole('tab',{name:'Trajectory',selected:true}).waitFor();
   await pane.getByRole('tab',{name:'Chat',exact:true}).click();
   await pane.getByText('Reviewed: '+message,{exact:true}).waitFor();
@@ -106,8 +113,7 @@ try {
   assert.equal(await page.evaluate(()=>history.state?.rsiConversation),undefined);
   await page.evaluate(session=>history.replaceState({rsiConversation:{owner:'other device',session}},''),session);
   await page.reload({waitUntil:'domcontentloaded'});
-  await page.locator('#dev-http').check();
-  await page.getByRole('button',{name:'Reconnect with this browser',exact:true}).click();
+  await page.locator('#workbench').waitFor({state:'visible'});
   await pane.getByRole('button',{name:'Editing',exact:true}).waitFor();
   assert.equal(await pane.getAttribute('data-session-id'),'');
   checks.push('new conversation clears the tab selection and a different device namespace cannot restore it');

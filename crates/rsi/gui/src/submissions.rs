@@ -354,8 +354,8 @@ impl GuiApplication {
                     if let Some(descriptor) = commands.commands().iter().find(|command| command.name() == name) {
                         let arguments = composer_command_arguments(&attached, descriptor, arguments, &mut input.images, &input.references).await?;
                         let id = DomainRequestId::new(rsi_ui::fresh_identity("command")?).map_err(error)?;
-                        let invocation = rsi_client::command_invocation(&commands, name,
-                            arguments, id.clone()).map_err(error)?;
+                        let invocation = attached.controller.prepare_composer_command(&commands, name,
+                            arguments, id.clone()).await.map_err(error)?;
                         command = Some((id.to_string(), Request::Command { invocation }));
                     }
                 }

@@ -45,7 +45,10 @@ impl DomainStage {
     pub(super) fn registrar(&self) -> Arc<dyn DomainRegistrar> {
         self.registrar.clone()
     }
-    pub(super) fn seal(&self) -> Result<DomainCatalog, DomainError> {
+    pub(super) fn seal(
+        &self,
+        seed: &[rsi_agent_session_protocol::DomainSnapshot],
+    ) -> Result<DomainCatalog, DomainError> {
         let mut state = self.registrar.state.lock().expect("domain stage poisoned");
         let mut builder = state.builder.take().ok_or(DomainError::Closed)?;
         for (_, (binding, position)) in std::mem::take(&mut state.positions) {
@@ -54,6 +57,7 @@ impl DomainStage {
             }
         }
         drop(state);
+        builder.retain_permission(seed)?;
         builder.finish()
     }
 }

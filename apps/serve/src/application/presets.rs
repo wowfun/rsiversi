@@ -7,7 +7,7 @@ use rsi_agent_session_protocol::{AgentPresetId, SessionId};
 use rsi_api_protocol::{ApiError, ApiOutput, CallOrigin, RetainedBytes};
 use rsi_configuration_api::agent_presets::AgentPresetsOperation;
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::{SelectDraftPreset, SessionError};
+use rsi_session_protocol::SessionError;
 use rsi_settings_protocol::{SettingsError, SettingsVersion};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -73,6 +73,7 @@ impl rsi_agent_composition::ApplicationPresetSource for Source {
                 "rsi.agent.model-selection",
                 Value::Null,
             ),
+            rsi_host::ProfileEntry::new("permission", "rsi.agent.permission", Value::Null),
             rsi_host::ProfileEntry::new("goal", "rsi.agent.goal", json!({"domain_only":true})),
         ])))
     }
@@ -143,25 +144,11 @@ impl BoundSessions {
             },
             Operation::Select { id, session_id } => {
                 let handle = self.interactive_handle(&input.request, &session_id).await?;
-                let draft = match handle.draft_snapshot().await {
-                    Ok(draft) => draft,
+                let changed = match handle.select_agent_preset(id.clone()).await {
+                    Ok((_, changed)) => changed,
                     Err(SessionError::NotFound(_)) => return Ok(json!({"code":"locked"})),
                     Err(error) => return Err(Error::Remote(error.to_string())),
                 };
-                let changed = draft.header.agent_preset_id() != &id;
-                if changed {
-                    match handle
-                        .select_preset(SelectDraftPreset {
-                            preset_id: id.clone(),
-                            expected_revision: draft.revision,
-                        })
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(SessionError::NotFound(_)) => return Ok(json!({"code":"locked"})),
-                        Err(error) => return Err(Error::Remote(error.to_string())),
-                    }
-                }
                 self.routes
                     .caller(&input.request)
                     .map_err(|_| Error::Cancelled)?;

@@ -1,5 +1,10 @@
 # rsi-session-protocol
 
+The preset view reports the active Agent preset and its editable predecessor.
+A draft selection can rebind a blank Header. After publication, an owner may
+select a generation under the observed control revision until the first Turn
+begins. Published selections preserve the original Header and pending messages.
+
 The Session panel observes the roster of background commands belonging to its
 authenticated Session and immutable Header. Its initial snapshot includes
 running and retained terminal jobs. Hosts without Jobs omit this observation.

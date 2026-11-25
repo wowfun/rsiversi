@@ -221,6 +221,49 @@ impl ResourcePreview {
     }
 }
 impl Attachment {
+    async fn select_preset(
+        &self,
+        preset: &rsi_agent_session_protocol::AgentPresetId,
+        expected_header: &str,
+    ) -> Result<(rsi_agent_session_protocol::SessionHeader, bool)> {
+        if !self.durable.load(std::sync::atomic::Ordering::Acquire) {
+            match self.handle.draft_snapshot().await {
+                Ok(draft) => {
+                    if draft.header.fingerprint().map_err(error)? != expected_header {
+                        return Err("The draft preset changed; reopen the session".into());
+                    }
+                    let selected = self
+                        .handle
+                        .select_preset(rsi_session_protocol::SelectDraftPreset {
+                            preset_id: preset.clone(),
+                            expected_revision: draft.revision,
+                        })
+                        .await
+                        .map_err(error)?;
+                    return Ok((selected.header, false));
+                }
+                Err(rsi_session_protocol::SessionError::NotFound(_)) => {}
+                Err(reason) => return Err(error(reason)),
+            }
+        }
+        let header = self.handle.header().await.map_err(error)?;
+        if header.fingerprint().map_err(error)? != expected_header {
+            return Err("The selected Session header changed; reopen the session".into());
+        }
+        let (revision, _) = self
+            .handle
+            .select_agent_preset(preset.clone())
+            .await
+            .map_err(error)?;
+        Ok((
+            header,
+            matches!(
+                revision,
+                rsi_agent_session_protocol::CommandRevision::Durable { .. }
+            ),
+        ))
+    }
+
     fn remember_blank(&self) {
         let origin = self
             .defaults
@@ -418,7 +461,7 @@ impl Pane {
             "resource":resource, "resource_revision":resource_revision,
             "command_receipt":*current.submission.receipt.lock().expect("Web command receipt poisoned"),
             "protected":current.protected, "draft":!current.durable.load(std::sync::atomic::Ordering::Acquire),
-            "header":current.header, "agent_preset":current.agent_preset, "creation":current.creation,
+            "header":current.header, "agent_preset":state.projections.as_ref().and_then(|view|view.snapshot().selected_preset()).map_or(current.agent_preset.as_str(), |preset|preset.as_str()), "creation":current.creation,
             "projections":state.projections, "projection_notice":state.projection_notice,
             "goal_armed":current.controller.goal_armed(),
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
@@ -1092,6 +1135,7 @@ impl GuiApplication {
         let draft = pane.submission(&id)?;
         let mut creation = None;
         let mut selected_header = None;
+        let mut published_selection = false;
         let _preset_permit;
         let selected_handle = match source {
             Open::Create(mut request, _) => {
@@ -1117,19 +1161,9 @@ impl GuiApplication {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| "A submission is still awaiting its receipt")?;
-                let current = attached.handle.draft_snapshot().await.map_err(error)?;
-                if current.header.fingerprint().map_err(error)? != header {
-                    return Err("The draft preset changed; reopen the session".into());
-                }
-                let selected = attached
-                    .handle
-                    .select_preset(rsi_session_protocol::SelectDraftPreset {
-                        preset_id: preset.clone(),
-                        expected_revision: current.revision,
-                    })
-                    .await
-                    .map_err(error)?;
-                selected_header = Some(selected.header);
+                let (header, published) = attached.select_preset(&preset, &header).await?;
+                selected_header = Some(header);
+                published_selection = published;
                 creation = attached.creation.clone();
                 if let Some(creation) = &mut creation {
                     creation.agent_preset_id = Some(preset);
@@ -1178,7 +1212,7 @@ impl GuiApplication {
         } else {
             None
         };
-        let durable = inspection.is_some();
+        let durable = inspection.is_some() || published_selection;
         let mut transcript = Transcript::default();
         let (header, cursor, before, more) = if let Some(inspection) = inspection {
             let before = inspection
@@ -1209,7 +1243,12 @@ impl GuiApplication {
                     .await
                     .map_err(error)?,
             };
-            (header, None, None, false)
+            (
+                header,
+                published_selection.then(ObservationCursor::default),
+                None,
+                false,
+            )
         };
         let generation = self
             .attachment_generation

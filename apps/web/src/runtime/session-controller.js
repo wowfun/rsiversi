@@ -2,7 +2,6 @@ import {bindStarting, startingWorkspace, startConversation, prepareComposer} fro
 import {assertDraftStorageActive, draftStorageRetired} from '../../draft-databases.js';
 import {commandSelection, claimedCommand, commandToken} from '../../command-input.js';
 import {formatQuoteText} from '../../vendor/dsh/quote/format-quote.ts';
-import {accessKey, readAccess, saveAccess} from '../../composer-access.js';
 import {captureOf, captureKey, canCaptureReference} from '../../drafts.js';
 import {
   exportSession,
@@ -396,9 +395,12 @@ export function createPaneClass(context) {
       try {
         await this.flush();
         if (!editor || this.editor !== editor || this.generation !== generation) throw new Error('The draft changed while selecting a preset');
-        if (editor.record.pending || editor.record.references.length || editor.record.releases.length)
-          throw new Error('Resolve pending input and release references before changing the draft preset');
-        this.pendingPresetChange = {connection:context.connection, generation, session:data.session, preset:id, record:editor.record};
+        if (editor.record.pending) throw new Error('Resolve pending input before changing the preset');
+        if (data.projections?.cursor?.kind !== 'durable' && data.draft !== false) {
+          if (editor.record.references.length || editor.record.releases.length)
+            throw new Error('Release references before changing the draft preset');
+          this.pendingPresetChange = {connection:context.connection, generation, session:data.session, preset:id, record:editor.record};
+        }
         await this.action('select_preset', {header:editor.record.header, preset:id});
       } catch (error) {
         if (this.generation === generation) {
@@ -410,14 +412,6 @@ export function createPaneClass(context) {
       }
     }
     prepareComposer() { return prepareComposer(this, context); }
-    setAccess(mode) {
-      if (!this.editor) throw new Error('Open a conversation before changing access');
-      if (this.submitting || this.switching || this.editor.record.pending) throw new Error('Finish the pending request before changing access');
-      const key = accessKey(context.connection.drafts.namespace, this.staged.data.session);
-      saveAccess(key, mode);
-      this.accessPreference = {key, mode};
-      this.renderComposer();
-    }
     async flush(all = false) {
       await this.startBinding;
       await this.starting?.flush();
@@ -582,14 +576,10 @@ export function createPaneClass(context) {
       const storageRetired = draftStorageRetired();
       const starting = !this.generation ? this.starting : undefined;
       const session = this.staged?.data?.session;
-      const namespace = context.connection?.drafts?.namespace;
-      if (session && namespace) {
-        const key = accessKey(namespace, session);
-        if (this.accessPreference?.key !== key) {
-          try { this.accessPreference = {key, mode: readAccess(key)}; }
-          catch (error) { this.accessPreference = {key}; context.notify(error.message); }
-        }
-      }
+      const permission = data?.projections?.entries?.find(entry=>entry.producer==='rsi.permission.view')?.content?.value;
+      const selection = session ? permission : context.view?.setup?.agent?.permission_default;
+      const sandbox = selection?.sandbox ?? (session ? data.sandbox : context.view?.setup?.agent?.sandbox);
+      const standard = (selection?.approval ?? 'ask') === (sandbox === 'danger-full-access' ? 'never' : 'ask');
       const editor = this.editor,
         pending = editor?.record.pending;
       const sendDisabled =
@@ -610,8 +600,10 @@ export function createPaneClass(context) {
       this.images = editor?.images ?? [];
       this.composerView = {
         completionsAvailable: !!this.generation && !this.switching,
-        access: session ? this.accessPreference?.mode ?? this.staged?.data?.sandbox : context.view?.setup?.agent?.sandbox,
-        accessDisabled: !!this.submitting || !!editor?.record.pending || !!this.switching,
+        access: sandbox && (standard && (!selection?.preset || selection.preset === sandbox) ? sandbox : 'custom'),
+        accessDisabled: !(context.view?.navigation?.can_archive ?? data?.can_stop_work ?? context.view?.setup?.allowed)
+          || (session ? !permission : !context.view?.setup?.agent?.default_model)
+          || !!this.submitting || !!editor?.record.pending || !!this.switching,
         text: starting?.text ?? editor?.text ?? "",
         command: claimedCommand(editor?.text ?? '', [...(this.staged?.data?.commands?.commands ?? []),...(this.selectedCommand ? [this.selectedCommand] : [])]),
         workspace: data?.workspace?.registration.status === 'registered' ? data.workspace.registration.id : data ? undefined : startingWorkspace(this, context)?.id,

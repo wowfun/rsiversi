@@ -163,6 +163,8 @@ pub struct SessionProjectionSnapshot {
     session_id: SessionId,
     header_sha256: String,
     generation_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_preset: Option<crate::AgentPresetId>,
     cursor: ProjectionCursor,
     generation_rejection: Option<String>,
     generation_rebuilding: bool,
@@ -178,6 +180,25 @@ impl SessionProjectionSnapshot {
         session_id: SessionId,
         header_sha256: impl Into<String>,
         generation_sha256: impl Into<String>,
+        cursor: ProjectionCursor,
+        entries: Vec<ProjectionEntry>,
+    ) -> Result<Self> {
+        Self::with_preset(
+            session_id,
+            header_sha256,
+            generation_sha256,
+            None,
+            cursor,
+            entries,
+        )
+    }
+
+    /// Captures the selected preset when an executable generation differs from its creation Header.
+    pub fn with_preset(
+        session_id: SessionId,
+        header_sha256: impl Into<String>,
+        generation_sha256: impl Into<String>,
+        selected_preset: Option<crate::AgentPresetId>,
         cursor: ProjectionCursor,
         entries: Vec<ProjectionEntry>,
     ) -> Result<Self> {
@@ -199,6 +220,7 @@ impl SessionProjectionSnapshot {
             session_id,
             header_sha256,
             generation_sha256,
+            selected_preset,
             cursor,
             generation_rejection: None,
             generation_rebuilding: false,
@@ -227,6 +249,10 @@ impl SessionProjectionSnapshot {
     /// Returns the immutable composition's source digest.
     pub fn generation_sha256(&self) -> &str {
         &self.generation_sha256
+    }
+    /// Returns the logical preset override at this projection cut.
+    pub fn selected_preset(&self) -> Option<&crate::AgentPresetId> {
+        self.selected_preset.as_ref()
     }
     /// Returns the shared cut reflected by every entry.
     pub const fn cursor(&self) -> ProjectionCursor {
@@ -292,16 +318,18 @@ impl<'de> Deserialize<'de> for SessionProjectionSnapshot {
             session_id: SessionId,
             header_sha256: String,
             generation_sha256: String,
+            selected_preset: Option<crate::AgentPresetId>,
             cursor: ProjectionCursor,
             generation_rejection: Option<String>,
             generation_rebuilding: bool,
             entries: Vec<ProjectionEntry>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(
+        Self::with_preset(
             wire.session_id,
             wire.header_sha256,
             wire.generation_sha256,
+            wire.selected_preset,
             wire.cursor,
             wire.entries,
         )

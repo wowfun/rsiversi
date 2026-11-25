@@ -103,6 +103,7 @@ const WORKSPACE_CONTRIBUTOR_FACTORY: &str = "rsi.agent.workspace-context.contrib
 const TIME_CONTEXT_FACTORY: &str = "rsi.agent.time-context";
 const TODO_FACTORY: &str = "rsi.agent.todo";
 const MODEL_SELECTION_FACTORY: &str = "rsi.agent.model-selection";
+const PERMISSION_FACTORY: &str = "rsi.agent.permission";
 const CONTEXT_INPUT_FACTORY: &str = "rsi.agent.context-input";
 const PLAN_POLICY_FACTORY: &str = "rsi.agent.plan-policy";
 const REPEAT_REMINDER_FACTORY: &str = "rsi.agent.repeat-tool-reminder";
@@ -386,6 +387,10 @@ fn register_session_commands(
     register: &mut impl FnMut(&str, Arc<dyn PluginFactory>) -> rsi_host::Result<()>,
 ) -> rsi_host::Result<()> {
     register(TODO_FACTORY, Arc::new(rsi_agent_todo::TodoFactory))?;
+    register(
+        PERMISSION_FACTORY,
+        Arc::new(rsi_agent_permission::PermissionFactory),
+    )?;
     register(
         CONTEXT_INPUT_FACTORY,
         Arc::new(rsi_agent_context_input::ContextInputFactory),
@@ -2870,6 +2875,7 @@ mod tests {
                 TODO_FACTORY,
                 CONTEXT_INPUT_FACTORY,
                 MODEL_SELECTION_FACTORY,
+                PERMISSION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
                 "rsi.agent.schedule",
@@ -2908,6 +2914,7 @@ mod tests {
                 TODO_FACTORY,
                 CONTEXT_INPUT_FACTORY,
                 MODEL_SELECTION_FACTORY,
+                PERMISSION_FACTORY,
                 PLAN_POLICY_FACTORY,
                 GOAL_DOMAIN_FACTORY,
                 "rsi.agent.schedule",

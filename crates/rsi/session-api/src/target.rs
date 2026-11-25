@@ -46,6 +46,8 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::DraftObserve
             | Operation::DiscardDraftInputs
             | Operation::SelectPreset
+            | Operation::PresetView
+            | Operation::SelectPublishedPreset
             | Operation::Image
             | Operation::MutateQueue
             | Operation::QueueMutationStatus

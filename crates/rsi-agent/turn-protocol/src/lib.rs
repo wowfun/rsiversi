@@ -93,7 +93,12 @@ impl ResumeAdmissionIssuer {
         header
             .validate()
             .map_err(|error| TurnError::Invalid(error.to_string()))?;
-        if header.agent_preset_id() != composition.preset_id() {
+        if composition
+            .selection()
+            .preset()
+            .unwrap_or(header.agent_preset_id())
+            != composition.preset_id()
+        {
             return Err(TurnError::Invariant(
                 "resume Header and composition preset identities differ".into(),
             ));
@@ -163,6 +168,10 @@ struct PreparedResumeSessionInner {
 }
 
 impl PreparedResumeSession {
+    /// Current executable preset, including an owner's pre-Turn selection.
+    pub fn preset_id(&self) -> &rsi_agent_session_protocol::AgentPresetId {
+        self.inner.composition.preset_id()
+    }
     /// Domain cut validated during cold preparation; resident admissions need no cut.
     pub fn domain_control_seq(&self) -> Option<u64> {
         self.inner.domain_control_seq
@@ -1659,6 +1668,24 @@ pub trait HumanWait: fmt::Debug + Send + 'static {
 /// Executor-facing Kernel port.
 #[async_trait]
 pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
+    /// Resolves whether a required Tool approval may ask an answerer for this claim.
+    async fn approval_prompt_policy(
+        &self,
+        claim: &TurnClaim,
+    ) -> Result<rsi_agent_session_protocol::ApprovalPromptPolicy> {
+        if self
+            .composition(claim)?
+            .domains()
+            .contains(rsi_agent_session_protocol::SessionPermission::DOMAIN)
+        {
+            return Err(TurnError::ExecutionUnavailable);
+        }
+        Ok(claim
+            .header()
+            .settings()
+            .permission()
+            .map_or(Default::default(), |value| value.approval))
+    }
     /// Checks or changes the workspace on behalf of the exact active extension Tool.
     async fn tool_working_directory(
         &self,

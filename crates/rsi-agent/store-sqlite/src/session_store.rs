@@ -540,6 +540,25 @@ impl SessionStore for SqliteStore {
         })
         .await
     }
+    async fn read_executable_generation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(
+        rsi_agent_store_protocol::StoreDomainWatermarks,
+        Option<rsi_agent_store_protocol::StoreGenerationSelection>,
+    )> {
+        self.ensure_session_validated(session_id).await?;
+        let id = session_id.clone();
+        self.with_reader_named(StoreOperation::DomainStates, move |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(sql_error)?;
+            let generation = domain::read_executable_generation(&tx, &id)?;
+            tx.commit().map_err(sql_error)?;
+            Ok(generation)
+        })
+        .await
+    }
     async fn read_domain_admission(
         &self,
         session_id: &SessionId,

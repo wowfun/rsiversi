@@ -168,6 +168,33 @@ impl AgentKernel {
 
 #[async_trait]
 impl TurnExecution for AgentKernel {
+    async fn approval_prompt_policy(
+        &self,
+        claim: &TurnClaim,
+    ) -> TurnResult<rsi_agent_session_protocol::ApprovalPromptPolicy> {
+        let composition = self.composition(claim)?;
+        let permission = self
+            .current_permission(claim.header(), &composition)
+            .await?;
+        self.validate_claim(&lock_state(&self.inner), claim)?;
+        Ok(permission.map_or_else(
+            || {
+                if composition
+                    .domains()
+                    .contains(rsi_agent_session_protocol::SessionPermission::DOMAIN)
+                {
+                    rsi_agent_session_protocol::SessionPermission::initial_approval(claim.header())
+                } else {
+                    claim
+                        .header()
+                        .settings()
+                        .permission()
+                        .map_or(Default::default(), |value| value.approval)
+                }
+            },
+            |value| value.approval,
+        ))
+    }
     async fn tool_working_directory(
         &self,
         caller: &AgentCallerAuthority,

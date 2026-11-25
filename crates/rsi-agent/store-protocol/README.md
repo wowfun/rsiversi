@@ -1,5 +1,10 @@
 # rsi-agent-store-protocol
 
+An executable-generation read returns the latest selection and stream
+watermarks at the same cut. Clients can determine the effective preset and
+whether a first Turn has started without resolving plugins or reading Domain
+snapshots.
+
 A local Session's working-directory change records the canonical target in a
 `WorkingDirectoryChanged` control. A summary resolves the latest change at
 its own cut. Cold validation binds
