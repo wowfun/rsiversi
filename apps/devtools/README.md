@@ -106,6 +106,9 @@ both native exports and the launcher are verified before publication.
 `fixture-dist` binds the document bundle identity to its captured build-family
 digest. This lets evidence fixtures verify the exact native/assets publication;
 it does not make that digest a production wire-compatibility requirement.
+Capture reuses a regular file whose size and SHA-256 match the source.
+Only new or changed contents need a temporary file for atomic replacement.
+The final verification still checks the checkout against the captured bytes.
 Its synchronous command runner waits for the build lock, drains both child
 output pipes and retains failure diagnostics before reporting the exit status.
 Watched-build cancellation and process-tree settlement belong to the ordinary

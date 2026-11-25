@@ -2,7 +2,7 @@ use super::{Path, Result, Value, fs, hash, hash_file, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
 };
 
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -72,7 +72,6 @@ fn capture_names(
         stamps.insert(name, stamp(&fs::symlink_metadata(root.join(name))?));
     }
     for name in names {
-        valid_name(name)?;
         let path = root.join(name);
         let target = destination.join(name);
         if !path
@@ -118,7 +117,7 @@ fn capture_names(
             if stamp(&input.metadata()?) != stamp(&before) {
                 return Err(format!("source changed while opening: {name}").into());
             }
-            let (digest, bytes) = copy_source(&mut input, &target)?;
+            let (digest, bytes) = copy_source(&mut input, before.len(), &target)?;
             let executable = is_executable(&before);
             #[cfg(unix)]
             {
@@ -148,9 +147,32 @@ fn capture_names(
     }
     Ok(serde_json::to_value(records)?)
 }
-fn copy_source(input: &mut impl Read, target: &Path) -> Result<(String, u64)> {
+fn copy_source(input: &mut (impl Read + Seek), size: u64, target: &Path) -> Result<(String, u64)> {
+    if fs::symlink_metadata(target).is_ok_and(|info| info.is_file() && info.len() == size) {
+        let (digest, bytes) = stream_source(input, &mut std::io::sink(), target)?;
+        if bytes == size && hash_file(target)? == digest {
+            return Ok((digest, bytes));
+        }
+        input.rewind()?;
+    }
     let mut temporary =
         tempfile::NamedTempFile::new_in(target.parent().ok_or("missing capture parent")?)?;
+    let record = stream_source(input, &mut temporary, target)?;
+    if let Ok(info) = fs::symlink_metadata(target) {
+        if info.is_symlink() {
+            fs::remove_file(target)?;
+        } else {
+            writable(target)?;
+        }
+    }
+    temporary.persist(target)?;
+    Ok(record)
+}
+fn stream_source(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    target: &Path,
+) -> Result<(String, u64)> {
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 16 * 1024];
@@ -166,21 +188,9 @@ fn copy_source(input: &mut impl Read, target: &Path) -> Result<(String, u64)> {
             return Err(format!("source file exceeds 64 MiB: {}", target.display()).into());
         }
         digest.update(&buffer[..count]);
-        temporary.write_all(&buffer[..count])?;
+        output.write_all(&buffer[..count])?;
     }
-    let digest = format!("{:x}", digest.finalize());
-    if let Ok(info) = fs::symlink_metadata(target) {
-        if info.is_symlink() {
-            fs::remove_file(target)?;
-        } else {
-            if info.is_file() && info.len() == bytes && hash_file(target)? == digest {
-                return Ok((digest, bytes));
-            }
-            writable(target)?;
-        }
-    }
-    temporary.persist(target)?;
-    Ok((digest, bytes))
+    Ok((format!("{:x}", digest.finalize()), bytes))
 }
 fn link_destination(path: &Path) -> Result<std::path::PathBuf> {
     if let Ok(resolved) = path.canonicalize() {
@@ -438,9 +448,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("source");
         fs::write(&target, b"previous").unwrap();
-        let mut growing = std::io::repeat(b'x').take(MAX_SOURCE_BYTES + 1);
+        let mut growing = tempfile::NamedTempFile::new().unwrap();
+        growing.as_file().set_len(MAX_SOURCE_BYTES + 1).unwrap();
         assert!(
-            copy_source(&mut growing, &target)
+            copy_source(&mut growing, MAX_SOURCE_BYTES, &target)
                 .unwrap_err()
                 .to_string()
                 .contains("64 MiB")
@@ -450,18 +461,52 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_capture_reads_without_creating_a_staging_file() {
+        struct Source<'a> {
+            bytes: std::io::Cursor<&'a [u8]>,
+            directory: &'a Path,
+        }
+        impl Read for Source<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert_eq!(fs::read_dir(self.directory)?.count(), 1);
+                self.bytes.read(buffer)
+            }
+        }
+        impl std::io::Seek for Source<'_> {
+            fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+                std::io::Seek::seek(&mut self.bytes, to)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("source");
+        let bytes = b"previously captured";
+        fs::write(&target, bytes).unwrap();
+        let mut source = Source {
+            bytes: std::io::Cursor::new(bytes),
+            directory: directory.path(),
+        };
+        let size = bytes.len() as u64;
+        assert_eq!(
+            copy_source(&mut source, size, &target).unwrap(),
+            (hash(bytes), size)
+        );
+    }
+
+    #[test]
     fn streamed_capture_reuses_large_files_and_detects_same_length_changes() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("source");
         let mut bytes = vec![b'a'; 1024 * 1024];
-        let (digest, count) = copy_source(&mut bytes.as_slice(), &target).unwrap();
+        let size = bytes.len() as u64;
+        let (digest, count) =
+            copy_source(&mut std::io::Cursor::new(&bytes), size, &target).unwrap();
         assert_eq!(digest, hash(&bytes));
         assert_eq!(count, bytes.len() as u64);
         let modified = fs::metadata(&target).unwrap().modified().unwrap();
-        copy_source(&mut bytes.as_slice(), &target).unwrap();
+        copy_source(&mut std::io::Cursor::new(&bytes), size, &target).unwrap();
         assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), modified);
         bytes[32_768] = b'b';
-        copy_source(&mut bytes.as_slice(), &target).unwrap();
+        copy_source(&mut std::io::Cursor::new(&bytes), size, &target).unwrap();
         assert_eq!(fs::read(&target).unwrap(), bytes);
     }
 
