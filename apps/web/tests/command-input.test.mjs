@@ -26,30 +26,63 @@ test('skill completion places the caret before arguments and only changes an adm
     assert.equal(input.selectionEnd, input.selectionStart);
   }
 });
-test('rejected command insertion preserves displayed text and command state at both draft limits',async()=>{
+test('command insertion checks the current draft independently of other sessions in the pane',async()=>{
   const store=await DraftStore.open('e'.repeat(32),{kind:'local'});
   try {
-    for (const aggregate of [false,true]) {
-      const record=await store.ensure('main',`limit-${aggregate}`,'a'.repeat(64));
-      const editor=new DraftEditor(store,record);
-      const text='x'.repeat(aggregate ? 512*1024 : 1024*1024);
-      editor.edit(text);await editor.flush();
-      const pane=new(createPaneClass({}))('main');
-      Object.assign(pane,{generation:'one',editor,input:{value:text,selectionStart:0,selectionEnd:0,focus(){},setSelectionRange(){}},closeCompletions(){}});
-      pane.editors.set('current',editor);
-      if(aggregate)pane.editors.set('other',{textBytes:2*1024*1024-editor.textBytes});
-      await assert.rejects(pane.selectCommand(plan),/limit|large|exceed/i);
-      assert.equal(pane.input.value.length,text.length);
-      assert.equal(pane.input.value,text);
-      assert.equal(editor.text,text);assert.equal(editor.dirty,false);
-      assert.equal(pane.selectedCommand,undefined);
+    const pane=new(createPaneClass({}))('main');
+    const full='x'.repeat(1024*1024);
+    for(const id of ['first','second','current']){
+      const editor=new DraftEditor(store,await store.ensure('main',id,'a'.repeat(64)));
+      editor.edit(id==='current'?'new text':full);
+      await editor.flush();
+      pane.editors.set(id,editor);
     }
+    const editor=pane.editors.get('current');
+    Object.assign(pane,{generation:'one',editor,input:{value:editor.text,selectionStart:0,selectionEnd:0,focus(){},setSelectionRange(){}},closeCompletions(){},prefetchCommands(){}});
+    await pane.selectCommand(plan);
+    await editor.flush();
+    assert.equal((await store.get('main','current')).text,'/plan new text');
+    assert.equal(pane.input.value,editor.text);
+    assert.equal((await store.get('main','first')).text,full);
+
+    pane.editor=pane.editors.get('first');pane.input.value=full;pane.selectedCommand=undefined;
+    await assert.rejects(pane.selectCommand(plan),/exceed/i);
+    assert.equal(pane.input.value,full);
+    assert.equal(pane.editor.text,full);assert.equal(pane.editor.dirty,false);
+    assert.equal(pane.selectedCommand,undefined);
   } finally {await clearDraftRecords();}
 });
 test('command selection reports an unavailable editor separately from a stale selection',async()=>{
   const pane=new(createPaneClass({}))('main');
   pane.input={value:'',selectionStart:0,selectionEnd:0};
   await assert.rejects(pane.selectCommand(plan),/draft is not ready/i);
+});
+test('switching releases saved text editors and retains a failed save through recovery',async()=>{
+  const store=await DraftStore.open('e'.repeat(32),{kind:'local'});
+  const pane=new(createPaneClass({DraftEditor,connection:{drafts:store},notify:assert.fail}))('main');
+  Object.assign(pane,{renderComposer(){},async drainReferenceReleases(){}});
+  const open=async session=>{
+    pane.generation=session;
+    await pane.bindDraft({session,header:'a'.repeat(64)});
+  };
+  try {
+    await open('original');pane.edit('saved text');await pane.editor.flush();
+    const saved=pane.editor;
+    await open('second');
+    assert.equal(pane.editors.size,1);
+    await open('original');
+    assert.notEqual(pane.editor,saved);assert.equal(pane.editor.text,'saved text');
+    const original=store.edit,gate=Promise.withResolvers(),saving=pane.editor;
+    store.edit=()=>gate.promise;
+    pane.edit('local text during the switch');
+    await open('second');
+    gate.reject(new Error('storage unavailable'));
+    await assert.rejects(saving.flush(),/storage unavailable/);
+    store.edit=original;
+    await open('original');
+    assert.equal(pane.editor,saving);assert.equal(pane.editor.text,'local text during the switch');
+    assert.equal((await store.get('main','original')).text,'saved text');
+  } finally {await clearDraftRecords();}
 });
 test('leaving command input preserves disabled and composing editors',()=>{
   const pane=new(createPaneClass({}))('main');
@@ -74,7 +107,7 @@ test('restored commands prefetch their catalog for every admitted leading name c
 test('typing a command fetches one catalog while the request is pending',async()=>{
   const context={connection:{},notify:assert.fail},pane=new(createPaneClass(context))('main');
   const request=Promise.withResolvers();let reads=0;
-  const editor={text:'',textBytes:0,edit(text){this.text=text;}};
+  const editor={text:'',edit(text){this.text=text;}};
   Object.assign(pane,{generation:'one',editor,staged:{data:{}},action(){reads++;return request.promise;}});
   pane.edit('hello');assert.equal(reads,0);
   pane.edit('/plan');pane.edit('/plan on');assert.equal(reads,1);

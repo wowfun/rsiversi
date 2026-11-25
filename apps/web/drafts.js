@@ -570,31 +570,29 @@ export class DraftEditor {
     this.store = store; this.record = record; this.references = clone(record.references); this.text = record.text; this.images = clone(record.images);
     this.changed = changed; this.revision = 0; this.dirty = false; this.work = Promise.resolve();
   }
-  get text() { return this.localText; }
   // A metadata-only transaction may observe a peer's later editor snapshot.
   // Keep only our editable fields when the two diverge, including the revision used to freeze a send.
   get savedInput() { return this.windowInput ? {...this.record, ...this.windowInput} : this.record; }
-  set text(value) { this.localText = value; this.localTextBytes = bytes(value); }
+  get savedTextOnly() {
+    return !!this.text && !this.dirty && !this.failure && !this.windowInput &&
+      !this.resolving && !this.transferring && !charged(this.record);
+  }
   get references() { return this.localReferences; }
-  set references(value) { this.localReferences = value; this.localReferenceBytes = referenceBytes(value); this.localPreviewBytes = value.reduce((total, reference) => total + bytes(reference.preview), 0); }
-  get textBytes() { return this.localTextBytes + this.localReferenceBytes; }
-  edit(text, images = this.images, references = this.references, checkBudget = () => {}) {
+  set references(value) { this.localReferences = value; this.localPreviewBytes = value.reduce((total, reference) => total + bytes(reference.preview), 0); }
+  edit(text, images = this.images, references = this.references) {
     require(!this.transferring, "This draft is moving to another conversation; wait for recovery to finish");
     require(!this.resolving, "Wait for this draft's current conflict resolution");
-    let size;
     if (images === this.images && references === this.references) {
       require(typeof text === "string", "Draft text must be a string");
       const textBytes = bytes(text);
       require(textBytes + this.localPreviewBytes <= MiB, "Draft text and reference previews exceed 1 MiB");
-      size = textBytes + this.localReferenceBytes;
     } else {
-      size = validateEditor(text, images, references);
+      validateEditor(text, images, references);
       require(captureCount(this.record, references) <= 16, "Clean up references before capturing more");
     }
-    checkBudget(size);
     if (references !== this.references) this.references = clone(references);
     if (images !== this.images) this.images = clone(images);
-    this.localText = text; this.localTextBytes = size - this.localReferenceBytes;
+    this.text = text;
     this.revision = bump(this.revision); this.dirty = true;
     this.pump(); this.changed();
   }

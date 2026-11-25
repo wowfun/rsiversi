@@ -44,7 +44,9 @@ permanently deletes them. After a failed read, the window retains its input
 and exposes recovery. Rust
 checks every pending operation and immutable Header binding before reconciliation.
 Ordinary Session text drafts use the available browser storage independently for
-each Session. Records containing images, references, outstanding releases or an
+each Session, including when the same pane switches between them. Typing or
+inserting a command checks the text and reference previews of the current draft.
+Records containing images, references, outstanding releases or an
 unresolved submission share an origin allowance of 128 records, 4 MiB editable
 text, 4 MiB pending text and 32 MiB opaque pending requests. Settling the last
 such obligation returns the record to ordinary storage.
@@ -151,8 +153,8 @@ execution. There is no cross-tab execution lease or automatic owner takeover.
 Within one pane, submission and reconciliation share synchronous admission before
 any binding or persistence wait. Repeated input and automatic reconciliation
 cannot run a second pending transition concurrently; failures release admission.
-The local editor budget includes unsaved cached input. Its UTF-8 size is cached
-per editor, so checking a keystroke does not encode every other draft again.
+When a pane leaves a saved text draft, it can release the editor and read that
+Session's record on return. Unsaved input and failed writes stay available for recovery.
 
 Rust prepares a full typed message or command invocation, including its original
 identity, Session and Header fingerprint, before any mutation. The document keeps

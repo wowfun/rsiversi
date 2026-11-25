@@ -281,14 +281,7 @@ export function createPaneClass(context) {
       assertDraftStorageActive();
       if (!this.generation && this.starting) { this.starting.edit(text); return; }
       if (!this.editor) throw new Error("The saved draft is still loading");
-      this.editor.edit(text, images, references, textBytes => {
-        const total = [...this.editors.values()].reduce(
-          (sum, editor) => sum + (editor === this.editor ? textBytes : editor.textBytes),
-          0,
-        );
-        if (total > 2 * 1024 * 1024)
-          throw new Error("Local drafts exceed this pane's 2 MiB limit");
-      });
+      this.editor.edit(text, images, references);
       this.prefetchCommands(text);
     }
     prefetchCommands(text) {
@@ -306,7 +299,15 @@ export function createPaneClass(context) {
     async bindDraft(data) {
       const generation = this.generation,
         current = context.connection;
+      const previous = this.editor;
       this.editor = undefined;
+      if (previous?.text) {
+        const work = previous.work, key = JSON.stringify(previous.record.key);
+        void work.then(() => {
+          if (previous !== this.editor && previous.work === work && previous.savedTextOnly &&
+              this.editors.get(key) === previous) this.editors.delete(key);
+        });
+      }
       if (!data || data.protected || !current?.drafts) return;
       const store = current.drafts,
         key = JSON.stringify(store.key(this.index, data.session));
@@ -342,7 +343,6 @@ export function createPaneClass(context) {
         }
         editor = new context.DraftEditor(store, record);
         editor.failure = failure;
-        this.editors.set(key, editor);
       }
       if (
         this.generation !== generation ||
@@ -350,6 +350,7 @@ export function createPaneClass(context) {
         current.closing
       )
         return;
+      this.editors.set(key, editor);
       this.editor = editor;
       editor.reuseGeneration = data.creation && !editor.record.everDispatched ? generation : undefined;
       this.bindingError =
