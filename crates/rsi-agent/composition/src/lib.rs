@@ -883,41 +883,27 @@ impl CompositionState {
             () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
             guard = Arc::clone(&row.build).lock_owned() => guard,
         };
-        let build_slot = tokio::select! {
-            biased;
-            () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
-            permit = Arc::clone(&self.build_slots).acquire_owned() => {
-                permit.map_err(|_| AgentCompositionError::ShuttingDown)?
-            },
-        };
         let preset_id = &preset_id;
-        let seed_value = match seed {
-            Some(seed) => seed.clone(),
+        let restoring = seed.is_some();
+        let seed = match seed {
+            Some(seed) => seed,
             None => snapshot
-                .seeds
-                .clone()
+                .generation_seed()
                 .map_err(|reason| unavailable(preset_id, reason))?,
         };
-        let inputs = Arc::new(AgentGenerationInputs::new(seed_value, seed.is_some()));
-        if self.shutdown.is_cancelled() {
-            return Err(AgentCompositionError::ShuttingDown);
-        }
 
         let current = {
             let inner = self.inner.lock().expect("composition state poisoned");
             if !inner.accepting {
                 return Err(AgentCompositionError::ShuttingDown);
             }
-            row.current
-                .lock()
-                .expect("composition row poisoned")
-                .iter()
-                .flatten()
-                .find(|generation| {
+            row.current.lock().expect("composition row poisoned")[usize::from(restoring)]
+                .as_ref()
+                .filter(|generation| {
                     generation.identity.matches(
                         &program_digest,
                         &snapshot.contributions,
-                        &inputs,
+                        seed,
                         &selection,
                     )
                 })
@@ -927,6 +913,14 @@ impl CompositionState {
             return Ok(generation.pin.clone());
         }
 
+        let build_slot = tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => return Err(AgentCompositionError::ShuttingDown),
+            permit = Arc::clone(&self.build_slots).acquire_owned() => {
+                permit.map_err(|_| AgentCompositionError::ShuttingDown)?
+            },
+        };
+        let inputs = Arc::new(AgentGenerationInputs::new(seed.clone(), restoring));
         let manifest = Arc::new(snapshot.manifest(&candidate.snapshot())?);
         let resolver: Arc<dyn ProfileResolver> = snapshot.contributions.clone();
         let generation_plan = ProfileGenerationPlan::resolve((*candidate).clone(), resolver)
@@ -1452,11 +1446,11 @@ mod tests {
             &first,
             &row.selection(&snapshot, candidate.clone(), false).unwrap()
         ));
+        let application = row.selection(&snapshot, candidate.clone(), true).unwrap();
+        assert_ne!(first.selection, application.selection);
         let changed = snapshot
             .with_code_selection(Arc::from(b"new".as_slice()))
             .unwrap();
-        let application = row.selection(&snapshot, candidate.clone(), true).unwrap();
-        assert_ne!(first.selection, application.selection);
         let next = row.selection(&changed, candidate, false).unwrap();
         assert_ne!(first.selection, next.selection);
     }

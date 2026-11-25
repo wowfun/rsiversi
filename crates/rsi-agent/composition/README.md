@@ -82,13 +82,10 @@ selection. Multiple providers conflict at ordinary Local publication. The same
 pin retains both builder and Tools for execution and delayed checkpoint work. A
 missing, malformed, or otherwise failed current source returns an error; it
 never falls back to an older cached generation. Failure leaves any previously
-published generation unchanged. Profile compilation uses a non-cancellable
-blocking task; that task itself retains the per-preset singleflight guard and
-global build permit, so dropping its waiter cannot admit overlapping compilers
-or let provider shutdown pass them. Once compilation returns, dropping a build
-waiter cancels its detached activation, and both guards remain held until the
-unpublished Scope has rolled back. Stage, Fiber, catalog, and build capacity
-therefore cannot escape caller cancellation.
+published generation unchanged. A blocking Profile compilation holds its source
+probe permit through completion, even if its waiter leaves. Dropping an activation
+waiter cancels the detached build. The per-preset lock and build permit remain
+held until the unpublished Scope has rolled back.
 
 Builds are singleflight per preset. Each admitted build obtains exactly one
 `AgentCompositionSnapshot` from its application-owned `AgentCompositionSource`
@@ -105,13 +102,13 @@ generation. Each preset retains its last compiled tree and selection digest;
 unchanged source bytes skip parsing, evaluation, freezing and selection hashing.
 The source probe uses a separate eight-operation blocking lane to verify current
 admission and exact included-file bytes. Prepared candidates retain no build
-permits or preset lock; consuming them acquires the preset's build lock and one
-of eight build permits. An unchanged source probe cannot queue behind a retained
-candidate or plugin activation. Each preset retains separate current slots for fresh, restoring and replacing
-inputs, so alternating draft creation and cold resume does not reactivate both
-generations. A new program or executable catalog retires the cached slots;
-changing a seed replaces only its fresh/restoring slot. External pins retain
-their existing independent lifetime.
+permits or preset lock. Under the preset's build lock, a matching published
+generation can be pinned while all eight build permits are in use.
+Constructing a new generation requires a build permit. Each preset retains one
+current generation for fresh inputs and one for restored inputs. Alternating
+draft creation and cold resume reuses both. A new program or executable catalog
+retires both slots. A changed seed replaces only its own slot. External pins
+retain their existing independent lifetime.
 Catalog identity includes every linked revision/native artifact digest and update
 mode, exact nominal Local/event bindings, and declared fresh Portable service
 keys. The process-local pin digest combines the evaluated program and selection with this catalog identity;

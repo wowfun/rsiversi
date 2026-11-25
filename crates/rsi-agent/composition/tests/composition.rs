@@ -333,7 +333,7 @@ struct Fixture {
 }
 
 struct BuildFixture {
-    _temp: TempDir,
+    temp: TempDir,
     ids: Vec<AgentPresetId>,
     gate: Arc<BuildGate>,
     runtime: Runtime,
@@ -510,7 +510,7 @@ impl BuildFixture {
         let (runtime, tools_fiber, composition_fiber, service) =
             activate_composition(presets, contributions).await;
         Self {
-            _temp: temp,
+            temp,
             ids,
             gate,
             runtime,
@@ -727,10 +727,22 @@ async fn duplicate_context_builder_rolls_back_candidate_and_preserves_current_pi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
-async fn builds_across_presets_never_exceed_the_global_limit() {
-    let fixture = BuildFixture::new(MAXIMUM_CONCURRENT_BUILDS + 1).await;
+async fn saturated_builds_limit_new_generations_and_allow_reusing_a_published_preset() {
+    let fixture = BuildFixture::new(MAXIMUM_CONCURRENT_BUILDS + 2).await;
+    let (ready, cold) = fixture.ids.split_first().unwrap();
+    fs::write(
+        fixture
+            .temp
+            .path()
+            .join("presets")
+            .join(ready.as_str())
+            .join(COMPOSITION_FILE),
+        "format = 1\n[[steps]]\nkind = \"plugin\"\nid = \"context\"\nplugin = \"test.context\"\n",
+    )
+    .unwrap();
+    let published = fixture.service.pin(ready, None).await.unwrap();
     let mut tasks = Vec::new();
-    for id in &fixture.ids {
+    for id in cold {
         let service = Arc::clone(&fixture.service);
         let id = id.clone();
         tasks.push(tokio::spawn(async move {
@@ -752,10 +764,17 @@ async fn builds_across_presets_never_exceed_the_global_limit() {
         MAXIMUM_CONCURRENT_BUILDS
     );
 
+    let reused =
+        tokio::time::timeout(Duration::from_secs(2), fixture.service.pin(ready, None)).await;
     fixture.gate.release.cancel();
     for task in tasks {
         drop(task.await.unwrap());
     }
+    let reused = reused
+        .expect("a published generation waited for unrelated builds")
+        .unwrap();
+    assert!(reused.same_generation(&published));
+    drop((reused, published));
     fixture.stop().await;
 }
 

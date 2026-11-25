@@ -262,13 +262,10 @@ impl GenerationIdentity {
         &self,
         program_digest: &str,
         catalog: &AgentContributionCatalog,
-        inputs: &rsi_agent_composition_protocol::AgentGenerationInputs,
+        seed: &rsi_agent_composition_protocol::AgentGenerationSeed,
         selection: &rsi_agent_session_protocol::GenerationSelection,
     ) -> bool {
-        self.program_digest == program_digest
-            && self.catalog.same_identity(catalog)
-            && self.seed_sha256 == *inputs.seed.sha256()
-            && self.restoring == inputs.restoring
-            && &self.selection == selection
+        self.seed_sha256 == *seed.sha256()
+            && self.matches_source(program_digest, catalog, selection)
     }
 }
