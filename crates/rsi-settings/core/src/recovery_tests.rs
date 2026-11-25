@@ -144,7 +144,21 @@ async fn failed_recovery_fences_only_target_and_survives_lease_retirement() {
             assert_ne!(current.scope_id, old_id);
             assert_eq!(current.value["value"], 1);
         } else {
-            assert_eq!(service.read("target").await.unwrap().revision, 1);
+            // Restoring the provider alone does not reconcile descriptive metadata.
+            assert!(matches!(
+                service.describe("target").await,
+                Err(SettingsError::RecoveryRequired(_))
+            ));
+            let (choice, raw) = service
+                .scope("target")
+                .unwrap()
+                .user_value(Some("value"))
+                .await
+                .unwrap();
+            assert_eq!(raw, Some(json!(1)));
+            assert_eq!(choice.revision, 1);
+            assert_eq!(service.describe("target").await.unwrap().version, choice);
+            assert_eq!(service.read("target").await.unwrap().version(), choice);
         }
         assert_eq!(provider.writes.load(Ordering::SeqCst), 1);
         drop(sibling);

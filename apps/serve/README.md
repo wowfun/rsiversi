@@ -411,6 +411,12 @@ duplex connection. It supplies their activation status. The Host contributes the
 model context builder and the Session model-selection and Goal domains. The Goal
 domain exposes the same native controls and projection to other clients. The application
 supplies its scoped request inputs and Tools. This source is available for local workspaces.
+The workbench reads and edits the active executor's concurrency override through
+`application.loop-settings`. The callback requires Host configuration access.
+It returns the configured base, the optional saved override and its Settings
+version. Saving and clearing use that version. After an uncertain save, reopening
+the form reads the provider's recorded choice through Settings recovery.
+
 Applications read and change the default for new Sessions through the Host's
 `rsi.agent-presets` Settings namespace. The callback returns the effective ID,
 the optional user override, and the Settings version. The caller needs Host
