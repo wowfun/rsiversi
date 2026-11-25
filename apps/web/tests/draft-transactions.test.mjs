@@ -43,6 +43,23 @@ test('moving uses the input visible in the source window when a peer last saved 
   await store.verify();
 });
 
+test('a workspace change leaves each captured reference bound to its own Session after reopen', async () => {
+  const store = await open();
+  const sourceRef = reference('source-capture');
+  const targetRef = reference('target-capture');
+  targetRef.metadata.target.session_id = 'destination';
+  const image = {id:'e'.repeat(64), mime:'image/png', bytes:40, width:2, height:2};
+  const source = await store.edit(await store.ensure('main','session',header), 'new text', [image], [sourceRef]);
+  const target = await store.edit(await store.ensure('main','destination',header), 'old text', [], [targetRef]);
+  await store.moveWorkspaceInput(source, target);
+  const reopened = await open();
+  const from = await reopened.get('main', 'session');
+  const to = await reopened.get('main', 'destination');
+  assert.deepEqual([from.text, from.images, from.references, from.releases], ['', [], [sourceRef], []]);
+  assert.deepEqual([to.text, to.images, to.references, to.releases], ['new text', [image], [targetRef], []]);
+  await reopened.verify();
+});
+
 test('an overfull destination keeps both workspace drafts intact', async () => {
   const store = await open();
   const image = {id:'d'.repeat(64), mime:'image/png', bytes:90, width:4, height:4};

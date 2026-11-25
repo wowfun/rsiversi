@@ -384,7 +384,8 @@ handoff never invents a Session identity or bypasses submission receipts.
 Choosing a different workspace from an attached composer carries unsent text
 and imported images from that window into the destination editor. Nonempty
 source text replaces the destination text, and images follow any images
-already there. Both Session records change in one browser transaction. Other
+already there. Each Session keeps its captured conversation references and
+their existing read and release bindings. Both Session records change in one browser transaction. Other
 open windows keep their visible input. A pending submission stays with its
 original Session. A failed transfer leaves the source input available.
 Recovery captures the connection and namespace before storage reads. Closing its
