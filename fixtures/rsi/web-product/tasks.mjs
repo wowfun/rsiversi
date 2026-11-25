@@ -250,8 +250,8 @@ for (const [name, engine] of [["chromium", chromium], ["firefox", firefox]]) {
     await goalBar.getByRole("button",{name:"Edit goal"}).click();
     await editor.fill("UI Goal hold");
     await editor.press("Shift+Enter");
-    await editor.press("End");
     await editor.pressSequentially("Review the edited draft");
+    assert.equal(await editor.inputValue(), "UI Goal hold\nReview the edited draft");
     await editor.press("Enter");
     await goalVisible(goalBar.getByText("UI Goal hold Review the edited draft",{exact:true}),"accepted inline edit");
     await goalBar.getByRole("button",{name:"Resume goal"}).click();
