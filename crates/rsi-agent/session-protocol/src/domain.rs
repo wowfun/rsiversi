@@ -559,12 +559,23 @@ impl DomainStateCommit {
         Self::new_with_command_inputs(request_id, source, updates, vec![])
     }
     /// Validates one atomic publication, including commands with inputs only.
-    /// At least one replacement or input is required.
+    /// Non-generation publications require at least one replacement or input.
     pub fn new_with_command_inputs(
         request_id: Option<crate::DomainRequestId>,
         source: DomainMutationSource,
         updates: Vec<DomainStateUpdate>,
         inputs: Vec<crate::CommandMessage>,
+    ) -> Result<Self> {
+        Self::assemble(request_id, source, updates, vec![], None, inputs)
+    }
+
+    fn assemble(
+        request_id: Option<crate::DomainRequestId>,
+        source: DomainMutationSource,
+        updates: Vec<DomainStateUpdate>,
+        removed: Vec<DomainIdentity>,
+        fact_span: Option<DomainFactSpan>,
+        command_inputs: Vec<crate::CommandMessage>,
     ) -> Result<Self> {
         source.validate()?;
         let baseline = source.is_initial();
@@ -630,19 +641,37 @@ impl DomainStateCommit {
                 actual: bytes,
             });
         }
-        Self {
+        let commit = Self {
             request_id,
             source,
             updates,
-            removed: vec![],
-            fact_span: None,
-            command_inputs: vec![],
+            removed,
+            fact_span,
+            command_inputs,
             request_sha256: String::new(),
+        };
+        commit.validate_command_inputs()?;
+        commit.validate_removed()?;
+        if commit.fact_span.is_some() && !matches!(commit.source, DomainMutationSource::Turn { .. })
+        {
+            return Err(SessionError::Invalid(
+                "only a Turn domain request binds Facts".into(),
+            ));
         }
-        .with_command_inputs(inputs)
+        commit.seal()
     }
     /// Declares exact removed owners at a generation cut; state remains in history.
     pub fn with_removed(mut self, removed: Vec<DomainIdentity>) -> Result<Self> {
+        if self.removed == removed {
+            return Ok(self);
+        }
+        self.removed = removed;
+        self.validate_removed()?;
+        self.seal()
+    }
+
+    fn validate_removed(&self) -> Result<()> {
+        let removed = &self.removed;
         if (!removed.is_empty() && (!self.source.is_generation() || self.source.is_initial()))
             || removed.len() > MAXIMUM_SESSION_DOMAINS
             || removed.windows(2).any(|pair| pair[0].id() >= pair[1].id())
@@ -657,15 +686,7 @@ impl DomainStateCommit {
                     .into(),
             ));
         }
-        self.removed = removed;
-        self.request_sha256 = request_digest(
-            &self.source,
-            &self.updates,
-            &self.removed,
-            self.fact_span.as_ref(),
-            &self.command_inputs,
-        )?;
-        Ok(self)
+        Ok(())
     }
     /// Exact owners removed from the active set by this generation.
     pub fn removed(&self) -> &[DomainIdentity] {
@@ -698,17 +719,17 @@ impl DomainStateCommit {
         } else {
             Some(DomainFactSpan::from_facts(facts)?)
         };
-        self.request_sha256 = request_digest(
-            &self.source,
-            &self.updates,
-            &self.removed,
-            self.fact_span.as_ref(),
-            &self.command_inputs,
-        )?;
-        Ok(self)
+        self.seal()
     }
     /// Binds exact command-produced messages to the same atomic control publication.
     pub fn with_command_inputs(mut self, inputs: Vec<crate::CommandMessage>) -> Result<Self> {
+        self.command_inputs = inputs;
+        self.validate_command_inputs()?;
+        self.seal()
+    }
+
+    fn validate_command_inputs(&self) -> Result<()> {
+        let inputs = &self.command_inputs;
         if self.updates.is_empty() && inputs.is_empty() && !self.source.is_generation() {
             return Err(SessionError::Invalid(
                 "commit requires a domain replacement or command input".into(),
@@ -726,8 +747,7 @@ impl DomainStateCommit {
             DomainMutationSource::Command { invocation } => Some(invocation),
             _ => None,
         };
-        crate::CommandMessage::validate_batch(&inputs, invocation, self.source.is_initial())?;
-        self.command_inputs = inputs;
+        crate::CommandMessage::validate_batch(inputs, invocation, self.source.is_initial())?;
         if self.source.is_initial()
             && self.request_id.as_ref()
                 != self.first_command_source().map(|source| &source.request_id)
@@ -736,6 +756,10 @@ impl DomainStateCommit {
                 "initial request identity must match the first command task".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn seal(mut self) -> Result<Self> {
         self.request_sha256 = request_digest(
             &self.source,
             &self.updates,
@@ -798,28 +822,13 @@ impl<'de> Deserialize<'de> for DomainStateCommit {
             request_sha256: String,
         }
         let wire = Wire::deserialize(deserializer)?;
-        let mut commit = Self::new_with_command_inputs(
+        let commit = Self::assemble(
             wire.request_id,
             wire.source,
             wire.updates,
+            wire.removed,
+            wire.fact_span,
             wire.command_inputs,
-        )
-        .map_err(serde::de::Error::custom)?;
-        commit = commit
-            .with_removed(wire.removed)
-            .map_err(serde::de::Error::custom)?;
-        if wire.fact_span.is_some() && !matches!(commit.source, DomainMutationSource::Turn { .. }) {
-            return Err(serde::de::Error::custom(
-                "only a Turn domain request binds Facts",
-            ));
-        }
-        commit.fact_span = wire.fact_span;
-        commit.request_sha256 = request_digest(
-            &commit.source,
-            &commit.updates,
-            &commit.removed,
-            commit.fact_span.as_ref(),
-            &commit.command_inputs,
         )
         .map_err(serde::de::Error::custom)?;
         if commit.request_sha256 != wire.request_sha256 {

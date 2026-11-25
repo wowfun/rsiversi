@@ -351,12 +351,12 @@ Only replacement and steering conversion require Human provenance. The initial
 input of a ProgramRun-owned child requires Program cancellation rather than plain
 withdrawal; its execution owner, not the message source, determines that relation.
 
-A `DomainStateCommit` contains domain replacements, command-produced inputs, or
-both. An input-only commit is valid only for a command or first-publication
-baseline. Empty commits remain invalid; Turn and continuation domain mutations
-still require replacements. The digest covers the complete input batch even when
-the domain set is empty. Removing the last input cannot produce an empty commit,
-including through deserialization.
+A `DomainStateCommit` can publish domain replacements, command-produced inputs,
+or both. An input-only commit requires a command or an initial publication.
+A generation selection can have no replacements or inputs. Turn and continuation
+domain mutations require replacements. Readers validate the complete publication
+and verify one digest covering the source, replacements, removed owners, Fact
+bodies digest and ordered command inputs, including when the domain set is empty.
 
 Durable command inputs carry the same delivery intent as mailbox messages. A
 follow-up targets the next Turn even when the current Turn is running. Draft

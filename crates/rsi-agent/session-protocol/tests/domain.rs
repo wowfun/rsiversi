@@ -192,6 +192,50 @@ fn input_only_commits_bind_provenance_and_cannot_be_emptied() {
 }
 
 #[test]
+fn recovery_receipts_validate_and_bind_exact_removed_owners() {
+    use rsi_agent_session_protocol::{
+        DomainMutationSource, DomainStateCommit, GenerationSelection,
+    };
+    let source = DomainMutationSource::Recovery {
+        selection: GenerationSelection::new("a".repeat(64)).unwrap(),
+    };
+    let empty = DomainStateCommit::new(None, source, vec![]).unwrap();
+    let owners = ["a", "b"].map(|id| DomainIdentity::new(id, 1).unwrap());
+    let removed = empty.clone().with_removed(owners.to_vec()).unwrap();
+    assert_ne!(empty.request_sha256(), removed.request_sha256());
+    let wire = serde_json::to_value(&removed).unwrap();
+    assert_eq!(
+        serde_json::from_value::<DomainStateCommit>(wire.clone()).unwrap(),
+        removed
+    );
+    let mut wrong_version = wire.clone();
+    wrong_version["removed"][0]["version"] = 2.into();
+    assert!(
+        serde_json::from_value::<DomainStateCommit>(wrong_version)
+            .unwrap_err()
+            .to_string()
+            .contains("digest")
+    );
+    let mut reordered = wire.clone();
+    reordered["removed"].as_array_mut().unwrap().reverse();
+    assert!(
+        serde_json::from_value::<DomainStateCommit>(reordered)
+            .unwrap_err()
+            .to_string()
+            .contains("sorted")
+    );
+    let mut misplaced = wire;
+    misplaced["fact_span"] =
+        serde_json::json!({"first_seq":1,"count":1,"bodies_sha256":"0".repeat(64)});
+    assert!(
+        serde_json::from_value::<DomainStateCommit>(misplaced)
+            .unwrap_err()
+            .to_string()
+            .contains("only a Turn")
+    );
+}
+
+#[test]
 fn mixed_domain_receipts_bind_fact_bodies_but_not_allocated_positions() {
     use rsi_agent_session_protocol::{
         DomainFactSpan, DomainFactSpanBuilder, DomainMutationSource, DomainRequestId,
