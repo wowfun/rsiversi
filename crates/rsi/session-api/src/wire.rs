@@ -58,6 +58,7 @@ pub enum Operation {
     RunScheduledTask,
     Submit,
     Commands,
+    PrepareApplicationCommands,
     ExecuteCommand,
     /// Change a Session model through its independent picker.
     SelectModel,
@@ -109,7 +110,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 72] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -134,6 +135,7 @@ impl Operation {
         Self::RunScheduledTask,
         Self::Submit,
         Self::Commands,
+        Self::PrepareApplicationCommands,
         Self::ExecuteCommand,
         Self::SelectModel,
         Self::MessageFeedback,
@@ -220,6 +222,9 @@ impl Operation {
             ),
             Self::Submit => ("submit", Data, Mutation, 8 * 1024 * 1024, 16 * 1024),
             Self::Commands => ("commands", Data, Read, 8192, 512 * 1024),
+            Self::PrepareApplicationCommands => {
+                ("prepare-application-commands", Data, Mutation, 8192, 8192)
+            }
             Self::MessageFeedback => ("message-feedback", Data, Read, 8192, 65536),
             Self::ChangeMessageFeedback => {
                 ("change-message-feedback", Data, Mutation, 65536, 65536)
@@ -312,6 +317,7 @@ impl Operation {
                     | Self::StopBackgroundJob
                     | Self::IsHostOwner
                     | Self::ExecuteCommand
+                    | Self::PrepareApplicationCommands
                     | Self::SelectPublishedPreset
                     | Self::Compact
             ) {

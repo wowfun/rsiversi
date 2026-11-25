@@ -173,6 +173,7 @@ pub(super) fn failure(
                     | Operation::ExecuteCommand
                     | Operation::SelectPreset
                     | Operation::SelectPublishedPreset
+                    | Operation::PrepareApplicationCommands
                     | Operation::GoalControl
             ) && expected != actual
         }
@@ -832,6 +833,21 @@ impl SessionHandle for Handle {
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionCommandsView> {
         self.call(Operation::Commands, &()).await
+    }
+    async fn prepare_application_commands(
+        &self,
+        expected_draft_revision: Option<u64>,
+    ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::CommandRevision> {
+        let revision = self
+            .call(
+                Operation::PrepareApplicationCommands,
+                &expected_draft_revision,
+            )
+            .await?;
+        match revision {
+            rsi_agent_session_protocol::CommandRevision::Durable { .. } => Ok(revision),
+            _ => Err(malformed(Operation::PrepareApplicationCommands)),
+        }
     }
     async fn message_feedback(
         &self,

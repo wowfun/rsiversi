@@ -880,7 +880,11 @@ fn workflow_failures_are_bound_to_their_actual_operations() {
             unavailable.is_ok(),
             matches!(
                 operation,
-                Operation::Create | Operation::SelectPreset | Operation::Submit | Operation::Image
+                Operation::Create
+                    | Operation::SelectPreset
+                    | Operation::SelectPublishedPreset
+                    | Operation::Submit
+                    | Operation::Image
             ),
             "{operation:?}"
         );

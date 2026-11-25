@@ -503,6 +503,12 @@ fn handle_operations(
             |owner, (): ()| async move { owner.commands().await }
         ),
         add!(
+            PrepareApplicationCommands,
+            |owner, revision: Option<u64>| async move {
+                owner.prepare_application_commands(revision).await
+            }
+        ),
+        add!(
             MessageFeedback,
             |owner, message: std::num::NonZeroU64| async move { owner.message_feedback(message).await }
         ),

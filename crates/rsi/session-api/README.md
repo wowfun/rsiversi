@@ -62,8 +62,12 @@ validates the snapshot and that none of the selected identities remain.
 `program_owned` rejection for a ProgramRun-owned child's initial input.
 Replacement and steering conversion retain Human-only semantics.
 
-`execute-command` v2 admits the Session protocol's 64 KiB encoded argument
+`execute-command` v3 admits the Session protocol's 64 KiB encoded argument
 budget within a 128 KiB request envelope, including the target and invocation.
+An owner can call the Session-bound `prepare-application-commands` mutation
+to publish the current draft before freezing a durable command invocation.
+Its optional draft revision must match. The reply identifies the durable
+control revision used by local and remote clients for the subsequent edit.
 
 Purge previews include UncertainWork for missing native settlement evidence.
 The decoder bounds total refusal evidence by the Store protocol limit and checks

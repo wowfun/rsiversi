@@ -35,6 +35,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::Attach
             | Operation::Submit
             | Operation::Commands
+            | Operation::PrepareApplicationCommands
             | Operation::MessageFeedback
             | Operation::ChangeMessageFeedback
             | Operation::Compact

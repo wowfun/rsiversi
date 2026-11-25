@@ -14,6 +14,34 @@ fn invocation() -> SessionCommandInvocation {
 }
 
 #[tokio::test]
+async fn remote_command_preparation_returns_only_a_durable_predecessor() {
+    let (remote, _, handle) = fixture().await;
+    let revision = CommandRevision::Durable { control_seq: 4 };
+    remote.reply(&envelope(json!(revision)));
+    assert_eq!(
+        handle.prepare_application_commands(Some(2)).await.unwrap(),
+        revision
+    );
+    {
+        let requests = remote.requests.lock().unwrap();
+        let (operation, request) = requests.last().unwrap();
+        assert_eq!(operation, &Operation::PrepareApplicationCommands.spec());
+        assert_eq!(request["input"], 2);
+        assert_eq!(
+            request["target"]["header_key"],
+            header().fingerprint().unwrap()
+        );
+    }
+    remote.reply(&envelope(json!(CommandRevision::Draft { revision: 2 })));
+    let before = remote.calls.load(Ordering::Acquire);
+    assert!(matches!(
+        handle.prepare_application_commands(None).await,
+        Err(SessionError::Api(ApiError::OutcomeUnknown))
+    ));
+    assert_eq!(remote.calls.load(Ordering::Acquire), before + 1);
+}
+
+#[tokio::test]
 async fn maximum_escaped_goal_detail_fits_registered_status_and_observation_replies() {
     let (remote, _, handle) = fixture().await;
     for detail in ["\n".repeat(4096), "\t".repeat(4096), "\\".repeat(4096)] {
