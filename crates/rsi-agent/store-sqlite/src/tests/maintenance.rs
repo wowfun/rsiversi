@@ -477,19 +477,40 @@ fn purge_selection_uses_session_and_operation_indexes_without_a_global_sort() {
     let store = SqliteStore::open(root.path()).unwrap();
     let mut slot = store.inner.connections.writer.lock().unwrap();
     let connection = slot.as_mut().unwrap();
-    let sql = crate::maintenance::deletion_query("facts", "seq", "length(fact_json)");
-    let mut statement = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .unwrap();
-    let plan = statement
-        .query_map(params!["operation", 512], |row| row.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-        .join("\n");
-    assert!(plan.contains("SEARCH facts USING INDEX"), "{plan}");
-    assert!(plan.contains("operation_tombstones"), "{plan}");
-    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    for (table, key, sequence, length, expected) in [
+        ("facts", "rowid", "seq", "length(fact_json)", "USING INDEX"),
+        (
+            "domain_heads",
+            "domain_id",
+            "control_seq",
+            "length(domain_id)",
+            "USING PRIMARY KEY",
+        ),
+        (
+            "domain_versions",
+            "domain_id",
+            "control_seq",
+            "length(domain_id)",
+            "USING",
+        ),
+    ] {
+        let sql = crate::maintenance::deletion_query(table, key, sequence, length);
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let plan = statement
+            .query_map(params!["operation", 512], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains(&format!("SEARCH {table} {expected}")),
+            "{plan}"
+        );
+        assert!(plan.contains("operation_tombstones"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
 }
 
 #[tokio::test]

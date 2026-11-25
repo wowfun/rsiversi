@@ -396,6 +396,10 @@ const STAGES: &[(&str, Option<&str>)] = &[
 ];
 // Largest valid checkpoint plus its Session identity and two hexadecimal digests.
 const MAXIMUM_BATCH_PAYLOAD: i64 = 64 * 1024 * 1024 + 256 + 2 * 64;
+enum DeletionKey {
+    Row(i64),
+    Domain(String),
+}
 fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, i64)> {
     let mut removed = 0_i64;
     let mut bytes = 0_i64;
@@ -413,12 +417,17 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
         } else {
             length
         };
-        let sequence = if matches!(stream, Some("fact" | "control")) {
-            "seq"
-        } else {
-            "0"
+        let domain = matches!(table, "domain_heads" | "domain_versions");
+        let (key, sequence, predicate) = match (domain, stream) {
+            (true, _) => (
+                "domain_id",
+                "control_seq",
+                "domain_id=?1 AND session_id=?2 AND control_seq=?3",
+            ),
+            (_, Some("fact" | "control")) => ("rowid", "seq", "rowid=?1"),
+            _ => ("rowid", "0", "rowid=?1"),
         };
-        let sql = deletion_query(table, sequence, &length);
+        let sql = deletion_query(table, key, sequence, &length);
         let mut statement = transaction.prepare(&sql).map_err(sql_error)?;
         let mut rows = statement
             .query(params![operation, 512 - removed])
@@ -437,7 +446,11 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
                 break;
             }
             keys.push((
-                row.get::<_, i64>(0).map_err(sql_error)?,
+                if domain {
+                    DeletionKey::Domain(bounded_text(row, 0, 256).map_err(sql_error)?)
+                } else {
+                    DeletionKey::Row(row.get::<_, i64>(0).map_err(sql_error)?)
+                },
                 bounded_text(row, 1, 256).map_err(sql_error)?,
                 row.get::<_, i64>(2).map_err(sql_error)?,
             ));
@@ -446,14 +459,26 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
         }
         drop(rows);
         drop(statement);
-        for (rowid, session, seq) in keys {
-            if let Some(stream) = stream {
-                verify_selected(transaction, table, stream, rowid, &session, seq)?;
-                reference_index::remove(transaction, &session, stream, seq)?;
-            }
-            transaction
-                .execute(&format!("DELETE FROM {table} WHERE rowid=?1"), [rowid])
+        if !keys.is_empty() {
+            let mut delete = transaction
+                .prepare(&format!("DELETE FROM {table} WHERE {predicate}"))
                 .map_err(sql_error)?;
+            for (key, session, seq) in keys {
+                match key {
+                    DeletionKey::Row(rowid) => {
+                        if let Some(stream) = stream {
+                            verify_selected(transaction, table, stream, rowid, &session, seq)?;
+                            reference_index::remove(transaction, &session, stream, seq)?;
+                        }
+                        delete.execute([rowid]).map_err(sql_error)?;
+                    }
+                    DeletionKey::Domain(id) => {
+                        delete
+                            .execute(params![id, session, seq])
+                            .map_err(sql_error)?;
+                    }
+                }
+            }
         }
         if full || removed == 512 {
             break;
@@ -467,9 +492,9 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
     Ok((removed, bytes))
 }
 
-pub(super) fn deletion_query(table: &str, sequence: &str, length: &str) -> String {
+pub(super) fn deletion_query(table: &str, key: &str, sequence: &str, length: &str) -> String {
     format!(
-        "SELECT rowid,session_id,{sequence},{length} FROM {table} WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE operation_id=?1 AND state='retiring') LIMIT ?2"
+        "SELECT {key},session_id,{sequence},{length} FROM {table} WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE operation_id=?1 AND state='retiring') LIMIT ?2"
     )
 }
 

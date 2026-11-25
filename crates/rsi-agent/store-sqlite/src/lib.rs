@@ -139,7 +139,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
             PRIMARY KEY (session_id, domain_id, control_seq),
             FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
-         ) STRICT",
+         ) STRICT, WITHOUT ROWID",
     ),
     (
         "domain_heads",
@@ -153,7 +153,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes > 0),
             PRIMARY KEY (session_id, domain_id),
             FOREIGN KEY (session_id, domain_id, control_seq) REFERENCES domain_versions(session_id, domain_id, control_seq) ON DELETE RESTRICT
-         ) STRICT",
+         ) STRICT, WITHOUT ROWID",
     ),
     (
         "domain_requests",

@@ -9,6 +9,9 @@ query, decoding each control once and retaining only selected snapshots. Both
 current and historical reads preserve domain ordering and reject missing,
 oversized or mismatched canonical records. Retained-state checks stay inside the
 write transaction so revision admission observes the same state as publication.
+SQLite stores current Domain heads under their Session and Domain names, and
+versions under those names and the control sequence. These composite primary
+keys address both reads and bounded retirement directly.
 Historical membership selects the last bounded name-set projection at its cut,
 then seeks each selected name's latest version. Work is independent of names
 retired before that cut and names introduced later. Canonical control replay
@@ -24,7 +27,7 @@ Message feedback is stored once in its canonical control. A partial index on
 Session, answer sequence and control sequence seeks the last change for one
 answer. Appends and replay check the predecessor and local Fact anchor.
 
-Schema 58 stores ordinary Facts of at least 1 KiB in independent checksummed zstd frames
+Schema 59 stores ordinary Facts of at least 1 KiB in independent checksummed zstd frames
 when the frame plus its SQL index projection is smaller than the canonical
 JSON. Uncompressed rows are read directly from SQLite. Model-effect coordinates
 remain queryable without expanding frames. Standalone command records and
