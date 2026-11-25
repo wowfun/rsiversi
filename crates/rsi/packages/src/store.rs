@@ -623,7 +623,6 @@ impl PackageStore {
             } else {
                 verify_file(source, file, Some(output))?;
             }
-            directory.directory.sync_all()?;
         }
         let mut budget = traversal_budget();
         sync_tree(&staging.directory, 0, &mut budget)?;

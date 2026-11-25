@@ -158,7 +158,8 @@ limits. An install that needs space reclaims unselected, unleased objects
 outside its candidate set until the reservation fits. Explicit GC can
 reclaim these objects at any time. Recovery enumeration allows the 256
 committed objects plus at most 128 interrupted staging names. Installation
-syncs every staged directory from leaves through the object root before publication.
+syncs each file after writing it. Once all files are staged, it syncs their
+directories from leaves through the object root before publication.
 If the incoming and already selected objects alone exceed capacity, the
 reservation fails before evicting reusable generations.
 If staging exhausts filesystem space or quota, installation discards the

@@ -39,6 +39,50 @@ fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
 }
 
 #[test]
+fn a_published_package_reopens_with_both_exports_in_the_same_nested_directory() {
+    let root = temporary_root();
+    let store_path = root.path().join("packages");
+    let mut input = source(root.path(), "nested", b"first");
+    let mut manifest = Manifest::parse(&input.manifest).unwrap();
+    std::fs::create_dir(input.directory.join("profiles")).unwrap();
+    let first = "profiles/first.toml";
+    let second = "profiles/second.toml";
+    std::fs::rename(
+        input.directory.join("application.toml"),
+        input.directory.join(first),
+    )
+    .unwrap();
+    std::fs::write(input.directory.join(second), b"other").unwrap();
+    manifest.files[0].path = first.into();
+    manifest.files.push(FileRecord {
+        path: second.into(),
+        bytes: 5,
+        digest: hex::encode(Sha256::digest(b"other")),
+        executable: false,
+    });
+    manifest.exports.get_mut("main").unwrap().path = first.into();
+    manifest.exports.insert(
+        "other".into(),
+        Export {
+            kind: ExportKind::ApplicationProfile,
+            path: second.into(),
+            index_digest: None,
+        },
+    );
+    input.manifest = serde_json::to_vec(&manifest).unwrap();
+    PackageStore::open(&store_path)
+        .unwrap()
+        .install(&[input], &[], &[], "portable")
+        .unwrap();
+    let store = PackageStore::open(&store_path).unwrap();
+    let lease = store.acquire("nested").unwrap();
+    for (name, expected) in [("main", b"first"), ("other", b"other")] {
+        let path = lease.export(name, ExportKind::ApplicationProfile).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
+
+#[test]
 fn unrelated_installs_and_rejected_publications_leave_retired_objects_for_gc() {
     let root = temporary_root();
     let store = PackageStore::open(&root.path().join("packages")).unwrap();
