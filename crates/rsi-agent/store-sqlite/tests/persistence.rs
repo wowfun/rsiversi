@@ -15,6 +15,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[path = "persistence/domains.rs"]
+mod domains;
 #[path = "persistence/execution.rs"]
 mod execution;
 
