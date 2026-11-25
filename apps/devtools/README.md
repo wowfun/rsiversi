@@ -109,6 +109,8 @@ it does not make that digest a production wire-compatibility requirement.
 Capture reuses a regular file whose size and SHA-256 match the source.
 Only new or changed contents need a temporary file for atomic replacement.
 The final verification still checks the checkout against the captured bytes.
+The frontend install gives pnpm the same store path when different checkouts
+reach the shared build cache through directory links.
 Its synchronous command runner waits for the build lock, drains both child
 output pipes and retains failure diagnostics before reporting the exit status.
 Watched-build cancellation and process-tree settlement belong to the ordinary

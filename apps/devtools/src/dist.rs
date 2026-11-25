@@ -309,6 +309,9 @@ fn collect_selected(arguments: &[String]) -> Result<()> {
 fn executable(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
+fn pnpm_store(cache: &Path) -> std::io::Result<PathBuf> {
+    Ok(command_path(cache.canonicalize()?).join("pnpm-store"))
+}
 pub(crate) fn command_path(path: PathBuf) -> PathBuf {
     // Node's JS module resolver does not consistently accept verbatim Win32 paths.
     // Keep canonical identity, but use the ordinary absolute spelling at process boundaries.
@@ -553,7 +556,7 @@ fn build(
     let assets = bundle.join("assets");
     if options.kind.web() {
         runner.cwd = captured.join("apps/web");
-        let store = cache.join("pnpm-store");
+        let store = pnpm_store(cache)?;
         let mut install = pnpm[1..].iter().map(String::as_str).collect::<Vec<_>>();
         install.extend([
             "install",
@@ -781,7 +784,7 @@ mod tests {
         }
     }
     #[test]
-    fn external_outputs_cannot_enter_managed_cache_even_through_aliases() {
+    fn cache_aliases_preserve_output_exclusion_and_pnpm_store_identity() {
         let root = tempfile::tempdir().unwrap();
         let cache = root.path().join("cache");
         fs::create_dir(&cache).unwrap();
@@ -813,7 +816,10 @@ mod tests {
                 .success()
         );
         #[cfg(any(unix, windows))]
-        assert!(validate_external_output(&cache, &alias.join("generations/notes")).is_err());
+        {
+            assert!(validate_external_output(&cache, &alias.join("generations/notes")).is_err());
+            assert_eq!(pnpm_store(&alias).unwrap(), pnpm_store(&cache).unwrap());
+        }
         assert!(!cache.join("generations").exists());
     }
     #[cfg(any(unix, windows))]
