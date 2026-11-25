@@ -69,7 +69,7 @@ async fn adapter(
     )])
     .unwrap();
     let pin = AgentCompositionPin::new(
-        AgentPresetId::new("alpha").unwrap(),
+        AgentPresetId::new("selected").unwrap(),
         "a".repeat(64),
         Arc::new(EmptyTools::default()),
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
@@ -78,6 +78,7 @@ async fn adapter(
         Arc::new(GenerationOwner),
     )
     .unwrap();
+    let pin = pin.for_session_preset(header("alpha").agent_preset_id());
     (runtime, lease, SessionResourceAdapter::new(pin, None))
 }
 fn request() -> SessionResourceRequest {

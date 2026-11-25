@@ -100,7 +100,7 @@ impl SessionProjectionAdapter {
         execution: &Execution,
         cancellation: CancellationToken,
     ) -> ContributionResult<SessionProjectionSnapshot> {
-        if context.header.agent_preset_id() != self.pin.preset_id() {
+        if context.header.agent_preset_id() != self.pin.header_preset_id() {
             return Err(ContributionError::Invalid(
                 "projection Header does not match its generation".into(),
             ));

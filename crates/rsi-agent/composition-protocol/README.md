@@ -1,8 +1,11 @@
 # rsi-agent-composition-protocol
 
 Session resource readers receive the immutable Session identity and the working
-coordinates at the Host's last committed move. Listing or reading a resource
-does not move the Session or enqueue model input.
+coordinates at the Host's last committed move. After a pre-Turn preset change,
+projections and resources use the selected generation and validate the Header
+against the creation preset to which that generation was bound. Replies keep
+the original Header fingerprint. Listing or reading a resource does not move
+the Session or enqueue model input.
 
 `PreparedFreshSession::initial_commit` includes the selection digest and complete
 initial Domain set, even when empty, together with held command inputs. Kernel

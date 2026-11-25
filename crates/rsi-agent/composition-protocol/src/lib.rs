@@ -74,6 +74,7 @@ impl<T> AgentGenerationOwner for T where T: fmt::Debug + Send + Sync + 'static {
 #[derive(Clone)]
 pub struct AgentCompositionPin {
     preset_id: AgentPresetId,
+    creation_preset: Option<Arc<AgentPresetId>>,
     source_digest: String,
     selection: rsi_agent_session_protocol::GenerationSelection,
     tools: Arc<dyn ToolRuntime>,
@@ -119,6 +120,7 @@ impl AgentCompositionPin {
         }
         Ok(Self {
             preset_id,
+            creation_preset: None,
             selection: rsi_agent_session_protocol::GenerationSelection::new(source_digest.clone())
                 .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))?,
             source_digest,
@@ -141,6 +143,10 @@ impl AgentCompositionPin {
     /// Returns the durable logical preset identity.
     pub const fn preset_id(&self) -> &AgentPresetId {
         &self.preset_id
+    }
+
+    fn header_preset_id(&self) -> &AgentPresetId {
+        self.creation_preset.as_deref().unwrap_or(&self.preset_id)
     }
 
     /// Selects the Host-local application as the required model input owner.
@@ -168,8 +174,16 @@ impl AgentCompositionPin {
     /// Binds the selected logical preset to this Session's creation identity.
     #[must_use]
     pub fn for_session_preset(mut self, initial: &AgentPresetId) -> Self {
-        let preset = (&self.preset_id != initial).then(|| self.preset_id.clone());
-        self.selection = self.selection.with_preset(preset);
+        let (creation, selected) = if &self.preset_id == initial {
+            (None, None)
+        } else {
+            (
+                Some(Arc::new(initial.clone())),
+                Some(self.preset_id.clone()),
+            )
+        };
+        self.creation_preset = creation;
+        self.selection = self.selection.with_preset(selected);
         self
     }
 

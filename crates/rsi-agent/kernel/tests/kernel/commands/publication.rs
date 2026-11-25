@@ -7,7 +7,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn queued_input_uses_the_last_unstarted_preset_and_keeps_its_identity_on_restart() {
-    use rsi_agent_turn_protocol::{ClaimMessage, SessionCommands as _};
+    use rsi_agent_turn_protocol::{ClaimMessage, SessionCommands as _, SessionProjections as _};
     #[derive(Debug)]
     struct Presets;
     #[async_trait]
@@ -58,6 +58,9 @@ async fn queued_input_uses_the_last_unstarted_preset_and_keeps_its_identity_on_r
         .await
         .unwrap();
     assert_eq!(cut, before.durable_control_seq + 1);
+    let view = initial.projection_snapshot(id).await.unwrap();
+    assert_eq!(view.selected_preset(), Some(&next));
+    assert_eq!(view.header_sha256(), origin.fingerprint().unwrap());
     assert_eq!(initial.prepare_resume(id).await.unwrap().preset_id(), &next);
     assert_eq!(store.session_summary(id).await.unwrap().header, origin);
     let child = initial
@@ -76,6 +79,14 @@ async fn queued_input_uses_the_last_unstarted_preset_and_keeps_its_identity_on_r
 
     let restarted = open().await.unwrap();
     let worker = restarted.start_workers();
+    assert_eq!(
+        restarted
+            .projection_snapshot(id)
+            .await
+            .unwrap()
+            .selected_preset(),
+        Some(&next)
+    );
     let prepared = restarted.prepare_resume(id).await.unwrap();
     assert_eq!(prepared.preset_id(), &next);
     restarted
