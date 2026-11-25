@@ -780,19 +780,19 @@ impl AgentKernel {
             )?,
             _ => None,
         };
+        let reserves_round = matches!(
+            candidate.authorization,
+            CommandAuthorization::Continuation {
+                reservation: Some(_),
+                ..
+            }
+        );
         outcome.begin_publication();
         let result = self
             .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
                 sessions: vec![append],
                 required_active_activations: vec![],
-                quiescent_descendants_of: matches!(
-                    candidate.authorization,
-                    CommandAuthorization::Continuation {
-                        reservation: Some(_),
-                        ..
-                    }
-                )
-                .then(|| session_id.clone().into()),
+                quiescent_descendants_of: reserves_round.then(|| session_id.clone().into()),
             })
             .await;
         if matches!(
@@ -801,12 +801,16 @@ impl AgentKernel {
         ) {
             return Err(TurnError::Capacity);
         }
-        if let Err(error) = result.and_then(|result| {
+        let result = result.and_then(|result| {
             result.map_err(|error| match error {
                 StoreError::SessionNotQuiescent { .. } => TurnError::SessionBusy,
                 error => turn_store_error(error),
             })
-        }) {
+        });
+        // A successful Store commit has already notified observers of the durable change.
+        let notify_after_publication =
+            result.is_err() || reserves_round || !candidate.inputs.is_empty();
+        if let Err(error) = result {
             match self
                 .domain_request(&session_id, &candidate.invocation.request_id)
                 .await
@@ -832,7 +836,9 @@ impl AgentKernel {
         if !candidate.inputs.is_empty() {
             self.request_ready_scan();
         }
-        self.inner.session_changes.committed(&session_id);
+        if notify_after_publication {
+            self.inner.session_changes.committed(&session_id);
+        }
         Ok(receipt)
     }
     fn complete_command_continuation(

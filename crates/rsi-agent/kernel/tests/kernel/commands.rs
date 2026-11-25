@@ -9,7 +9,7 @@ use rsi_agent_session_protocol::{
     SessionCommandInvocation,
 };
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
-use rsi_agent_turn_protocol::SessionCommands;
+use rsi_agent_turn_protocol::{SessionCommands, SessionProjections};
 
 #[tokio::test]
 async fn store_admission_command_refusal_preserves_known_prewrite_capacity() {
@@ -722,6 +722,7 @@ async fn lost_commit_acknowledgements_reconcile_or_remain_queryable_without_call
         store
             .fail_domain_lookup_after_apply
             .store(unavailable, Ordering::Release);
+        let before = fixture.kernel.activity_revision().unwrap();
         let result = fixture
             .kernel
             .execute(
@@ -750,6 +751,7 @@ async fn lost_commit_acknowledgements_reconcile_or_remain_queryable_without_call
             store.domain_lookup_fails.store(false, Ordering::Release);
         } else {
             assert!(result.is_ok());
+            assert_eq!(fixture.kernel.activity_revision(), Some(before + 1));
         }
         let receipt = fixture
             .kernel

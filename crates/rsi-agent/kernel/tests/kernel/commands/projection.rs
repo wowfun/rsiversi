@@ -3,7 +3,6 @@ use rsi_agent_composition_protocol::{
     ContributionError, SessionProjection, SessionProjectionContext,
 };
 use rsi_agent_session_protocol::{ProjectionCursor, ProjectionValue};
-use rsi_agent_turn_protocol::SessionProjections;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -209,6 +208,7 @@ async fn projection_commit_hints_are_scoped_coalesced_and_end_on_shutdown() {
         .unwrap();
     for (id, value) in [("on", true), ("off", false)] {
         let invocation = fixture.invocation(id, value).await;
+        let before = fixture.kernel.activity_revision().unwrap();
         fixture
             .kernel
             .execute(
@@ -221,6 +221,7 @@ async fn projection_commit_hints_are_scoped_coalesced_and_end_on_shutdown() {
             )
             .await
             .unwrap();
+        assert_eq!(fixture.kernel.activity_revision(), Some(before + 1));
     }
     changes.next().await.unwrap();
     assert!(

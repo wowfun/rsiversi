@@ -331,6 +331,8 @@ identity, and pointer identity of the one resident Header allocation.
 The independent Session projection read service reports `ProjectionCapacity`
 when concurrent capture admission is exhausted.
 Its change subscriptions use the shared observer pool and report `ObserverCapacity`.
+A state-only command wakes these observers when its durable write commits.
+Commands that publish a live input also notify after installing that input.
 The read service retains an existing resident pin without acquiring a claim.
 A cold view selects current plugins without hydrating the Session.
 Its declared Domains must accept the durable states; each projection unit owns
