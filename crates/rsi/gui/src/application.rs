@@ -120,6 +120,9 @@ pub(crate) enum Command {
     Navigate {
         command: rsi_workbench_ui::NavigationCommand,
     },
+    MarkReading {
+        request: rsi_navigation_api::attention::Mark,
+    },
     RemoteUiList {
         pane: crate::SurfaceId,
         generation: String,
@@ -366,6 +369,7 @@ impl Command {
             | Self::Setup { .. }
             | Self::Plugins { .. }
             | Self::Navigate { .. }
+            | Self::MarkReading { .. }
             | Self::RemoteUiList { .. }
             | Self::RemoteUiNext { .. }
             | Self::RemoteUiSurface { .. }
@@ -1102,6 +1106,13 @@ impl GuiApplication {
                     .as_ref()
                     .ok_or("Session navigation is unavailable on this connection")?
                     .command(command)
+                    .await
+            }
+            Command::MarkReading { request } => {
+                self.navigation
+                    .as_ref()
+                    .ok_or("Session navigation is unavailable on this connection")?
+                    .mark_reading(request)
                     .await
             }
             Command::ReopenRemoteSurface {

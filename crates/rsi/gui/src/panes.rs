@@ -686,12 +686,10 @@ impl GuiApplication {
         }
         if let Some(navigation) = &self.navigation {
             navigation
-                .command(rsi_workbench_ui::NavigationCommand::Mark {
-                    request: rsi_navigation_api::attention::Mark {
-                        host_epoch,
-                        position,
-                        action: rsi_navigation_api::attention::ReadAction::Read,
-                    },
+                .mark_reading(rsi_navigation_api::attention::Mark {
+                    host_epoch,
+                    position,
+                    action: rsi_navigation_api::attention::ReadAction::Read,
                 })
                 .await?;
         }

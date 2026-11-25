@@ -50,20 +50,26 @@ impl Work {
         &self,
         future: impl std::future::Future<Output = Result<T>> + Send + 'static,
     ) -> BoxFuture<'static, Result<T>> {
-        let open = self.admission.lock().expect("workbench admission poisoned");
-        if !*open {
-            return Box::pin(async { Err("Workbench feature is closed".into()) });
-        }
         let Ok(permit) = self.slot.clone().try_acquire_owned() else {
             return Box::pin(async { Err("This workbench operation is still running".into()) });
         };
         let changed = self.changed.clone();
-        let task = self.execution.spawn(self.tasks.track_future(async move {
+        self.retain(async move {
             let _permit = permit;
             let result = future.await;
             changed.send_modify(|revision| *revision = revision.wrapping_add(1));
             result
-        }));
+        })
+    }
+    fn retain<T: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> BoxFuture<'static, Result<T>> {
+        let open = self.admission.lock().expect("workbench admission poisoned");
+        if !*open {
+            return Box::pin(async { Err("Workbench feature is closed".into()) });
+        }
+        let task = self.execution.spawn(self.tasks.track_future(future));
         drop(open);
         Box::pin(async move {
             task.await

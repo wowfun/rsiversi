@@ -88,8 +88,11 @@ worker refreshes the current filter after any admitted navigation command settle
 it does not replay a write, change the selected Session or manufacture a row from
 document state. Retirement cancels this read worker before draining commands.
 
-Each plugin admits one non-queued command and retains its execution independently
-of the caller's waiter. Retirement closes admission, drains work and withdraws
+Commands that update a plugin's local view share one non-queued slot. Reading
+marks go directly to the Host attention service and can run while navigation
+loads a workspace group. The attention subscription publishes their effects.
+Each plugin retains admitted work independently of the caller's waiter.
+Retirement closes admission, drains work and withdraws
 its UI contributions. Service configuration authorization remains at the Host's
 trusted-origin boundary. Local UI availability is not an authorization proof.
 

@@ -5,7 +5,7 @@ import {hasOpenOverlay} from "./presentation.tsx";
 
 export function markReading(host_epoch: string, session: string, row: AttentionEntry | undefined, action: "read" | "unread" | "acknowledge") {
   const position = row?.position ?? {conversation: {kind: "native", id: session}, epoch: "0", sequence: "0"};
-  return input.command({action: "navigate", command: {kind: "mark", request: {host_epoch, position, action}}});
+  return input.command({action: "mark_reading", request: {host_epoch, position, action}});
 }
 
 export function isUnread(row?: AttentionEntry) {

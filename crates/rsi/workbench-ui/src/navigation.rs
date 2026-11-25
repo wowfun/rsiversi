@@ -29,11 +29,6 @@ pub enum NavigationCommand {
         /// At most 64 exact members in desired order.
         sessions: Vec<SessionId>,
     },
-    /// Set or clear a shared reminder through a displayed Host cut.
-    Mark {
-        /// Authenticated action and the original Host and source coordinates.
-        request: rsi_navigation_api::attention::Mark,
-    },
     /// Expand a workspace group or continue its exact displayed page.
     Group {
         /// Registered or unregistered group identity.
@@ -286,6 +281,15 @@ impl NavigationFeature {
         if !self.stop.is_cancelled() {
             self.refresh.send_replace(());
         }
+    }
+    /// Marks the observed Host position independently of navigation page reads.
+    pub fn mark_reading(
+        &self,
+        request: rsi_navigation_api::attention::Mark,
+    ) -> BoxFuture<'static, Result<()>> {
+        let attention = self.attention.clone();
+        self.work
+            .retain(async move { attention.mark(request).await.map(|_| ()).map_err(error) })
     }
     /// Runs one retained navigation action.
     ///
@@ -555,10 +559,6 @@ impl NavigationFeature {
                     .view
                     .groups
                     .remove(&group_key(&workspace)?);
-                return Ok(None);
-            }
-            NavigationCommand::Mark { request } => {
-                self.attention.mark(request).await.map_err(error)?;
                 return Ok(None);
             }
             NavigationCommand::Query { filter } => {
@@ -1150,19 +1150,45 @@ mod group_tests {
         assert_eq!(api.attention_reads.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
-    async fn marking_a_session_leaves_the_cached_navigation_page_until_its_update() {
+    async fn reading_marks_reach_the_host_while_a_workspace_group_is_loading() {
         let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
         let initial = owner.content_revision();
-        let request = serde_json::from_value(json!({
+        let request: rsi_navigation_api::attention::Mark = serde_json::from_value(json!({
             "action":"unread", "host_epoch":api.description.host_epoch,
             "position":{"conversation":{"kind":"native","id":"one"},"epoch":"0","sequence":"0"}
         }))
         .unwrap();
-        owner
-            .command(NavigationCommand::Mark { request })
-            .await
-            .unwrap();
+        api.block_next_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let group = owner.command(NavigationCommand::Group {
+            workspace: WorkspaceFilter::Unregistered,
+            ticket: None,
+        });
+        api.read_entered.notified().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            owner.mark_reading(request.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(owner.content_revision(), initial);
+        api.release_read.notify_one();
+        group.await.unwrap();
+        owner.work.close().await;
+        assert!(
+            owner
+                .mark_reading(request)
+                .await
+                .unwrap_err()
+                .contains("closed")
+        );
     }
     #[tokio::test]
     async fn full_background_refresh_does_not_issue_a_second_query_for_its_head() {
