@@ -42,7 +42,35 @@ export async function verifyPromptRecall(page) {
   await page.evaluate(() => window.finishRecall("late response"));
   await page.waitForFunction(() => !fixture.runtime.panes.get("main").editor.readingPrompt);
   assert.equal(await input.inputValue(),"keep writing");
-  return {multiline:true,duplicates:true,multipart:true,undo:true,lateRead:true};
+  const referenceText = 'quoted: Referenced conversation data from original through record 5.\n' +
+    'excerpt\nRead more with reference_read using recorded_session_id="current", fact_seq="9", content_index=1.';
+  await page.evaluate(text => {
+    fixture.setReply("recall_prompt", () => text);
+    fixture.setReply("prepare_submission", payload => JSON.stringify({
+      kind:"message", id:"recalled-text", opaque:payload, text_bytes:new TextEncoder().encode(JSON.parse(payload).text).length,
+      images:0, captures:[],
+    }));
+    fixture.setReply("dispatch_submission", () => JSON.stringify({status:"complete",receipt:"{}"}));
+  },referenceText);
+  try {
+    await input.fill("");
+    await input.press("ArrowUp");
+    await value(latest);
+    await input.press("ArrowUp");
+    await value(referenceText);
+    await input.press("Control+Enter");
+    await page.waitForFunction(() => fixture.calls.some(call => call.method === "dispatch_submission"));
+    const prepared = await page.evaluate(() => JSON.parse(fixture.calls.findLast(call => call.method === "prepare_submission").payload));
+    assert.equal(prepared.text,referenceText);
+    assert.deepEqual(prepared.references,[]);
+    assert.deepEqual(prepared.images,[]);
+  } finally {
+    await page.evaluate(() => {
+      fixture.setReply("prepare_submission");
+      fixture.setReply("dispatch_submission");
+    });
+  }
+  return {multiline:true,duplicates:true,multipart:true,undo:true,lateRead:true,resentReferenceAsText:true};
 }
 
 // Actual document methods and IndexedDB, with gated persistence and Worker replies.
