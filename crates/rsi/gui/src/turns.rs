@@ -62,7 +62,7 @@ struct Link {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Model {
     seq: u64,
-    started: bool,
+    started: Option<std::num::NonZeroU64>,
     conversation: bool,
     tools: bool,
     finished: Option<(u64, bool)>,
@@ -90,6 +90,14 @@ pub(crate) struct Index {
     rebuilds: usize,
 }
 impl Index {
+    pub fn active_start(&self, turn: &TurnId, effect: &EffectId) -> Option<u64> {
+        let state = self.states.get(turn)?;
+        let model = state.models.get(effect)?;
+        if state.terminal.is_some() || model.finished.is_some() {
+            return None;
+        }
+        model.started.map(std::num::NonZeroU64::get)
+    }
     pub fn live(
         &mut self,
         turn: &TurnId,
@@ -140,7 +148,8 @@ impl Index {
         let effect = match fact.body() {
             Fact::ModelIntent { effect_id, .. }
             | Fact::ModelStarted { effect_id, .. }
-            | Fact::ModelAttemptSettled { effect_id, .. } => Some(effect_id.clone()),
+            | Fact::ModelAttemptSettled { effect_id, .. }
+            | Fact::ContextCompactionInstalled { effect_id, .. } => Some(effect_id.clone()),
             _ => None,
         };
         if let Some(effect) = &effect {
@@ -152,7 +161,9 @@ impl Index {
                 model.seq.min(fact.seq())
             };
             if let Fact::ModelAttemptSettled {
-                purpose, attempt, ..
+                purpose: ModelEventPurpose::Conversation,
+                attempt,
+                ..
             } = fact.body()
             {
                 for (_, event) in attempt.events().filter_map(Result::ok) {
@@ -172,11 +183,24 @@ impl Index {
                         _ => {}
                     }
                 }
-                model.conversation = *purpose == ModelEventPurpose::Conversation;
+                model.conversation = true;
+            } else if let Fact::ModelAttemptSettled { attempt, .. } = fact.body() {
+                model.finished = Some((
+                    fact.seq(),
+                    matches!(
+                        attempt.terminal(),
+                        LanguageEvent::Finished {
+                            reason: FinishReason::Stop,
+                            ..
+                        }
+                    ),
+                ));
+            } else if let Fact::ContextCompactionInstalled { settlement_seq, .. } = fact.body() {
+                model.finished = Some((*settlement_seq, true));
             }
             changed |= *model != previous;
-            if matches!(fact.body(), Fact::ModelStarted { .. }) && !model.started {
-                model.started = true;
+            if matches!(fact.body(), Fact::ModelStarted { .. }) && model.started.is_none() {
+                model.started = std::num::NonZeroU64::new(fact.seq());
                 changed |= self
                     .view
                     .entries
@@ -361,7 +385,7 @@ impl State {
         let state = RetryState::observed(
             self.models
                 .get(&decision.effect_id)
-                .is_some_and(|model| model.started),
+                .is_some_and(|model| model.started.is_some()),
             self.terminal.is_some(),
         );
         let previous = link
@@ -503,11 +527,12 @@ impl State {
                 .as_ref()
                 .and_then(|effect| self.models.get(effect))
                 .is_some_and(|model| !model.conversation);
-            if matches!(
-                link.role,
-                "tool" | "reasoning" | "metadata" | "assistant" | "step-context"
-            ) && !answer
-                && !compaction
+            if link.role == "compaction"
+                || (matches!(
+                    link.role,
+                    "tool" | "reasoning" | "metadata" | "assistant" | "step-context"
+                ) && !answer
+                    && !compaction)
             {
                 turn.process.push(block.key.clone());
             }
@@ -1129,7 +1154,13 @@ mod tests {
         );
         apply(&mut t, terminal(TurnOutcome::Completed));
         assert!(turn(&t).answer.is_empty());
-        assert!(turn(&t).process.is_empty());
+        let marker = t
+            .blocks
+            .iter()
+            .find(|block| block.role == "compaction")
+            .unwrap();
+        assert_eq!(turn(&t).process, [marker.key.clone()]);
+        assert!(t.blocks.iter().all(|block| !block.text.contains("summary")));
         for i in 0..140 {
             apply(&mut t, text(&format!("effect-{i}"), "text"));
         }
@@ -1482,6 +1513,124 @@ mod tests {
         partial.fact(&end);
         let turn = &partial.turns.view.entries[&TurnId::new("turn").unwrap()];
         assert!(turn.elapsed_ms.is_none() && turn.usage.is_none());
+    }
+
+    #[test]
+    fn automatic_compaction_reconnects_to_its_started_effect_without_rendering_each_prefix() {
+        use rsi_agent_session_protocol::{ModelAttemptBuilder, SessionId};
+        use rsi_agent_turn_protocol::{ModelLiveSnapshot, ModelLiveStatus};
+        let mut t = Transcript::default();
+        apply(&mut t, accepted());
+        let turn_id = TurnId::new("turn").unwrap();
+        let effect_id = EffectId::new("cold-summary").unwrap();
+        let mut prefix = ModelAttemptBuilder::new();
+        prefix
+            .push(
+                0,
+                &LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+            )
+            .unwrap();
+        prefix
+            .push(
+                1,
+                &LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: rsi_ai_protocol::ContentDelta::Text("internal summary".repeat(1000)),
+                },
+            )
+            .unwrap();
+        let mut snapshot = ModelLiveSnapshot {
+            turn_id: turn_id.clone(),
+            effect_id: effect_id.clone(),
+            session_id: SessionId::new("session").unwrap(),
+            purpose: ModelEventPurpose::ContextCompaction,
+            status: ModelLiveStatus::Streaming,
+            revision: 1,
+            prefix: prefix.prefix(),
+        };
+        assert!(!t.model(&snapshot));
+        apply(
+            &mut t,
+            Fact::ModelStarted {
+                turn_id: turn_id.clone(),
+                effect_id,
+            },
+        );
+        snapshot.turn_id = TurnId::new("other-turn").unwrap();
+        assert!(!t.model(&snapshot));
+        snapshot.turn_id = turn_id;
+        assert!(t.model(&snapshot));
+        let key = &turn(&t).process[0];
+        let row = t.blocks.iter().find(|b| &b.key == key).unwrap();
+        assert_eq!(row.title, "Compacting context…");
+        assert!(row.text.is_empty());
+        snapshot.revision += 1;
+        assert!(!t.model(&snapshot));
+        snapshot.status = ModelLiveStatus::Abandoned;
+        assert!(t.model(&snapshot));
+        assert!(!t.model(&snapshot));
+        snapshot.status = ModelLiveStatus::Streaming;
+        assert!(!t.model(&snapshot));
+        assert!(
+            t.blocks
+                .iter()
+                .all(|block| !block.text.contains("internal summary"))
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_links_only_the_confirmed_summary_through_cold_backfill() {
+        let mut settlement = complete("summary", "unique checkpoint text");
+        let Fact::ModelAttemptSettled { purpose, .. } = &mut settlement else {
+            unreachable!()
+        };
+        *purpose = ModelEventPurpose::ContextCompaction;
+        let settled = SessionFact::new(8, 8, settlement).unwrap();
+        let installed = SessionFact::new(
+            9,
+            9,
+            Fact::ContextCompactionInstalled {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("summary").unwrap(),
+                settlement_seq: settled.seq(),
+            },
+        )
+        .unwrap();
+        let marker = |t: &Transcript| {
+            let rows: Vec<_> = t.blocks.iter().filter(|b| b.role == "compaction").collect();
+            assert_eq!(rows.len(), 1);
+            serde_json::to_value(rows[0]).unwrap()
+        };
+        let mut forward = Transcript::default();
+        forward.fact(&settled);
+        assert!(marker(&forward).get("summary_seq").is_none());
+        assert!(
+            !serde_json::to_string(&forward.blocks)
+                .unwrap()
+                .contains("unique checkpoint text")
+        );
+        forward.fact(&installed);
+        let mut backward = Transcript::default();
+        backward.fact(&installed);
+        assert_eq!(marker(&backward)["summary_seq"], "8");
+        backward.fact(&settled);
+        assert_eq!(marker(&backward), marker(&forward));
+        for t in [&forward, &backward] {
+            let row = marker(t);
+            let key = row["key"].as_str().unwrap();
+            assert_eq!(turn(t).process, [key]);
+            assert!(turn(t).answer.is_empty() && turn(t).candidate.is_empty());
+        }
+        let summary = super::super::summary_document(&settled).unwrap();
+        assert!(
+            serde_json::to_string(&summary)
+                .unwrap()
+                .contains("unique checkpoint text")
+        );
+        assert!(super::super::summary_document(&installed).is_none());
     }
 
     #[test]

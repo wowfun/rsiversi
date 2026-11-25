@@ -672,6 +672,7 @@ struct TurnControl {
     conclusion: Option<(u64, rsi_agent_session_protocol::ToolConclusion)>,
 
     tool_source: Option<Arc<tool_origin::ToolSource>>,
+    unconfirmed_summary: Option<(EffectId, u64)>,
     selected_tools: Option<Arc<[String]>>,
     application: Arc<ApplicationRegistrations>,
 
@@ -781,6 +782,7 @@ impl TurnControl {
             program_roles: Arc::new(BTreeMap::new()),
             conclusion: None,
             tool_source: None,
+            unconfirmed_summary: None,
             selected_tools: None,
             application: Arc::default(),
 

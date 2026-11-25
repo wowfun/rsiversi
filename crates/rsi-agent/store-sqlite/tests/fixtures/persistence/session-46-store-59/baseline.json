@@ -1,0 +1,27 @@
+{
+  "session_format": 46,
+  "store_schema": 59,
+  "schema_sha256": "916b336dcaf201f742d14e157f10c2333724a87b1c3b57ca93bc414fcb63c367",
+  "files": {
+    "domains/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "domains/sessions.sqlite3": "01bd7afbc1e0ad4b0c2e6596c4df0af439413a77ebe617abbfceb28948e2b074",
+    "generations/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "generations/sessions.sqlite3": "9d261a390a3a29b252b2844c643acccc318b136b1e6195ae732b98ec1fa8d46b",
+    "mechanical/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "mechanical/cas/a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7": "a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7",
+    "mechanical/sessions.sqlite3": "4543dc61438652be0f6555c300d33517acd9cad40af0492b659ded129bd40cf2",
+    "mechanical/sessions.sqlite3-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "mechanical/sessions.sqlite3-wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/media-fixture.png": "559c2b5a952c931a1d3794d806dcb4eecde89c58a3f8f0e26c1673374483bad9",
+    "model-tools/sessions.sqlite3": "e1d3561bd09aeaf012eb4a276c135dde9baa10ebd8138d29b322c0716d788c6a",
+    "plugin-child/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "plugin-child/sessions.sqlite3": "99919cbf4495225525705d8695e7fc25a24a1cb98fbefa9d25a033b4efd43494",
+    "program/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "program/sessions.sqlite3": "fc5dfc2fb9f25616629869b0694c2c44e722932ca84b2e86a4f590daef6d79b0",
+    "queue/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "queue/sessions.sqlite3": "c4e22661cffa50b3393f14a9744defbe3999b5949bc0de1501ce98eadfd71643"
+  }
+}

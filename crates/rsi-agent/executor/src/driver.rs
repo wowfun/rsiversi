@@ -492,7 +492,7 @@ impl Driver {
                     request = ModelRequest::Stopping;
                     continue;
                 }
-                ModelAttempt::Output(effect_id, output) => (effect_id, *output),
+                ModelAttempt::Output { effect, output, .. } => (effect, *output),
             };
             if cancellation.is_cancelled()
                 || matches!(output.finish_reason, FinishReason::Cancelled)
@@ -992,7 +992,11 @@ impl Driver {
             )
             .await?;
         if let rsi_agent_session_protocol::ModelPurpose::ContextCompaction(plan) = purpose
-            && let ModelAttempt::Output(_, output) = &result
+            && let ModelAttempt::Output {
+                output,
+                settlement_seq,
+                ..
+            } = &result
         {
             if stop.is_cancelled() {
                 return Err(DriveFailure::Stopped);
@@ -1008,6 +1012,16 @@ impl Driver {
                     "summary did not install against its exact source view",
                 ));
             }
+            self.publish(
+                claim,
+                fold,
+                vec![SessionFactBody::ContextCompactionInstalled {
+                    turn_id: claim.turn_id().clone(),
+                    effect_id,
+                    settlement_seq: *settlement_seq,
+                }],
+            )
+            .await?;
         }
         Ok(result)
     }
@@ -1149,7 +1163,11 @@ impl Driver {
                 return Err(ai_failure(&error));
             }
             return match assembler.finish() {
-                Ok(output) => Ok(ModelAttempt::Output(effect_id.clone(), Box::new(output))),
+                Ok(output) => Ok(ModelAttempt::Output {
+                    effect: effect_id.clone(),
+                    settlement_seq: facts.facts()[0].seq(),
+                    output: Box::new(output),
+                }),
                 Err(LanguageAssemblyError::Incomplete { .. }) => Ok(ModelAttempt::Incomplete),
                 Err(LanguageAssemblyError::Provider { error, .. }) => Err(ai_failure(&error)),
                 Err(LanguageAssemblyError::Protocol(error)) => {

@@ -354,7 +354,11 @@ use execution_support::{
 
 #[derive(Debug)]
 enum ModelAttempt {
-    Output(EffectId, Box<rsi_ai_protocol::LanguageOutput>),
+    Output {
+        effect: EffectId,
+        settlement_seq: u64,
+        output: Box<rsi_ai_protocol::LanguageOutput>,
+    },
     Incomplete,
     Retry(rsi_agent_session_protocol::ScheduledModelRetry),
     ContextLimit,
@@ -695,6 +699,7 @@ fn scan_turn(
             | SessionFactBody::ToolContextsClaimed { .. }
             | SessionFactBody::StepInputsPrepared { .. }
             | SessionFactBody::ManualCompaction { .. }
+            | SessionFactBody::ContextCompactionInstalled { .. }
             | SessionFactBody::StepPrepared { .. } => {}
         }
     }

@@ -83,7 +83,9 @@ async fn compaction_summary_reads_only_the_cited_settlement_in_the_attached_pane
             SessionFactBody::ManualCompaction {
                 command_id: DomainRequestId::new("compact-7").unwrap(),
                 effect_id: EffectId::new("summary-7").unwrap(),
-                event: ManualCompactionEvent::Settled { attempt },
+                event: ManualCompactionEvent::Settled {
+                    attempt: attempt.clone(),
+                },
             },
         )
         .unwrap(),
@@ -103,6 +105,24 @@ async fn compaction_summary_reads_only_the_cited_settlement_in_the_attached_pane
             .any(|node| node["text"] == "Record 7")
     );
     assert!(doc.get("text").is_none());
+    backend.facts.lock().unwrap().push(
+        SessionFact::new(
+            9,
+            1,
+            SessionFactBody::ModelAttemptSettled {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("auto").unwrap(),
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
+                attempt,
+            },
+        )
+        .unwrap(),
+    );
+    let automatic = app
+        .compaction_summary(pane, generation.clone(), 9, stop.clone())
+        .await
+        .unwrap();
+    assert_eq!(automatic, body);
     assert!(
         app.compaction_summary(pane, generation.clone(), 8, stop.clone())
             .await

@@ -352,6 +352,8 @@ receives the current described profile and may freeze a compaction plan. Summary
 calls use the current model with no Tools and a capped output reserve. A valid
 Finished is flushed before another external call; resumption also requires
 successful installation under the [Context contract](../context/README.md).
+The executor publishes the installation confirmation before it resumes
+preparation. It shares the next ordinary durability barrier.
 A naturally finished, bounded summary can still fail to shrink the view; this
 fails the Turn without replacing the prior view. There are at most two summary
 attempts per pressure event, with a smaller complete source batch only after

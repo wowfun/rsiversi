@@ -67,11 +67,12 @@ impl AgentKernel {
                     body,
                     SessionFactBody::TurnTerminal { .. }
                         | SessionFactBody::ModelAttemptSettled { .. }
+                        | SessionFactBody::ContextCompactionInstalled { .. }
                 )
             })
         {
             return Err(TurnError::Invalid(
-                "domain mutation cannot publish model settlements or terminal records".into(),
+                "domain mutation cannot publish model settlements, compaction confirmations or terminal records".into(),
             ));
         }
         let caller = if let Some(caller) = tool_caller {

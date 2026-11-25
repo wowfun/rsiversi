@@ -47,7 +47,9 @@ pub(super) fn apply_recovered_fact(
             order.retain(|candidate| candidate != turn_id);
         }
         body => {
-            let Some(turn_id) = body.turn_id() else { return Ok(()) };
+            let Some(turn_id) = body.turn_id() else {
+                return Ok(());
+            };
             let turn = turns.get_mut(turn_id).ok_or_else(|| {
                 KernelError::Invariant("durable Fact references unknown turn".into())
             })?;
@@ -91,10 +93,15 @@ pub(super) fn apply_executor_body(
         SessionFactBody::InputMessageClaimed { step_id, .. } => {
             apply_claimed_input(turn, step_id, seq)?;
         }
-        SessionFactBody::ManualCompaction { .. } => return Err(TurnError::Invalid("standalone maintenance cannot be published by a turn".into())),
+        SessionFactBody::ManualCompaction { .. } => {
+            return Err(TurnError::Invalid(
+                "standalone maintenance cannot be published by a turn".into(),
+            ));
+        }
         SessionFactBody::ModelIntent { .. }
         | SessionFactBody::ModelStarted { .. }
-        | SessionFactBody::ModelAttemptSettled { .. } => apply_model_body(turn, body)?,
+        | SessionFactBody::ModelAttemptSettled { .. }
+        | SessionFactBody::ContextCompactionInstalled { .. } => apply_model_body(turn, body, seq)?,
         SessionFactBody::ImageIntent { .. }
         | SessionFactBody::ImageStarted { .. }
         | SessionFactBody::ImageOutput { .. } => apply_image_body(turn, body)?,
@@ -272,7 +279,11 @@ fn prepare_inputs(
     Ok(())
 }
 
-pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -> TurnResult<()> {
+pub(super) fn apply_model_body(
+    turn: &mut TurnControl,
+    body: &SessionFactBody,
+    seq: u64,
+) -> TurnResult<()> {
     match body {
         SessionFactBody::ModelIntent {
             effect_id,
@@ -281,6 +292,7 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
             ..
         } => {
             ensure_no_active_effect(turn)?;
+            turn.unconfirmed_summary = None;
             if matches!(
                 purpose,
                 rsi_agent_session_protocol::ModelPurpose::Conversation
@@ -348,7 +360,34 @@ pub(super) fn apply_model_body(turn: &mut TurnControl, body: &SessionFactBody) -
             } else {
                 turn.tool_source = None;
             }
+            if *purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                && matches!(
+                    attempt.terminal(),
+                    rsi_ai_protocol::LanguageEvent::Finished {
+                        reason: rsi_ai_protocol::FinishReason::Stop,
+                        ..
+                    }
+                )
+            {
+                turn.unconfirmed_summary = Some((effect_id.clone(), seq));
+            }
             turn.effects.remove(effect_id);
+        }
+        SessionFactBody::ContextCompactionInstalled {
+            effect_id,
+            settlement_seq,
+            ..
+        } => {
+            if !turn
+                .unconfirmed_summary
+                .as_ref()
+                .is_some_and(|(id, at)| id == effect_id && at == settlement_seq)
+            {
+                return Err(TurnError::Invalid(
+                    "summary installation has no matching settled attempt".into(),
+                ));
+            }
+            turn.unconfirmed_summary = None;
         }
         _ => unreachable!("caller selected a Model Fact"),
     }
@@ -624,6 +663,7 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
         program_roles: turn.program_roles.clone(),
         conclusion: turn.conclusion.clone(),
         tool_source: turn.tool_source.clone(),
+        unconfirmed_summary: turn.unconfirmed_summary.clone(),
 
         accepted_at_ms: turn.accepted_at_ms,
         accepted_seq: turn.accepted_seq,

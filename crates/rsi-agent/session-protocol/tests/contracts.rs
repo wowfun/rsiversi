@@ -6,6 +6,30 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn automatic_compaction_installation_references_an_earlier_settlement() {
+    let fact = SessionFact::new(
+        11,
+        1,
+        SessionFactBody::ContextCompactionInstalled {
+            turn_id: TurnId::new("turn").unwrap(),
+            effect_id: EffectId::new("summary").unwrap(),
+            settlement_seq: 10,
+        },
+    )
+    .unwrap();
+    let wire = serde_json::to_value(&fact).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SessionFact>(wire.clone()).unwrap(),
+        fact
+    );
+    for invalid in [0, 11, 12] {
+        let mut bad = wire.clone();
+        bad["settlement_seq"] = invalid.into();
+        assert!(serde_json::from_value::<SessionFact>(bad).is_err());
+    }
+}
+
+#[test]
 fn application_bindings_retain_only_selected_unambiguous_identities() {
     let fact = SessionFact::new(
         1,

@@ -227,6 +227,7 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
             | SessionFactBody::ImageRequested { .. }
             | SessionFactBody::CancelRequested { .. }
             | SessionFactBody::ManualCompaction { .. }
+            | SessionFactBody::ContextCompactionInstalled { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }

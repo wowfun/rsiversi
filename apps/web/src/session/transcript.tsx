@@ -122,14 +122,15 @@ function TranscriptRow({label,caption,icon,open,busy,hint,onClick,status}: {
     aria-expanded={onClick?open:undefined} aria-busy={busy} title={hint} onClick={onClick}>{content}</button>;
 }
 
-function CompactionRow({block,pane,generation}: {block:TranscriptBlock; pane?:string; generation?:string}) {
+function CompactionRow({block,pane,generation,automatic}: {block:TranscriptBlock; pane?:string; generation?:string; automatic:boolean}) {
   return <article className="compaction-row">{block.summary_seq===undefined
     ? <TranscriptRow label="compact" caption={block.title} icon={<IconApiOutlineRegular/>}
         status={block.compacting?'running':'settled'}/>
-    : <CompactionSummary caption={block.title} sequence={block.summary_seq} pane={pane} generation={generation}/>}
+    : <CompactionSummary label={automatic?'Context compacted':'compact'}
+        caption={automatic?'Earlier history condensed into a summary':block.title} sequence={block.summary_seq} pane={pane} generation={generation}/>}
   </article>;
 }
-function CompactionSummary({caption,sequence,pane,generation}: {caption:string;sequence:string;pane?:string;generation?:string}) {
+function CompactionSummary({label,caption,sequence,pane,generation}: {label:string;caption:string;sequence:string;pane?:string;generation?:string}) {
   const dock=useSyncExternalStore(activeResourceDock.subscribe,activeResourceDock.getSnapshot);
   const available=dock!==undefined&&dock.pane===pane&&dock.generation===generation;
   const pending=useRef<AbortController|null>(null);
@@ -155,7 +156,7 @@ function CompactionSummary({caption,sequence,pane,generation}: {caption:string;s
     }
   }
   return <>
-    <TranscriptRow label="compact" caption={caption} icon={<IconApiOutlineRegular/>}
+    <TranscriptRow label={label} caption={caption} icon={<IconApiOutlineRegular/>}
       busy={opening} hint={available?'View compaction summary in the sidebar':undefined}
       onClick={available?()=>void open():undefined}/>
     {failure&&<p role="alert">{failure}</p>}
@@ -423,7 +424,7 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
       if (first && (!turn.running || mode === 'compact') && mode !== "verbose") {
         const expandable = turn.foldable && turn.process.some(key => {
           const role = blocks.get(key)?.role;
-          return role === 'tool' || role === 'reasoning' || role === 'context';
+          return role === 'tool' || role === 'reasoning' || role === 'context' || role === 'compaction';
         });
         const Summary = expandable ? 'button' : 'div';
         const duration = !turn.running && turnDurationLabel(turn.status, turn.elapsed_ms);
@@ -465,14 +466,12 @@ export class Transcript extends PureComponent<Props, State, Position | undefined
       if (visibility.get(block.key)?.streaming) runningTail = block.key;
     }
     for (const block of transcript.blocks) {
-      if (block.role === "compaction") {
-        nodes.push(<CompactionRow key={`${generation}:${block.key}`} block={block} pane={pane} generation={generation}/>);
-        continue;
-      }
       if (summaries.has(block.key)) nodes.push(summaries.get(block.key));
       const state = visibility.get(block.key);
       const hidden = state?.hidden ?? false;
-      if (block.role !== 'metadata' || !state || !hidden &&
+      if (block.role === "compaction") {
+        if (!hidden) nodes.push(<CompactionRow key={`${generation}:${block.key}`} block={block} pane={pane} generation={generation} automatic={!!state}/>);
+      } else if (block.role !== 'metadata' || !state || !hidden &&
         (mode === 'verbose' || state.expanded && !block.scheduled_retry)) nodes.push(
         <Message
           key={`${generation}:${block.key}`}

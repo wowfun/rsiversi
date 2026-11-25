@@ -128,7 +128,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 45;
+pub const SESSION_FORMAT_VERSION: u32 = 46;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -2584,6 +2584,15 @@ pub enum SessionFactBody {
         /// Frozen interpretation of this attempt.
         purpose: ModelEventPurpose,
     },
+    /// The selected Context builder installed the settled automatic summary.
+    ContextCompactionInstalled {
+        /// Turn that requested compaction.
+        turn_id: TurnId,
+        /// Model effect whose settlement contains the summary.
+        effect_id: EffectId,
+        /// Canonical settlement containing the installed text.
+        settlement_seq: u64,
+    },
     /// One Tool call was pinned before execution.
     ToolIntent {
         /// Exact target turn.
@@ -2854,6 +2863,14 @@ impl SessionFactBody {
             | Self::ImageStarted { .. }
             | Self::ToolStarted { .. }
             | Self::ToolCallsSuperseded { .. } => Ok(()),
+            Self::ContextCompactionInstalled { settlement_seq, .. } => {
+                if *settlement_seq == 0 || seq.is_some_and(|at| *settlement_seq >= at) {
+                    return Err(SessionError::Invalid(
+                        "summary installation requires an earlier settlement".into(),
+                    ));
+                }
+                Ok(())
+            }
             Self::ModelAttemptSettled {
                 effect_id, attempt, ..
             } => {
@@ -2969,6 +2986,7 @@ impl SessionFactBody {
             | Self::ImageStarted { turn_id, .. }
             | Self::ImageOutput { turn_id, .. }
             | Self::ModelAttemptSettled { turn_id, .. }
+            | Self::ContextCompactionInstalled { turn_id, .. }
             | Self::ToolIntent { turn_id, .. }
             | Self::ToolCallsSuperseded { turn_id, .. }
             | Self::ToolRejected { turn_id, .. }

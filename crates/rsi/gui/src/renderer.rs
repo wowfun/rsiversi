@@ -224,9 +224,11 @@ impl ObservationSink for Renderer {
         if self.stop.is_cancelled() {
             return Err(ObservationFailure::SinkStopped);
         }
-        state.transcript.model(snapshot.as_ref());
+        let changed = state.transcript.model(snapshot.as_ref());
         drop(state);
-        self.changed();
+        if changed {
+            self.changed();
+        }
         Ok(())
     }
     fn wants_background_jobs(&self) -> bool {

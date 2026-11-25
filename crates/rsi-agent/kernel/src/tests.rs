@@ -304,6 +304,82 @@ fn tool_intent(turn_id: &TurnId, suffix: &str, parallel_safe: bool) -> SessionFa
 }
 
 #[test]
+fn automatic_compaction_confirmation_belongs_to_one_naturally_settled_effect() {
+    use rsi_agent_session_protocol::{ModelAttemptLog, ModelEventPurpose};
+    use rsi_ai_protocol::{ContentDelta, ContentStart, FinishReason, LanguageEvent};
+    let turn_id = TurnId::new("turn").unwrap();
+    let effect = EffectId::new("summary").unwrap();
+    let confirm = |id: &str, settlement_seq| SessionFactBody::ContextCompactionInstalled {
+        turn_id: turn_id.clone(),
+        effect_id: EffectId::new(id).unwrap(),
+        settlement_seq,
+    };
+    for (purpose, reason, installable) in [
+        (ModelEventPurpose::Conversation, FinishReason::Stop, false),
+        (
+            ModelEventPurpose::ContextCompaction,
+            FinishReason::MaxTokens,
+            false,
+        ),
+        (
+            ModelEventPurpose::ContextCompaction,
+            FinishReason::Stop,
+            true,
+        ),
+    ] {
+        let mut turn = TurnControl::new(1, 1);
+        turn.effects.insert(
+            effect.clone(),
+            ActiveEffect::Model {
+                purpose,
+                started: true,
+            },
+        );
+        let attempt = ModelAttemptLog::from_events(
+            [
+                LanguageEvent::ContentStarted {
+                    index: 0,
+                    content: ContentStart::Text,
+                },
+                LanguageEvent::ContentDelta {
+                    index: 0,
+                    delta: ContentDelta::Text("summary".into()),
+                },
+                LanguageEvent::ContentFinished { index: 0 },
+                LanguageEvent::Finished {
+                    reason,
+                    replay: None,
+                },
+            ]
+            .into_iter()
+            .map(|event| (0, event)),
+            true,
+        )
+        .unwrap();
+        turn_state::apply_executor_body(
+            &mut turn,
+            &SessionFactBody::ModelAttemptSettled {
+                turn_id: turn_id.clone(),
+                effect_id: effect.clone(),
+                purpose,
+                attempt,
+            },
+            8,
+        )
+        .unwrap();
+        for invalid in [confirm("other", 8), confirm("summary", 7)] {
+            assert!(turn_state::apply_executor_body(&mut turn, &invalid, 9).is_err());
+        }
+        let exact = confirm("summary", 8);
+        assert_eq!(
+            turn_state::apply_executor_body(&mut turn, &exact, 9).is_ok(),
+            installable
+        );
+        assert!(turn_state::apply_executor_body(&mut turn, &exact, 10).is_err());
+    }
+}
+
+#[test]
 fn producing_step_selection_fences_model_and_nested_program_intents() {
     let turn_id = TurnId::new("selected-step").unwrap();
     let mut turn = TurnControl::new(1, 1);
@@ -405,7 +481,8 @@ fn overlapping_tool_intents_require_every_definition_to_be_parallel_safe() {
             &SessionFactBody::ModelStarted {
                 turn_id: turn_id.clone(),
                 effect_id: effect_id.clone(),
-            }
+            },
+            1,
         )
         .is_err()
     );

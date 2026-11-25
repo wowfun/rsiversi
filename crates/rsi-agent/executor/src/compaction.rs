@@ -301,7 +301,7 @@ impl Driver {
                         "summary reached its output limit",
                     ));
                 }
-                ModelAttempt::Output(_, _) => {
+                ModelAttempt::Output { .. } => {
                     // A steering message accepted during the summary must enter
                     // before the resumed ordinary request is prepared.
                     self.turns

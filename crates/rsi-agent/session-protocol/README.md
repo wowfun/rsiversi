@@ -376,7 +376,7 @@ canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 45 is accepted; all other formats are unsupported. Header protection is
+format 46 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -395,6 +395,10 @@ small Conversation/ContextCompaction kind, which Kernel checks against the
 intent. Partial history pages therefore identify internal summary output even
 when they omit the earlier intent. Only the intent's validated plan plus its
 Finished output can install a summary; the event tag grants no new authority.
+After the selected Context builder installs an automatic summary, the executor
+records `ContextCompactionInstalled` for that Turn and effect. The settlement
+remains the sole source of the summary text. A naturally finished attempt
+without this confirmation has no recorded installation.
 
 `PluginContext` attributes actual model-visible text to one validated
 ContributionId. It is text-only, uses the entered-message byte/block bounds,

@@ -7,8 +7,11 @@ pub(crate) use prompt_recall::{PromptRecall, recorded_text};
 #[path = "turns.rs"]
 mod turns;
 
-use rsi_agent_session_protocol::{AgentControlRecordBody, SessionFact, SessionFactBody, TurnId};
-use rsi_agent_turn_protocol::SessionObservation;
+use rsi_agent_session_protocol::{
+    AgentControlRecordBody, ManualCompactionEvent, ModelEventPurpose, SessionFact, SessionFactBody,
+    TurnId,
+};
+use rsi_agent_turn_protocol::{CompactionOutcome, SessionObservation};
 use rsi_conversation::{BlockIdentity, FactField, FieldWindow, SourceIndex, SourceRef, ToolState};
 use rsi_tools_protocol::ToolContent;
 use serde::Serialize;
@@ -56,9 +59,23 @@ pub(crate) struct Block {
 #[derive(Clone, Debug)]
 struct CompactionMarker {
     latest: u64,
-    outcome: rsi_agent_turn_protocol::CompactionOutcome,
+    state: CompactionState,
     settlement: Option<u64>,
-    running: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompactionState {
+    Running,
+    Returned,
+    Recorded(CompactionOutcome),
+}
+impl CompactionState {
+    fn caption(self) -> &'static str {
+        match self {
+            Self::Running => "Compacting context…",
+            Self::Returned => "Summary returned. Installation has not been recorded.",
+            Self::Recorded(outcome) => outcome.message(),
+        }
+    }
 }
 #[derive(Debug)]
 pub(crate) struct CachedBlock {
@@ -97,12 +114,15 @@ impl Serialize for BlockView<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let block = self.0;
-        let compacting = block.compact.as_ref().is_some_and(|marker| marker.running);
+        let compacting = block
+            .compact
+            .as_ref()
+            .is_some_and(|marker| marker.state == CompactionState::Running);
         let summary_seq = block
             .compact
             .as_ref()
             .filter(|marker| {
-                marker.outcome == rsi_agent_turn_protocol::CompactionOutcome::Compacted
+                marker.state == CompactionState::Recorded(CompactionOutcome::Compacted)
             })
             .and_then(|marker| marker.settlement);
         let text = block.text.as_str();
@@ -328,15 +348,59 @@ impl Transcript {
     pub(crate) fn test_source(&mut self, key: String, source: SourceRef, text: &str) {
         self.put_source(key, "assistant", "Assistant", source, text);
     }
-    pub fn model(&mut self, snapshot: &rsi_agent_turn_protocol::ModelLiveSnapshot) {
+    pub fn model(&mut self, snapshot: &rsi_agent_turn_protocol::ModelLiveSnapshot) -> bool {
+        if snapshot.purpose == ModelEventPurpose::ContextCompaction {
+            use rsi_agent_turn_protocol::ModelLiveStatus;
+            let Some(start) = self
+                .turns
+                .active_start(&snapshot.turn_id, &snapshot.effect_id)
+            else {
+                return false;
+            };
+            let state = match snapshot.status {
+                ModelLiveStatus::Streaming => CompactionState::Running,
+                ModelLiveStatus::Abandoned => {
+                    CompactionState::Recorded(CompactionOutcome::Interrupted)
+                }
+                ModelLiveStatus::Committed { .. } => return false,
+            };
+            if let Some(block) = self.blocks.iter_mut().rev().find(|b| {
+                b.compact
+                    .as_ref()
+                    .is_some_and(|marker| marker.latest == start)
+            }) {
+                let marker = block.compact.as_mut().expect("matched compaction marker");
+                if marker.state == state
+                    || marker.state == CompactionState::Recorded(CompactionOutcome::Interrupted)
+                {
+                    return false;
+                }
+                marker.state = state;
+                block.title = state.caption().into();
+                block.invalidate();
+            } else {
+                let key = automatic_compaction_key(&snapshot.turn_id, &snapshot.effect_id);
+                self.project_compaction(key.clone(), start, state, None);
+                self.turns.live(
+                    &snapshot.turn_id,
+                    &snapshot.effect_id,
+                    snapshot.purpose,
+                    &[key],
+                    &self.blocks,
+                    start,
+                );
+            }
+            return true;
+        }
         if !self
             .live_model
             .update(snapshot, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2)
             .unwrap_or(false)
         {
-            return;
+            return false;
         }
         self.project_live_model();
+        true
     }
     fn project_live_model(&mut self) {
         let model = std::mem::take(&mut self.live_model);
@@ -379,14 +443,11 @@ impl Transcript {
             {
                 continue;
             }
-            let (role, title) =
-                if purpose == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction {
-                    ("status", "Context compaction")
-                } else if matches!(part.field, FactField::ModelReasoning { .. }) {
-                    ("reasoning", "Thinking")
-                } else {
-                    ("assistant", "Assistant")
-                };
+            let (role, title) = if matches!(part.field, FactField::ModelReasoning { .. }) {
+                ("reasoning", "Thinking")
+            } else {
+                ("assistant", "Assistant")
+            };
             self.add(
                 key.clone(),
                 role,
@@ -801,7 +862,7 @@ impl Transcript {
     }
     #[allow(clippy::too_many_lines)] // Closed Fact-to-block projection with one shared sequence fence.
     fn fact_blocks(&mut self, fact: &SessionFact, live: bool) {
-        self.project_request(fact);
+        self.project_request(fact, live);
         if BlockIdentity::tool(fact).is_some() {
             self.seq = self.seq.max(fact.seq());
             self.project_tool(fact);
@@ -824,7 +885,32 @@ impl Transcript {
             SessionFactBody::ManualCompaction {
                 command_id, event, ..
             } => {
-                self.project_compaction(command_id, event, fact, live);
+                let state = if live && matches!(event, ManualCompactionEvent::Started) {
+                    CompactionState::Running
+                } else {
+                    CompactionState::Recorded(
+                        CompactionOutcome::recorded(fact).expect("command fact"),
+                    )
+                };
+                let settled = matches!(event, ManualCompactionEvent::Settled { attempt } if matches!(attempt.terminal(), rsi_ai_protocol::LanguageEvent::Finished { .. }));
+                self.project_compaction(
+                    rsi_conversation::compaction_key(command_id),
+                    fact.seq(),
+                    state,
+                    settled.then_some(fact.seq()),
+                );
+            }
+            SessionFactBody::ContextCompactionInstalled {
+                turn_id,
+                effect_id,
+                settlement_seq,
+            } => {
+                self.project_compaction(
+                    automatic_compaction_key(turn_id, effect_id),
+                    fact.seq(),
+                    CompactionState::Recorded(CompactionOutcome::Compacted),
+                    Some(*settlement_seq),
+                );
             }
             SessionFactBody::ImageOutput {
                 turn_id,
@@ -868,14 +954,13 @@ impl Transcript {
                     }
                 }
                 self.live_model.settle(fact.seq(), effect_id);
+                if *purpose == ModelEventPurpose::ContextCompaction {
+                    return;
+                }
                 let preview =
                     rsi_conversation::model_previews(attempt, MAX_BLOCK_BYTES, MAX_BLOCK_BYTES * 2);
                 for part in preview.blocks() {
-                    let (role, title) = if *purpose
-                        == rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
-                    {
-                        ("status", "Context compaction")
-                    } else if matches!(part.field, FactField::ModelReasoning { .. }) {
+                    let (role, title) = if matches!(part.field, FactField::ModelReasoning { .. }) {
                         ("reasoning", "Reasoning")
                     } else {
                         ("assistant", "Assistant")
@@ -959,18 +1044,32 @@ pub(super) enum SummaryDocument {
         text: String,
     },
 }
+fn automatic_compaction_key(
+    turn: &TurnId,
+    effect: &rsi_agent_session_protocol::EffectId,
+) -> String {
+    serde_json::to_string(&("compact", turn, effect)).expect("typed compaction identity")
+}
 
 pub(super) fn summary_document(fact: &SessionFact) -> Option<SummaryDocument> {
-    let SessionFactBody::ManualCompaction {
-        event: rsi_agent_session_protocol::ManualCompactionEvent::Settled { attempt },
-        ..
-    } = fact.body()
-    else {
-        return None;
+    let attempt = match fact.body() {
+        SessionFactBody::ManualCompaction {
+            event: rsi_agent_session_protocol::ManualCompactionEvent::Settled { attempt },
+            ..
+        }
+        | SessionFactBody::ModelAttemptSettled {
+            purpose: ModelEventPurpose::ContextCompaction,
+            attempt,
+            ..
+        } => attempt,
+        _ => return None,
     };
     if !matches!(
         attempt.terminal(),
-        rsi_ai_protocol::LanguageEvent::Finished { .. }
+        rsi_ai_protocol::LanguageEvent::Finished {
+            reason: rsi_ai_protocol::FinishReason::Stop,
+            ..
+        }
     ) {
         return None;
     }
@@ -998,54 +1097,38 @@ impl Transcript {
 
     fn project_compaction(
         &mut self,
-        command: &rsi_agent_session_protocol::DomainRequestId,
-        event: &rsi_agent_session_protocol::ManualCompactionEvent,
-        fact: &SessionFact,
-        live: bool,
+        key: String,
+        seq: u64,
+        state: CompactionState,
+        settlement: Option<u64>,
     ) {
-        use rsi_agent_session_protocol::ManualCompactionEvent;
-        use rsi_agent_turn_protocol::CompactionOutcome;
-        let key = rsi_conversation::compaction_key(command);
         let index = self.blocks.iter().position(|block| block.key == key);
         let block = match index {
             Some(index) => &mut self.blocks[index],
             None => self
                 .blocks
-                .push_back_mut(Block::new(key, "compaction", "", fact.seq())),
+                .push_back_mut(Block::new(key, "compaction", "", seq)),
         };
         let previous_first = block.first_seq;
         block.first_seq = if block.compact.is_some() {
-            block.first_seq.min(fact.seq())
+            block.first_seq.min(seq)
         } else {
-            fact.seq()
+            seq
         };
-        let outcome = CompactionOutcome::recorded(fact).expect("command fact");
         let marker = block.compact.get_or_insert_with(|| {
             Box::new(CompactionMarker {
                 latest: 0,
-                outcome,
+                state,
                 settlement: None,
-                running: false,
             })
         });
-        if marker.latest < fact.seq() {
-            marker.running = live && outcome == CompactionOutcome::Started;
-            block.title = if marker.running {
-                "Compacting context…"
-            } else {
-                outcome.message()
-            }
-            .into();
-            marker.latest = fact.seq();
-            marker.outcome = outcome;
+        if marker.latest < seq {
+            block.title = state.caption().into();
+            marker.latest = seq;
+            marker.state = state;
         }
-        if let ManualCompactionEvent::Settled { attempt } = event
-            && matches!(
-                attempt.terminal(),
-                rsi_ai_protocol::LanguageEvent::Finished { .. }
-            )
-        {
-            marker.settlement = Some(fact.seq());
+        if settlement.is_some() {
+            marker.settlement = settlement;
         }
         block.invalidate();
         if index.is_none() || previous_first != block.first_seq {
@@ -1056,7 +1139,7 @@ impl Transcript {
         self.trim();
     }
 
-    fn project_request(&mut self, fact: &SessionFact) {
+    fn project_request(&mut self, fact: &SessionFact, live: bool) {
         let (SessionFactBody::ModelIntent {
             turn_id: turn,
             effect_id: effect,
@@ -1075,28 +1158,68 @@ impl Transcript {
             return;
         };
         let key = serde_json::to_string(&("request", turn, effect)).expect("typed identities");
-        let existing = self.blocks.iter().any(|block| block.key == key);
-        if !existing {
-            self.add(key.clone(), "metadata", "Request", "", false);
-        }
-        if let Some(block) = self.blocks.iter_mut().find(|block| block.key == key) {
-            let request = block.request.get_or_insert_with(Default::default);
-            request.observe(fact);
-            let title = request.title();
-            if block.title != title {
-                block.title = title;
-                block.invalidate();
+        let (block, reorder) = match self.blocks.iter().position(|block| block.key == key) {
+            Some(index) => {
+                let block = &mut self.blocks[index];
+                let earlier = fact.seq() < block.first_seq;
+                block.first_seq = block.first_seq.min(fact.seq());
+                (block, earlier)
             }
-            block.first_seq = if !existing || block.first_seq == 0 {
-                fact.seq()
-            } else {
-                block.first_seq.min(fact.seq())
-            };
+            None => {
+                let earlier = self
+                    .blocks
+                    .back()
+                    .is_some_and(|last| last.first_seq > fact.seq());
+                (
+                    self.blocks
+                        .push_back_mut(Block::new(key, "metadata", "Request", fact.seq())),
+                    earlier,
+                )
+            }
+        };
+        let request = block.request.get_or_insert_with(Default::default);
+        let previous_intent = request.intent_seq();
+        request.observe(fact);
+        let compaction = request.is_compaction();
+        let title = request.title();
+        if block.title != title || previous_intent != request.intent_seq() {
+            block.title = title;
+            block.invalidate();
         }
-        self.blocks
-            .make_contiguous()
-            .sort_by_key(|block| block.first_seq);
-        self.trim();
+        if reorder {
+            self.blocks
+                .make_contiguous()
+                .sort_by_key(|block| block.first_seq);
+        }
+        if compaction {
+            use rsi_ai_protocol::{ErrorKind, FinishReason, LanguageEvent};
+            let state = match fact.body() {
+                SessionFactBody::ModelStarted { .. } if live => CompactionState::Running,
+                SessionFactBody::ModelAttemptSettled { attempt, .. } => match attempt.terminal() {
+                    LanguageEvent::Finished {
+                        reason: FinishReason::Stop,
+                        ..
+                    } => CompactionState::Returned,
+                    LanguageEvent::Finished {
+                        reason: FinishReason::Cancelled,
+                        ..
+                    } => CompactionState::Recorded(CompactionOutcome::Interrupted),
+                    LanguageEvent::Failed { error, .. } if error.kind() == ErrorKind::Cancelled => {
+                        CompactionState::Recorded(CompactionOutcome::Interrupted)
+                    }
+                    _ => CompactionState::Recorded(CompactionOutcome::Failed),
+                },
+                _ => CompactionState::Recorded(CompactionOutcome::Started),
+            };
+            self.project_compaction(
+                automatic_compaction_key(turn, effect),
+                fact.seq(),
+                state,
+                None,
+            );
+        } else {
+            self.trim();
+        }
     }
 }
 

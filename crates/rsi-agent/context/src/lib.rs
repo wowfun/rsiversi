@@ -1179,6 +1179,7 @@ impl ContextFold {
             SessionFactBody::StepPrepared { prompt: None, .. }
             | SessionFactBody::CancelRequested { .. }
             | SessionFactBody::WorkspaceTouched { .. }
+            | SessionFactBody::ContextCompactionInstalled { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }
             | SessionFactBody::ImageStarted { .. } => {}

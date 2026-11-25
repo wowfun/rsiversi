@@ -116,6 +116,25 @@ async fn pressure_summary_is_durable_before_conversation_resumes_and_charges_pro
             ModelPurpose::Conversation
         ]
     ));
+    let installed: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ContextCompactionInstalled {
+                turn_id,
+                effect_id,
+                settlement_seq,
+            } if turn_id == &second.turn_id => Some((fact.seq(), effect_id, *settlement_seq)),
+            _ => None,
+        })
+        .collect();
+    let [(confirmed, effect, settlement)] = installed.as_slice() else {
+        panic!("expected one installed summary")
+    };
+    assert!(*settlement < *confirmed);
+    assert!(facts.iter().any(|fact| fact.seq() == *settlement && matches!(fact.body(),
+        SessionFactBody::ModelAttemptSettled { effect_id, purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction, .. } if effect_id == *effect)));
+    assert!(facts.iter().any(|fact| fact.seq() > *confirmed && matches!(fact.body(),
+        SessionFactBody::ModelIntent { turn_id, purpose: ModelPurpose::Conversation, .. } if turn_id == &second.turn_id)));
     stack.dispose(language, executor).await;
 }
 
@@ -283,6 +302,10 @@ async fn naturally_finished_summary_that_expands_the_view_fails_without_resubmis
         }
     }
     assert_eq!(finished, 1);
+    assert!(!facts.iter().any(|fact| matches!(
+        fact.body(),
+        SessionFactBody::ContextCompactionInstalled { .. }
+    )));
     let mut replay = ModelContextState::open(
         Arc::new(rsi_agent_context::DefaultContextBuilder::default()),
         stack.store.header(&first.session_id).await.unwrap(),
