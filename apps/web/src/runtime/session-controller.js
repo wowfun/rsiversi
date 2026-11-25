@@ -578,7 +578,7 @@ export function createPaneClass(context) {
       const session = this.staged?.data?.session;
       const permission = data?.projections?.entries?.find(entry=>entry.producer==='rsi.permission.view')?.content?.value;
       const selection = session ? permission : context.view?.setup?.agent?.permission_default;
-      const sandbox = selection?.sandbox ?? (session ? data.sandbox : context.view?.setup?.agent?.sandbox);
+      const sandbox = session ? permission?.sandbox : selection?.sandbox ?? context.view?.setup?.agent?.sandbox;
       const standard = (selection?.approval ?? 'ask') === (sandbox === 'danger-full-access' ? 'never' : 'ask');
       const editor = this.editor,
         pending = editor?.record.pending;
@@ -602,7 +602,7 @@ export function createPaneClass(context) {
         completionsAvailable: !!this.generation && !this.switching,
         access: sandbox && (standard && (!selection?.preset || selection.preset === sandbox) ? sandbox : 'custom'),
         accessDisabled: !(context.view?.navigation?.can_archive ?? data?.can_stop_work ?? context.view?.setup?.allowed)
-          || (session ? !permission : !context.view?.setup?.agent?.default_model)
+          || (!session && !context.view?.setup?.agent?.default_model)
           || !!this.submitting || !!editor?.record.pending || !!this.switching,
         text: starting?.text ?? editor?.text ?? "",
         command: claimedCommand(editor?.text ?? '', [...(this.staged?.data?.commands?.commands ?? []),...(this.selectedCommand ? [this.selectedCommand] : [])]),

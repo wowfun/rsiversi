@@ -985,7 +985,9 @@ and reveals the button; the threshold includes one pixel of browser rounding.
 Expanding a turn preserves the reading anchor without itself enabling this
 control. Scroll, transcript updates and viewport resize recalculate visibility.
 
-The access picker shows the Session's current permission. Full access opens an
+An attached Session shows the access picker while its preset provides the
+permission projection. Withdrawing the projection also closes any pending
+confirmation. Full access opens an
 acknowledgement dialog with its checkbox initially unchecked. Cancel or Escape
 preserves the current mode. Confirming updates the Session for all clients.
 Steering keeps the active Turn's policy. The permission command and executor

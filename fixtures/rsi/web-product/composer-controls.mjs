@@ -98,6 +98,22 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
   await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();assert(!(await acknowledgement.isChecked()));await page.keyboard.press('Escape');
   await access.click();await page.getByRole('menuitemradio',{name:'Read Only',exact:true}).click();
   await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
+  await acknowledgement.check();
+  await page.evaluate(async()=>{
+    const surface=fixture.view.surfaces.main;
+    fixture.savedPermissions=surface.projections;
+    surface.projections={...surface.projections,entries:[]};
+    await fixture.frame();
+  });
+  await access.waitFor({state:'detached',timeout:5000});
+  assert.equal(await confirmation.count(),0);
+  await page.screenshot({path:join(report,name+'-permission-absent.png')});
+  await page.evaluate(async()=>{fixture.view.surfaces.main.projections=fixture.savedPermissions;await fixture.frame();});
+  await page.getByRole('button',{name:'Access mode, current: Read Only',exact:true}).waitFor();
+  await access.click();await page.getByRole('menuitemradio',{name:'Full access',exact:true}).click();
+  assert.equal(await acknowledgement.isChecked(),false);
+  await page.keyboard.press('Escape');
   await input.fill('permission request');await page.getByTestId('composer-send').click();await page.waitForFunction(()=>fixture.prepared.length===1);
   assert.equal(await page.evaluate(()=>Object.hasOwn(fixture.prepared[0],'sandbox')),false);
   assert.equal(await page.getByRole('button',{name:/^Access mode/}).isDisabled(),true);
@@ -111,7 +127,7 @@ try {for(const [name,engine] of Object.entries({chromium,firefox})){
    await page.getByRole('button',{name:/^Select model/}).click();
    const bounds=await page.getByRole('menu',{name:/^Select model/}).boundingBox();assert(bounds.x>=0&&bounds.x+bounds.width<=width);
    await page.screenshot({path:join(report,name+'-'+width+'.png')});await page.keyboard.press('Escape');}
-  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','ordinary messages follow Host permission','pending access lock','Escape focus','narrow menu bounds']});
+  assert.deepEqual(errors,[]);results.push({browser:name,errors,checks:['starting draft handoff without send','plus commands','reasoning Max','full access confirmation cancel','permission withdrawal removes the control and resets confirmation','ordinary messages follow Host permission','pending access lock','Escape focus','narrow menu bounds']});
  }catch(error){await page.screenshot({path:join(report,name+'-failure.png')}).catch(()=>{});await writeFile(join(report,name+'-failure.txt'),String(error.stack));throw error;}finally{await browser.close();}
 }}finally{await scene.close();}
 await writeFile(join(report,'document-results.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));

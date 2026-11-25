@@ -42,7 +42,7 @@ queue edits and uncertain retries retain their original options. Dispatch admits
 that same bounded mode without rewriting it. The Agent enforces the execution
 policy and its independent approval requirement as defined by the
 [security contract](../../rsi-agent/docs/security.md). The pane publishes the
-creation-time sandbox and the current permission projection. The Web composer sends ordinary messages
+current permission through its contributing projection. The Web composer sends ordinary messages
 without an override. Its access picker commits the owner's choice through
 `/permission`. Only the Host owner can submit an explicit one-Turn sandbox.
 

@@ -5,7 +5,8 @@ import {chromium, firefox} from 'playwright';
 import {sourceFixture} from './source-fixture.mjs';
 
 const report=resolve(process.env.RSI_REPORT_DIR);await mkdir(report,{recursive:true});
-const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8');
+const source=await readFile(new URL('./document-scene.tsx',import.meta.url),'utf8')
+  +'\nfixture.permissionCommands(fixture.view.surfaces.main);';
 const server=await sourceFixture({name:'reflow',source});
 const geometry=()=>({width:innerWidth,overflow:document.documentElement.scrollWidth-innerWidth,
   textSize:getComputedStyle(document.querySelector('.message-text')??document.body).fontSize,

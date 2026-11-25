@@ -172,7 +172,6 @@ struct Attachment {
     workspace_registration: Mutex<WorkspaceRegistration>,
     header: String,
     agent_preset: String,
-    sandbox: rsi_sandbox::SandboxMode,
     protected: bool,
     can_stop_without_navigation: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
@@ -465,7 +464,6 @@ impl Pane {
             "projections":state.projections, "projection_notice":state.projection_notice,
             "goal_armed":current.controller.goal_armed(),
             "model":selection.model,"reasoning_effort":selection.reasoning_effort,
-            "sandbox":current.sandbox,
             "effort_profile":profile.map(rsi_ai_protocol::LanguageProfile::reasoning_efforts),
             "model_command":current.submission.model_command.view(),
             "context_capacity_tokens": metrics.as_ref().and_then(|value| value.summary.last_context.as_ref()).map(rsi_conversation::ContextUsage::input_capacity),
@@ -1301,7 +1299,6 @@ impl GuiApplication {
             ),
             header: header.fingerprint().map_err(error)?,
             agent_preset: header.agent_preset_id().to_string(),
-            sandbox: header.settings().sandbox(),
             protected: header.protection().is_some(),
             can_stop_without_navigation: self.navigation.is_none()
                 && controller.is_host_owner().await.unwrap_or(false),

@@ -35,13 +35,12 @@ if (surface.kind === 'external') {
   const creationWorkspace:string|undefined=surface.creation?.workspace_id;
   const active:string|null=surface.active;
   const uiRevision:string=surface.ui_revision;
-  const sandbox:'read-only'|'workspace-write'|'danger-full-access'=surface.sandbox;
   const completionSequence:string|undefined=surface.completions?.sequence;
   void completionSequence;
   // @ts-expect-error Completion revisions use decimal wire strings.
   const invalidCompletion:NonNullable<typeof surface.completions>={query:'',sequence:1,entries:[],notice:null};
   void invalidCompletion;
-  void [selection,creationWorkspace,active,uiRevision,sandbox];
+  void [selection,creationWorkspace,active,uiRevision];
   const block: TranscriptBlock | undefined = surface.transcript.blocks[0];
   const opaque: unknown = block?.tool?.result;
   void opaque;
