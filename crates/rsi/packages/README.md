@@ -44,11 +44,15 @@ acquisition. A missing index commitment is inadmissible; no legacy archive fallb
 or in-place object conversion is provided. Windows excludes the filesystem-owned `.rsi-namespace-pin` guard
 of each pinned directory.
 Installation writes in archive order and holds only the current ancestor chain.
+For large payloads, completed files may sync concurrently while the installer
+reads the next entry. These operations share the process-wide worker budget
+with verification. Every file sync must succeed before syncing directories
+and publishing the object.
 Resolving a `payload_tree` export returns its expanded directory; its transport
 container is not an installed file export.
 For large acquisitions the directory walk sends bounded batches from retained
-parents to at most seven additional readers across the process. All readers
-settle before the lease is published.
+parents to available workers. The process admits at most seven additional
+payload I/O workers in total. All readers settle before the lease is published.
 The `process_extension` export is a format-1 JSON descriptor, bounded to 64 KiB,
 with an immutable payload working directory and at most 64 arguments. Arguments
 are literal strings, the host-issued generation identity, or paths in a named

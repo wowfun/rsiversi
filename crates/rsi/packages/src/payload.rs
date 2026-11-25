@@ -1,4 +1,5 @@
 mod verify;
+mod workers;
 use crate::{Error, FileRecord, Manifest, Result, filesystem::Dir, invalid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -177,6 +178,20 @@ fn read_record(
 }
 
 fn expand_files(tree: &Dir, files: &[FileRecord], input: &mut impl Read) -> Result<()> {
+    workers::run(
+        files.len(),
+        3,
+        || |file: File| Ok(file.sync_all()?),
+        |sync| write_files(tree, files, input, sync),
+    )
+}
+
+fn write_files(
+    tree: &Dir,
+    files: &[FileRecord],
+    input: &mut impl Read,
+    sync: &mut dyn FnMut(File) -> Result<()>,
+) -> Result<()> {
     let mut buffer = vec![0; 64 * 1024];
     let mut ancestors: Vec<(&str, Dir)> = Vec::new();
     for file in files {
@@ -207,7 +222,7 @@ fn expand_files(tree: &Dir, files: &[FileRecord], input: &mut impl Read) -> Resu
                 0o400
             }))?;
         }
-        output.sync_all()?;
+        sync(output)?;
     }
     Ok(())
 }
