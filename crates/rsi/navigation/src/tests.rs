@@ -409,6 +409,9 @@ async fn finish_fixture_turn(owner: &Navigation, id: &SessionId) {
     .unwrap();
 }
 async fn owner() -> FixtureOwner {
+    owner_with_store(Arc::new(rsi_agent_testkit::MemoryStore::new())).await
+}
+async fn owner_with_store(store: Arc<rsi_agent_testkit::MemoryStore>) -> FixtureOwner {
     let settings = FrozenAgentSettings::new(
         "default",
         "system",
@@ -417,7 +420,6 @@ async fn owner() -> FixtureOwner {
         false,
     )
     .unwrap();
-    let store = Arc::new(rsi_agent_testkit::MemoryStore::new());
     for id in (1..=300).rev() {
         let header = SessionHeader::new_local(
             SessionId::new(format!("row-{id:03}")).unwrap(),
@@ -867,7 +869,8 @@ async fn activity_moving_ahead_of_a_live_cursor_is_exposed_on_refresh() {
 #[tokio::test]
 async fn manual_seed_is_complete_before_ordered_64_65_summary_reads() {
     use rsi_navigation_api::{OrderMembership, OrderScope, SummaryRequest};
-    let owner = owner().await;
+    let store = Arc::new(rsi_agent_testkit::MemoryStore::new());
+    let owner = owner_with_store(store.clone()).await;
     owner.state.lock().unwrap().document = Arc::new(Document {
         workspace_orders: BTreeMap::new(),
         accounting: None,
@@ -955,6 +958,9 @@ async fn manual_seed_is_complete_before_ordered_64_65_summary_reads() {
         .await
         .unwrap();
     assert_eq!(absent.entries, [None]);
+    // Two access batches for 300 members and five for their exact summaries.
+    let (_, access, individual) = store.activity_read_counts();
+    assert_eq!((access, individual), (7, 0));
     owner.close().await;
 }
 #[test]
@@ -2091,11 +2097,11 @@ async fn a_linear_scan_replaces_its_cut_and_expires_after_five_minutes() {
 fn header_failure_is_not_silently_treated_as_a_protection_denial() {
     use rsi_agent_store_protocol::StoreError;
     assert!(matches!(
-        visible_summary(Err(StoreError::NotFound("missing".into()))),
+        visible_summary::<()>(Err(StoreError::NotFound("missing".into()))),
         Ok(None)
     ));
     assert!(matches!(
-        visible_summary(Err(StoreError::ValidationBusy)),
+        visible_summary::<()>(Err(StoreError::ValidationBusy)),
         Err(ApiError::Capacity)
     ));
 }

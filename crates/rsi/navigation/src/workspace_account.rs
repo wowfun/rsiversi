@@ -269,7 +269,11 @@ impl Navigation {
                         if let Some(row) =
                             super::visible_summary(owner.store.session_summary(member).await)?
                             && row.header.coordinates() == &coordinates
-                            && owner.retain_header_view(&row.header, &origin, &mut leases)?
+                            && owner.retain_scope_view(
+                                row.header.protection(),
+                                &origin,
+                                &mut leases,
+                            )?
                         {
                             result.push(member.clone());
                         }

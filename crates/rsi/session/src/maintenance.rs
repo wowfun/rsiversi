@@ -687,6 +687,7 @@ mod tests {
                                     session_id: id.clone(),
                                     location: ExecutionLocation::Local,
                                     protection: None,
+                                    before_first_turn: false,
                                 })
                             }
                         })
@@ -750,6 +751,7 @@ mod tests {
                         session_id: source.clone(),
                         location: ExecutionLocation::Local,
                         protection: None,
+                        before_first_turn: false,
                     })])
                 }
             },
@@ -876,6 +878,7 @@ fn access_batch_requires_exact_length_and_positional_identities() {
             session_id: SessionId::new(name).unwrap(),
             location: ExecutionLocation::Local,
             protection: None,
+            before_first_turn: false,
         })
     };
     assert!(matches!(

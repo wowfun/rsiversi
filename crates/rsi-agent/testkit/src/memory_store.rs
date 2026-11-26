@@ -810,7 +810,10 @@ impl SessionStore for MemoryStore {
                     .sessions
                     .get(id)
                     .map(|session| {
-                        rsi_agent_store_protocol::StoreSessionAccess::from(&session.header)
+                        rsi_agent_store_protocol::StoreSessionAccess::at(
+                            &session.header,
+                            session.facts.last().map_or(0, |fact| fact.seq()),
+                        )
                     })
                     .ok_or_else(|| StoreError::NotFound(id.to_string()))
             })

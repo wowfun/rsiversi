@@ -348,17 +348,33 @@ pub(super) fn read_session_header_source(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(StoreRecentSession, String)> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {} FROM sessions WHERE session_id = ?1",
+            header_projection()
+        ))
+        .map_err(sql_error)?;
+    read_selected_header(&mut statement, session_id)
+}
+
+pub(super) fn live_headers(connection: &Connection) -> Result<rusqlite::CachedStatement<'_>> {
+    connection
+        .prepare_cached(&format!(
+            "SELECT {} FROM sessions WHERE session_id = ?1
+         AND NOT EXISTS (SELECT 1 FROM session_tombstones WHERE session_id = ?1)",
+            header_projection()
+        ))
+        .map_err(sql_error)
+}
+
+pub(super) fn read_selected_header(
+    statement: &mut rusqlite::Statement<'_>,
+    session_id: &SessionId,
+) -> Result<(StoreRecentSession, String)> {
     #[cfg(test)]
     HEADER_READS.set(HEADER_READS.get() + 1);
-    let row = connection
-        .query_row(
-            &format!(
-                "SELECT {} FROM sessions WHERE session_id = ?1",
-                header_projection()
-            ),
-            [session_id.as_str()],
-            |row| read_header_projection(row, 0),
-        )
+    let row = statement
+        .query_row([session_id.as_str()], |row| read_header_projection(row, 0))
         .optional()
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;

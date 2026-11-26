@@ -71,6 +71,47 @@ async fn cold_session_summary_returns_header_and_cuts_in_one_metadata_read() {
 }
 
 #[tokio::test]
+async fn access_batch_preserves_blank_and_started_slots_after_a_corrupt_header() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let bad = seed_session(&store, "access-corrupt").await;
+    let live = seed_session(&store, "access-live").await;
+    let blank = test_header("access-blank");
+    store.save_blank(blank.clone(), None).await.unwrap();
+    store
+        .inner
+        .connections
+        .writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET header_json='{}' WHERE session_id=?1",
+            [bad.as_str()],
+        )
+        .unwrap();
+    let missing = SessionId::new("access-missing").unwrap();
+    let rows = store
+        .session_access(&[
+            bad,
+            blank.session_id().clone(),
+            missing.clone(),
+            live.clone(),
+        ])
+        .await
+        .unwrap();
+    assert!(matches!(&rows[0], Err(StoreError::Corrupt(_))));
+    let reserved = rows[1].as_ref().unwrap();
+    assert_eq!(&reserved.session_id, blank.session_id());
+    assert!(reserved.before_first_turn);
+    assert_eq!(rows[2], Err(StoreError::NotFound(missing.to_string())));
+    let started = rows[3].as_ref().unwrap();
+    assert_eq!(started.session_id, live);
+    assert!(!started.before_first_turn);
+}
+
+#[tokio::test]
 async fn cuts_keep_per_item_corruption_separate_from_valid_sessions() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();

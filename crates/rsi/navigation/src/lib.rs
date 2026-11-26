@@ -899,7 +899,7 @@ impl Navigation {
             if visibility
                 .locations()
                 .contains(header.coordinates().location())
-                && self.retain_header_view(&header, origin, &mut leases)?
+                && self.retain_scope_view(header.protection(), origin, &mut leases)?
             {
                 visible.push((record.partition_revision, id.clone()));
             }
@@ -1218,7 +1218,7 @@ impl Navigation {
             return Ok(None);
         };
         Ok(self
-            .retain_header_view(&summary.header, origin, leases)?
+            .retain_scope_view(summary.header.protection(), origin, leases)?
             .then(|| {
                 summary
                     .header
@@ -1226,13 +1226,13 @@ impl Navigation {
             }))
     }
 
-    fn retain_header_view(
+    fn retain_scope_view(
         &self,
-        header: &rsi_agent_session_protocol::SessionHeader,
+        scope: Option<&rsi_agent_session_protocol::SessionProtectionScope>,
         origin: &CallOrigin,
         leases: &mut Vec<tokio_util::sync::CancellationToken>,
     ) -> Result<bool> {
-        let Some(scope) = header.protection() else {
+        let Some(scope) = scope else {
             return Ok(true);
         };
         let Some(lease) = self.protection_view(scope, origin)? else {
@@ -1295,15 +1295,19 @@ fn navigation_entry(
     }
 }
 
-fn visible_summary(
-    result: rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSession>,
-) -> Result<Option<rsi_agent_store_protocol::StoreRecentSession>> {
+fn visible_summary<T>(result: rsi_agent_store_protocol::Result<T>) -> Result<Option<T>> {
     use rsi_agent_store_protocol::StoreError;
     match result {
         Ok(summary) => Ok(Some(summary)),
         Err(StoreError::NotFound(_)) => Ok(None),
-        Err(StoreError::ReadCapacity | StoreError::ValidationBusy) => Err(ApiError::Capacity),
-        Err(_) => Err(ApiError::Unavailable),
+        Err(error) => Err(store_read_error(error)),
+    }
+}
+fn store_read_error(error: rsi_agent_store_protocol::StoreError) -> ApiError {
+    use rsi_agent_store_protocol::StoreError;
+    match error {
+        StoreError::ReadCapacity | StoreError::ValidationBusy => ApiError::Capacity,
+        _ => ApiError::Unavailable,
     }
 }
 fn finish_scope(origin: &CallOrigin, leases: &[tokio_util::sync::CancellationToken]) -> Result<()> {

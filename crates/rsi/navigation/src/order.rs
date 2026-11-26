@@ -1,6 +1,8 @@
-use super::{ApiError, Arc, BoxFuture, Document, Navigation, Result, navigation_entry};
+use super::{
+    ApiError, Arc, BoxFuture, CallOrigin, Document, Navigation, Result, SessionId, navigation_entry,
+};
 use futures_util::{StreamExt, TryStreamExt, stream};
-use rsi_agent_store_protocol::StoreOrderSeed;
+use rsi_agent_store_protocol::{MAXIMUM_ACCESS_SESSIONS, StoreOrderSeed};
 use rsi_navigation_api::{
     OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
 };
@@ -37,27 +39,28 @@ impl Navigation {
                         let mut created = Vec::new();
                         let mut selected = Vec::new();
                         let mut leases = Vec::new();
-                        for member in members {
-                            let Some(blank) = owner
-                                .visible_session_blank(&member.session, &origin, &mut leases)
-                                .await?
-                            else {
-                                continue;
-                            };
-                            created.push(member.created_at_ms);
-                            let metadata = document.records.get(&member.session);
-                            selected.push(OrderMember {
-                                blank,
-                                account_position: 0,
-                                last_activity_ms: member.last_activity_ms.to_string(),
-                                group: member.group,
-                                session: member.session,
-                                pinned: metadata.is_some_and(|row| row.pinned),
-                                partition_revision: metadata
-                                    .and_then(|row| row.partition_revision)
-                                    .map(|r| r.to_string()),
-                                archived: metadata.is_some_and(|row| row.archived),
-                            });
+                        for batch in members.chunks(MAXIMUM_ACCESS_SESSIONS) {
+                            let ids = batch.iter().map(|m| m.session.clone()).collect::<Vec<_>>();
+                            let access = owner.visible_batch(&ids, &origin, &mut leases).await?;
+                            for (member, grant) in batch.iter().zip(access) {
+                                let Some((session, blank)) = grant else {
+                                    continue;
+                                };
+                                created.push(member.created_at_ms);
+                                let metadata = document.records.get(&member.session);
+                                selected.push(OrderMember {
+                                    blank,
+                                    account_position: 0,
+                                    last_activity_ms: member.last_activity_ms.to_string(),
+                                    group: member.group,
+                                    session,
+                                    pinned: metadata.is_some_and(|row| row.pinned),
+                                    partition_revision: metadata
+                                        .and_then(|row| row.partition_revision)
+                                        .map(|r| r.to_string()),
+                                    archived: metadata.is_some_and(|row| row.archived),
+                                });
+                            }
                         }
                         let groups = owner
                             .order_accounts(&document, &groups, &created, &mut selected)
@@ -78,6 +81,31 @@ impl Navigation {
                 seed.bounded().map_err(|_| ApiError::Unavailable)
             })
         })
+    }
+    async fn visible_batch(
+        &self,
+        sessions: &[SessionId],
+        origin: &CallOrigin,
+        leases: &mut Vec<tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<Option<(SessionId, bool)>>> {
+        if sessions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .store
+            .session_access(sessions)
+            .await
+            .map_err(super::store_read_error)?;
+        rows.into_iter()
+            .map(|row| {
+                let Some(row) = super::visible_summary(row)? else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .retain_scope_view(row.protection.as_ref(), origin, leases)?
+                    .then_some((row.session_id, row.before_first_turn)))
+            })
+            .collect()
     }
     async fn order_accounts(
         &self,
@@ -171,15 +199,28 @@ impl Navigation {
                     .session_activity_summaries(&request.sessions)
                     .await
                     .map_err(|_| ApiError::Unavailable)?;
+                for slot in &mut rows {
+                    if slot.as_ref().is_some_and(|row| {
+                        !visibility.locations().contains(row.coordinates.location())
+                    }) {
+                        *slot = None;
+                    }
+                }
+                let ids = rows
+                    .iter()
+                    .flatten()
+                    .map(|row| row.session_id.clone())
+                    .collect::<Vec<_>>();
                 let mut leases = Vec::new();
+                let mut grants = owner
+                    .visible_batch(&ids, &origin, &mut leases)
+                    .await?
+                    .into_iter();
                 let default_metadata = rsi_navigation_api::SessionMetadata::default();
                 let mut entries = Vec::with_capacity(rows.len());
                 for slot in &mut rows {
                     let entry = if let Some(row) = slot.as_ref()
-                        && visibility.locations().contains(row.coordinates.location())
-                        && let Some(blank) = owner
-                            .visible_session_blank(&row.session_id, &origin, &mut leases)
-                            .await?
+                        && let Some((_, blank)) = grants.next().flatten()
                     {
                         let metadata = document
                             .records

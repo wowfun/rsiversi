@@ -254,7 +254,7 @@ pub async fn assert_mechanical_store_contract(
         access,
         vec![
             Err(StoreError::NotFound(missing.to_string())),
-            Ok(rsi_agent_store_protocol::StoreSessionAccess::from(&header))
+            Ok(rsi_agent_store_protocol::StoreSessionAccess::at(&header, 2))
         ]
     );
     assert!(matches!(

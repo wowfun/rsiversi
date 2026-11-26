@@ -2245,8 +2245,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     /// Missing or retired Sessions are not found; this read never loads transcript.
     async fn session_summary(&self, session_id: &SessionId) -> Result<StoreRecentSession>;
     /// Reads ordered per-item access projections from one metadata snapshot.
-    /// Returns exactly one result per input identity, in input order, including
-    /// failures and repeated identities; implementations never omit a slot.
+    /// The selection contains 1..=256 distinct identities. Item failures preserve slots.
     async fn session_access(
         &self,
         sessions: &[SessionId],
@@ -2979,7 +2978,7 @@ impl StoreError {
 /// Store result.
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Bounded immutable metadata used by caller-owned access policy.
+/// Bounded metadata for caller-owned access policy and Session discovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreSessionAccess {
     /// Exact selected identity.
@@ -2988,20 +2987,26 @@ pub struct StoreSessionAccess {
     pub location: rsi_agent_session_protocol::ExecutionLocation,
     /// Optional caller-interpreted protection scope.
     pub protection: Option<rsi_agent_session_protocol::SessionProtectionScope>,
+    /// Whether this Session has yet to start or inherit its first Turn.
+    pub before_first_turn: bool,
 }
-impl From<&SessionHeader> for StoreSessionAccess {
-    fn from(header: &SessionHeader) -> Self {
+impl StoreSessionAccess {
+    /// Derives the access projection from the Header and Fact watermark read together.
+    pub fn at(header: &SessionHeader, durable_fact_seq: u64) -> Self {
         Self {
             session_id: header.session_id().clone(),
             location: header.coordinates().location().clone(),
             protection: header.protection().cloned(),
+            before_first_turn: header.is_before_first_turn(durable_fact_seq),
         }
     }
 }
 /// Checks batch selection without changing caller order.
 pub fn validate_access_selection(sessions: &[SessionId]) -> Result<()> {
-    validate_unique_selection(sessions, "access", 256)
+    validate_unique_selection(sessions, "access", MAXIMUM_ACCESS_SESSIONS)
 }
+/// Maximum number of distinct Sessions in one access read.
+pub const MAXIMUM_ACCESS_SESSIONS: usize = 256;
 
 /// Durable activity for one selected Session at the batch's read snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]

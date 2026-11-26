@@ -4,6 +4,10 @@ Atomic Session appends check retirement once in the writer transaction. One
 indexed Session read supplies both expected-sequence comparisons and the two
 prefix digests. A newly admitted Header starts with the empty stream digests.
 
+Live summary and access reads select the Header and check retirement in the
+same indexed statement. An access batch reuses that statement inside one
+snapshot and keeps each selected Header's decode result in its own slot.
+
 Domain reads batch the distinct canonical control positions in one bounded SQL
 query, decoding each control once and retaining only selected snapshots. Both
 current and historical reads preserve domain ordering and reject missing,

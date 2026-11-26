@@ -50,6 +50,10 @@ Fact/control watermarks from one metadata snapshot. It returns the same
 `StoreRecentSession` value used by recent listings, without loading transcript
 or creating runtime activity. A missing or retired Session is not found.
 
+`session_access` projects the location, protection scope and before-first-Turn
+state for 1–256 distinct identities at one metadata snapshot. Retired and
+missing identities retain individual not-found slots in caller order.
+
 A domain-state read can select one domain ID. It returns the same watermarks
 and canonical state as filtering the complete page at that cut. A missing
 domain yields an empty page. Readers can request a removed Domain by name at a

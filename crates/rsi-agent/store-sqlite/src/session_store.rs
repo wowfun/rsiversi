@@ -60,9 +60,8 @@ impl SqliteStore {
     async fn read_summary_row(&self, session_id: &SessionId) -> Result<StoreRecentSession> {
         let session_id = session_id.clone();
         self.with_reader_named(StoreOperation::Header, move |connection| {
-            let transaction = connection.transaction().map_err(sql_error)?;
-            reference_index::available(&transaction, &session_id)?;
-            validation::read_session_header_source(&transaction, &session_id).map(|(row, _)| row)
+            let mut statement = validation::live_headers(connection)?;
+            validation::read_selected_header(&mut statement, &session_id).map(|(row, _)| row)
         })
         .await
     }
@@ -502,15 +501,19 @@ impl SessionStore for SqliteStore {
         let sessions = sessions.to_vec();
         self.with_reader_named(StoreOperation::AccessBatch, move |connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
+            let mut statement = validation::live_headers(&transaction)?;
             let result = sessions
                 .iter()
                 .map(|id| {
-                    reference_index::available(&transaction, id)?;
-                    read_session_header_row(&transaction, id).map(|(header, _)| {
-                        rsi_agent_store_protocol::StoreSessionAccess::from(&header)
+                    validation::read_selected_header(&mut statement, id).map(|(row, _)| {
+                        rsi_agent_store_protocol::StoreSessionAccess::at(
+                            &row.header,
+                            row.durable_fact_seq,
+                        )
                     })
                 })
                 .collect();
+            drop(statement);
             transaction.commit().map_err(sql_error)?;
             Ok(result)
         })
