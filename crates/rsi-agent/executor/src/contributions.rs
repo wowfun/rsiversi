@@ -182,7 +182,7 @@ impl Driver {
         run: &StageRun<'_>,
     ) -> std::result::Result<AgentCompositionPin, DriveFailure> {
         let mut reserved = std::collections::BTreeSet::new();
-        let assigned = source.replaced_preset_tools();
+        let assigned = source.replaced_preset_tools(preset.preset_id());
         let request_preset = || preset.clone().without_preset_tools(assigned.clone());
         let selected = request_preset();
         selected.tools().visit_definitions(&mut |tool| {

@@ -60,6 +60,8 @@ struct Config {
     presets: bool,
     #[serde(default)]
     replace_preset_tools: std::collections::BTreeSet<String>,
+    replace_tools_in_presets:
+        Option<std::collections::BTreeSet<rsi_agent_session_protocol::AgentPresetId>>,
     #[serde(default)]
     routes: Vec<String>,
 }
@@ -661,6 +663,7 @@ impl PluginFactory for Factory {
                 lifetime.clone(),
                 config.profile.clone(),
                 config.replace_preset_tools,
+                config.replace_tools_in_presets,
                 rsi::application_tool_receipt_directory(&self.0, &config.profile)
                     .map_err(failure)?,
             )?;

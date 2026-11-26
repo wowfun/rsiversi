@@ -1,7 +1,7 @@
 use super::{AgentCompositionError, AgentCompositionPin, Result};
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    ApplicationToolBinding, ApplicationToolView, ModelSelection, SessionHeader,
+    AgentPresetId, ApplicationToolBinding, ApplicationToolView, ModelSelection, SessionHeader,
 };
 use rsi_tools_protocol::{
     PreparedToolCall, RetainedToolResult, ToolCall, ToolDefinition, ToolResultIdentity, ToolRuntime,
@@ -123,7 +123,7 @@ pub(super) struct RequestPreparation {
 #[async_trait]
 pub trait RequestToolSource: fmt::Debug + Send + Sync + 'static {
     /// Preset names assigned exclusively to this source by the Host profile.
-    fn replaced_preset_tools(&self) -> Option<Arc<BTreeSet<String>>> {
+    fn replaced_preset_tools(&self, _preset: &AgentPresetId) -> Option<Arc<BTreeSet<String>>> {
         None
     }
     /// Waits for configured input preparation outside the per-Step callback deadline.

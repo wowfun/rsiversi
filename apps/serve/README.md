@@ -141,6 +141,8 @@ before native admission; incomplete or cancelled bodies never submit input.
 A Host profile can use `replace_preset_tools` with `tools = true` to assign
 specific names to its selected application. Those native bodies are omitted
 from the request even if the application withdraws a tool or cannot answer.
+`replace_tools_in_presets` limits this assignment to the listed preset IDs.
+Omitting the list applies the configured assignment to every preset.
 All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 

@@ -64,9 +64,13 @@ async fn captured_full_access_policy_reaches_prepared_calls() {
         .unwrap();
     let (socket, endpoint) = endpoint().await;
     let (_sender, current) = watch::channel(Some(endpoint));
-    let source = Source {
+    let native_preset = AgentPresetId::new("agent").unwrap();
+    let custom = AgentPresetId::new("custom").unwrap();
+    let assigned = Arc::new(BTreeSet::from(["schedule_list".to_owned()]));
+    let mut source = Source {
         profile: "fixture".into(),
-        replaced_preset_tools: None,
+        replaced_preset_tools: Some(assigned.clone()),
+        replace_tools_in_presets: Some(BTreeSet::from([native_preset.clone()])),
         catalogs: runtime
             .root()
             .lookup_local::<ToolCatalogProviderContract>()
@@ -75,11 +79,21 @@ async fn captured_full_access_policy_reaches_prepared_calls() {
         lifetime: CancellationToken::new(),
         executions: Arc::new(Semaphore::new(8)),
     };
+    assert_eq!(source.replaced_preset_tools(&custom), None);
+    assert_eq!(
+        source.replaced_preset_tools(&native_preset).as_ref(),
+        Some(&assigned)
+    );
+    source.replace_tools_in_presets = None;
+    assert_eq!(
+        source.replaced_preset_tools(&custom).as_ref(),
+        Some(&assigned)
+    );
     let header = SessionHeader::new_local(
         SessionId::new("session").unwrap(),
         1,
         "/workspace",
-        AgentPresetId::new("agent").unwrap(),
+        native_preset,
         FrozenAgentSettings::new(
             "default",
             "system",

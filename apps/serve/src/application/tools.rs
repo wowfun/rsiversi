@@ -4,7 +4,9 @@ use rsi_agent_composition_protocol::{
     AgentCompositionError, RequestInputContext, RequestInputPreparer, RequestToolCatalog,
     RequestToolSource,
 };
-use rsi_agent_session_protocol::{EffectId, ExecutionLocation, SessionHeader, SessionId};
+use rsi_agent_session_protocol::{
+    AgentPresetId, EffectId, ExecutionLocation, SessionHeader, SessionId,
+};
 use rsi_agent_turn_protocol::AgentCallerAuthority;
 use rsi_credentials_protocol::SecretValue;
 use rsi_tools_protocol::{
@@ -170,6 +172,7 @@ async fn response_bytes(
 pub(super) struct Source {
     profile: String,
     replaced_preset_tools: Option<Arc<BTreeSet<String>>>,
+    replace_tools_in_presets: Option<BTreeSet<AgentPresetId>>,
     catalogs: Arc<dyn ToolCatalogProvider>,
     endpoint: watch::Receiver<Option<Arc<Endpoint>>>,
     lifetime: CancellationToken,
@@ -189,6 +192,7 @@ impl Source {
         lifetime: CancellationToken,
         profile: String,
         replaced_preset_tools: BTreeSet<String>,
+        replace_tools_in_presets: Option<BTreeSet<AgentPresetId>>,
         receipt_directory: std::path::PathBuf,
     ) -> rsi_meta::Result<(Self, Publisher)> {
         let client = reqwest::Client::builder()
@@ -202,6 +206,7 @@ impl Source {
                 profile,
                 replaced_preset_tools: (!replaced_preset_tools.is_empty())
                     .then(|| Arc::new(replaced_preset_tools)),
+                replace_tools_in_presets,
                 catalogs,
                 endpoint,
                 lifetime,
@@ -313,8 +318,15 @@ fn invalid(error: impl std::fmt::Display) -> AgentCompositionError {
 
 #[async_trait]
 impl RequestToolSource for Source {
-    fn replaced_preset_tools(&self) -> Option<Arc<BTreeSet<String>>> {
-        self.replaced_preset_tools.clone()
+    fn replaced_preset_tools(&self, preset: &AgentPresetId) -> Option<Arc<BTreeSet<String>>> {
+        self.replaced_preset_tools
+            .as_ref()
+            .filter(|_| {
+                self.replace_tools_in_presets
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(preset))
+            })
+            .cloned()
     }
     async fn await_input_preparer(
         &self,

@@ -53,7 +53,10 @@ impl RequestEcho {
 
 #[async_trait]
 impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
-    fn replaced_preset_tools(&self) -> Option<Arc<std::collections::BTreeSet<String>>> {
+    fn replaced_preset_tools(
+        &self,
+        _preset: &AgentPresetId,
+    ) -> Option<Arc<std::collections::BTreeSet<String>>> {
         self.replaced.clone()
     }
 

@@ -108,7 +108,8 @@ draft is a no-op and does not publish a Session.
 A configured source can own request input preparation for a Session. Its readiness
 is cancellable and precedes the BeforeStep deadline. When it participates, an
 unavailable capture cannot authorize sending the original inputs to a provider.
-A tools-only source may fall back to the unassigned preset tools.
+The source receives the effective preset ID when resolving its exclusive tool
+assignments. A tools-only source may fall back to the unassigned preset tools.
 
 A `RequestToolSource` captures a supplemental sealed catalog for a single
 provider request series. The generation pin continues to own preset tools.
