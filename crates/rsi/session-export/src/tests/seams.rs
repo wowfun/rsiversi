@@ -312,12 +312,12 @@ impl SessionStore for PausedStore {
     async fn list_session_activity(
         &self,
         locations: &rsi_agent_store_protocol::ExecutionLocations,
-        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        scope: rsi_agent_store_protocol::ActivityScope<'_>,
         after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
         limit: usize,
     ) -> rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreActivityPage> {
         self.inner
-            .list_session_activity(locations, coordinates, after, limit)
+            .list_session_activity(locations, scope, after, limit)
             .await
     }
     async fn session_order_seed(

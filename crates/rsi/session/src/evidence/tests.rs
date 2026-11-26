@@ -793,7 +793,7 @@ impl SessionStore for Store {
     async fn list_session_activity(
         &self,
         locations: &rsi_execution::ExecutionLocations,
-        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        scope: rsi_agent_store_protocol::ActivityScope<'_>,
         after: Option<&StoreActivityCursor>,
         limit: usize,
     ) -> Result<StoreActivityPage> {

@@ -212,7 +212,7 @@ impl SessionStore for MemoryStore {
     async fn list_session_activity(
         &self,
         locations: &rsi_agent_store_protocol::ExecutionLocations,
-        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        scope: rsi_agent_store_protocol::ActivityScope<'_>,
         after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
         limit: usize,
     ) -> Result<rsi_agent_store_protocol::StoreActivityPage> {
@@ -224,13 +224,22 @@ impl SessionStore for MemoryStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let empty = BTreeSet::new();
+        let coordinates = scope.coordinates();
         let entries = coordinates.map_or(&state.activity_sessions, |coordinates| {
             state.coordinate_activity.get(coordinates).unwrap_or(&empty)
         });
+        let eligible = |id: &SessionId| {
+            let session = &state.sessions[id];
+            locations.contains(session.header.coordinates().location())
+                && (!matches!(
+                    scope,
+                    rsi_agent_store_protocol::ActivityScope::WorkspaceWithoutFacts(_)
+                ) || session.facts.is_empty())
+        };
         let newest = entries
             .iter()
             .rev()
-            .find(|(_, id)| locations.contains(state.sessions[id].header.coordinates().location()))
+            .find(|(_, id)| eligible(id))
             .map(|(time, id)| StoreActivityCursor {
                 last_activity_ms: *time,
                 session_id: id.clone(),
@@ -241,9 +250,7 @@ impl SessionStore for MemoryStore {
         let mut sessions = entries
             .range((Unbounded, end))
             .rev()
-            .filter(|(_, id)| {
-                locations.contains(state.sessions[id].header.coordinates().location())
-            })
+            .filter(|(_, id)| eligible(id))
             .take(limit + 1)
             .map(|(time, id)| {
                 let session = &state.sessions[id];

@@ -440,7 +440,10 @@ impl Navigation {
             .store
             .list_session_activity(
                 visibility.locations(),
-                coordinates.as_ref(),
+                coordinates.as_ref().map_or(
+                    rsi_agent_store_protocol::ActivityScope::All,
+                    rsi_agent_store_protocol::ActivityScope::Workspace,
+                ),
                 cut.as_ref(),
                 256,
             )

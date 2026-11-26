@@ -94,6 +94,15 @@ fn facts() -> [SessionFact; 3] {
     ]
 }
 
+#[tokio::test]
+async fn sqlite_activity_is_indexed_isolated_and_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(root.path()).unwrap();
+    rsi_agent_testkit::assert_activity_store_contract(&store, &header("activity-template")).await;
+    drop(store);
+    SqliteStore::verify(root.path()).unwrap();
+}
+
 fn connection(root: &Path) -> Connection {
     Connection::open_with_flags(
         root.join("sessions.sqlite3"),

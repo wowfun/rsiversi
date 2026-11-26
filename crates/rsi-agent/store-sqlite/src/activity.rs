@@ -4,8 +4,8 @@ use super::{
 };
 use rsi_agent_session_protocol::ExecutionCoordinates;
 use rsi_agent_store_protocol::{
-    ExecutionLocations, MAXIMUM_ORDER_MEMBERS, StoreActivityCursor, StoreActivityPage,
-    StoreActivityRow, StoreOrderSeed,
+    ActivityScope, ExecutionLocations, MAXIMUM_ORDER_MEMBERS, StoreActivityCursor,
+    StoreActivityPage, StoreActivityRow, StoreOrderSeed,
 };
 
 pub(super) fn coordinates_key(coordinates: &ExecutionCoordinates) -> Result<String> {
@@ -124,13 +124,18 @@ impl SqliteStore {
     pub(super) async fn activity_page(
         &self,
         locations: &ExecutionLocations,
-        coordinates: Option<&ExecutionCoordinates>,
+        scope: ActivityScope<'_>,
         after: Option<&StoreActivityCursor>,
         limit: usize,
     ) -> Result<StoreActivityPage> {
         rsi_agent_store_protocol::validate_session_read_limit(limit)?;
         let locations = locations.clone();
-        let coordinates = coordinates.cloned();
+        let coordinates = scope.coordinates().cloned();
+        let ordering = if matches!(scope, ActivityScope::WorkspaceWithoutFacts(_)) {
+            Ordering::ActivityWithoutFacts
+        } else {
+            Ordering::Activity
+        };
         let after = after.cloned();
         self.with_reader(move |connection| {
             let transaction = connection
@@ -141,13 +146,14 @@ impl SqliteStore {
                 &transaction,
                 &locations,
                 key.as_deref(),
+                ordering,
                 after.as_ref(),
                 limit + 1,
             )?;
             let newest = if after.is_none() {
                 sessions.first().map(StoreActivityRow::cursor)
             } else {
-                read_rows(&transaction, &locations, key.as_deref(), None, 1)?
+                read_rows(&transaction, &locations, key.as_deref(), ordering, None, 1)?
                     .first()
                     .map(StoreActivityRow::cursor)
             };
@@ -213,13 +219,14 @@ fn read_rows(
     connection: &Connection,
     locations: &ExecutionLocations,
     key: Option<&str>,
+    ordering: Ordering<'_>,
     after: Option<&StoreActivityCursor>,
     limit: usize,
 ) -> Result<Vec<StoreActivityRow>> {
     let (sql, parameters) = ordered_query(
         locations,
         key,
-        Ordering::Activity,
+        ordering,
         after.map(|cursor| (cursor.last_activity_ms, &cursor.session_id)),
         limit,
     )?;
@@ -254,6 +261,7 @@ fn read_rows(
 #[derive(Clone, Copy)]
 pub(super) enum Ordering<'a> {
     Activity,
+    ActivityWithoutFacts,
     Created { edited_domain: Option<&'a str> },
     Identity,
 }
@@ -267,7 +275,7 @@ pub(super) fn ordered_query(
     limit: usize,
 ) -> Result<(String, Vec<rusqlite::types::Value>)> {
     let column = match ordering {
-        Ordering::Activity => "last_activity_ms",
+        Ordering::Activity | Ordering::ActivityWithoutFacts => "last_activity_ms",
         Ordering::Created { .. } => "created_at_ms",
         Ordering::Identity => "session_id",
     };
@@ -276,7 +284,10 @@ pub(super) fn ordered_query(
     } else {
         format!("{column} DESC, session_id DESC")
     };
-    let watermark = if matches!(ordering, Ordering::Activity) {
+    let watermark = if matches!(
+        ordering,
+        Ordering::Activity | Ordering::ActivityWithoutFacts
+    ) {
         ", durable_seq, control_seq"
     } else {
         ""
@@ -285,8 +296,14 @@ pub(super) fn ordered_query(
     let mut query = |scope: &ExecutionLocations| -> Result<String> {
         let (mut conditions, values) = selection(scope, key)?;
         conditions.push("session_id NOT IN (SELECT session_id FROM session_tombstones)".into());
+        if matches!(ordering, Ordering::ActivityWithoutFacts) {
+            conditions.push("durable_seq = 0".into());
+        }
         parameters.extend(values);
-        if let Ordering::Created { edited_domain: Some(domain) } = ordering {
+        if let Ordering::Created {
+            edited_domain: Some(domain),
+        } = ordering
+        {
             conditions.push("session_id IN (SELECT session_id FROM domain_heads WHERE domain_id = ? AND revision > 1)".into());
             parameters.push(domain.to_owned().into());
         }
@@ -401,7 +418,12 @@ mod tests {
                 .unwrap();
         }
         let scope = ExecutionLocations::only(locations).unwrap();
-        for ordering in [Ordering::Activity, Ordering::Created { edited_domain: None }] {
+        for ordering in [
+            Ordering::Activity,
+            Ordering::Created {
+                edited_domain: None,
+            },
+        ] {
             let mut cursor: Option<(u64, SessionId)> = None;
             let mut seen = vec![];
             loop {
@@ -496,7 +518,12 @@ mod tests {
             "bounded membership seed took {steps} VM steps"
         );
 
-        for ordering in [Ordering::Activity, Ordering::Created { edited_domain: None }] {
+        for ordering in [
+            Ordering::Activity,
+            Ordering::Created {
+                edited_domain: None,
+            },
+        ] {
             for after in [None, Some((5000, &cursor))] {
                 let (sql, parameters) = ordered_query(&scope, None, ordering, after, 17).unwrap();
                 let mut statement = connection.prepare_cached(&sql).unwrap();

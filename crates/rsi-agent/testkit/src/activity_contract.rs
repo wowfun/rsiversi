@@ -5,8 +5,8 @@ use rsi_agent_session_protocol::{
     SessionHeader, SessionId, StepId, TurnId,
 };
 use rsi_agent_store_protocol::{
-    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, ExecutionLocations, SessionStore,
-    StoreOrderSeed,
+    ActivityScope, AppendBatch, AtomicAgentCommit, AtomicSessionAppend, ExecutionLocations,
+    SessionStore, StoreOrderSeed,
 };
 use rsi_sandbox::SandboxMode;
 use std::sync::Arc;
@@ -120,7 +120,7 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     filtered_recent(store, local.location(), &a, &b).await;
     filtered_cursors(store, &a, &b, &remote).await;
     let global = store
-        .list_session_activity(&ExecutionLocations::all(), None, None, 3)
+        .list_session_activity(&ExecutionLocations::all(), ActivityScope::All, None, 3)
         .await
         .unwrap();
     assert_eq!(
@@ -132,7 +132,12 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
         vec![&remote_id, &b, &a]
     );
     let first = store
-        .list_session_activity(&ExecutionLocations::all(), Some(&local), None, 1)
+        .list_session_activity(
+            &ExecutionLocations::all(),
+            ActivityScope::Workspace(&local),
+            None,
+            1,
+        )
         .await
         .unwrap();
     assert_eq!(first.sessions[0].session_id, b);
@@ -151,7 +156,12 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     )
     .await;
     let unchanged = store
-        .list_session_activity(&ExecutionLocations::all(), Some(&local), None, 2)
+        .list_session_activity(
+            &ExecutionLocations::all(),
+            ActivityScope::Workspace(&local),
+            None,
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(unchanged.newest, first.newest);
@@ -169,7 +179,12 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     )
     .await;
     let continuation = store
-        .list_session_activity(&ExecutionLocations::all(), Some(&local), Some(&cursor), 2)
+        .list_session_activity(
+            &ExecutionLocations::all(),
+            ActivityScope::Workspace(&local),
+            Some(&cursor),
+            2,
+        )
         .await
         .unwrap();
     assert!(continuation.sessions.is_empty());
@@ -197,10 +212,60 @@ pub async fn assert_activity_store_contract(store: &dyn SessionStore, template: 
     );
     new_human(store, &a).await;
     let final_page = store
-        .list_session_activity(&ExecutionLocations::all(), Some(&local), None, 2)
+        .list_session_activity(
+            &ExecutionLocations::all(),
+            ActivityScope::Workspace(&local),
+            None,
+            2,
+        )
         .await
         .unwrap();
     assert_eq!(final_page.sessions[0].last_activity_ms, 60);
+    workspace_without_facts(store, template, &local).await;
+}
+
+async fn workspace_without_facts(
+    store: &dyn SessionStore,
+    template: &SessionHeader,
+    at: &ExecutionCoordinates,
+) {
+    let scope = ActivityScope::WorkspaceWithoutFacts(at);
+    let visible = ExecutionLocations::all();
+    let empty = store
+        .list_session_activity(&visible, scope, None, 1)
+        .await
+        .unwrap();
+    assert!(empty.sessions.is_empty() && empty.newest.is_none());
+    let older = SessionId::new("old-blank").unwrap();
+    let queued = SessionId::new("queued-blank").unwrap();
+    let blank = |id: &SessionId, time| {
+        SessionHeader::new(
+            id.clone(),
+            time,
+            at.clone(),
+            template.agent_preset_id().clone(),
+            template.settings().clone(),
+        )
+        .unwrap()
+    };
+    store.save_blank(blank(&older, 1), None).await.unwrap();
+    let header = blank(&queued, 2);
+    store.save_blank(header.clone(), None).await.unwrap();
+    append_human(store, &queued, 0, Some(header)).await;
+    let first = store
+        .list_session_activity(&visible, scope, None, 1)
+        .await
+        .unwrap();
+    assert!(first.has_more);
+    assert_eq!(first.sessions[0].session_id, queued);
+    assert_eq!(first.sessions[0].durable_control_seq, 1);
+    let next = store
+        .list_session_activity(&visible, scope, first.newest.as_ref(), 1)
+        .await
+        .unwrap();
+    assert_eq!(next.newest, first.newest);
+    assert_eq!(next.sessions[0].session_id, older);
+    assert!(!next.has_more);
 }
 
 async fn exact_summaries(
@@ -236,15 +301,12 @@ async fn exact_summaries(
         .collect();
     assert!(store.session_activity_summaries(&too_many).await.is_err());
 }
-async fn new_human(store: &dyn SessionStore, session: &SessionId) {
-    let before = store
-        .list_recent_sessions(&ExecutionLocations::all(), None, 3, None)
-        .await
-        .unwrap()
-        .sessions
-        .into_iter()
-        .find(|row| row.header.session_id() == session)
-        .unwrap();
+async fn append_human(
+    store: &dyn SessionStore,
+    session: &SessionId,
+    expected_fact_seq: u64,
+    header: Option<SessionHeader>,
+) {
     let message = AgentMessage {
         message_id: MessageId::new("new-human").unwrap(),
         source: AgentMessageSource::Human { attribution: None },
@@ -270,9 +332,9 @@ async fn new_human(store: &dyn SessionStore, session: &SessionId) {
         .commit_agent(AtomicAgentCommit {
             sessions: vec![AtomicSessionAppend {
                 session_id: session.clone(),
-                expected_fact_seq: 4,
+                expected_fact_seq,
                 expected_control_seq: 0,
-                header: None,
+                header,
                 facts: vec![],
                 controls: vec![control],
             }],
@@ -281,6 +343,18 @@ async fn new_human(store: &dyn SessionStore, session: &SessionId) {
         })
         .await
         .unwrap();
+}
+
+async fn new_human(store: &dyn SessionStore, session: &SessionId) {
+    let before = store
+        .list_recent_sessions(&ExecutionLocations::all(), None, 3, None)
+        .await
+        .unwrap()
+        .sessions
+        .into_iter()
+        .find(|row| row.header.session_id() == session)
+        .unwrap();
+    append_human(store, session, 4, None).await;
     let after = store
         .list_recent_sessions(&ExecutionLocations::all(), None, 3, None)
         .await
@@ -348,7 +422,7 @@ pub async fn assert_activity_membership_bounds(store: &dyn SessionStore, templat
         store
             .list_session_activity(
                 &ExecutionLocations::all(),
-                Some(template.coordinates()),
+                ActivityScope::Workspace(template.coordinates()),
                 None,
                 64
             )
@@ -399,7 +473,12 @@ async fn rollback_does_not_advance(
     .await;
     assert_eq!(
         store
-            .list_session_activity(&ExecutionLocations::all(), Some(local), None, 2)
+            .list_session_activity(
+                &ExecutionLocations::all(),
+                ActivityScope::Workspace(local),
+                None,
+                2
+            )
             .await
             .unwrap()
             .newest,
@@ -424,7 +503,12 @@ async fn rollback_does_not_advance(
     assert!(store.append(conflict).await.is_err());
     assert_eq!(
         store
-            .list_session_activity(&ExecutionLocations::all(), Some(local), None, 2)
+            .list_session_activity(
+                &ExecutionLocations::all(),
+                ActivityScope::Workspace(local),
+                None,
+                2
+            )
             .await
             .unwrap()
             .newest,
@@ -442,21 +526,26 @@ async fn filtered_cursors(
         ExecutionLocations::only(std::collections::BTreeSet::from([ExecutionLocation::Local]))
             .unwrap();
     let filtered = store
-        .list_session_activity(&visible, None, None, 1)
+        .list_session_activity(&visible, ActivityScope::All, None, 1)
         .await
         .unwrap();
     assert_eq!(&filtered.sessions[0].session_id, b);
     assert_eq!(&filtered.newest.as_ref().unwrap().session_id, b);
     assert!(filtered.has_more);
     let next = store
-        .list_session_activity(&visible, None, Some(&filtered.sessions[0].cursor()), 1)
+        .list_session_activity(
+            &visible,
+            ActivityScope::All,
+            Some(&filtered.sessions[0].cursor()),
+            1,
+        )
         .await
         .unwrap();
     assert_eq!(&next.sessions[0].session_id, a);
     assert!(!next.has_more);
     assert!(
         store
-            .list_session_activity(&visible, Some(remote), None, 1)
+            .list_session_activity(&visible, ActivityScope::Workspace(remote), None, 1)
             .await
             .unwrap()
             .sessions

@@ -234,12 +234,11 @@ impl SessionStore for SqliteStore {
     async fn list_session_activity(
         &self,
         locations: &rsi_agent_store_protocol::ExecutionLocations,
-        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        scope: rsi_agent_store_protocol::ActivityScope<'_>,
         after: Option<&rsi_agent_store_protocol::StoreActivityCursor>,
         limit: usize,
     ) -> Result<rsi_agent_store_protocol::StoreActivityPage> {
-        self.activity_page(locations, coordinates, after, limit)
-            .await
+        self.activity_page(locations, scope, after, limit).await
     }
     async fn session_order_seed(
         &self,

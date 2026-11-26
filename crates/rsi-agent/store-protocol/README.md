@@ -155,7 +155,9 @@ and from an uncertain durable write outcome.
 
 Activity enumeration is a metadata-only live keyset over `(last_activity_ms,
 SessionId)` descending, globally or within exact execution coordinates. It reads
-neither transcript nor complete Headers and does not mount a Session. Each page
+neither transcript nor complete Headers and does not mount a Session. Within a
+workspace, callers may restrict the page and its newest cursor to Sessions with
+zero durable Facts. Accepted control records count independently. Each page
 and its newest cursor share one read snapshot. Each activity row includes its
 Session's durable Fact watermark from that snapshot. Activity commits atomically with
 the owning append and never regresses under wall-clock rollback. Header creation,

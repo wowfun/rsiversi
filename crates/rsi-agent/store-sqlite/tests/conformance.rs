@@ -2605,7 +2605,7 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
     let page = store
         .list_session_activity(
             &rsi_agent_store_protocol::ExecutionLocations::all(),
-            None,
+            rsi_agent_store_protocol::ActivityScope::All,
             None,
             64,
         )
@@ -2622,15 +2622,6 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
         store.header(&page.sessions[0].session_id).await,
         Err(StoreError::Corrupt(_))
     ));
-}
-
-#[tokio::test]
-async fn sqlite_activity_is_indexed_isolated_and_atomic() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    rsi_agent_testkit::assert_activity_store_contract(&store, &header("activity-template")).await;
-    drop(store);
-    SqliteStore::verify(root.path()).unwrap();
 }
 
 #[tokio::test]

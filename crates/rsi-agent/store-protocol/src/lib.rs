@@ -2192,7 +2192,7 @@ pub trait SessionStore: fmt::Debug + Send + Sync + 'static {
     async fn list_session_activity(
         &self,
         locations: &rsi_execution_protocol::ExecutionLocations,
-        coordinates: Option<&rsi_agent_session_protocol::ExecutionCoordinates>,
+        scope: ActivityScope<'_>,
         after: Option<&StoreActivityCursor>,
         limit: usize,
     ) -> Result<StoreActivityPage>;

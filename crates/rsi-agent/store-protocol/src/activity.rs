@@ -5,6 +5,26 @@ use rsi_agent_session_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Scope of an activity page within the caller's admitted locations.
+#[derive(Clone, Copy, Debug)]
+pub enum ActivityScope<'a> {
+    /// Every visible workspace.
+    All,
+    /// All durable Sessions at these coordinates.
+    Workspace(&'a ExecutionCoordinates),
+    /// Only Sessions whose durable Fact watermark is zero at these coordinates.
+    WorkspaceWithoutFacts(&'a ExecutionCoordinates),
+}
+impl<'a> ActivityScope<'a> {
+    /// Coordinates shared by every row when the page selects one workspace.
+    pub const fn coordinates(self) -> Option<&'a ExecutionCoordinates> {
+        match self {
+            Self::All => None,
+            Self::Workspace(at) | Self::WorkspaceWithoutFacts(at) => Some(at),
+        }
+    }
+}
+
 /// Validates one exact summary request before Store access.
 pub fn validate_activity_summaries(sessions: &[SessionId]) -> Result<()> {
     if sessions.len() > 64
