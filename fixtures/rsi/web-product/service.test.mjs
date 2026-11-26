@@ -230,6 +230,31 @@ test("startup preserves its bad readiness reply when child cleanup also fails", 
   }
 });
 
+test("a foreground Host that exits before publication starts no status or stop subprocess", async t => {
+  const report = await mkdtemp(join(tmpdir(), 'rsi-foreground-startup-'));
+  const launch = cp.spawn;
+  let statusCalls = 0;
+  try {
+    t.mock.method(cp, 'spawnSync', (program, args, options) => {
+      if (program !== 'fixture') return certificateOrPrivateDirectory(program, args, options);
+      statusCalls++;
+      return {status:0, stdout:'stopped\n', stderr:''};
+    });
+    t.mock.method(cp, 'spawn', (_program, args, options) => {
+      assert.deepEqual(args, ['host','serve','--profile','fixture']);
+      return launch(process.execPath, ['-e','process.exitCode = 1'], options);
+    });
+    syncBuiltinESMExports();
+    await assert.rejects(startService({binary:'fixture',assets:report,report,localWeb:true,foregroundHost:true}),
+      /fixture foreground Host exited during startup/);
+    assert.equal(statusCalls, 0);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(report, {recursive:true,force:true});
+  }
+});
+
 test("failed admission before Host creation preserves its primary error without stopping an absent owner", async t => {
   const directory = await mkdtemp(join(tmpdir(), "rsi-service-admission-"));
   const launch = cp.spawn;

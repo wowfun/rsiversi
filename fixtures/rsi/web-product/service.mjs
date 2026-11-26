@@ -8,6 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -304,10 +305,21 @@ export async function startService({ binary, assets, report, configure, registra
     if (foregroundHost && !embedded) {
       hostProcess = spawn(binary, ['host', 'serve', '--profile', 'fixture'], {cwd:workspace,env,stdio:'ignore',windowsHide:true});
       hostExit = once(hostProcess, 'exit');
-      await waitUntil(() => {
-        assert.equal(hostProcess.exitCode, null, 'fixture foreground Host exited during startup');
-        return run(['host','status']).stdout.startsWith('running\t');
-      }, 'fixture foreground Host readiness');
+      const owner = join(env.XDG_STATE_HOME,'rsiversi/session-host/owner.json');
+      try {
+        await waitUntil(() => {
+          assert(hostProcess.exitCode === null && hostProcess.signalCode === null, 'fixture foreground Host exited during startup');
+          if (!existsSync(owner)) return false;
+          const fields = run(['host','status']).stdout.trim().split('\t');
+          return fields[0] === 'running' && fields.includes('pid='+hostProcess.pid);
+        }, 'fixture foreground Host readiness', 180_000);
+      } catch (error) {
+        hostProcess.kill();
+        await hostExit;
+        hostProcess = undefined;
+        hostStarted = false;
+        throw error;
+      }
     }
     child = spawn(binary, argumentsValue, { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"] });
     stopped = once(child, "exit");

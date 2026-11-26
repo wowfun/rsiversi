@@ -691,6 +691,9 @@ one acceptance and the spent allowance. Wide and narrow browser screenshots
 show the reopened conversation. Pass `--crash-host` to terminate the fixture's
 foreground Host process before its deadline and exercise recovery from an
 unclean stop with the same storage and browser identity.
+Foreground startup allows the native three-minute Host transition deadline. The
+fixture waits for the isolated owner record before polling the public status
+command and checks that the responding PID belongs to its foreground child.
 Use `--archive` for delivery after unarchive, `--without-navigation` for
 recovery without the navigation owner, or `--pending-restart` to edit the
 running Host's Profile while an archived task detail is open and restart
