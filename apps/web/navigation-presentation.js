@@ -4,6 +4,7 @@ const common = (a, b) => { let i=0; while(i<a.length && i<b.length && a[i]===b[i
 export function navigationTitles(entries) {
   const titles=new Map(), times=new Map();
   for(const entry of entries) {
+    if(entry.blank){titles.set(entry.session,'New session');continue;}
     if(entry.metadata.title){titles.set(entry.session,entry.metadata.title);continue;}
     let ids=times.get(entry.created_at_ms);
     if(!ids){ids=new Set();times.set(entry.created_at_ms,ids);}
@@ -46,6 +47,18 @@ export function conversationRecency(timestamp, now=Date.now()) {
   if(seconds<3600)return `${Math.floor(seconds/60)}min`;
   if(seconds<86400)return `${Math.floor(seconds/3600)}h`;
   return `${Math.floor(seconds/86400)}d`;
+}
+
+/** @template {{session: string, blank?: boolean}} T
+ * @param {T[]} entries
+ * @param {string | undefined} selected
+ */
+export function sidebarConversations(entries, selected) {
+  if (!entries.some(entry => entry.blank)) return entries;
+  const started = entries.filter(entry => !entry.blank);
+  const current = selected && entries.find(entry => entry.blank && entry.session === selected);
+  if (current) started.unshift(current);
+  return started;
 }
 
 export function visibleConversations(entries, expanded, selected) {

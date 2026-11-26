@@ -2261,6 +2261,14 @@ impl SessionHeader {
             None => None,
         }
     }
+    /// Whether neither local Facts nor inherited history have started a Turn.
+    pub fn is_before_first_turn(&self, durable_fact_seq: u64) -> bool {
+        durable_fact_seq == 0
+            && self
+                .history_origin()
+                .is_none_or(|origin| origin.effective_turns == 0)
+    }
+
     /// Derives a new independent execution root retaining an exact source history.
     pub fn forked_independent(
         &self,

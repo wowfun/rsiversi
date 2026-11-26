@@ -100,6 +100,28 @@ struct OrderView {
     requested: Vec<SessionId>,
     entries: Vec<Option<NavigationEntry>>,
 }
+impl OrderView {
+    fn observe_started_turns<'a>(&mut self, rows: impl Iterator<Item = &'a NavigationEntry>) {
+        let OrderMembership::Available { members, .. } = &mut self.seed.membership else {
+            return;
+        };
+        for row in rows.filter(|row| !row.blank) {
+            if let Ok(index) = members.binary_search_by(|member| member.session.cmp(&row.session))
+                && members[index].blank
+            {
+                members[index].blank = false;
+                if let Some(cached) = self
+                    .entries
+                    .iter_mut()
+                    .flatten()
+                    .find(|entry| entry.session == row.session)
+                {
+                    cached.blank = false;
+                }
+            }
+        }
+    }
+}
 #[derive(Debug, Default, Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -369,7 +391,12 @@ impl NavigationFeature {
             state.view.can_archive = page.can_archive;
             let view = &state.view;
             let newer =
-                view.newest != page.newest || view.metadata_revision != page.metadata_revision;
+                view.newest != page.newest
+                    || view.metadata_revision != page.metadata_revision
+                    || (!view.continued
+                        && view.entries.iter().zip(&page.entries).any(|(old, new)| {
+                            old.blank && !new.blank && old.session == new.session
+                        }));
             if !newer || view.continued || view.groups.values().any(|group| group.continued) {
                 let changed = newer != view.newer_activity;
                 if changed {
@@ -389,35 +416,43 @@ impl NavigationFeature {
         true
     }
     async fn order_summaries(&self, ticket: &str, sessions: Vec<SessionId>) -> Result<()> {
-        let seed = self
-            .state
-            .lock()
-            .expect("navigation state")
-            .view
-            .order
-            .as_ref()
-            .filter(|view| view.ticket == ticket)
-            .map(|view| view.seed.clone())
-            .ok_or("Manual order changed; refresh complete membership")?;
-        let OrderMembership::Available { members, groups } = &seed.membership else {
-            return Err("Manual ordering exceeds complete membership bounds".into());
+        let (metadata_revision, indices) = {
+            let state = self.state.lock().expect("navigation state");
+            let seed = &state
+                .view
+                .order
+                .as_ref()
+                .filter(|view| view.ticket == ticket)
+                .ok_or("Manual order changed; refresh complete membership")?
+                .seed;
+            let OrderMembership::Available { members, .. } = &seed.membership else {
+                return Err("Manual ordering exceeds complete membership bounds".into());
+            };
+            let indices = sessions
+                .iter()
+                .map(|id| members.binary_search_by(|member| member.session.cmp(id)))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| "Summary is outside the complete order membership")?;
+            (seed.metadata_revision.clone(), indices)
         };
-        let selected = sessions
-            .iter()
-            .map(|id| {
-                members
-                    .binary_search_by(|member| member.session.cmp(id))
-                    .map(|index| &members[index])
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|_| "Summary is outside the complete order membership")?;
         let request = SummaryRequest {
             sessions: sessions.clone(),
-            metadata_revision: seed.metadata_revision.clone(),
+            metadata_revision,
         };
         let page = self.client.summaries(request).await.map_err(error)?;
-        for (row, member) in page.entries.iter().zip(selected) {
+        let mut state = self.state.lock().expect("navigation state");
+        let view = state
+            .view
+            .order
+            .as_mut()
+            .filter(|view| view.ticket == ticket)
+            .ok_or("Manual order changed")?;
+        let OrderMembership::Available { members, groups } = &view.seed.membership else {
+            return Err("Manual ordering exceeds complete membership bounds".into());
+        };
+        for (row, index) in page.entries.iter().zip(indices) {
             if let Some(row) = row {
+                let member = &members[index];
                 let group = &groups[usize::from(member.group)];
                 let coordinates = &group.coordinates;
                 if row.location != *coordinates.location()
@@ -430,13 +465,7 @@ impl NavigationFeature {
                 }
             }
         }
-        let mut state = self.state.lock().expect("navigation state");
-        let view = state
-            .view
-            .order
-            .as_mut()
-            .filter(|view| view.ticket == ticket)
-            .ok_or("Manual order changed")?;
+        view.observe_started_turns(page.entries.iter().flatten());
         view.requested = sessions;
         view.entries = page.entries;
         Ok(())
@@ -503,6 +532,9 @@ impl NavigationFeature {
         let mut state = self.state.lock().expect("navigation view poisoned");
         if page.metadata_revision != state.view.metadata_revision {
             return Err("Navigation changed; refresh before continuing this workspace".into());
+        }
+        if let Some(order) = &mut state.view.order {
+            order.observe_started_turns(page.entries.iter());
         }
         if ticket.is_none()
             && state.view.groups.get(&key).is_some_and(|previous| {
@@ -670,11 +702,19 @@ impl NavigationFeature {
             } else {
                 rsi_ui::fresh_identity("navigation")?
             };
-            let order = state
+            let mut order = state
                 .view
                 .order
                 .take()
                 .filter(|order| order.seed.metadata_revision == page.metadata_revision);
+            if let Some(order) = &mut order {
+                order.observe_started_turns(page.entries.iter().chain(
+                    pins.entries.iter().filter_map(|pin| match pin {
+                        PinnedEntry::Available { entry } => Some(entry),
+                        PinnedEntry::Missing { .. } => None,
+                    }),
+                ));
+            }
             let newer_activity = continued && state.view.newest != page.newest;
             let newest = if continued {
                 state.view.newest.take()
@@ -1035,13 +1075,13 @@ mod group_tests {
             } else if operation == &NavigationOperation::OrderSeed.spec() {
                 json!({"scope":request,"host_epoch":self.description.host_epoch,"metadata_revision":revision,"membership":{
                     "kind":"available","groups":[{"coordinates":{"location":{"kind":"local"},"path":"/project"},"workspace":null}],
-                    "members":[{"session":"one","group":0,"account_position":1,"last_activity_ms":"1","pinned":false,"archived":false},{"session":"two","group":0,"account_position":0,"last_activity_ms":"2","pinned":false,"archived":false}]
+                    "members":[{"session":"one","blank":true,"group":0,"account_position":1,"last_activity_ms":"1","pinned":false,"archived":false},{"session":"two","blank":true,"group":0,"account_position":0,"last_activity_ms":"2","pinned":false,"archived":false}]
                 }})
             } else if operation == &NavigationOperation::Summaries.spec() {
                 if request["metadata_revision"] != revision {
                     return Err(ApiError::Invalid("metadata changed".into()));
                 }
-                let entries = request["sessions"].as_array().unwrap().iter().map(|id|json!({"session":id,"created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},"path":"/project","workspace":self.summary_workspace.lock().unwrap().clone(),"metadata":{"pinned":false,"archived":false,"title":null}})).collect::<Vec<_>>();
+                let entries = request["sessions"].as_array().unwrap().iter().map(|id|json!({"session":id,"blank":id=="one","created_at_ms":"1","last_activity_ms":"2","location":{"kind":"local"},"path":"/project","workspace":self.summary_workspace.lock().unwrap().clone(),"metadata":{"pinned":false,"archived":false,"title":null}})).collect::<Vec<_>>();
                 json!({"metadata_revision":revision,"entries":entries})
             } else if operation == &NavigationOperation::Pinned.spec() {
                 let revision = if self.race_pins.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1415,6 +1455,10 @@ mod group_tests {
         let ids = ["two", "one"]
             .map(|id| SessionId::new(id).unwrap())
             .to_vec();
+        assert_eq!(
+            owner.view()["order"]["seed"]["membership"]["members"][1]["blank"],
+            true
+        );
         owner
             .command(NavigationCommand::OrderSummaries {
                 ticket: ticket.clone(),
@@ -1423,6 +1467,40 @@ mod group_tests {
             .await
             .unwrap();
         assert_eq!(owner.view()["order"]["entries"][0]["session"], "two");
+        assert!(
+            owner.view()["order"]["seed"]["membership"]["members"][1]
+                .get("blank")
+                .is_none()
+        );
+        assert_eq!(owner.view()["order"]["ticket"], ticket);
+        let mut one: NavigationEntry =
+            serde_json::from_value(owner.view()["order"]["entries"][1].clone()).unwrap();
+        assert!(one.blank);
+        one.blank = false;
+        owner
+            .install_page(
+                NavigationFilter::default(),
+                NavigationPage {
+                    can_archive: true,
+                    metadata_revision: "1".into(),
+                    newest: None,
+                    entries: vec![one],
+                    scanned: 1,
+                    next: None,
+                },
+                1,
+                false,
+            )
+            .await
+            .unwrap();
+        let current = owner.view();
+        assert!(current["order"]["entries"][1].get("blank").is_none());
+        assert!(
+            current["order"]["seed"]["membership"]["members"][0]
+                .get("blank")
+                .is_none()
+        );
+        assert_eq!(current["order"]["ticket"], ticket);
         for sessions in [
             vec![SessionId::new("foreign").unwrap()],
             vec![ids[0].clone(), ids[0].clone()],

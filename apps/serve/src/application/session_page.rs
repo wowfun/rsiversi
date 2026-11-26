@@ -68,11 +68,7 @@ pub(super) fn catalog_item(
     fact_seq: u64,
     running: bool,
 ) -> Value {
-    // A standalone compaction requires a nonempty prior Fact prefix.
-    let blank = fact_seq == 0
-        && header
-            .history_origin()
-            .is_none_or(|origin| origin.effective_turns == 0);
+    let blank = header.is_before_first_turn(fact_seq);
     let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":updated_at,
         "blank":blank,"running":running});
     if let Some(origin) = header.fork_origin() {

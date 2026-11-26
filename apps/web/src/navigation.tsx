@@ -22,7 +22,7 @@ import { chooseWorkspace } from "./directory-picker.tsx";
 import { Button } from "./button.tsx";
 import { input, run, source, selection, useView, useSelected, type ArchiveActivity, type NavigationEntry } from "./bridge.ts";
 import {
-  navigationTitles, navigationAttention, sessionWorkspaceGroup,
+  navigationTitles, navigationAttention, sessionWorkspaceGroup, sidebarConversations,
   GroupRestoration,
 } from "../navigation-presentation.js";
 
@@ -51,7 +51,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
   const selected = useSelected(value=>value);
   const currentSession = useView(view=>{
     const surface = view?.surfaces[selected];
-    return conversationVisible && surface?.kind === "native" ? surface.session : undefined;
+    return surface?.kind === "native" ? surface.session : undefined;
   });
   const [now, setNow] = useState(Date.now);
   useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()), 60_000);return ()=>clearInterval(timer);}, []);
@@ -84,11 +84,13 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       ).map((item) => ({ ...item, ...item.coordinates })),
     [workspaceSeed, catalog?.workspaces],
   );
-  const device = useDeviceNavigation(nav, workspaces, !completeWorkspaces);
+  const device = useDeviceNavigation(nav, workspaces, !completeWorkspaces, currentSession);
   const restoring = useRef(new GroupRestoration());
   const selectedGroups = useMemo(() => JSON.parse(selectedWorkspaces) as string[], [selectedWorkspaces]);
-  const showUngrouped = selectedGroups.includes("other") || !!nav &&
-    (!completeList || nav.entries.some(entry => entry.workspace === null));
+  const flatEntries = useMemo(() => sidebarConversations(nav?.entries ?? [], currentSession), [nav?.entries, currentSession]);
+  const currentGroup = useView(value => sessionWorkspaceGroup(value?.surfaces[selected], value?.navigation));
+  const showUngrouped = currentGroup === "other" || !!nav &&
+    (!completeList || flatEntries.some((entry: NavigationEntry) => entry.workspace === null));
   const firstVisits = useMemo(() => selectedGroups.filter(id =>
     (id === "other" || workspaces.some(record => record.id === id)) && !layout.workspaces.some(item => item.id === id)),
     [selectedGroups, workspaces, layout.workspaces]);
@@ -241,7 +243,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
     if (!workspaceLabels) return;
     const candidates = new Map<string, NavigationEntry>();
     for (const entry of visibleEntries) {
-      if (filter.archived === null || entry.metadata.archived === filter.archived) candidates.set(entry.session, entry);
+      if (!entry.blank && (filter.archived === null || entry.metadata.archived === filter.archived)) candidates.set(entry.session, entry);
     }
     return new TextSearchIndex([...candidates.values()].sort(recentFirst), entry => ({
       fuzzy: [titles.get(entry.session), entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped"],
@@ -263,7 +265,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       now={now}
       key={entry.session}
       entry={entry}
-      active={currentSession===entry.session}
+      active={conversationVisible && currentSession===entry.session}
       title={titles.get(entry.session)}
       activity={attention.get(entry.session)}
       workspaceLabel={workspaceLabels && (entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped")}
@@ -274,7 +276,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       onMenu={target => setMenu(target && {...target, revision: nav?.metadata_revision})}
     />
   );
-  const pins = nav?.pins ? [...nav.pins] : [];
+  const pins = nav?.pins.filter(pin => pin.status === "missing" || !pin.entry.blank || pin.entry.session === currentSession) ?? [];
   if (device.preferences.sessionOrder === "manual" && !device.paused) {
     const rank = new Map(device.ordered.map((id, index) => [id, index]));
     pins.sort(
@@ -335,7 +337,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
         <AttentionNavigation nav={nav} />
       ) : (
         <>
-          {!query && !awaitingQuery && !!nav?.pins.length && (
+          {!query && !awaitingQuery && !!pins.length && (
             <section
               className="pinned-conversations"
               aria-label="Pinned conversations"
@@ -408,9 +410,9 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
               mode === "archived" ||
               device.preferences.view === "flat" ? (
               <>
-                {(query ? searchEntries : nav?.entries)?.map(row)}
+                {(query ? searchEntries : flatEntries).map(row)}
                 {awaitingQuery && <p role="status" className="hint">Searching conversations…</p>}
-                {nav && !awaitingQuery && !(query ? searchEntries : nav.entries).length && (
+                {nav && !awaitingQuery && !(query ? searchEntries : flatEntries).length && (
                   <p className="hint">
                     {nav.more
                       ? "Continue searching the remaining conversations."

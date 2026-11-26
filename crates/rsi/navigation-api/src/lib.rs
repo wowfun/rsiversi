@@ -129,6 +129,9 @@ pub struct NavigationCursor {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NavigationEntry {
+    /// The first Turn has yet to start, including inherited history.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blank: bool,
     /// Durable Session identity.
     pub session: SessionId,
     /// Exact creation timestamp encoded as decimal text.

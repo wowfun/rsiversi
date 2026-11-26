@@ -1,12 +1,24 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency,sessionWorkspaceGroup} from '../navigation-presentation.js';
+import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency,sessionWorkspaceGroup,sidebarConversations,visibleConversations} from '../navigation-presentation.js';
 test('conversation recency handles future clocks and minute/hour/day boundaries',()=>{
   const now=1_000_000_000;
   for(const [age,label] of [[-1,'now'],[59_999,'now'],[60_000,'1min'],[3_600_000,'1h'],[86_400_000,'1d']])assert.equal(conversationRecency(String(now-age),now),label);
   assert.equal(conversationRecency('bad',now),'');
 });
 const row=id=>({session:id,created_at_ms:'1700000000000',path:'/same',metadata:{title:null}});
+test('only the selected provisional conversation leads its window and consumes a visible slot',()=>{
+  const started=Array.from({length:6},(_,i)=>row(String(i)));
+  const queued={...row('queued'),blank:true,metadata:{title:'Queued message'}};
+  const empty={...row('empty'),blank:true};
+  const members=[...started,queued,empty];
+  assert.deepEqual(sidebarConversations(members,'queued'),[queued,...started]);
+  assert.deepEqual(sidebarConversations(members,'empty'),[empty,...started]);
+  assert.deepEqual(sidebarConversations(members,undefined),started);
+  assert.deepEqual(visibleConversations(sidebarConversations(members,'queued'),false,'queued'),[queued,...started.slice(0,4)]);
+  assert.deepEqual(members,[...started,queued,empty]);
+  assert.equal(navigationTitles(members).get('queued'),'New session');
+});
 test('untitled rows use creation time and distinguish same-time IDs across duplicate pages',()=>{
   const first=row('same-prefix-first'),second=row('same-prefix-second');
   const titles=navigationTitles([first,second,first,{...row('named'),metadata:{title:'Named'}},{...row('invalid'),created_at_ms:'18446744073709551615'}]);

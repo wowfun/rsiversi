@@ -16,6 +16,9 @@ corpus exercises runtime read/refusal using actual database and payload bytes.
 The executable generation records a selected preset when it differs from the
 preset in the immutable creation Header. Cold attachment resolves that preset
 through the current composition owner. The first Turn locks this choice.
+A Session is before its first Turn while its local Fact watermark is zero and
+its inherited history contains no Turns. Queued input changes the control
+watermark independently.
 
 An ordinary Session freezes its creation-time file policy in the Header.
 The `sandbox` field carries either the configured sandbox mode or the selected

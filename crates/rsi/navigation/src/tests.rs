@@ -480,6 +480,102 @@ async fn owner() -> FixtureOwner {
     }
 }
 #[tokio::test]
+async fn provisional_members_remain_discoverable_in_pages_pins_and_exact_order() {
+    use rsi_navigation_api::{OrderMembership, OrderScope, SummaryRequest};
+    let owner = owner().await;
+    let started = SessionId::new("row-300").unwrap();
+    let root = owner.store.header(&started).await.unwrap();
+    let blank = SessionId::new("blank").unwrap();
+    let header = SessionHeader::new_local(
+        blank.clone(),
+        301,
+        root.canonical_cwd(),
+        root.agent_preset_id().clone(),
+        root.settings().clone(),
+    )
+    .unwrap();
+    owner.store.save_blank(header, None).await.unwrap();
+    let local = CallOrigin::Local;
+    let page = owner
+        .query(&local, NavigationFilter::default(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(page.entries[0].session, blank);
+    assert!(page.entries[0].blank);
+    assert_eq!(page.entries[1].session, started);
+    assert!(!page.entries[1].blank);
+    let search = NavigationFilter {
+        query: "blank".into(),
+        ..Default::default()
+    };
+    let matches = owner
+        .query(&local, search.clone(), None)
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(matches.entries.is_empty());
+    owner
+        .replace(
+            local.clone(),
+            blank.clone(),
+            "0",
+            SessionMetadata {
+                pinned: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    let pins = owner
+        .pinned(local.clone(), NavigationFilter::default())
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(
+        matches!(&pins.entries[..], [PinnedEntry::Available { entry }] if entry.session == blank && entry.blank)
+    );
+    assert!(
+        owner
+            .pinned(local.clone(), search)
+            .unwrap()
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let seed = owner
+        .order_seed(&local, OrderScope::All)
+        .unwrap()
+        .await
+        .unwrap();
+    let OrderMembership::Available { members, .. } = seed.membership else {
+        panic!("complete membership")
+    };
+    assert_eq!(members.iter().filter(|member| member.blank).count(), 1);
+    assert!(
+        members
+            .iter()
+            .any(|member| member.session == blank && member.blank && member.pinned)
+    );
+    let exact = owner
+        .summaries(
+            &local,
+            SummaryRequest {
+                sessions: vec![started, blank],
+                metadata_revision: seed.metadata_revision,
+            },
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(
+        matches!(&exact.entries[..], [Some(started), Some(blank)] if !started.blank && blank.blank)
+    );
+}
+
+#[tokio::test]
 async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch() {
     use std::sync::atomic::Ordering::SeqCst;
     let mut owner = owner().await;
@@ -1225,9 +1321,10 @@ async fn unprotected_navigation_reads_retain_no_revocation_leases() {
         let id = SessionId::new(format!("row-{n:03}")).unwrap();
         assert!(
             owner
-                .retain_session_view(&id, &CallOrigin::Local, &mut leases)
+                .visible_session_blank(&id, &CallOrigin::Local, &mut leases)
                 .await
                 .unwrap()
+                .is_some()
         );
     }
     assert!(

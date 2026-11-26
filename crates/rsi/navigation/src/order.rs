@@ -1,4 +1,4 @@
-use super::{ApiError, Arc, BoxFuture, Document, Navigation, NavigationEntry, Result};
+use super::{ApiError, Arc, BoxFuture, Document, Navigation, Result, navigation_entry};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use rsi_agent_store_protocol::StoreOrderSeed;
 use rsi_navigation_api::{
@@ -38,15 +38,16 @@ impl Navigation {
                         let mut selected = Vec::new();
                         let mut leases = Vec::new();
                         for member in members {
-                            if !owner
-                                .retain_session_view(&member.session, &origin, &mut leases)
+                            let Some(blank) = owner
+                                .visible_session_blank(&member.session, &origin, &mut leases)
                                 .await?
-                            {
+                            else {
                                 continue;
-                            }
+                            };
                             created.push(member.created_at_ms);
                             let metadata = document.records.get(&member.session);
                             selected.push(OrderMember {
+                                blank,
                                 account_position: 0,
                                 last_activity_ms: member.last_activity_ms.to_string(),
                                 group: member.group,
@@ -171,46 +172,33 @@ impl Navigation {
                     .await
                     .map_err(|_| ApiError::Unavailable)?;
                 let mut leases = Vec::new();
-                for row in &mut rows {
-                    if let Some(candidate) = row
-                        && !owner
-                            .retain_session_view(&candidate.session_id, &origin, &mut leases)
+                let default_metadata = rsi_navigation_api::SessionMetadata::default();
+                let mut entries = Vec::with_capacity(rows.len());
+                for slot in &mut rows {
+                    let entry = if let Some(row) = slot.as_ref()
+                        && visibility.locations().contains(row.coordinates.location())
+                        && let Some(blank) = owner
+                            .visible_session_blank(&row.session_id, &origin, &mut leases)
                             .await?
                     {
-                        *row = None;
-                    }
+                        let metadata = document
+                            .records
+                            .get(&row.session_id)
+                            .map_or(&default_metadata, |stored| &stored.metadata);
+                        Some(navigation_entry(row, blank, None, metadata))
+                    } else {
+                        *slot = None;
+                        None
+                    };
+                    entries.push(entry);
                 }
-                let mut entries = Vec::with_capacity(rows.len());
-                let lookups = owner.workspace_lookups(rows.iter().map(|row| {
-                    row.as_ref()
-                        .filter(|row| visibility.locations().contains(row.coordinates.location()))
-                        .map(|row| &row.coordinates)
-                }));
-                let mut rows = stream::iter(&rows).zip(lookups);
-                while let Some((row, workspace)) = rows.next().await {
-                    entries.push(
-                        if let Some(row) = row.as_ref().filter(|row| {
-                            visibility.locations().contains(row.coordinates.location())
-                        }) {
-                            let workspace = document.membership(workspace?, &row.session_id);
-                            Some(NavigationEntry {
-                                metadata: document
-                                    .records
-                                    .get(&row.session_id)
-                                    .map(|row| row.metadata.clone())
-                                    .unwrap_or_default(),
-                                session: row.session_id.clone(),
-                                created_at_ms: row.created_at_ms.to_string(),
-                                last_activity_ms: row.last_activity_ms.to_string(),
-                                location: row.coordinates.location().clone(),
-                                path: row.coordinates.path().into(),
-                                workspace,
-                            })
-                        } else {
-                            None
-                        },
-                    );
+                let lookups = owner
+                    .workspace_lookups(rows.iter().flatten().map(|row| Some(&row.coordinates)));
+                let mut admitted = stream::iter(entries.iter_mut().flatten()).zip(lookups);
+                while let Some((entry, workspace)) = admitted.next().await {
+                    entry.workspace = document.membership(workspace?, &entry.session);
                 }
+                drop(admitted);
                 super::finish_scope(&origin, &leases)?;
                 Ok(SummaryPage {
                     metadata_revision: request.metadata_revision,

@@ -30,6 +30,9 @@ impl OrderScope {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrderMember {
+    /// The first Turn has yet to start, including inherited history.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blank: bool,
     /// Zero-based shared Workspace account position within the visible group.
     pub account_position: u16,
     /// Lossless initial activity rank, independent of later live changes.
@@ -297,6 +300,7 @@ mod tests {
                     workspace: None,
                 }],
                 members: vec![OrderMember {
+                    blank: false,
                     account_position: 0,
                     last_activity_ms: "1".into(),
                     group: 0,
@@ -358,6 +362,7 @@ mod tests {
         if let OrderMembership::Available { members, .. } = &mut seed.membership {
             *members = (0..1024)
                 .map(|i| OrderMember {
+                    blank: false,
                     account_position: i,
                     last_activity_ms: "1".into(),
                     group: 0,

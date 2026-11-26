@@ -130,9 +130,11 @@ same menu for that row. The active conversation stays selected. Arrow keys move
 between enabled actions. Escape returns focus to the opener. Only the open
 menu mounts its controls. Activity indicators occupy their own space in flat and grouped rows. Rename opens a labelled dialog for the chosen Session. Workspace and Session dialogs use the opaque secondary background. Confirming an input-method composition keeps the Session name editable.
 
-An expanded workspace shows the selected unpublished Session as **New session**.
-Selecting it returns to its composer with its input intact. Its row comes from
-the open pane and gives way to the Session's navigation entry at publication.
+Before its first Turn, a conversation appears as **New session** only in the
+window that has it selected. It leads its workspace or flat list, including
+when its first message is queued. Search omits every such conversation.
+Selecting the row preserves its composer. Workspace membership, opening by ID
+and reuse through **New session** remain available across devices.
 
 On the first keyboard submission, the composer keeps its keyboard position
 while the starting draft binds to a Session. Its text is read-only during that

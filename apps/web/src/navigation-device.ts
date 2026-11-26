@@ -1,6 +1,7 @@
-import {useEffect,useRef,useState} from 'react'
+import {useEffect,useMemo,useRef,useState} from 'react'
 import {bindSnapshotSelector} from '../vendor/dsh/renderer/bind.ts'
 import {NavigationCommandLane} from '../navigation-command-lane.js'
+import {sidebarConversations} from '../navigation-presentation.js'
 import {DeviceStore,defaultPreferences} from '../device-store.js'
 import {workspaceMembers} from '../workspace-tree.js'
 import {presentationIdentity} from './presentation.tsx'
@@ -30,7 +31,7 @@ function waitSeed(previous?:string):Promise<ManualOrder> {
     unsubscribe=source.subscribe(read);read()
   })
 }
-export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:string;path:string;location:ExecutionLocation}[],moreWorkspaces:boolean) {
+export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:string;path:string;location:ExecutionLocation}[],moreWorkspaces:boolean,currentSession?:string) {
   const identity=useIdentity(value=>value)
   const [preferences,setPreferences]=useState<DeviceNavigation>(defaultPreferences as DeviceNavigation)
   const [workspaceIds,setWorkspaceIds]=useState<string[]>([])
@@ -156,8 +157,20 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
   },[ready,preferences.sessionOrder,ticket])
   const complete=nav?.order?.seed.membership
   const manual=preferences.sessionOrder==='manual' && complete?.kind==='available' && !nav?.filter.query
-  const selected=manual?new Map(complete.members.filter(member=>!member.pinned && (nav?.filter.archived===null||member.archived===nav?.filter.archived)).map(member=>[member.session,member])):new Map()
-  const all=ordered.filter(id=>selected.has(id)),requested=all.slice(offset,offset+64),requestKey=JSON.stringify(requested)
+  const archived=nav?.filter.archived
+  const all=useMemo(()=>{
+    if(!manual)return []
+    const byId=new Map(complete.members.map(member=>[member.session,member]))
+    const listed=[]
+    for(const id of ordered){
+      const member=byId.get(id)
+      if(member && !member.pinned && (archived===null || member.archived===archived))listed.push(member)
+    }
+    return sidebarConversations(listed,currentSession)
+  },[manual,complete,ordered,archived,currentSession])
+  const provisional=all[0]?.blank?all[0].session:undefined
+  useEffect(()=>{if(provisional)setOffset(0)},[provisional])
+  const requested=all.slice(offset,offset+64).map(member=>member.session),requestKey=JSON.stringify(requested)
   useEffect(()=>{setOffset(value=>Math.min(value,Math.max(0,Math.floor((all.length-1)/64)*64)))},[all.length])
   useEffect(()=>{
     if(!manual || !ticket || !lastReconciled.current || JSON.stringify(nav?.order?.requested)===requestKey)return

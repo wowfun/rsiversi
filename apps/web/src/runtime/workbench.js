@@ -233,8 +233,11 @@ async function openInSelected(fields, startingText) {
   if (!pane) throw new Error("Open a conversation surface first");
   const surface = view?.surfaces[selected];
   const restoring = pane.index === "main" ? owner?.restoring : undefined;
-  if (!restoring && fields.action === "open" && surface?.kind === "native" && !surface.draft &&
-      surface.session === fields.session && surface.generation === pane.generation && !pane.switching && owner && !owner.closing) return;
+  if (!restoring && fields.action === "open" && surface?.kind === "native" &&
+      surface.session === fields.session && surface.generation === pane.generation && !pane.switching && owner && !owner.closing) {
+    if (surface.draft) requestAnimationFrame(() => pane.focusInput());
+    return;
+  }
   if (pane.switching || pane.submitting || pane.uploading) throw new Error("Wait for this conversation’s current operation");
   if (restoring && fields.action === "open" && fields.session === restoring.session)
     return restoring.opened;

@@ -102,6 +102,7 @@ fn fixture() -> (NavigationPage, NavigationFilter, HostEpoch) {
             metadata_revision: "1".into(),
             newest: Some(key),
             entries: vec![NavigationEntry {
+                blank: false,
                 session: id,
                 created_at_ms: "1".into(),
                 last_activity_ms: "2".into(),

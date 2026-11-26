@@ -28,8 +28,8 @@ fixture.setReply('command',async text=>{
    fixture.queries.push(nav.filter.query);
    nav.entries=[activeRow,archivedRow].filter(row=>(nav.filter.archived===null||row.metadata.archived===nav.filter.archived)&&row.metadata.title.toLowerCase().includes(nav.filter.query.toLowerCase()));
    await fixture.frame();
- } else if(command.action==='navigate'&&command.command.kind==='mark'){
-   const {request}=command.command;
+ } else if(command.action==='mark_reading'){
+   const {request}=command;
    const entry=nav.attention.entries.find(row=>row.position.conversation.id===request.position.conversation.id);
    if(request.action!=='acknowledge')entry.reading.manual=request.action==='unread';
    if(request.action!=='unread')entry.reading.unseen=false;
@@ -464,7 +464,7 @@ try {
    assert.deepEqual(alignment,{aligned:true,compact:true,active:true});
    await page.screenshot({path:join(report,name+'-workspace-rows.png')});
    await page.evaluate(async()=>{
-     fixture.view.surfaces.main={...fixture.savedMain,session:'fresh-session',draft:true};
+     fixture.view.surfaces.main={...fixture.savedMain,session:'fresh-session',draft:true,creation:{workspace_id:'fixture'}};
      await fixture.frame();
    });
    const fresh=group.getByRole('button',{name:'New session',exact:true});
@@ -476,8 +476,33 @@ try {
    await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Main message');
    assert.equal(await editor.inputValue(),'Still editing');
    await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     const sample=nav.groups.fixture.entries[0];
+     const blanks=['other-queued','fresh-session'].map(session=>({...sample,session,blank:true,metadata:{...sample.metadata,title:session}}));
+     nav.entries.push(...blanks);
+     nav.groups.fixture.entries.push(...blanks);
+     await fixture.frame();
+   });
+   const persisted=group.getByTestId('conversation-row').first();
+   await persisted.getByText('New session',{exact:true}).waitFor();
+   assert.equal(await persisted.getAttribute('data-session-id'),'fresh-session');
+   assert.equal(await group.locator('[data-session-id="other-queued"]').count(),0);
+   await persisted.getByTestId('conversation-open').click();
+   assert.equal(await opens(),priorOpens);
+   assert.equal(await editor.inputValue(),'Still editing');
+   await page.screenshot({path:join(report,name+'-selected-blank.png'),animations:'disabled'});
+   await searchButton.click();
+   for(const id of ['fresh-session','other-queued']){
+     await searchInput.fill(id);
+     await page.getByText('No matching conversations.',{exact:true}).waitFor();
+     assert.equal(await page.locator('#sessions .session-row').count(),0);
+   }
+   await searchInput.press('Escape');
+   await page.evaluate(async()=>{
      const workspace={...fixture.savedMain.workspace,registration:{status:'unregistered'}};
      fixture.view.surfaces.main={...fixture.savedMain,session:'loose-draft',draft:true,workspace};
+     const sample=fixture.view.navigation.entries[0];
+     fixture.view.navigation.entries.push({...sample,session:'loose-draft',blank:true,workspace:null});
      await fixture.frame();
    });
    await ungrouped.waitFor();

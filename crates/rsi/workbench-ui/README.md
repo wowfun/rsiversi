@@ -136,7 +136,9 @@ pages. Pinned rows are a separate complete bounded query.
 
 Unchanged metadata refreshes preserve continued workspace pages and their tickets.
 Newest pages may refresh to include newly durable Sessions; identical results
-keep their tickets. A metadata revision change retires old cursors and reloads
+keep their tickets. When a page observes a member's first Turn, the manual
+order seed and its cached row take that change without altering saved rank.
+A metadata revision change retires old cursors and reloads
 the first page of each open, uncontinued group. A continued or previously failed
 group keeps its explicit refresh control so a change cannot silently reset its
 reading position. Its invalidated rows and mutation controls remain unavailable.

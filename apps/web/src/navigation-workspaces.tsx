@@ -1,6 +1,6 @@
 import {WorkspaceHeader} from "./workspace-header.tsx";
 import { useMemo, useState, type ReactNode } from "react";
-import {sessionWorkspaceGroup, visibleConversations} from '../navigation-presentation.js';
+import {sessionWorkspaceGroup, sidebarConversations, visibleConversations} from '../navigation-presentation.js';
 import {
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
@@ -70,8 +70,9 @@ export function WorkspaceNavigation({
             more: false,
           }
         : savedPage;
-    const visible = visibleConversations(page?.entries ?? [], expanded.has(key), active?.session);
-    const remaining = (page?.entries.length ?? 0) - visible.length;
+    const listed = sidebarConversations(page?.entries ?? [], active?.session);
+    const visible = visibleConversations(listed, expanded.has(key), active?.session);
+    const remaining = listed.length - visible.length;
     const showDraft = active?.draft && active.creation && activeGroup === key &&
       nav?.filter.archived !== true && !page?.entries.some(entry => entry.session === active.session);
     return (
@@ -171,7 +172,7 @@ export function WorkspaceNavigation({
               </p>
             )}
             {visible.map(row)}
-            {(remaining > 0 || expanded.has(key) && page.entries.length > 5) && <button type="button" className="workspace-show-more" aria-expanded={expanded.has(key)} onClick={()=>setExpanded(previous=>{const next=new Set(previous);if(next.has(key))next.delete(key);else next.add(key);return next;})}>{remaining > 0 ? `Show ${remaining} more ${remaining === 1 ? 'session' : 'sessions'}` : 'Show less'}</button>}
+            {(remaining > 0 || expanded.has(key) && listed.length > 5) && <button type="button" className="workspace-show-more" aria-expanded={expanded.has(key)} onClick={()=>setExpanded(previous=>{const next=new Set(previous);if(next.has(key))next.delete(key);else next.add(key);return next;})}>{remaining > 0 ? `Show ${remaining} more ${remaining === 1 ? 'session' : 'sessions'}` : 'Show less'}</button>}
             {page.stale && (
               <p className="hint" role="status">
                 Conversations changed.{" "}
@@ -190,7 +191,7 @@ export function WorkspaceNavigation({
                 </button>
               </p>
             )}
-            {!page.stale && !page.entries.length && page.more && (
+            {!page.stale && !listed.length && !showDraft && page.more && (
               <p className="hint">No matches in this scan. Continue searching.</p>
             )}
             {page.more && (

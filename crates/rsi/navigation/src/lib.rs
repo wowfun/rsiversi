@@ -491,19 +491,14 @@ impl Navigation {
             if !filter.workspace.matches(workspace.as_ref()) {
                 continue;
             }
-            if !self.retain_session_view(id, &origin, &mut leases).await? {
+            let Some(blank) = self.visible_session_blank(id, &origin, &mut leases).await? else {
+                continue;
+            };
+            if blank && !query.is_empty() {
                 continue;
             }
             visible_cut = Some(row.cursor());
-            entries.push(NavigationEntry {
-                session: id.clone(),
-                created_at_ms: row.created_at_ms.to_string(),
-                last_activity_ms: row.last_activity_ms.to_string(),
-                location: row.coordinates.location().clone(),
-                path: path.into(),
-                workspace,
-                metadata: metadata.clone(),
-            });
+            entries.push(navigation_entry(row, blank, workspace, metadata));
             if entries.len() == 64 {
                 break;
             }
@@ -513,8 +508,9 @@ impl Navigation {
         let newest = match page.newest {
             Some(key) => {
                 if self
-                    .retain_session_view(&key.session_id, &origin, &mut leases)
+                    .visible_session_blank(&key.session_id, &origin, &mut leases)
                     .await?
+                    .is_some()
                 {
                     Some(key)
                 } else {
@@ -656,10 +652,21 @@ impl Navigation {
                 let mut rows = stream::iter(rows.iter().enumerate()).zip(lookups);
                 while let Some(((index, row), workspace)) = rows.next().await {
                     let (id, metadata) = selected[index];
+                    if row.as_ref().is_some_and(|row| {
+                        !visibility.locations().contains(row.coordinates.location())
+                    }) {
+                        continue;
+                    }
+                    let Some(blank) = owner
+                        .visible_session_blank(id, &origin, &mut leases)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    if blank && !query.is_empty() {
+                        continue;
+                    }
                     let Some(row) = row else {
-                        if !owner.retain_session_view(id, &origin, &mut leases).await? {
-                            continue;
-                        }
                         if matches!(origin, CallOrigin::Local)
                             && filter.workspace == WorkspaceFilter::All
                             && matches_query(&query, id, metadata, None)
@@ -671,12 +678,6 @@ impl Navigation {
                         }
                         continue;
                     };
-                    if !visibility.locations().contains(row.coordinates.location()) {
-                        continue;
-                    }
-                    if !owner.retain_session_view(id, &origin, &mut leases).await? {
-                        continue;
-                    }
                     let path = row.coordinates.path();
                     if !matches_query(&query, id, metadata, Some(path)) {
                         continue;
@@ -689,15 +690,7 @@ impl Navigation {
                         (metadata.partition_revision, row.last_activity_ms),
                         id,
                         PinnedEntry::Available {
-                            entry: NavigationEntry {
-                                session: id.clone(),
-                                created_at_ms: row.created_at_ms.to_string(),
-                                last_activity_ms: row.last_activity_ms.to_string(),
-                                location: row.coordinates.location().clone(),
-                                path: path.into(),
-                                workspace,
-                                metadata: metadata.metadata.clone(),
-                            },
+                            entry: navigation_entry(row, blank, workspace, &metadata.metadata),
                         },
                     ));
                 }
@@ -1215,16 +1208,22 @@ impl Navigation {
         Ok(visible_summary(self.store.session_summary(id).await)?.map(|summary| summary.header))
     }
 
-    async fn retain_session_view(
+    async fn visible_session_blank(
         &self,
         id: &SessionId,
         origin: &CallOrigin,
         leases: &mut Vec<tokio_util::sync::CancellationToken>,
-    ) -> Result<bool> {
-        let Some(header) = self.metadata_header(id).await? else {
-            return Ok(false);
+    ) -> Result<Option<bool>> {
+        let Some(summary) = visible_summary(self.store.session_summary(id).await)? else {
+            return Ok(None);
         };
-        self.retain_header_view(&header, origin, leases)
+        Ok(self
+            .retain_header_view(&summary.header, origin, leases)?
+            .then(|| {
+                summary
+                    .header
+                    .is_before_first_turn(summary.durable_fact_seq)
+            }))
     }
 
     fn retain_header_view(
@@ -1278,6 +1277,24 @@ impl Navigation {
         }
     }
 }
+fn navigation_entry(
+    row: &rsi_agent_store_protocol::StoreActivityRow,
+    blank: bool,
+    workspace: Option<WorkspaceId>,
+    metadata: &SessionMetadata,
+) -> NavigationEntry {
+    NavigationEntry {
+        blank,
+        session: row.session_id.clone(),
+        created_at_ms: row.created_at_ms.to_string(),
+        last_activity_ms: row.last_activity_ms.to_string(),
+        location: row.coordinates.location().clone(),
+        path: row.coordinates.path().into(),
+        workspace,
+        metadata: metadata.clone(),
+    }
+}
+
 fn visible_summary(
     result: rsi_agent_store_protocol::Result<rsi_agent_store_protocol::StoreRecentSession>,
 ) -> Result<Option<rsi_agent_store_protocol::StoreRecentSession>> {

@@ -5,6 +5,11 @@ ID together. A member carries its registration only after explicit enrollment.
 One coordinate can have a registered group and a separate unattached group. Clients consume
 this mapping instead of deriving registration identities from paths.
 
+Navigation entries and manual-order members carry `blank: true` while the
+Session is before its first Turn. Complete membership and exact summaries
+include these Sessions so each client can apply its own selection to the list.
+Text queries omit them from ordinary and pinned results.
+
 Wire version 9 exposes each complete member's `account_position`: its zero-based
 position in the caller-visible shared Workspace account. Positions are contiguous
 within each group and independent of pin/archive state and later activity. Device
