@@ -22,14 +22,15 @@ import {
 import type { useDeviceNavigation } from "./navigation-device.ts";
 import type { useLayout } from "./presentation.tsx";
 import {workspaceName as basename} from '../workspace-name.js';
-function WorkspaceRows({entries, current, attention, row}: {
+function WorkspaceRows({entries, current, attention, reveal, row}: {
   entries: NavigationEntry[];
   current?: string;
+  reveal?: string;
   attention: ReadonlyMap<string, AttentionEntry>;
   row(entry: NavigationEntry): ReactNode;
 }) {
   const [stored, setStored] = useState(5);
-  const {minimum, limit, visible, canFold} = workspaceRowWindow(entries, current, attention, stored);
+  const {minimum, limit, visible, canFold} = workspaceRowWindow(entries, current, attention, stored, reveal);
   if (limit > stored) setStored(limit);
   const remaining = entries.length - visible;
   return <>
@@ -52,6 +53,7 @@ export function WorkspaceNavigation({
   row,
   attention,
   blankPin,
+  reveal,
 }: {
   conversationVisible: boolean;
   nav: Navigation | undefined;
@@ -63,6 +65,7 @@ export function WorkspaceNavigation({
   row(entry: NavigationEntry): ReactNode;
   attention: ReadonlyMap<string, AttentionEntry>;
   blankPin?: NavigationEntry;
+  reveal?: string;
 }) {
   const selected = useSelected(value => value);
   const active = useView(value => {const surface=value?.surfaces[selected];return surface?.kind === "native" ? surface : undefined;});
@@ -185,7 +188,7 @@ export function WorkspaceNavigation({
                 </button>
               </p>
             )}
-            <WorkspaceRows entries={listed} current={active?.session} attention={attention} row={row}/>
+            <WorkspaceRows entries={listed} current={active?.session} attention={attention} reveal={reveal} row={row}/>
             {page.stale && (
               <p className="hint" role="status">
                 Conversations changed.{" "}

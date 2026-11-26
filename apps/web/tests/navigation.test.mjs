@@ -7,6 +7,12 @@ test('conversation recency handles future clocks and minute/hour/day boundaries'
   assert.equal(conversationRecency('bad',now),'');
 });
 const row=id=>({session:id,created_at_ms:'1700000000000',path:'/same',metadata:{title:null}});
+test('an explicit search result reveals its row beyond the automatic limit',()=>{
+  const rows=Array.from({length:60},(_,i)=>row(String(i+1)));
+  assert.equal(workspaceRowWindow(rows,'58',new Map(),5,'58').visible,58);
+  assert.equal(workspaceRowWindow(rows,'58',new Map(),5).visible,5);
+  assert.equal(workspaceRowWindow(rows,'3',new Map(),5,'3').visible,5);
+});
 test('only the selected provisional conversation leads its window beside five established rows',()=>{
   const started=Array.from({length:6},(_,i)=>row(String(i)));
   const queued={...row('queued'),blank:true,metadata:{title:'Queued message'}};

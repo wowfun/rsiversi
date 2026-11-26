@@ -61,8 +61,9 @@ export function sidebarConversations(entries, selected) {
   return started;
 }
 
-// sidebarConversations has already placed the optional current blank first.
-export function workspaceRowWindow(entries, selected, attention, stored) {
+/** sidebarConversations has already placed the optional current blank first.
+ * @param {string} [reveal] */
+export function workspaceRowWindow(entries, selected, attention, stored, reveal) {
   const first = entries[0]?.blank ? 1 : 0;
   const count = entries.length - first;
   let minimum = 5;
@@ -72,6 +73,10 @@ export function workspaceRowWindow(entries, selected, attention, stored) {
     if (id === selected || status === 'running' || status === 'waiting' || status === 'unread') {
       minimum = index - first + 1;
     }
+  }
+  if (reveal !== undefined) {
+    const index = entries.findIndex(entry => entry.session === reveal);
+    minimum = Math.max(minimum, index - first + 1);
   }
   const limit = Math.max(stored, minimum);
   return {minimum, limit, visible: first + Math.min(count, limit), canFold: count > minimum};

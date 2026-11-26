@@ -128,6 +128,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
     }
   }, [restoreKey, nav?.ticket, nav?.filter.query]);
   const [searchText, setSearchText] = useState("");
+  const [reveal, setReveal] = useState<string>();
   const query = searchText.trim();
   const searchRoot = useRef<HTMLFormElement>(null);
   const submitSearch = useRef<() => void>();
@@ -261,6 +262,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       notify(archivedSessionHint);
       return;
     }
+    setReveal(entry.session);
     closeSearch();
     if (device.preferences.view !== "flat") expand(entry.workspace ?? "other");
     return input.open({action:"open", session:entry.session});
@@ -276,6 +278,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       activity={attention.get(entry.session)}
       workspaceLabel={workspaceLabels && (entry.workspace ? workspaceLabels.get(entry.workspace) || workspaceName(entry.path) : "Ungrouped")}
       openSearchResult={searching ? openSearchResult : undefined}
+      onReveal={!searching && reveal === entry.session ? () => setReveal(id => id === entry.session ? undefined : id) : undefined}
       unarchive={searching && nav?.can_archive && entry.metadata.archived ? () => archive(entry) : undefined}
       device={device}
       opener={menu?.opener}
@@ -298,7 +301,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       <div className={`section-heading ${css.heading}`}>
         {searchOpen ? <form ref={searchRoot} className="navigation-search" onSubmit={event=>{event.preventDefault();submitSearch.current?.()}}>
           <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={14}/></Button>
-          <input ref={searchInputRef} autoFocus data-navigation-initial-focus="" aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>setSearchText(searchInput(event.target.value))} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch()}}}/>
+          <input ref={searchInputRef} autoFocus data-navigation-initial-focus="" aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>{setReveal(undefined);setSearchText(searchInput(event.target.value));}} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch()}}}/>
           <Button size="sm" aria-label="Close search" onClick={closeSearch}><IconCloseOutlineRegular size={16}/></Button>
         </form> : <>
           <h2 data-testid="workspace-heading">Workspaces</h2>
@@ -455,6 +458,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
                   row={row}
                   attention={attention}
                   blankPin={blankPin}
+                  reveal={reveal}
                 />
                 {!completeWorkspaces && catalog?.workspaces_more && (
                   <Button

@@ -2,7 +2,7 @@ import {conversationRecency} from "../navigation-presentation.js";
 import {messageClock} from '../message-metrics.js';
 import { IconArchiveOffOutlineRegular, IconArchiveOutlineRegular, IconCloseOutlineRegular, IconCopyOutlineRegular,
   IconEditOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular, IconEllipsisOutlineRegular, IconPinOutlineRegular } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
-import { useRef, useState, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { Menu } from "../vendor/dsh/dockkit-primitives/Menu.tsx";
 import { Modal } from "./presentation.tsx";
 import { Button } from "./button.tsx";
@@ -49,6 +49,7 @@ export function ConversationRow({
   activity,
   workspaceLabel,
   openSearchResult,
+  onReveal,
   unarchive,
   device,
   onMenu,
@@ -61,6 +62,7 @@ export function ConversationRow({
   activity: AttentionEntry | undefined;
   workspaceLabel?: string;
   openSearchResult?: (entry: NavigationEntry) => unknown;
+  onReveal?: () => void;
   unarchive?: () => Promise<unknown>;
   device: ReturnType<typeof useDeviceNavigation>;
   now: number;
@@ -68,6 +70,12 @@ export function ConversationRow({
   opener?: HTMLElement;
 }) {
   const row = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (onReveal && row.current) {
+      row.current.scrollIntoView({block: "nearest"});
+      onReveal();
+    }
+  }, [onReveal]);
   const menuOpen = !!opener && !!row.current?.contains(opener);
   const clock = workspaceLabel ? undefined : messageClock(entry.last_activity_ms, now);
   function showMenu(event: SyntheticEvent<HTMLElement>, point?: SessionMenuTarget["point"]) {

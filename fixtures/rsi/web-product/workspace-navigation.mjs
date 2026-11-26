@@ -570,8 +570,46 @@ try {
    await page.evaluate(()=>window.finishClose());
    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
    assert.equal(await page.evaluate(()=>window.groupOpens),0,'closing the active workspace must not enqueue an automatic reopen');
+   await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     const sample=window.allRows[0];
+     nav.entries=Array.from({length:60},(_,i)=>({...sample,session:'search-'+(i+1),metadata:{...sample.metadata,title:'Search row '+(i+1)}}));
+     nav.continued=false;
+     nav.more=false;
+     nav.attention.entries=[];
+     fixture.setReply('command',async text=>{
+       const request=JSON.parse(text);
+       if(request.action==='open'){
+         fixture.view.surfaces.main={...fixture.savedMain,session:request.session,draft:false};
+         await fixture.frame();
+       }
+       return '{}';
+     });
+     await fixture.frame();
+   });
+   await searchButton.click();
+   await searchInput.fill('Search row 58');
+   await page.locator('#sessions [data-session-id="search-58"]').getByTestId('conversation-open').click();
+   await searchInput.waitFor({state:'detached'});
+   const revealedGroup=page.locator('[data-workspace-id="fixture"]');
+   assert.equal(await revealedGroup.locator('[data-session-id="search-58"]').count(),0);
+   await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     nav.groups.fixture={...window.foldedPage,entries:nav.entries};
+     await fixture.frame();
+   });
+   await revealedGroup.getByRole('button',{name:'Show 2 more sessions',exact:true}).waitFor();
+   const hit=revealedGroup.locator('[data-session-id="search-58"]');
+   assert.equal(await hit.getByTestId('conversation-open').getAttribute('aria-current'),'true');
+   await page.waitForFunction(()=>{
+     const rect=document.querySelector('[data-workspace-id="fixture"] [data-session-id="search-58"]')?.getBoundingClientRect();
+     return rect && rect.top>=0 && rect.bottom<=innerHeight;
+   });
+   assert.equal(await revealedGroup.getByTestId('conversation-row').count(),58);
+   assert.equal(await hit.count(),1);
+   await page.screenshot({path:join(report,name+'-revealed-search-result.png'),animations:'disabled'});
    assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,composerReadShortcut:true,
-     acknowledgedOnlyAfterLaterTurn:true,archiveAndCopyFeedbackExpires:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true});
+     acknowledgedOnlyAfterLaterTurn:true,archiveAndCopyFeedbackExpires:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true,searchRevealedRow:58});
   } catch (error) {
    const failure=join(report,name+'-failure.txt');
    await writeFile(failure,[error.stack,...errors].join('\n'));
