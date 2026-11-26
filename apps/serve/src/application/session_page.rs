@@ -1,6 +1,7 @@
 use super::Sessions;
+use rsi_agent_session_protocol::SessionHeader;
 use rsi_extension::{Error, Result};
-use rsi_session_protocol::{RecentSessionCursor, SessionSummary};
+use rsi_session_protocol::RecentSessionCursor;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -46,7 +47,12 @@ impl Sessions {
                     row.durable_control_seq,
                 )
             } else {
-                catalog_item(row, running.contains(row.header.session_id()))
+                catalog_item(
+                    &row.header,
+                    row.last_activity_ms,
+                    row.durable_fact_seq,
+                    running.contains(row.header.session_id()),
+                )
             });
         }
         self.routes
@@ -56,10 +62,19 @@ impl Sessions {
     }
 }
 
-fn catalog_item(summary: &SessionSummary, running: bool) -> Value {
-    let header = &summary.header;
-    let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":summary.last_activity_ms,
-        "blank":summary.is_blank(),"running":running});
+pub(super) fn catalog_item(
+    header: &SessionHeader,
+    updated_at: u64,
+    fact_seq: u64,
+    running: bool,
+) -> Value {
+    // A standalone compaction requires a nonempty prior Fact prefix.
+    let blank = fact_seq == 0
+        && header
+            .history_origin()
+            .is_none_or(|origin| origin.effective_turns == 0);
+    let mut item = json!({"id":header.session_id(),"cwd":header.canonical_cwd(),"createdAt":header.created_at_ms(),"updatedAt":updated_at,
+        "blank":blank,"running":running});
     if let Some(origin) = header.fork_origin() {
         item["parent"] = json!(origin.parent.session_id());
     }
@@ -264,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_keeps_accepted_context_visible_before_the_first_turn() {
+    fn catalog_reuses_a_session_with_accepted_input_until_its_first_turn() {
         let header = SessionHeader::new_local(
             SessionId::new("held-context").unwrap(),
             1,
@@ -280,7 +295,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let mut summary = SessionSummary {
+        let summary = rsi_session_protocol::SessionSummary {
             working_directory: None,
             header,
             last_activity_ms: 2,
@@ -288,16 +303,39 @@ mod tests {
             durable_control_seq: 2,
         };
         assert_eq!(
-            catalog_item(&summary, false),
+            catalog_item(
+                &summary.header,
+                summary.last_activity_ms,
+                summary.durable_fact_seq,
+                false
+            ),
             json!({
-                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":false,"running":false,
+                "id":"held-context","cwd":"/workspace","createdAt":1,"updatedAt":2,"blank":true,"running":false,
             })
         );
-        summary.durable_control_seq = 0;
-        assert_eq!(catalog_item(&summary, false)["blank"], true);
-        summary.durable_fact_seq = 1;
-        let started = catalog_item(&summary, true);
+        let started = catalog_item(&summary.header, 3, 1, true);
         assert_eq!(started["blank"], false);
         assert_eq!(started["running"], true);
+        use rsi_agent_session_protocol::{ForkPoint, ForkTurnSelection, HistoryOrigin, TurnId};
+        let fork = summary
+            .header
+            .forked_independent(
+                SessionId::new("inherited").unwrap(),
+                4,
+                HistoryOrigin {
+                    parent_session_id: summary.header.session_id().clone(),
+                    parent_header_fingerprint: summary.header.fingerprint().unwrap(),
+                    point: ForkPoint::through(&TurnId::new("completed").unwrap()),
+                    resolved_after_seq: 0,
+                    resolved_terminal_seq: 3,
+                    terminal_prefix_sha256: "a".repeat(64),
+                    resolved_terminal_control_seq: 1,
+                    terminal_control_prefix_sha256: "b".repeat(64),
+                    requested_turns: ForkTurnSelection::All,
+                    effective_turns: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(catalog_item(&fork, 4, 0, false)["blank"], false);
     }
 }

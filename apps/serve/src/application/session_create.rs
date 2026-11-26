@@ -254,12 +254,8 @@ fn receipt(
     header: &rsi_agent_session_protocol::SessionHeader,
     reused: Option<&AgentPresetId>,
 ) -> Value {
-    let blank = header
-        .history_origin()
-        .is_none_or(|origin| origin.effective_turns == 0);
     json!({"id":header.session_id(),"preset":reused.unwrap_or_else(|| header.agent_preset_id()),"reused":reused.is_some(),
-        "summary":{"id":header.session_id(),"cwd":header.canonical_cwd(),
-            "createdAt":header.created_at_ms(),"updatedAt":header.created_at_ms(),"blank":blank,"running":false}})
+        "summary":super::session_page::catalog_item(header, header.created_at_ms(), 0, false)})
 }
 
 fn remote(error: impl std::fmt::Display) -> Error {

@@ -316,8 +316,9 @@ draft handle. A local filesystem plugin can only receive a native local
 workspace path through this operation.
 `application.sessions` reads one page of visible durable Sessions with the
 same live request authority. Each listed row supplies its Header, activity time and
-durable Fact/control watermarks from one Store read snapshot. Both watermarks
-determine the blank flag; no follow-up activity-summary query is needed. The running
+durable Fact/control watermarks from one Store read snapshot. The blank flag
+remains set until the first Turn starts, including while the first input is
+queued. Inherited Turns count as history. The running
 flag reports current Kernel ownership of a nonterminal Turn for that visible
 identity. A cold open Turn stays in the list with a clear running flag.
 Listing reads neither transcript bodies nor pending human interactions.
