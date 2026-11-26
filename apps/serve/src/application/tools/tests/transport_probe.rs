@@ -52,7 +52,7 @@ async fn native_tool_transport() {
                 let channel: Channel = serde_json::from_slice(&bytes).unwrap();
                 let endpoint = Arc::new(Endpoint {
                     listener: Listener {
-                        protocol: 16,
+                        protocol: 17,
                         generation: "transport-probe".into(),
                         port: channel.port,
                     },

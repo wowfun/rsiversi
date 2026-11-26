@@ -26,8 +26,8 @@ pub struct RequestToolCatalog {
     pub runtime: Arc<dyn ToolRuntime>,
     /// Rendered current system guidance from the same request capture; empty means none.
     pub instructions: String,
-    /// Final input preparation owned by this same request capture.
-    pub inputs: Option<Arc<dyn RequestInputPreparer>>,
+    /// Hooks owned by this same request capture.
+    pub callbacks: Option<Arc<dyn RequestCallbacks>>,
     /// Optional middleware for native Tools called through this captured request.
     pub middleware: Option<Arc<dyn rsi_tools_protocol::ToolMiddleware>>,
 }
@@ -94,9 +94,19 @@ impl serde::Serialize for RequestInputContext<'_> {
     }
 }
 
-/// Application-owned final decision using its retained request capture.
+/// Application hooks using the producing request's retained view.
 #[async_trait]
-pub trait RequestInputPreparer: fmt::Debug + Send + Sync + 'static {
+pub trait RequestCallbacks: fmt::Debug + Send + Sync + 'static {
+    /// Whether this registration permits overlap for these arguments at admission.
+    async fn parallel_safe(
+        &self,
+        _registration: &str,
+        _call: &rsi_ai_protocol::ToolCall,
+        _stop: &CancellationToken,
+    ) -> bool {
+        false
+    }
+
     /// Runs once; the executor publishes its decision and reuses it for retries.
     async fn prepare(
         &self,
@@ -115,7 +125,7 @@ pub trait RequestInputPreparer: fmt::Debug + Send + Sync + 'static {
 pub(super) struct RequestPreparation {
     view: ApplicationToolView,
     instruction: Option<rsi_agent_session_protocol::StepInstruction>,
-    inputs: Option<Arc<dyn RequestInputPreparer>>,
+    callbacks: Option<Arc<dyn RequestCallbacks>>,
     middleware: Option<Arc<dyn rsi_tools_protocol::ToolMiddleware>>,
 }
 
@@ -246,7 +256,7 @@ impl AgentCompositionPin {
         self.application = Some(Arc::new(RequestPreparation {
             view,
             instruction,
-            inputs: catalog.inputs,
+            callbacks: catalog.callbacks,
             middleware: catalog.middleware,
         }));
         Ok(self)
@@ -268,7 +278,7 @@ impl AgentCompositionPin {
         self.application = Some(Arc::new(RequestPreparation {
             view: ApplicationToolView::Unavailable { reason: bounded },
             instruction: None,
-            inputs: None,
+            callbacks: None,
             middleware: None,
         }));
         self
@@ -286,10 +296,35 @@ impl AgentCompositionPin {
         self.application.as_deref()?.instruction.as_ref()
     }
 
-    /// Input callback retained by the same application capture as its Tools.
+    /// Callbacks retained by the same application capture as its Tools.
     #[must_use]
-    pub fn request_input_preparer(&self) -> Option<&dyn RequestInputPreparer> {
-        self.application.as_deref()?.inputs.as_deref()
+    pub fn request_callbacks(&self) -> Option<&dyn RequestCallbacks> {
+        self.application.as_deref()?.callbacks.as_deref()
+    }
+
+    /// Resolves a captured application's overlap decision immediately before admission.
+    pub async fn call_scheduling(
+        &self,
+        call: &rsi_ai_protocol::ToolCall,
+        registered: rsi_tools_protocol::ToolScheduling,
+        stop: &CancellationToken,
+    ) -> rsi_tools_protocol::ToolScheduling {
+        use rsi_tools_protocol::ToolScheduling;
+        if registered == ToolScheduling::Exclusive
+            && let Some(app) = &self.application
+            && let Some(callbacks) = &app.callbacks
+            && let Ok(index) = app
+                .view
+                .bindings()
+                .binary_search_by(|b| b.name.cmp(&call.name))
+            && callbacks
+                .parallel_safe(&app.view.bindings()[index].registration, call, stop)
+                .await
+        {
+            ToolScheduling::ParallelSafe
+        } else {
+            registered
+        }
     }
 
     /// Routes a prepared name within this request's collision-free catalog.

@@ -147,8 +147,13 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 16 owns capture, input
-preparation, stopping, start, outcome, cancellation and view release. Before an
+loopback listener in its opening reply. Tool protocol 17 owns capture, input
+preparation, overlap classification, stopping, start, outcome, cancellation and view release.
+`POST /v1/parallel-safe` receives the producing view, registration and model call.
+Its boolean result applies only to the supplied arguments at this admission. A missing
+or failed classification leaves the call exclusive. Classification executes no Tool body
+and produces no durable receipt. Native preset Tools retain their registered scheduling.
+Before an
 idle language Turn settles, `POST /v1/stopping` names its producing view.
 The application returns JSON null once its stopping listeners and their native
 publications have settled. If a preparation or stopping reply is lost, the

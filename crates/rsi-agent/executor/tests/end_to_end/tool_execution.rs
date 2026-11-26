@@ -20,6 +20,7 @@ struct AuthenticatedEcho(EchoTool);
 #[derive(Debug)]
 struct RequestEcho {
     requires_full_access: bool,
+    callbacks: Option<Arc<dyn rsi_agent_composition_protocol::RequestCallbacks>>,
     replaced: Option<Arc<std::collections::BTreeSet<String>>>,
     middleware: Option<Arc<dyn rsi_tools_protocol::ToolMiddleware>>,
     catalogs: Arc<dyn rsi_tools_protocol::ToolCatalogProvider>,
@@ -33,6 +34,7 @@ impl RequestEcho {
     fn new(stack: &BaseStack, calls: Arc<AtomicUsize>) -> Self {
         Self {
             requires_full_access: false,
+            callbacks: None,
             replaced: None,
             middleware: None,
             captures: AtomicUsize::new(0),
@@ -115,7 +117,7 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
         *self.previous.lock().unwrap() = Some(Arc::downgrade(&runtime));
         Ok(rsi_agent_composition_protocol::RequestToolCatalog {
             middleware: self.middleware.clone(),
-            inputs: None,
+            callbacks: self.callbacks.clone(),
             instructions: format!("APPLICATION_SYSTEM_{capture}"),
             generation: "process-generation".into(),
             receipt_source: None,
@@ -372,6 +374,95 @@ fn register_native_echo(
             ),
         })
         .unwrap()
+}
+
+#[tokio::test]
+async fn application_classifies_actual_arguments_again_after_an_exclusive_barrier() {
+    use rsi_agent_composition_protocol::{RequestCallbacks, RequestInputContext};
+    use rsi_agent_session_protocol::{InputClaimRef, PreparedInput, StepInputDecision};
+
+    #[derive(Debug)]
+    struct Classifier(Arc<AtomicUsize>);
+    #[async_trait]
+    impl RequestCallbacks for Classifier {
+        async fn parallel_safe(
+            &self,
+            registration: &str,
+            call: &rsi_ai_protocol::ToolCall,
+            _: &CancellationToken,
+        ) -> bool {
+            assert_eq!(registration, "first-registration");
+            let args: Value = serde_json::from_str(&call.arguments).unwrap();
+            args["mode"] == "read"
+                || (args["mode"] == "later" && self.0.load(Ordering::Acquire) >= 3)
+        }
+        async fn prepare(
+            &self,
+            context: &RequestInputContext<'_>,
+            _: CancellationToken,
+        ) -> rsi_agent_composition_protocol::Result<StepInputDecision> {
+            Ok(StepInputDecision::enter(
+                context
+                    .claims
+                    .iter()
+                    .map(|f| PreparedInput::Claimed {
+                        claim: InputClaimRef::new(f.seq(), 0).unwrap(),
+                    })
+                    .collect(),
+            )
+            .unwrap())
+        }
+    }
+    let stack = BaseStack::activate_with_approval(ApprovalDecision::Deny).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut source = RequestEcho::new(&stack, calls.clone());
+    source.callbacks = Some(Arc::new(Classifier(calls.clone())));
+    let worker = activate_fixture(
+        &stack.runtime,
+        "test.request-tools",
+        "app",
+        Arc::new(RequestSourceFactory(Arc::new(source))),
+    )
+    .await;
+    let provider = Arc::new(LanguageFixture {
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::Stream(tool_calls_script(&[
+                ("a", "echo", r#"{"mode":"read","defer":false}"#),
+                ("b", "echo", r#"{"mode":"read","defer":false}"#),
+                ("c", "echo", r#"{"mode":"write","defer":false}"#),
+                ("d", "echo", r#"{"mode":"later","defer":false}"#),
+            ])),
+            StartOutcome::Stream(answer_script()),
+        ])),
+        requests: Mutex::new(vec![]),
+        starts: Arc::new(AtomicUsize::new(0)),
+        store: stack.store.clone(),
+        retry_policy: RetryPolicy::default(),
+    });
+    let language = stack.activate_language("test.language", provider).await;
+    let executor = stack.activate_executor("executor-classification").await;
+    let (submitted, outcome) = stack.submit_and_wait("classify calls").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let page = stack
+        .store
+        .read_facts(&submitted.session_id, 0, 128, FACT_PAGE_BYTES)
+        .await
+        .unwrap();
+    let modes: Vec<_> = page
+        .facts
+        .iter()
+        .filter_map(|fact| match fact.body() {
+            SessionFactBody::ToolIntent {
+                identity,
+                parallel_safe,
+                ..
+            } => Some((identity.call_id(), *parallel_safe)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(modes, [("a", true), ("b", true), ("c", false), ("d", true)]);
+    assert!(worker.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
 }
 
 #[tokio::test]

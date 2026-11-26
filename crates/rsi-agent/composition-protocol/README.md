@@ -86,8 +86,11 @@ identity. The application may consume its already-admitted body once or return
 an outcome directly. Recovery reads the final retained outcome and never reruns
 the hook or the body.
 
-A captured application request may retain an input preparer beside its Tool
-runtime and system guidance. The preparer receives the final borrowed claim Facts
+A captured application request may retain callbacks beside its Tool runtime and
+system guidance. An application may classify its own Tool calls for overlap using
+the producing registration and exact model arguments. The executor consults this
+callback when admitting siblings, including after a pool drains at an exclusive
+barrier. A call with no overlap decision runs exclusively. Input preparation receives the final borrowed claim Facts
 after ordinary contributions, the native Turn/Step and captured Fact horizon. It
 returns one typed ordered `StepInputDecision`; Kernel resolves its coordinates
 before publication. Capture and preparation share the BeforeStep deadline, and

@@ -163,7 +163,7 @@ async fn request_guidance_is_bounded_replaced_and_removed_without_changing_the_p
         registrations: std::collections::BTreeMap::new(),
         runtime: Arc::new(EmptyTools::default()),
         instructions: text,
-        inputs: None,
+        callbacks: None,
     };
     let first = base
         .clone()

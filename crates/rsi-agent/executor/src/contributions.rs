@@ -133,7 +133,7 @@ async fn prepare_final_inputs(
     {
         return Ok(StepInputDecision::reject());
     }
-    if let Some(preparer) = composition.request_input_preparer() {
+    if let Some(preparer) = composition.request_callbacks() {
         let context = rsi_agent_composition_protocol::RequestInputContext {
             previous: previous.as_ref(),
             ..*context
@@ -200,7 +200,7 @@ impl Driver {
             result=capture=>result,
         };
         let reason = match result {
-            Ok(Ok(catalog)) if input_required && catalog.inputs.is_none() => {
+            Ok(Ok(catalog)) if input_required && catalog.callbacks.is_none() => {
                 "application capture omitted its input preparer".into()
             }
             Ok(Ok(catalog)) => match selected.with_request_catalog(catalog, claim.header()) {

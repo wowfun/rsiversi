@@ -416,7 +416,7 @@ impl Driver {
                         .is_empty()
                 {
                     let continued = if let Some(application) =
-                        request_composition.request_input_preparer()
+                        request_composition.request_callbacks()
                     {
                         let token = cancellation.child_token();
                         let _guard = token.clone().drop_guard();
@@ -567,11 +567,18 @@ impl Driver {
             }
             let parallel_limit = self.parallelism.limit().await?;
             let mut settled = Vec::new();
-            while let Some((call, scheduling)) = scheduled.pop_front() {
+            while let Some((call, registered)) = scheduled.pop_front() {
                 self.turns
                     .refresh_working_directory(claim)
                     .await
                     .map_err(fatal)?;
+                let scheduling = if total_calls == 1 {
+                    registered
+                } else {
+                    composition
+                        .call_scheduling(&call, registered, &cancellation)
+                        .await
+                };
                 match scheduling {
                     ToolScheduling::Exclusive | ToolScheduling::ExclusiveFinal => {
                         settled.push(
@@ -591,16 +598,6 @@ impl Driver {
                         );
                     }
                     ToolScheduling::ParallelSafe => {
-                        let mut batch = vec![call];
-                        while scheduled
-                            .front()
-                            .is_some_and(|(_, next)| *next == ToolScheduling::ParallelSafe)
-                        {
-                            let (call, _) = scheduled
-                                .pop_front()
-                                .expect("front was a parallel-safe Tool call");
-                            batch.push(call);
-                        }
                         settled.extend(
                             self.run_parallel_tools(
                                 &source_model_effect_id,
@@ -608,7 +605,8 @@ impl Driver {
                                 composition,
                                 job_scope,
                                 fold,
-                                batch,
+                                call,
+                                &mut scheduled,
                                 parallel_limit,
                                 turn_policy,
                                 &cancellation,

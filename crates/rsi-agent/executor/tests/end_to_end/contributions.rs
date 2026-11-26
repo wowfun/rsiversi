@@ -1462,7 +1462,7 @@ impl rsi_agent_composition_protocol::RequestToolSource for SelectionTools {
         self.selections.lock().unwrap().push(selection.clone());
         Ok(rsi_agent_composition_protocol::RequestToolCatalog {
             middleware: None,
-            inputs: None,
+            callbacks: None,
             instructions: String::new(),
             generation: "selected-model-tools".into(),
             receipt_source: None,

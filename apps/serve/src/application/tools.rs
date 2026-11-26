@@ -1,7 +1,7 @@
 use super::failure;
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{
-    AgentCompositionError, RequestInputContext, RequestInputPreparer, RequestToolCatalog,
+    AgentCompositionError, RequestCallbacks, RequestInputContext, RequestToolCatalog,
     RequestToolSource,
 };
 use rsi_agent_session_protocol::{
@@ -34,7 +34,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 16 || self.port == 0 {
+        if self.protocol != 17 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -431,7 +431,7 @@ impl RequestToolSource for Source {
             runtime,
             instructions: captured.instructions,
             middleware: Some(view.clone()),
-            inputs: Some(view),
+            callbacks: Some(view),
         })
     }
 }
@@ -466,7 +466,30 @@ impl View {
 }
 
 #[async_trait]
-impl RequestInputPreparer for View {
+impl RequestCallbacks for View {
+    async fn parallel_safe(
+        &self,
+        registration: &str,
+        call: &rsi_ai_protocol::ToolCall,
+        stop: &CancellationToken,
+    ) -> bool {
+        #[derive(Serialize)]
+        struct Classification<'a> {
+            view: &'a str,
+            registration: &'a str,
+            call: &'a rsi_ai_protocol::ToolCall,
+        }
+        let request = Classification {
+            view: &self.id,
+            registration,
+            call,
+        };
+        tokio::select! { biased;
+            () = stop.cancelled() => false,
+            result = self.endpoint.call::<bool>("parallel-safe", &request, 8) => result.unwrap_or(false),
+        }
+    }
+
     async fn turn_stopping(
         &self,
         stop: CancellationToken,

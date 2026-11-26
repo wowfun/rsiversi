@@ -1,6 +1,6 @@
 use super::*;
 use rsi_agent_composition_protocol::{
-    RequestInputContext, RequestInputPreparer, RequestToolCatalog, RequestToolSource,
+    RequestCallbacks, RequestInputContext, RequestToolCatalog, RequestToolSource,
 };
 use rsi_agent_session_protocol::{
     InputClaimRef, MessageAttribution, PreparedInput, PreparedInputMessage, PreparedInputRole,
@@ -30,7 +30,7 @@ struct Preparation {
 }
 
 #[async_trait]
-impl RequestInputPreparer for Preparation {
+impl RequestCallbacks for Preparation {
     async fn turn_stopping(
         &self,
         _: CancellationToken,
@@ -169,7 +169,7 @@ impl RequestToolSource for Source {
             registrations: std::collections::BTreeMap::default(),
             runtime: self.catalogs.begin_stage().unwrap().seal().unwrap(),
             instructions: String::new(),
-            inputs: Some(self.preparation.clone()),
+            callbacks: Some(self.preparation.clone()),
         })
     }
 }

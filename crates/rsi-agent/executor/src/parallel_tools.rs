@@ -140,17 +140,34 @@ impl Batch<'_> {
 
     async fn prepare(
         &self,
-        calls: Vec<ModelToolCall>,
+        first: ModelToolCall,
+        remaining: &mut VecDeque<(ModelToolCall, ToolScheduling)>,
         mut admitted: watch::Receiver<usize>,
         ready: mpsc::Sender<(usize, DriveResult<ToolPreparation>)>,
     ) {
         let origin = rsi_agent_session_protocol::ToolOrigin::Model {
             effect_id: self.source.clone(),
         };
-        for (index, call) in calls.into_iter().enumerate() {
+        let mut first = Some(first);
+        for index in 0..=remaining.len() {
             if admitted.wait_for(|end| index < *end).await.is_err() {
                 return;
             }
+            let call = if let Some(call) = first.take() {
+                call
+            } else {
+                let (call, registered) = remaining.front().expect("remaining scheduled call");
+                if self
+                    .composition
+                    .call_scheduling(call, *registered, self.cancellation)
+                    .await
+                    != ToolScheduling::ParallelSafe
+                {
+                    // Drain started siblings before the driver revisits this barrier.
+                    return;
+                }
+                remaining.pop_front().expect("classified call").0
+            };
             let outcome = self
                 .driver
                 .prepare_tool_call(
@@ -173,18 +190,19 @@ impl Batch<'_> {
 
     async fn run(
         &self,
-        calls: Vec<ModelToolCall>,
+        first: ModelToolCall,
+        remaining: &mut VecDeque<(ModelToolCall, ToolScheduling)>,
         batch_limit: usize,
         fold: &mut ModelContextState,
     ) -> DriveResult<Vec<Arc<SessionFact>>> {
-        let count = calls.len();
+        let count = 1 + remaining.len();
         let limit = batch_limit.min(count);
         let mut running = FuturesUnordered::new();
         let mut results = OrderedResults::default();
         {
             let (admission, horizon) = watch::channel(0);
             let (sender, mut ready) = mpsc::channel(limit);
-            let preparation = self.prepare(calls, horizon, sender);
+            let preparation = self.prepare(first, remaining, horizon, sender);
             let dispatch = async {
                 let mut admitted = 0;
                 let mut received = 0;
@@ -282,7 +300,8 @@ impl Driver {
         composition: &AgentCompositionPin,
         jobs: Option<&JobScopeAuthority>,
         fold: &mut ModelContextState,
-        calls: Vec<ModelToolCall>,
+        first: ModelToolCall,
+        remaining: &mut VecDeque<(ModelToolCall, ToolScheduling)>,
         batch_limit: usize,
         policy: ResolvedTurnPolicy,
         cancellation: &CancellationToken,
@@ -298,7 +317,7 @@ impl Driver {
             cancellation,
             stop,
         }
-        .run(calls, batch_limit, fold)
+        .run(first, remaining, batch_limit, fold)
         .await
     }
 }
