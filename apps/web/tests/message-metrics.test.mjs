@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {messageClock, usageReadings, tokenTotal, elapsedLabel, turnDurationLabel, tokenCount, durationReading} from '../message-metrics.js';
-import {visibleConversations} from '../navigation-presentation.js';
 
 test('missing provider metrics remain absent and inclusive input is not double counted',()=>{
   assert.deepEqual(usageReadings(undefined),{total:undefined,cache:undefined,speed:undefined,context:undefined});
@@ -29,13 +28,6 @@ test('settled headings show whole units while retaining failure and stop outcome
     assert.equal(turnDurationLabel(status,12000),'');
   }
 });
-test('collapsed workspace keeps its selected conversation and preserves order',()=>{
-  const entries=Array.from({length:9},(_,i)=>({session:String(i)}));
-  assert.deepEqual(visibleConversations(entries,false,'7').map(x=>x.session),['0','1','2','3','4','7']);
-  assert.deepEqual(visibleConversations(entries,false,'1'),entries.slice(0,5));
-  assert.deepEqual(visibleConversations(entries,true,'7'),entries);
-});
-
 test('stat display keeps M-scale counts and sub-second timing',()=>{
   assert.equal(tokenCount(15_936_069),'15.9M');
   assert.equal(durationReading(1100),'1.1s');

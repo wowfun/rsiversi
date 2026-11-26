@@ -1,6 +1,7 @@
 import {WorkspaceHeader} from "./workspace-header.tsx";
 import { useMemo, useState, type ReactNode } from "react";
-import {sessionWorkspaceGroup, sidebarConversations, visibleConversations} from '../navigation-presentation.js';
+import {sessionWorkspaceGroup, sidebarConversations, workspaceRowWindow} from '../navigation-presentation.js';
+import {BlankConversationRow} from './navigation-row.tsx';
 import {
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
@@ -9,20 +10,37 @@ import {
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import { workspaceTree } from "../workspace-tree.js";
 import { Button } from "./button.tsx";
-import { sessionSurfaces } from "./session/state.ts";
 import {
-  closeWorkbenchPage,
-  dismissNavigationDrawer,
   run,
   useSelected,
   useView,
   type Navigation,
   type NavigationEntry,
+  type AttentionEntry,
   type WorkspaceFilter,
 } from "./bridge.ts";
 import type { useDeviceNavigation } from "./navigation-device.ts";
 import type { useLayout } from "./presentation.tsx";
 import {workspaceName as basename} from '../workspace-name.js';
+function WorkspaceRows({entries, current, attention, row}: {
+  entries: NavigationEntry[];
+  current?: string;
+  attention: ReadonlyMap<string, AttentionEntry>;
+  row(entry: NavigationEntry): ReactNode;
+}) {
+  const [stored, setStored] = useState(5);
+  const {minimum, limit, visible, canFold} = workspaceRowWindow(entries, current, attention, stored);
+  if (limit > stored) setStored(limit);
+  const remaining = entries.length - visible;
+  return <>
+    {entries.slice(0, visible).map(row)}
+    {canFold && <button type="button" className="workspace-show-more" aria-expanded={remaining === 0}
+      onClick={() => setStored(remaining === 0 ? minimum : remaining <= 5 ? Infinity : limit + 5)}>
+      {remaining === 0 ? 'Show less' : `Show ${remaining} more ${remaining === 1 ? 'session' : 'sessions'}`}
+    </button>}
+  </>;
+}
+
 export function WorkspaceNavigation({
   conversationVisible,
   nav,
@@ -32,6 +50,8 @@ export function WorkspaceNavigation({
   showUngrouped,
   expand,
   row,
+  attention,
+  blankPin,
 }: {
   conversationVisible: boolean;
   nav: Navigation | undefined;
@@ -41,10 +61,11 @@ export function WorkspaceNavigation({
   showUngrouped: boolean;
   expand: ReturnType<typeof useLayout>["expand"];
   row(entry: NavigationEntry): ReactNode;
+  attention: ReadonlyMap<string, AttentionEntry>;
+  blankPin?: NavigationEntry;
 }) {
   const selected = useSelected(value => value);
   const active = useView(value => {const surface=value?.surfaces[selected];return surface?.kind === "native" ? surface : undefined;});
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const activeGroup = sessionWorkspaceGroup(active, nav);
   const group = (
     key: string,
@@ -70,11 +91,11 @@ export function WorkspaceNavigation({
             more: false,
           }
         : savedPage;
-    const listed = sidebarConversations(page?.entries ?? [], active?.session);
-    const visible = visibleConversations(listed, expanded.has(key), active?.session);
-    const remaining = listed.length - visible.length;
+    const entries = page?.entries ?? [];
+    const includePin = !device.manual && blankPin && (blankPin.workspace ?? 'other') === key;
+    const listed = sidebarConversations(includePin ? [blankPin, ...entries] : entries, active?.session);
     const showDraft = active?.draft && active.creation && activeGroup === key &&
-      nav?.filter.archived !== true && !page?.entries.some(entry => entry.session === active.session);
+      nav?.filter.archived !== true && !listed.some(entry => entry.session === active.session);
     return (
       <section
         className="workspace-group"
@@ -146,14 +167,7 @@ export function WorkspaceNavigation({
         </WorkspaceHeader>
         {page && (
           <div className="workspace-conversations">
-            {showDraft && <div className="session-row" data-session-id={active.session}>
-              <button type="button" className="nav-item" aria-current={conversationVisible||undefined} onClick={() => {
-                closeWorkbenchPage();
-                dismissNavigationDrawer();
-                const pane = sessionSurfaces.getSnapshot().find(surface => surface.index === selected);
-                if (pane && pane.kind !== 'external') requestAnimationFrame(() => pane.focusInput());
-              }}><strong>New session</strong></button>
-            </div>}
+            {showDraft && <BlankConversationRow session={active.session} active={conversationVisible}/>}
             {page.continued && !page.stale && (
               <p className="hint">
                 Earlier entries are outside this page.{" "}
@@ -171,8 +185,7 @@ export function WorkspaceNavigation({
                 </button>
               </p>
             )}
-            {visible.map(row)}
-            {(remaining > 0 || expanded.has(key) && listed.length > 5) && <button type="button" className="workspace-show-more" aria-expanded={expanded.has(key)} onClick={()=>setExpanded(previous=>{const next=new Set(previous);if(next.has(key))next.delete(key);else next.add(key);return next;})}>{remaining > 0 ? `Show ${remaining} more ${remaining === 1 ? 'session' : 'sessions'}` : 'Show less'}</button>}
+            <WorkspaceRows entries={listed} current={active?.session} attention={attention} row={row}/>
             {page.stale && (
               <p className="hint" role="status">
                 Conversations changed.{" "}

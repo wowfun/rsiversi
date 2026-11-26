@@ -1,4 +1,4 @@
-import { archivedSessionHint, ConfirmArchive, ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
+import { archivedSessionHint, BlankConversationRow, ConfirmArchive, ConversationRow, RenameSession, SessionMenu, type SessionMenuTarget } from "./navigation-row.tsx";
 import { WorkspaceNavigation } from "./navigation-workspaces.tsx";
 import {NavigationOptions, type ConversationFilter} from "./navigation-options.tsx";
 import { AttentionNavigation } from "./navigation-attention.tsx";
@@ -87,7 +87,12 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
   const device = useDeviceNavigation(nav, workspaces, !completeWorkspaces, currentSession);
   const restoring = useRef(new GroupRestoration());
   const selectedGroups = useMemo(() => JSON.parse(selectedWorkspaces) as string[], [selectedWorkspaces]);
-  const flatEntries = useMemo(() => sidebarConversations(nav?.entries ?? [], currentSession), [nav?.entries, currentSession]);
+  const selectedPin = nav?.pins.find(pin => pin.status === "available" && pin.entry.blank && pin.entry.session === currentSession);
+  const blankPin = selectedPin?.status === "available" ? selectedPin.entry : undefined;
+  const flatEntries = useMemo(() => {
+    const entries = nav?.entries ?? [];
+    return sidebarConversations(blankPin ? [blankPin, ...entries] : entries, currentSession);
+  }, [nav?.entries, currentSession, blankPin]);
   const currentGroup = useView(value => sessionWorkspaceGroup(value?.surfaces[selected], value?.navigation));
   const showUngrouped = currentGroup === "other" || !!nav &&
     (!completeList || flatEntries.some((entry: NavigationEntry) => entry.workspace === null));
@@ -260,7 +265,8 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
     if (device.preferences.view !== "flat") expand(entry.workspace ?? "other");
     return input.open({action:"open", session:entry.session});
   };
-  const row = (entry: NavigationEntry) => (
+  const row = (entry: NavigationEntry) => entry.blank
+    ? <BlankConversationRow key={entry.session} session={entry.session} active={conversationVisible && currentSession === entry.session}/> : (
     <ConversationRow
       now={now}
       key={entry.session}
@@ -276,7 +282,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
       onMenu={target => setMenu(target && {...target, revision: nav?.metadata_revision})}
     />
   );
-  const pins = nav?.pins.filter(pin => pin.status === "missing" || !pin.entry.blank || pin.entry.session === currentSession) ?? [];
+  const pins = nav?.pins.filter(pin => pin.status === "missing" || !pin.entry.blank) ?? [];
   if (device.preferences.sessionOrder === "manual" && !device.paused) {
     const rank = new Map(device.ordered.map((id, index) => [id, index]));
     pins.sort(
@@ -379,7 +385,7 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
                 ) : device.preferences.view === "flat" ? (
                   device.entries.map(row)
                 ) : (
-                  <WorkspaceNavigation conversationVisible={conversationVisible} nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row}/>
+                  <WorkspaceNavigation conversationVisible={conversationVisible} nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row} attention={attention} blankPin={blankPin}/>
                 )}
                 <div className="manual-pagination">
                   <Button
@@ -447,6 +453,8 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
                   showUngrouped={showUngrouped}
                   expand={expand}
                   row={row}
+                  attention={attention}
+                  blankPin={blankPin}
                 />
                 {!completeWorkspaces && catalog?.workspaces_more && (
                   <Button

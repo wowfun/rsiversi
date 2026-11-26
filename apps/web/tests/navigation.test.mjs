@@ -1,13 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency,sessionWorkspaceGroup,sidebarConversations,visibleConversations} from '../navigation-presentation.js';
+import {navigationTitles,navigationAttention,GroupRestoration,conversationRecency,sessionWorkspaceGroup,sidebarConversations,workspaceRowWindow} from '../navigation-presentation.js';
 test('conversation recency handles future clocks and minute/hour/day boundaries',()=>{
   const now=1_000_000_000;
   for(const [age,label] of [[-1,'now'],[59_999,'now'],[60_000,'1min'],[3_600_000,'1h'],[86_400_000,'1d']])assert.equal(conversationRecency(String(now-age),now),label);
   assert.equal(conversationRecency('bad',now),'');
 });
 const row=id=>({session:id,created_at_ms:'1700000000000',path:'/same',metadata:{title:null}});
-test('only the selected provisional conversation leads its window and consumes a visible slot',()=>{
+test('only the selected provisional conversation leads its window beside five established rows',()=>{
   const started=Array.from({length:6},(_,i)=>row(String(i)));
   const queued={...row('queued'),blank:true,metadata:{title:'Queued message'}};
   const empty={...row('empty'),blank:true};
@@ -15,9 +15,20 @@ test('only the selected provisional conversation leads its window and consumes a
   assert.deepEqual(sidebarConversations(members,'queued'),[queued,...started]);
   assert.deepEqual(sidebarConversations(members,'empty'),[empty,...started]);
   assert.deepEqual(sidebarConversations(members,undefined),started);
-  assert.deepEqual(visibleConversations(sidebarConversations(members,'queued'),false,'queued'),[queued,...started.slice(0,4)]);
+  const listed=sidebarConversations(members,'queued');
+  const {visible}=workspaceRowWindow(listed,'queued',new Map(),5);
+  assert.deepEqual(listed.slice(0,visible),[queued,...started.slice(0,5)]);
   assert.deepEqual(members,[...started,queued,empty]);
-  assert.equal(navigationTitles(members).get('queued'),'New session');
+  assert.equal(navigationTitles(members).has('queued'),false);
+});
+test('the workspace reveals the loaded prefix through selected and attention-bearing rows in the first fifty',()=>{
+  const rows=Array.from({length:60},(_,index)=>row(String(index+1)));
+  const attention=new Map([['12',{status:'unread'}],['15',{status:'waiting'}],['18',{status:'running'}],['22',{status:'unknown'}],['51',{status:'running'}]]);
+  assert.deepEqual(workspaceRowWindow(rows,'7',attention,5),{minimum:18,limit:18,visible:18,canFold:true});
+  assert.equal(workspaceRowWindow(rows,'50',attention,5).visible,50);
+  assert.equal(workspaceRowWindow(rows,'51',attention,5).visible,18);
+  assert.deepEqual(workspaceRowWindow(rows,'1',new Map(),18),{minimum:5,limit:18,visible:18,canFold:true});
+  assert.equal(workspaceRowWindow(rows,undefined,attention,Infinity).visible,60);
 });
 test('untitled rows use creation time and distinguish same-time IDs across duplicate pages',()=>{
   const first=row('same-prefix-first'),second=row('same-prefix-second');

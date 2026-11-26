@@ -74,7 +74,9 @@ try {
   const browser=await engine.launch(),page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   try {
-   await page.goto(fixture.url);await page.waitForFunction(()=>window.ready);await page.evaluate(()=>fixture.frame());
+   await page.goto(fixture.url,{waitUntil:'commit'});
+   await page.waitForFunction(()=>window.ready,null,{timeout:180_000});
+   await page.evaluate(()=>fixture.frame());
    assert.equal(await page.locator('.external-navigation').count(),0);
    assert.equal(await page.getByRole('button',{name:'Toggle navigation',exact:true}).count(),0);
    assert.equal(await page.locator('#connection-state').isVisible(),false);
@@ -439,7 +441,7 @@ try {
      await fixture.frame();
    });
    await page.waitForFunction(()=>fixture.lastMark.action==='acknowledge' && fixture.lastMark.position.sequence==='15');
-   await group.getByRole('button',{name:/Show \d+ more sessions/}).click();
+   await group.getByRole('button',{name:'Show 1 more session',exact:true}).click();
    const opens=()=>page.evaluate(()=>fixture.calls.filter(call=>call.method==='command' && JSON.parse(call.payload).action==='open').length);
    const priorOpens=await opens();
    await page.getByRole('button',{name:'Open plugins',exact:true}).click();
@@ -456,7 +458,7 @@ try {
    assert.equal(await opens(),priorOpens,'returning from a global page must preserve the attached surface');
    await page.waitForFunction(()=>fixture.lastMark.action==='read' && fixture.lastMark.position.sequence==='15');
    await group.getByRole('button',{name:'Show less',exact:true}).click();
-   assert.equal(await group.getByTestId('conversation-row').count(),6);
+   assert.equal(await group.getByTestId('conversation-row').count(),8);
    const alignment=await group.evaluate(node=>{
     const workspace=node.querySelector('.workspace-toggle strong').getBoundingClientRect(),row=node.querySelector('[aria-current=true]'),text=row.querySelector('strong').getBoundingClientRect();
     return {aligned:Math.abs(workspace.left-text.left)<2,compact:row.getBoundingClientRect().height<=36,active:!!node.querySelector('.workspace-row[data-active]')};
@@ -486,11 +488,47 @@ try {
    const persisted=group.getByTestId('conversation-row').first();
    await persisted.getByText('New session',{exact:true}).waitFor();
    assert.equal(await persisted.getAttribute('data-session-id'),'fresh-session');
+   assert.equal(await group.getByTestId('conversation-row').count(),9);
+   assert.equal(await persisted.evaluate(node=>node.draggable),false);
+   assert.equal(await persisted.locator('time,[data-session-menu-trigger]').count(),0);
+   await persisted.getByTestId('conversation-open').press('Shift+F10');
+   assert.equal(await page.getByRole('menu').filter({has:page.getByRole('menuitem',{name:'Pin session'})}).count(),0);
    assert.equal(await group.locator('[data-session-id="other-queued"]').count(),0);
    await persisted.getByTestId('conversation-open').click();
    assert.equal(await opens(),priorOpens);
    assert.equal(await editor.inputValue(),'Still editing');
    await page.screenshot({path:join(report,name+'-selected-blank.png'),animations:'disabled'});
+   await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     const blank=nav.entries.find(entry=>entry.session==='fresh-session');
+     nav.pins=[{status:'available',entry:{...blank,metadata:{...blank.metadata,pinned:true}}}];
+     nav.entries=nav.entries.filter(entry=>entry.session!==blank.session);
+     nav.groups.fixture.entries=nav.groups.fixture.entries.filter(entry=>entry.session!==blank.session);
+     nav.attention.entries=[];
+     window.foldedPage={...nav.groups.fixture,entries:Array.from({length:16},(_,i)=>({...window.allRows[0],session:'sample-'+i,metadata:{...window.allRows[0].metadata,title:'Conversation '+i}}))};
+     delete nav.groups.fixture;
+     await fixture.frame();
+   });
+   await page.getByTestId('workspace-group').locator('[data-session-id="fresh-session"]').waitFor({state:'detached'});
+   await page.evaluate(async()=>{fixture.view.navigation.groups.fixture=window.foldedPage;await fixture.frame()});
+   await group.getByRole('button',{name:'Show 11 more sessions',exact:true}).waitFor();
+   assert.equal(await group.getByTestId('conversation-row').count(),6);
+   assert.equal(await page.locator('.session-row[data-session-id="fresh-session"]').count(),1);
+   for(const [hidden,count] of [[11,11],[6,16],[1,17]]){
+     await group.getByRole('button',{name:`Show ${hidden} more ${hidden===1?'session':'sessions'}`,exact:true}).click();
+     assert.equal(await group.getByTestId('conversation-row').count(),count);
+   }
+   await group.getByRole('button',{name:'Show less',exact:true}).click();
+   assert.equal(await group.getByTestId('conversation-row').count(),6);
+   await page.screenshot({path:join(report,name+'-folded-workspace.png'),animations:'disabled'});
+   await page.evaluate(async()=>{
+     const nav=fixture.view.navigation;
+     const blank=nav.pins[0].entry;
+     nav.pins=[];
+     nav.entries.push(blank);
+     nav.groups.fixture.entries=[...window.allRows,blank];
+     await fixture.frame();
+   });
    await searchButton.click();
    for(const id of ['fresh-session','other-queued']){
      await searchInput.fill(id);

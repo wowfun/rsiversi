@@ -164,7 +164,7 @@ export function useDeviceNavigation(nav:Navigation|undefined,workspaces:{id:stri
     const listed=[]
     for(const id of ordered){
       const member=byId.get(id)
-      if(member && !member.pinned && (archived===null || member.archived===archived))listed.push(member)
+      if(member && (!member.pinned || member.blank && member.session===currentSession) && (archived===null || member.archived===archived))listed.push(member)
     }
     return sidebarConversations(listed,currentSession)
   },[manual,complete,ordered,archived,currentSession])

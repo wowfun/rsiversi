@@ -4,7 +4,7 @@ const common = (a, b) => { let i=0; while(i<a.length && i<b.length && a[i]===b[i
 export function navigationTitles(entries) {
   const titles=new Map(), times=new Map();
   for(const entry of entries) {
-    if(entry.blank){titles.set(entry.session,'New session');continue;}
+    if(entry.blank)continue;
     if(entry.metadata.title){titles.set(entry.session,entry.metadata.title);continue;}
     let ids=times.get(entry.created_at_ms);
     if(!ids){ids=new Set();times.set(entry.created_at_ms,ids);}
@@ -61,8 +61,20 @@ export function sidebarConversations(entries, selected) {
   return started;
 }
 
-export function visibleConversations(entries, expanded, selected) {
-  return expanded ? entries : entries.filter((entry, index) => index < 5 || entry.session === selected);
+// sidebarConversations has already placed the optional current blank first.
+export function workspaceRowWindow(entries, selected, attention, stored) {
+  const first = entries[0]?.blank ? 1 : 0;
+  const count = entries.length - first;
+  let minimum = 5;
+  for (let index = first + minimum; index < Math.min(entries.length, first + 50); index++) {
+    const id = entries[index].session;
+    const status = attention.get(id)?.status;
+    if (id === selected || status === 'running' || status === 'waiting' || status === 'unread') {
+      minimum = index - first + 1;
+    }
+  }
+  const limit = Math.max(stored, minimum);
+  return {minimum, limit, visible: first + Math.min(count, limit), canFold: count > minimum};
 }
 
 export function sessionWorkspaceGroup(surface, navigation) {

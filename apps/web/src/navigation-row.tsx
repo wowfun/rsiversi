@@ -11,9 +11,13 @@ import css from "./navigation.module.css";
 import {isUnread, markReading} from "./session-reading.ts";
 import { ActivityLabel } from "./activity-label.tsx";
 import { rowContextMenu } from "./row-context-menu.ts";
+import {sessionSurfaces} from "./session/state.ts";
 import {
+  closeWorkbenchPage,
+  dismissNavigationDrawer,
   input,
   run,
+  selection,
   type NavigationEntry,
   type AttentionEntry, type ArchiveActivity,
 } from "./bridge.ts";
@@ -24,6 +28,18 @@ export interface SessionMenuTarget {
   opener: HTMLElement;
   point: {x: number; y: number};
   revision?: string;
+}
+
+export function BlankConversationRow({session, active}: {session:string; active:boolean}) {
+  return <div className="session-row" data-testid="conversation-row" data-session-id={session}>
+    <button type="button" className="nav-item" data-testid="conversation-open" aria-current={active || undefined}
+      onClick={() => {
+        closeWorkbenchPage();
+        dismissNavigationDrawer();
+        const pane = sessionSurfaces.getSnapshot().find(surface => surface.index === selection.getSnapshot());
+        if (pane && pane.kind !== 'external') requestAnimationFrame(() => pane.focusInput());
+      }}><strong>New session</strong></button>
+  </div>;
 }
 
 export function ConversationRow({

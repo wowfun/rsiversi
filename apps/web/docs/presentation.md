@@ -133,7 +133,9 @@ menu mounts its controls. Activity indicators occupy their own space in flat and
 Before its first Turn, a conversation appears as **New session** only in the
 window that has it selected. It leads its workspace or flat list, including
 when its first message is queued. Search omits every such conversation.
-Selecting the row preserves its composer. Workspace membership, opening by ID
+The row opens its composer and shows only its label. Row actions, drag
+reordering, activity indicators and timestamps begin with established history.
+Workspace membership, opening by ID
 and reuse through **New session** remain available across devices.
 
 On the first keyboard submission, the composer keeps its keyboard position
@@ -877,9 +879,13 @@ Session logs, and refreshes those Sessions into Ungrouped. Pending mutations
 cannot be submitted twice; failures keep the dialog and entered value available.
 Activity uses a compact dot with an accessible label and tooltip.
 Conversation selection fills the group width; text remains aligned with the workspace
-label. Relative activity times refresh once per minute. Each group initially shows
-five loaded conversations, keeping a selected conversation visible, with an explicit
-expand/collapse control independent of server pagination.
+label. Relative activity times refresh once per minute. An open workspace initially
+shows five established conversations plus its selected **New session**. Within
+the first 50 established rows, selection, running work, pending input and unread
+activity reveal all preceding rows. The group keeps that depth after selection
+or activity changes. Show more reveals five more loaded rows per click. Show
+less returns to the current required depth. Closing the group resets its depth.
+Loading another server page is a separate action.
 
 Message clocks use durable Fact timestamps; transient blocks have no fabricated time.
 Completed Turn headings show recorded elapsed time when both boundaries are known.
