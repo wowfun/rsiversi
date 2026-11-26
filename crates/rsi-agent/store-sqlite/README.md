@@ -31,9 +31,9 @@ Message feedback is stored once in its canonical control. A partial index on
 Session, answer sequence and control sequence seeks the last change for one
 answer. Appends and replay check the predecessor and local Fact anchor.
 
-Schema 59 stores ordinary Facts of at least 1 KiB in independent checksummed zstd frames
-when the frame plus its SQL index projection is smaller than the canonical
-JSON. Uncompressed rows are read directly from SQLite. Model-effect coordinates
+Schema 59 stores an ordinary Fact of 256 bytes or more in an independent
+checksummed zstd frame when the frame plus its SQL index projection is smaller
+than the canonical JSON. Uncompressed rows are read directly from SQLite. Model-effect coordinates
 remain queryable without expanding frames. Standalone command records and
 mailbox acceptance references keep their indexed JSON representation. Page
 admission uses the original logical size before decompression. Coverage digests,

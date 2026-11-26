@@ -455,6 +455,15 @@ async fn compressed_model_events_reopen_and_reject_wrong_coordinates_or_damaged_
     execution::capture(&store, &path).await;
     drop(store);
     let db = Connection::open(path.join("sessions.sqlite3")).unwrap();
+    let (intent_seq, intent_bytes): (i64, i64) = db
+        .query_row(
+            "SELECT seq,logical_bytes FROM facts
+             WHERE json_extract(fact_json,'$.type')='model_intent'
+               AND logical_bytes BETWEEN 256 AND 1023 AND fact_frame IS NOT NULL LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     let (seq, logical, mut frame, index): (i64, i64, Vec<u8>, String) = db.query_row(
         "SELECT seq,logical_bytes,fact_frame,fact_json FROM facts
          WHERE json_extract(fact_json,'$.type')='model_attempt_settled' AND fact_frame IS NOT NULL LIMIT 1",
@@ -465,6 +474,19 @@ async fn compressed_model_events_reopen_and_reject_wrong_coordinates_or_damaged_
     let logical = usize::try_from(logical).unwrap();
     let id = header("model-tools").session_id().clone();
     let store = SqliteStore::open(&path).unwrap();
+    let intent = store
+        .read_facts(
+            &id,
+            u64::try_from(intent_seq - 1).unwrap(),
+            1,
+            usize::try_from(intent_bytes).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        intent.facts[0].body(),
+        SessionFactBody::ModelIntent { .. }
+    ));
     assert!(matches!(
         store.read_facts(&id, after, 1, frame.len()).await,
         Err(StoreError::ReadRequiresCapacity { minimum_bytes }) if minimum_bytes == logical

@@ -147,7 +147,7 @@ pub(super) fn encode(
     } else {
         references.fact(fact)
     }?;
-    if json.len() >= 1024
+    if json.len() >= 256
         && acceptance.is_none()
         && !matches!(fact.body(), SessionFactBody::ManualCompaction { .. })
     {
