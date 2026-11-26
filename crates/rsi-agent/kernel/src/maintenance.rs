@@ -1,5 +1,86 @@
 //! Exact live-owner admission, using the mutation submission locks.
 use super::*;
+
+struct Callback {
+    kernel: AgentKernel,
+    key: Arc<SubmissionKey>,
+    stop: CancellationToken,
+}
+impl fmt::Debug for Callback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SessionMaintenance")
+            .field(&self.key.id)
+            .finish()
+    }
+}
+impl rsi_agent_turn_protocol::SessionMaintenance for Callback {
+    fn cancellation(&self) -> CancellationToken {
+        self.stop.clone()
+    }
+}
+impl Drop for Callback {
+    fn drop(&mut self) {
+        let owner = self
+            .key
+            .maintenance
+            .lock()
+            .expect("maintenance lock")
+            .take();
+        if let Some(MaintenanceOwner::Callback(callback)) = owner {
+            callback.finished.cancel();
+            if callback.deferred {
+                self.kernel.request_ready_scan();
+            }
+        }
+    }
+}
+
+pub(super) async fn begin_callback(
+    kernel: &AgentKernel,
+    id: &SessionId,
+) -> TurnResult<Box<dyn rsi_agent_turn_protocol::SessionMaintenance>> {
+    let admission = &kernel.inner.submission_admission;
+    let key = admission.register(id);
+    let _guard = key
+        .mutex
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| TurnError::SessionBusy)?;
+    if key.maintenance.lock().expect("maintenance lock").is_some() {
+        return Err(TurnError::SessionBusy);
+    }
+    if !driver_idle(kernel, id).await? {
+        return Err(TurnError::SessionBusy);
+    }
+    let stop = admission.closed.child_token();
+    if stop.is_cancelled() {
+        return Err(TurnError::ShuttingDown);
+    }
+    *key.maintenance.lock().expect("maintenance lock") =
+        Some(MaintenanceOwner::Callback(CallbackState {
+            stop: stop.clone(),
+            finished: CancellationToken::new(),
+            deferred: false,
+        }));
+    Ok(Box::new(Callback {
+        kernel: kernel.clone(),
+        key,
+        stop,
+    }))
+}
+
+// The caller holds this Session's submission admission. A draft has no Store row.
+pub(super) async fn driver_idle(kernel: &AgentKernel, id: &SessionId) -> TurnResult<bool> {
+    kernel.flush_resident_admitted(id).await?;
+    match kernel.inner.store.read_inbox_control_state(id, false).await {
+        Ok(state) => {
+            Ok(!state.has_open_turn && !state.has_active_activation && !state.has_waking_message)
+        }
+        Err(StoreError::NotFound(_)) => Ok(true),
+        Err(error) => Err(turn_store_error(error)),
+    }
+}
+
 struct Retirement {
     kernel: AgentKernel,
     ids: Vec<SessionId>,
@@ -52,10 +133,10 @@ pub(super) fn reserve(
             .clone()
             .try_lock_owned()
             .map_err(|_| TurnError::Capacity)?;
-        guards.push(SubmissionGuard {
-            _guard: guard,
-            key,
-        });
+        if key.maintenance.lock().expect("maintenance lock").is_some() {
+            return Err(TurnError::Capacity);
+        }
+        guards.push(SubmissionGuard { _guard: guard, key });
     }
     {
         let state = lock_state(&kernel.inner);

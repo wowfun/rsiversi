@@ -4,6 +4,20 @@ use rsi_agent_session_protocol::{
 };
 use rsi_agent_turn_protocol::ContinuationBinding;
 
+#[tokio::test(start_paused = true)]
+async fn plugin_maintenance_preserves_the_admission_deadline_for_a_blocked_edit() {
+    let (kernel, header, _) = retirement_fixture().await;
+    let id = header.session_id();
+    let _callback = kernel.begin_maintenance(id).await.unwrap();
+    let admission = &kernel.inner.submission_admission;
+    let _editing = admission.acquire(id).await.unwrap();
+
+    assert!(matches!(
+        tokio::time::timeout(DURABILITY_WAIT_TIMEOUT * 2, admission.acquire(id)).await,
+        Ok(Err(TurnError::Capacity))
+    ));
+}
+
 #[tokio::test]
 async fn retirement_refuses_every_pending_owner_and_preserves_residency() {
     let (kernel, header, pin) = retirement_fixture().await;

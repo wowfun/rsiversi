@@ -22,14 +22,21 @@ impl AgentKernel {
                 .map_err(|error| TurnError::Invalid(error.to_string()))?;
         }
         let keep_inbox = matches!(target, InboxCancel::Stop { keep_inbox: true });
-        let stop_turns = matches!(target, InboxCancel::Stop { .. });
-        let stopped_command = stop_turns && {
+        let mut stop_turns = matches!(target, InboxCancel::Stop { .. });
+        let mut stopped_command = stop_turns && {
             let key = self.inner.submission_admission.register(id);
-            key.maintenance.lock().expect("maintenance lock").as_ref().is_some_and(|command| {
-                let active = !command.is_cancelled();
-                command.cancel();
-                active
-            })
+            key.maintenance
+                .lock()
+                .expect("maintenance lock")
+                .as_ref()
+                .is_some_and(|owner| {
+                    let MaintenanceOwner::Compaction(command) = owner else {
+                        return false;
+                    };
+                    let active = !command.is_cancelled();
+                    command.cancel();
+                    active
+                })
         };
         let header = if keep_inbox {
             None
@@ -48,6 +55,12 @@ impl AgentKernel {
             .acquire_pair(id, parent)
             .await?;
         self.flush_resident_admitted(id).await?;
+        if stop_turns && let Some(stop) = self.maintenance_cancellation(id) {
+            stopped_command |= !stop.is_cancelled();
+            stop.cancel();
+            // An idle callback has no Turn to pause. Retained waking input runs at release.
+            stop_turns = false;
+        }
         if let Some(parent) = parent {
             self.flush_resident_admitted(parent).await?;
         }

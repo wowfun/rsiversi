@@ -262,6 +262,11 @@ Queue mutations and receipt lookups use the same native Session methods as other
 clients. A withdrawal names the original slot and expected message identity;
 claim or replacement races return their actual rejection, never cancel a Turn.
 Only Human input is currently editable through this queue contract.
+An owner application can begin maintenance on an idle Session and watch for a
+Session stop. Begin returns whether the caller acquired the driver. Finishing
+the callback or retiring its application generation
+releases the native driver reservation. The temporary handle belongs to that
+generation and Session.
 The read-only `message_status` operation returns the native message receipt or
 null when no acceptance exists. It does not publish a draft or submit input.
 Its acceptance cursor can address the immutable body through `application.history`.

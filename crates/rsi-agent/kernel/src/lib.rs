@@ -285,7 +285,18 @@ struct SubmissionKey {
     id: SessionId,
     mutex: Arc<AsyncMutex<()>>,
     registry: Weak<SubmissionSessions>,
-    maintenance: Mutex<Option<CancellationToken>>,
+    maintenance: Mutex<Option<MaintenanceOwner>>,
+}
+
+enum MaintenanceOwner {
+    Compaction(CancellationToken),
+    Callback(CallbackState),
+}
+
+struct CallbackState {
+    stop: CancellationToken,
+    finished: CancellationToken,
+    deferred: bool,
 }
 
 impl Drop for SubmissionKey {
@@ -367,6 +378,28 @@ impl SubmissionAdmission {
         key
     }
 
+    fn with_callback<T>(
+        &self,
+        id: &SessionId,
+        action: impl FnOnce(&mut CallbackState) -> T,
+    ) -> Option<T> {
+        let key = self
+            .sessions
+            .lock()
+            .expect("submission registry lock")
+            .get(id)
+            .and_then(Weak::upgrade)?;
+        match key.maintenance.lock().expect("maintenance lock").as_mut() {
+            Some(MaintenanceOwner::Callback(callback)) => Some(action(callback)),
+            _ => None,
+        }
+    }
+
+    fn defer_claim(&self, id: &SessionId) -> bool {
+        self.with_callback(id, |callback| callback.deferred = true)
+            .is_some()
+    }
+
     async fn acquire_until(
         &self,
         session: &SessionId,
@@ -395,7 +428,12 @@ impl SubmissionAdmission {
                 () = closed.cancelled() => return Err(TurnError::ShuttingDown),
                 guard = &mut waiting => guard,
                 () = tokio::time::sleep_until(deadline) => {
-                    if key.maintenance.lock().expect("maintenance lock").is_none() { return Err(TurnError::Capacity); }
+                    if !matches!(
+                        *key.maintenance.lock().expect("maintenance lock"),
+                        Some(MaintenanceOwner::Compaction(_))
+                    ) {
+                        return Err(TurnError::Capacity);
+                    }
                     // The earlier idle command may outlive the ordinary submission deadline.
                     // Keep this prompt's FIFO position until that exact key becomes available.
                     let guard = tokio::select! { biased;

@@ -601,6 +601,13 @@ capacity is acquired only by the current owner of a Session key, so queued
 same-Session retries do not consume unrelated active slots. Slot and
 same-Session admission waits share the one-minute durability deadline, and
 shutdown closes both wait paths before the final flush.
+An application maintenance callback reserves the driver under this same key,
+then releases the submission mutex so mailbox edits and submissions can commit
+under the ordinary admission deadline. Only idle compaction holds that mutex
+for its command and extends the wait of a queued submission.
+Its owner lives in memory. Release signals waiters on that callback and
+reschedules a deferred claim. An empty callback leaves the public activity
+revision unchanged. A Host restart recovers ordinary durable mailbox entries.
 Activation terminal preparation acquires the child and optional parent
 submission admissions before taking and flushing its final live-tail snapshot;
 a Turn accepted during earlier descendant preparation therefore becomes part of

@@ -891,9 +891,23 @@ impl LocalContract for ManualCompactorContract {
     type Service = dyn ManualCompactor;
 }
 
+/// A plugin callback owns the idle driver until this lease drops.
+pub trait SessionMaintenance: fmt::Debug + Send + Sync {
+    /// A Session stop or Host shutdown requests cooperative cancellation.
+    fn cancellation(&self) -> CancellationToken;
+}
+
 /// Application-facing process-local Turn service.
 #[async_trait]
 pub trait TurnService: fmt::Debug + Send + Sync + 'static {
+    /// Reserves an idle driver while leaving ordinary mailbox admission open.
+    async fn begin_maintenance(&self, _id: &SessionId) -> Result<Box<dyn SessionMaintenance>> {
+        Err(TurnError::ExecutionUnavailable)
+    }
+    /// Cancellation signal for the current callback, including on an unpublished draft.
+    fn maintenance_cancellation(&self, _id: &SessionId) -> Option<CancellationToken> {
+        None
+    }
     /// Selects a local working directory or recovers a missing selection at its creation directory.
     async fn working_directory(
         &self,

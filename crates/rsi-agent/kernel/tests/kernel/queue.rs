@@ -49,6 +49,152 @@ async fn submit(kernel: &AgentKernel, session: &SessionId, id: &str, delivery: M
 }
 
 #[tokio::test]
+async fn plugin_maintenance_only_wakes_its_own_idle_waiters() {
+    let kernel = AgentKernel::recover_with_clock(
+        Arc::new(MemoryStore::new()),
+        composition(),
+        Arc::new(FixedClock),
+    )
+    .await
+    .unwrap();
+    let id = SessionId::new("empty-callback").unwrap();
+    let revision = rsi_agent_turn_protocol::SessionProjections::activity_revision(&kernel);
+    let hold = kernel.begin_maintenance(&id).await.unwrap();
+    let stop = hold.cancellation();
+    let waiter = kernel.wait_idle(&id);
+    tokio::pin!(waiter);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut waiter)
+            .await
+            .is_err()
+    );
+    drop(hold);
+    tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stop.is_cancelled());
+    assert_eq!(
+        rsi_agent_turn_protocol::SessionProjections::activity_revision(&kernel),
+        revision
+    );
+}
+
+#[tokio::test]
+async fn plugin_maintenance_keeps_messages_editable_until_driver_release() {
+    let store = Arc::new(MemoryStore::new());
+    let kernel =
+        AgentKernel::recover_with_clock(store.clone(), composition(), Arc::new(FixedClock))
+            .await
+            .unwrap();
+    let workers = kernel.start_workers();
+    let executor = kernel.register("maintenance-executor".into()).unwrap();
+    let id = SessionId::new("plugin-maintenance").unwrap();
+    let hold = kernel.begin_maintenance(&id).await.unwrap();
+    assert!(matches!(
+        kernel.begin_maintenance(&id).await,
+        Err(TurnError::SessionBusy)
+    ));
+    create(&kernel, &id, "withdraw-me").await;
+    let claim = ClaimMessage {
+        session: kernel.prepare_resume(&id).await.unwrap(),
+        message_id: MessageId::new("withdraw-me").unwrap(),
+        activation_id: ActivationId::new("blocked").unwrap(),
+        path: AgentPath::root(),
+        turn_id: TurnId::new("blocked").unwrap(),
+        step_id: StepId::new("blocked").unwrap(),
+    };
+    assert!(matches!(
+        kernel.claim_message(claim).await,
+        Err(TurnError::StaleClaim)
+    ));
+    let withdrawn = kernel
+        .mutate_queue(
+            &id,
+            edit(
+                "withdraw",
+                "withdraw-me",
+                "withdraw-me",
+                QueueMutation::Withdraw,
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(withdrawn.outcome, Outcome::Withdrawn);
+    let stop = hold.cancellation();
+    kernel
+        .cancel_target(&id, CancelTarget::Session { keep_inbox: false }, None)
+        .await
+        .unwrap();
+    assert!(stop.is_cancelled());
+    let other = SessionId::new("unrelated").unwrap();
+    create(&kernel, &other, "independent").await;
+    let driver = kernel
+        .claim("maintenance-executor", CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(driver.session_id(), &other);
+    kernel
+        .finish_turn(&driver, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    drop(hold);
+    kernel.wait_idle(&id).await.unwrap();
+    assert_eq!(
+        store
+            .read_inbox_control_state(&id, false)
+            .await
+            .unwrap()
+            .durable_fact_seq,
+        0
+    );
+
+    let hold = kernel.begin_maintenance(&id).await.unwrap();
+    submit(&kernel, &id, "keep-me", MessageDelivery::NextTurn).await;
+    kernel
+        .cancel_target(&id, CancelTarget::Session { keep_inbox: true }, None)
+        .await
+        .unwrap();
+    assert!(hold.cancellation().is_cancelled());
+    let waiting = {
+        let (kernel, id) = (kernel.clone(), id.clone());
+        tokio::spawn(async move { kernel.wait_idle(&id).await })
+    };
+    let claim = kernel.claim("maintenance-executor", CancellationToken::new());
+    tokio::pin!(claim);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(60), &mut claim)
+            .await
+            .is_err()
+    );
+    assert!(!waiting.is_finished());
+    drop(hold);
+    let driver = tokio::time::timeout(std::time::Duration::from_secs(5), claim)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(driver.session_id(), &id);
+    assert!(matches!(
+        kernel.begin_maintenance(&id).await,
+        Err(TurnError::SessionBusy)
+    ));
+    kernel
+        .finish_turn(&driver, &TurnOutcome::Completed)
+        .await
+        .unwrap();
+    waiting.await.unwrap().unwrap();
+    let state = store.read_inbox_control_state(&id, true).await.unwrap();
+    assert!(
+        !state.has_waking_message && !state.has_open_turn && state.pending_message_ids.is_empty()
+    );
+    drop(executor);
+    kernel.shutdown(workers).await.unwrap();
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "One paused-inbox scenario holds the commit barrier across retries, edits, stale claims and a new wake on both Stores."

@@ -2076,6 +2076,17 @@ impl SessionHandle for LocalSessionHandle {
             }
         }
     }
+    async fn begin_application_maintenance(
+        &self,
+    ) -> Result<Option<Box<dyn rsi_agent_turn_protocol::SessionMaintenance>>> {
+        self.require_host_owner()?;
+        let _operation = self.admit_mutation()?;
+        match self.turns.begin_maintenance(self.session_id()).await {
+            Ok(lease) => Ok(Some(lease)),
+            Err(TurnError::SessionBusy) => Ok(None),
+            Err(error) => Err(map_turn_error(error)),
+        }
+    }
     async fn compact_application_region(
         &self,
         region: rsi_agent_turn_protocol::CompactionRegion,
@@ -2435,7 +2446,12 @@ impl SessionHandle for LocalSessionHandle {
     async fn wait_idle(&self) -> Result<()> {
         self.read_until_retired(async {
             let _admission = self.admit()?;
-            if !self.reconcile_fresh_read().await? {
+            if !self.reconcile_fresh_read().await?
+                && self
+                    .turns
+                    .maintenance_cancellation(self.session_id())
+                    .is_none()
+            {
                 return Ok(());
             }
             self.turns
@@ -2461,16 +2477,26 @@ impl SessionHandle for LocalSessionHandle {
                     )
                     .map_err(|error| SessionError::Invalid(error.to_string()))?;
                 }
-                let accepted = !keep_inbox
+                let stopped = if matches!(target, CancelTarget::Session { .. })
+                    && let Some(signal) = self.turns.maintenance_cancellation(self.session_id())
+                    && self.credential_is_host_owner()?
+                {
+                    let active = !signal.is_cancelled();
+                    signal.cancel();
+                    active
+                } else {
+                    false
+                };
+                let cleared = !keep_inbox
                     && draft
                         .clear_command_inputs()
                         .map_err(|error| SessionError::Invalid(error.to_string()))?;
                 drop(state);
-                if accepted {
+                if cleared {
                     self.projection_changed();
                 }
                 return Ok(CancelResult {
-                    accepted,
+                    accepted: cleared || stopped,
                     already_terminal: false,
                 });
             }

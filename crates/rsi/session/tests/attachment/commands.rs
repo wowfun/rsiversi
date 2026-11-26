@@ -298,6 +298,10 @@ async fn an_application_cannot_compact_with_a_paired_devices_session_handle() {
     let initial = guest.draft_snapshot().await.unwrap();
     let command = DomainRequestId::new("compact").unwrap();
     assert!(matches!(
+        guest.begin_application_maintenance().await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
         guest.compact(command.clone()).await,
         Err(SessionError::Api(ApiError::Unauthorized))
     ));

@@ -796,6 +796,10 @@ impl AgentKernel {
                     .get(&message.session_id)
                     .copied()
                     .unwrap_or(false)
+                    || self
+                        .inner
+                        .submission_admission
+                        .defer_claim(&message.session_id)
                 {
                     continue;
                 }
@@ -1561,6 +1565,9 @@ impl AgentKernel {
                 self.validate_fresh_baseline(prepared).await?;
             }
             return Ok(receipt);
+        }
+        if self.maintenance_cancellation(header.session_id()).is_some() {
+            return Err(TurnError::SessionBusy);
         }
         let (resume_admission, submission_admission) = match &session {
             SubmitSession::Fresh(_) => (None, submission_admission),

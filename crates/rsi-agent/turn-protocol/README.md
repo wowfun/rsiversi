@@ -563,6 +563,12 @@ lineage separately; automatic-work adapters select allowed continuation domains.
 
 ## Queue mutation
 
+An idle Session can lend its driver to a trusted application callback. The
+reservation lasts until its owner drops it. Incoming mailbox messages stay
+pending and can be withdrawn normally. A Session stop signals the callback;
+the driver becomes available when the callback settles. Waiting for idle
+includes the callback and any waking input left at release.
+
 `mutate_queue` changes one message only while it remains Pending. The
 request names a stable QueueSlotId and uses `expected_message_id` as its sole
 compare-and-set predecessor. Replace supplies complete bounded content and a new

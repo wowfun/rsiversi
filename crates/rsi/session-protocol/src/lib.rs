@@ -736,6 +736,12 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
             "application region compaction unavailable".into(),
         ))
     }
+    /// Reserves the idle driver for an authenticated owner application callback.
+    async fn begin_application_maintenance(
+        &self,
+    ) -> Result<Option<Box<dyn rsi_agent_turn_protocol::SessionMaintenance>>> {
+        Err(SessionError::NotFound("application maintenance".into()))
+    }
     /// Installs attributed text supplied by a trusted Host application for the open Turn.
     async fn install_plugin_checkpoint(
         &self,

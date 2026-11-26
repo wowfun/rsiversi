@@ -38,6 +38,9 @@ pub(super) async fn reserve(
     let Ok(guard) = key.mutex.clone().try_lock_owned() else {
         return Ok(ManualCompactionAdmission::Busy);
     };
+    if key.maintenance.lock().expect("maintenance lock").is_some() {
+        return Ok(ManualCompactionAdmission::Busy);
+    }
     {
         let state = lock_state(&kernel.inner);
         if !state.accepting {
@@ -54,12 +57,10 @@ pub(super) async fn reserve(
         }
     }
     let cancellation = kernel.inner.submission_admission.closed.child_token();
-    *key.maintenance.lock().expect("maintenance lock") = Some(cancellation.clone());
+    *key.maintenance.lock().expect("maintenance lock") =
+        Some(MaintenanceOwner::Compaction(cancellation.clone()));
     let reservation = Arc::new(Reservation {
-        guard: SubmissionGuard {
-            _guard: guard,
-            key,
-        },
+        guard: SubmissionGuard { _guard: guard, key },
         cancellation,
     });
     kernel.flush_resident_admitted(id).await?;

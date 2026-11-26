@@ -517,6 +517,10 @@ content at their normal owning boundary before dispatch. ACP retains request
 cancellation and does not expose queue editing. The `:steer` command continues to
 submit new input with its existing idle fallback.
 
+A trusted owner application can acquire the [idle driver reservation](../../rsi-agent/turn-protocol/README.md#queue-mutation)
+for an attached Session, including a blank draft. The same reservation governs
+input from attached Web, terminal and application clients.
+
 `SessionService::read_summary` reads one durable Session's Header, activity time
 and Fact/control watermarks from one Store metadata snapshot, without attaching,
 creating a handle, touching activity or loading transcript. It returns the same

@@ -284,6 +284,17 @@ impl TurnService for AgentKernel {
         .await
     }
 
+    async fn begin_maintenance(
+        &self,
+        id: &SessionId,
+    ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::SessionMaintenance>> {
+        maintenance::begin_callback(self, id).await
+    }
+    fn maintenance_cancellation(&self, id: &SessionId) -> Option<CancellationToken> {
+        self.inner
+            .submission_admission
+            .with_callback(id, |callback| callback.stop.clone())
+    }
     async fn reserve_manual_compaction(
         &self,
         id: &SessionId,
@@ -308,23 +319,22 @@ impl TurnService for AgentKernel {
         let mut changes = self.inner.session_changes.session(session_id);
         loop {
             changes.mark_seen();
-            {
+            let finished = {
                 let _admission = self.inner.submission_admission.acquire(session_id).await?;
-                self.flush_resident_admitted(session_id).await?;
-                let state = self
+                let finished = self
                     .inner
-                    .store
-                    .read_inbox_control_state(session_id, false)
-                    .await
-                    .map_err(turn_store_error)?;
-                if !state.has_open_turn && !state.has_active_activation && !state.has_waking_message
-                {
+                    .submission_admission
+                    .with_callback(session_id, |callback| callback.finished.clone());
+                if finished.is_none() && maintenance::driver_idle(self, session_id).await? {
                     return Ok(());
                 }
-            }
+                finished
+            };
             tokio::select! {
                 () = self.inner.submission_admission.closed.cancelled() => return Err(TurnError::ShuttingDown),
-                () = changes.changed() => {},
+                () = async {
+                    if let Some(done) = finished { done.cancelled().await } else { changes.changed().await }
+                } => {},
             }
         }
     }
@@ -1548,6 +1558,9 @@ impl AgentKernel {
             .submission_admission
             .acquire_pair(&session_id, header.completion_parent())
             .await?;
+        if self.inner.submission_admission.defer_claim(&session_id) {
+            return Err(TurnError::StaleClaim);
+        }
         let execution = self
             .inner
             .execution_messages
