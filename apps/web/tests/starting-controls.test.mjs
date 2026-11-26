@@ -54,14 +54,17 @@ test('starting recovery stops after connection replacement or closing its recove
   }
 });
 
-test('opening controls on a blank starting page does not persist an empty editor',async()=>{
-  let cleared=false;
-  const editor={text:'',images:[],references:[],record:{},edit:assert.fail,flush:assert.fail};
-  const pane={index:'main',starting:{text:'',workspace:'workspace',serial:0,async flush(){},async clearCaptured(){cleared=true;}},renderComposer(){},subscribe(){return()=>{};}};
-  const context={connection:{},view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},
-    boundCall:()=>async()=>{pane.editor=editor;pane.generation='new';pane.staged={data:{creation:{workspace_id:'workspace'}}};}};
-  assert.equal(await prepareComposer(pane,context),true);
-  assert.equal(cleared,true);
+test('opening controls from an empty starting draft preserves fresh and reused editors',async()=>{
+  for (const text of ['', 'saved workspace input']) {
+    let cleared=false;
+    const editor={text,images:[],references:[],record:{},edit:assert.fail,flush:assert.fail};
+    const pane={index:'main',starting:{text:'',workspace:'workspace',serial:0,async flush(){},async clearCaptured(){cleared=true;}},renderComposer(){},subscribe(){return()=>{};}};
+    const context={connection:{},view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},
+      boundCall:()=>async()=>{pane.editor=editor;pane.generation='new';pane.staged={data:{creation:{workspace_id:'workspace'}}};}};
+    assert.equal(await prepareComposer(pane,context),true);
+    assert.equal(editor.text,text);
+    assert.equal(cleared,true);
+  }
 });
 
 test('a blank surface binds its draft after reset and same-namespace reconnect',async t=>{
@@ -104,16 +107,24 @@ test('failed draft creation keeps starting input and releases control admission'
   await assert.rejects(prepareComposer(pane,context),/creation failed/);assert.equal(cleared,false);assert.equal(pane.submitting,undefined);assert.equal(pane.openingComposer,undefined);
 });
 
-test('recovery waits for the newly created attachment and never sends restored input',async t=>{
-  let check,cleared=false;
+test('recovery waits for the Host selection and never sends restored input',async t=>{
   const row={key:JSON.stringify(['endpoint','local','old-pane']),incarnation:'incarnation',revision:3};
-  t.mock.method(StartingDraft,'load',async()=>({record:row,text:'recovered input',serial:0,workspace:'workspace',async flush(){},async clearCaptured(){cleared=true;}}));
-  const old={text:'',images:[],references:[],record:{},edit(){assert.fail('Old attachment was edited');}};
-  const fresh={text:'',images:[],references:[],record:{},edit(text){this.text=text;},async flush(){}};
-  const pane={index:'main',generation:'1',editor:old,staged:{data:{creation:{workspace_id:'workspace'}}},async flush(){},renderComposer(){},subscribe(fn){check=fn;return()=>{};},submit:assert.fail};
-  const connection={drafts:{namespace:['endpoint','local']}};const context={connection,view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},boundCall:()=>async()=>{}};
-  const restoring=restoreStartingDraft(pane,context,row);
-  while(!check)await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(cleared,false);pane.generation='2';pane.editor=fresh;check();
-  assert.equal(await restoring,true);assert.equal(fresh.text,'recovered input');assert(cleared);
+  for (const reused of [false,true]) await t.test(reused?'reselected editor':'new attachment',async t=>{
+    let check,cleared=false;
+    t.mock.method(StartingDraft,'load',async()=>({record:row,text:'recovered input',serial:0,workspace:'workspace',async flush(){},async clearCaptured(){cleared=true;}}));
+    const selected={text:'',images:[],references:[],record:{},edit(text){this.text=text;},async flush(){}};
+    const previous=reused ? selected : {...selected,edit:assert.fail};
+    const pane={index:'main',generation:'1',selection:'1',editor:previous,
+      staged:{data:{workspace:{registration:{status:'registered',id:'workspace'}}}},
+      async flush(){},renderComposer(){},subscribe(fn){check=fn;return()=>{};},submit:assert.fail};
+    const connection={drafts:{namespace:['endpoint','local']}};
+    const context={connection,view:{setup:{agent:{default_model:{model:'test'}}},catalog:{workspaces:[{id:'workspace'}]}},boundCall:()=>async()=>{}};
+    const restoring=restoreStartingDraft(pane,context,row);
+    while(!check)await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(cleared,false);
+    assert.equal(selected.text,'');
+    if(!reused) { pane.generation='2';pane.editor=selected; }
+    pane.selection='2';check();
+    assert.equal(await restoring,true);assert.equal(selected.text,'recovered input');assert(cleared);
+  });
 });

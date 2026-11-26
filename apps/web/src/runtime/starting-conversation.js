@@ -16,6 +16,7 @@ export function startingWorkspace(pane, context) {
 }
 async function openWorkspaceEditor(pane, context, workspace, preset, current) {
   const generation = pane.generation;
+  const selection = pane.selection;
   await context.boundCall(context.connection)('command', JSON.stringify({action:'create', pane:pane.index, workspace, agent_preset_id:preset}));
   // The command can finish before React has bound the new editor.
   return new Promise((resolve, reject) => {
@@ -25,7 +26,10 @@ async function openWorkspaceEditor(pane, context, workspace, preset, current) {
       try { current(); }
       catch (error) { finish(reject, error); return; }
       const data = pane.staged?.data;
-      if (pane.generation && pane.generation !== generation && pane.editor && data?.creation?.workspace_id === workspace && (!preset || data.agent_preset === preset))
+      const registration = data?.workspace?.registration;
+      const workspaceId = data?.creation?.workspace_id ?? (registration?.status === 'registered' ? registration.id : undefined);
+      if (pane.generation && (pane.generation !== generation || pane.selection !== selection) &&
+          pane.editor && workspaceId === workspace && (!preset || data.agent_preset === preset))
         finish(resolve, pane.editor);
     };
     const unsubscribe = pane.subscribe(check);
@@ -117,7 +121,7 @@ async function openComposer(pane, context, draft = pane.starting, recoveryCurren
     const editor = await openWorkspaceEditor(pane, context, workspace.id, preset, current);
     current();
     if (pane.editor !== editor) throw new Error('Conversation changed; your starting draft is saved');
-    if (editor.text || editor.images.length || editor.references.length || editor.record.pending)
+    if (editor.record.pending || (text && (editor.text || editor.images.length || editor.references.length)))
       throw new Error('Conversation already has input. Your starting draft is saved.');
     if (text) { editor.edit(text, [], []); await editor.flush(); }
     current();

@@ -376,9 +376,12 @@ Before a Session exists, each endpoint/principal/surface has a bounded local
 starting draft with its selected workspace and text. This record is independent
 of model configuration and Session Header identities. Typing does not create a
 Session. Model setup and workspace selection preserve the record. Sending first
-creates the Session, durably copies the captured text into its bound draft, then
+opens the conversation, durably copies the captured text into its bound draft, then
 clears both text and workspace of the matching starting revision. Opening controls
-with blank input does not materialize an empty saved Session draft. Failure leaves a recoverable copy;
+with blank input preserves the selected editor's existing contents and leaves
+an empty editor unsaved. When the Host reselects the current conversation,
+recovery waits for the pane's selection acknowledgement before editing it.
+Failure leaves a recoverable copy;
 a late result cannot overwrite newer text or another endpoint's draft. This
 handoff never invents a Session identity or bypasses submission receipts.
 Choosing a different workspace from an attached composer carries unsent text
