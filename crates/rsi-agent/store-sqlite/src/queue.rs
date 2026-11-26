@@ -21,15 +21,17 @@ pub(super) fn read_control(
         .map_err(|_| StoreError::Invalid("queue read bound overflow".into()))?;
     let bytes = connection
         .query_row(
-            "SELECT length(CAST(control_json AS BLOB)),
-                CASE WHEN length(CAST(control_json AS BLOB)) <= ?3 THEN control_json END
+            "SELECT control_bytes, CASE WHEN control_bytes <= ?3 THEN control_payload END
              FROM agent_controls WHERE session_id=?1 AND seq=?2",
             params![
                 session.as_str(),
                 sqlite_u64("queue control", seq)?,
                 maximum_sql
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                let payload = super::record_codec::projected(row, 0, maximum)?;
+                Ok((row.get(0)?, payload.map(std::borrow::Cow::into_owned)))
+            },
         )
         .optional()
         .map_err(sql_error)?

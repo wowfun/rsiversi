@@ -823,9 +823,8 @@ impl SessionStore for SqliteStore {
             }
             let mut statement = transaction
                 .prepare(
-                    "SELECT length(CAST(control_json AS BLOB)),
-                            CASE WHEN length(CAST(control_json AS BLOB)) <= ?4
-                                 THEN control_json END, fact_seq, seq
+                    "SELECT control_bytes,
+                            CASE WHEN control_bytes <= ?4 THEN control_payload END, fact_seq, seq
                      FROM agent_controls
                      WHERE session_id = ?1 AND seq > ?2 AND seq <= ?5
                      ORDER BY seq LIMIT ?3",
@@ -867,12 +866,12 @@ impl SessionStore for SqliteStore {
                 if !admit_page_record(projected, maximum_bytes, records.is_empty())? {
                     break;
                 }
-                let record: AgentControlRecord = decode_projected_json(
+                let (record, _): (AgentControlRecord, _) = super::cas::decode_projected_json_with_source(
                     "Agent control record",
                     (
                         i64::try_from(encoded_len)
                             .expect("bounded control length fits SQLite INTEGER"),
-                        row.get::<_, Option<String>>(1).map_err(sql_error)?,
+                        Some(super::record_codec::payload(row, 0, MAXIMUM_SESSION_FACT_BYTES).map_err(sql_error)?),
                     ),
                     MAXIMUM_SESSION_FACT_BYTES,
                 )?;
@@ -1969,9 +1968,8 @@ impl SessionStore for SqliteStore {
                 })?;
             let mut statement = transaction
                 .prepare(
-                    &format!("SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
-                            CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?2
-                                 THEN c.control_json END,
+                    &format!("SELECT coalesce(c.control_bytes, -1),
+                            CASE WHEN c.control_bytes <= ?2 THEN c.control_payload END,
                             message_source, root_session_id, target, wake_required,
                             accepted_control_seq, state,
                             length(CAST(state_json AS BLOB)),
@@ -2919,9 +2917,8 @@ pub(super) fn read_indexed_message(
 ) -> Result<Option<StoreAgentMessage>> {
     connection
                         .query_row(
-                            "SELECT coalesce(length(CAST(c.control_json AS BLOB)), -1),
-                                    CASE WHEN length(CAST(c.control_json AS BLOB)) <= ?3
-                                         THEN c.control_json END,
+                            "SELECT coalesce(c.control_bytes, -1),
+                                    CASE WHEN c.control_bytes <= ?3 THEN c.control_payload END,
                                     message_source, root_session_id, target, wake_required,
                                     accepted_control_seq, state,
                                     length(CAST(state_json AS BLOB)),

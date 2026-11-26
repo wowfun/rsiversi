@@ -60,7 +60,7 @@ async fn program_notice_graph_rejects_canonical_control_corruption() {
     *notice = serde_json::from_value(value).unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json=?1 WHERE session_id=?2 AND seq=?3",
+            "UPDATE agent_controls SET control_payload=?1 WHERE session_id=?2 AND seq=?3",
             params![
                 serde_json::to_string(notice).unwrap(),
                 id.as_str(),
@@ -121,7 +121,7 @@ async fn activation_counterpart_lookup_work_is_independent_of_control_history() 
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO agent_controls(session_id,seq,control_json,fact_seq) VALUES(?1,?2,?3,0)",
+                "INSERT INTO agent_controls(session_id,seq,control_payload,fact_seq) VALUES(?1,?2,?3,0)",
                 params![
                     id.as_str(),
                     i64::try_from(seq).unwrap(),

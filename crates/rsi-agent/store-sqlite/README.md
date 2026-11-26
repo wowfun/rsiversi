@@ -68,6 +68,12 @@ not validate a rehydrated substitute or reread a just-inserted Fact. Explicit
 Facts also support same-append acceptance. Claims without a mailbox acceptance
 remain inline.
 
+The control payload column holds canonical JSON text or a checksummed zstd
+frame. Large human and application message acceptances use the frame when it
+reduces the stored row. Read limits and reference coverage use the original UTF-8 bytes. Mailbox
+selection still reads the indexed source and delivery coordinates. Command
+acceptances retain their searchable invocation identity in plain JSON.
+
 The Store returns the same self-contained logical Facts through all read paths.
 One bounded joined query supplies the physical Fact and its accepted control;
 typed decoding moves the accepted content into the logical Fact without SQL JSON

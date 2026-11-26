@@ -456,7 +456,7 @@ pub async fn assert_queue_store_contract(store: &dyn SessionStore, header: Sessi
     let mut successor = original.message.clone();
     successor.message_id = MessageId::new("replacement").unwrap();
     successor.content = vec![AgentMessageContent::Text {
-        text: "edited complete content".into(),
+        text: "edited complete content\n".repeat(96),
     }];
     let link = record(
         65,

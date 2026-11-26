@@ -147,8 +147,28 @@ async fn queued_claims_store_one_body_and_preserve_every_logical_reader() {
         assert!(!raw.contains("content") && !raw.contains("source"));
         assert_eq!(acceptance, 1);
         assert_eq!(usize::try_from(logical).unwrap(), expected[2].encoded_len());
-        let copies: i64 = db.query_row("SELECT sum(instr(body,'ONE_COPY_BODY:')>0) FROM (SELECT fact_json AS body FROM facts UNION ALL SELECT control_json FROM agent_controls)", [], |row|row.get(0)).unwrap();
-        assert_eq!(copies, 1);
+        let (frame, length): (Vec<u8>, i64) = db.query_row(
+            "SELECT control_payload,control_bytes FROM agent_controls WHERE seq=1 AND control_json IS NULL",
+            [], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        let length = usize::try_from(length).unwrap();
+        let canonical = crate::record_codec::expand(&frame, length).unwrap();
+        assert_eq!(canonical.matches("ONE_COPY_BODY:").count(), 1);
+        let plain_copies: i64 = db.query_row(
+            "SELECT count(*) FROM (SELECT fact_json AS body FROM facts UNION ALL SELECT control_json FROM agent_controls)
+             WHERE instr(body,'ONE_COPY_BODY:')>0",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(plain_copies, 0);
+        let page = store
+            .read_controls(header.session_id(), 0, 1, length)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_string(&page.records[0]).unwrap(), canonical);
+        assert!(
+            matches!(store.read_controls(header.session_id(), 0, 1, length - 1).await,
+            Err(StoreError::ReadRequiresCapacity {minimum_bytes}) if minimum_bytes == length)
+        );
         assert!(db.query_row("SELECT acceptance_control_seq IS NULL AND instr(fact_json,'inline context')>0 FROM facts WHERE seq=4", [], |row|row.get::<_,bool>(0)).unwrap());
         drop(db);
         check_reads(&store, header.session_id(), &expected).await;
@@ -331,7 +351,9 @@ async fn normalized_claim_rejects_broken_references_and_false_byte_projections()
         "UPDATE facts SET logical_bytes=logical_bytes-1 WHERE seq=3",
         "UPDATE facts SET fact_json=json_set(fact_json,'$.accepted_control_seq',2) WHERE seq=3",
         "DELETE FROM agent_controls WHERE seq=1",
-        "UPDATE agent_controls SET control_json=json_set(control_json,'$.wake_required',json('false')) WHERE seq=1",
+        "UPDATE agent_controls SET control_payload=zeroblob(length(control_payload)) WHERE seq=1",
+        "UPDATE agent_controls SET frame_bytes=frame_bytes+1 WHERE seq=1",
+        "UPDATE agent_controls SET control_payload=json_set(control_json,'$.wake_required',json('false')) WHERE seq=1",
     ] {
         let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();
@@ -339,6 +361,19 @@ async fn normalized_claim_rejects_broken_references_and_false_byte_projections()
         drop(store);
         let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         db.pragma_update(None, "foreign_keys", false).unwrap();
+        if sql.contains("wake_required") {
+            let original = db
+                .query_row(
+                    "SELECT control_bytes,control_payload FROM agent_controls WHERE seq=1",
+                    [],
+                    |row| {
+                        crate::record_codec::payload(row, 0, MAXIMUM_SESSION_FACT_BYTES)
+                            .map(std::borrow::Cow::into_owned)
+                    },
+                )
+                .unwrap();
+            db.execute("UPDATE agent_controls SET control_payload=?1,frame_bytes=NULL WHERE seq=1", [original]).unwrap();
+        }
         db.execute(sql, []).unwrap();
         drop(db);
         assert!(

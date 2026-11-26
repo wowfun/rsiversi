@@ -262,7 +262,12 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
             seq INTEGER NOT NULL CHECK (seq > 0),
             fact_seq INTEGER NOT NULL CHECK (fact_seq >= 0),
-            control_json TEXT NOT NULL,
+            control_payload ANY NOT NULL,
+            frame_bytes INTEGER,
+            control_json TEXT AS (CASE WHEN frame_bytes IS NULL THEN control_payload END),
+            control_bytes INTEGER AS (max(ifnull(frame_bytes,0),octet_length(control_payload))),
+            CHECK ((typeof(control_payload)='text' AND frame_bytes IS NULL) OR
+                   (typeof(control_payload)='blob' AND frame_bytes IS NOT NULL AND length(control_payload) BETWEEN 1 AND frame_bytes-1)),
             PRIMARY KEY (session_id, seq)
          ) STRICT",
     ),
@@ -1172,6 +1177,7 @@ impl SqliteStore {
 
 #[macro_use]
 mod fact_storage;
+mod record_codec;
 mod activity;
 mod feedback;
 mod maintenance;

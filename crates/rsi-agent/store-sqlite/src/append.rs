@@ -375,14 +375,26 @@ impl ControlIndexer<'_, '_> {
         &self,
         references: &super::reference_index::Writer<'_>,
     ) -> Result<Option<(u64, u64)>> {
+        let json = references.control(self.record)?;
+        let frame = if json.len() >= 1024 && super::record_codec::direct_acceptance(self.record) {
+            Some(super::record_codec::compress(&json)?).filter(|bytes| bytes.len() + 8 < json.len())
+        } else {
+            None
+        };
+        let payload: &dyn rusqlite::ToSql = match &frame {
+            Some(bytes) => bytes,
+            None => &json,
+        };
         self.transaction
             .execute(
-                "INSERT INTO agent_controls (session_id, seq, control_json, fact_seq) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO agent_controls (session_id, seq, control_payload, fact_seq, frame_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     self.session_id.as_str(),
                     sqlite_u64("control sequence", self.record.seq())?,
-                    references.control(self.record)?,
+                    payload,
                     sqlite_u64("control Fact watermark", self.after_fact_seq)?,
+                    frame.as_ref().map(|_| i64::try_from(json.len()).expect("bounded control length")),
                 ],
             )
             .map_err(sql_error)?;
@@ -1015,7 +1027,8 @@ pub(super) type IndexedMessageRow = (
 pub(super) fn indexed_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedMessageRow> {
     Ok((
         row.get(0)?,
-        row.get(1)?,
+        super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES)?
+            .map(std::borrow::Cow::into_owned),
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,

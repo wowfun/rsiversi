@@ -175,7 +175,7 @@ async fn ready_projection_classifies_metadata_without_reading_message_bodies() {
     let id = ready_fixture(&store).await;
     let database = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     database
-        .execute("UPDATE agent_controls SET control_json = '{}'", [])
+        .execute("UPDATE agent_controls SET control_payload = '{}'", [])
         .unwrap();
     for (encoded, expected) in [
         ("human", AgentMessageSourceKind::Human),

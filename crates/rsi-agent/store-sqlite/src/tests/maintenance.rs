@@ -317,7 +317,7 @@ async fn coverage_authenticates_stored_json_bytes_including_whitespace() {
     for (table, column) in [
         ("sessions", "header_json"),
         ("facts", "fact_json"),
-        ("agent_controls", "control_json"),
+        ("agent_controls", "control_payload"),
     ] {
         let root = private_tempdir();
         let store = SqliteStore::open(root.path()).unwrap();

@@ -130,8 +130,8 @@ async fn cold_domain_reads_and_offline_verify_reject_corrupted_canonical_indexes
         "INSERT INTO domain_requests VALUES ('domains', 'fabricated', 99, NULL, 1)",
         "UPDATE domain_requests SET source_turn_id = NULL",
         "UPDATE domain_requests SET control_bytes = control_bytes + 1",
-        "UPDATE agent_controls SET control_json = json_set(control_json, '$.commit.updates[0].snapshot.state', 'changed') WHERE seq = 2",
-        "UPDATE agent_controls SET control_json = json_set(control_json, '$.commit.fact_span.first_seq', 1) WHERE seq = 2",
+        "UPDATE agent_controls SET control_payload = json_set(control_json, '$.commit.updates[0].snapshot.state', 'changed') WHERE seq = 2",
+        "UPDATE agent_controls SET control_payload = json_set(control_json, '$.commit.fact_span.first_seq', 1) WHERE seq = 2",
         "UPDATE domain_heads SET domain_id = printf('%0500000d', 1) WHERE domain_id = 'a'",
     ];
     for mutation in mutations {

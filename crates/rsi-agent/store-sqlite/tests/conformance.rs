@@ -107,14 +107,14 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
             "marker-turn-wrong",
             true,
             Some(
-                "UPDATE agent_controls SET control_json = json_set(control_json, '$.turn_id', 'wrong-turn')",
+                "UPDATE agent_controls SET control_payload = json_set(control_json, '$.turn_id', 'wrong-turn')",
             ),
         ),
         (
             "marker-fact-wrong",
             true,
             Some(
-                "UPDATE agent_controls SET control_json = json_set(control_json, '$.terminal_fact_seq', 1)",
+                "UPDATE agent_controls SET control_payload = json_set(control_json, '$.terminal_fact_seq', 1)",
             ),
         ),
         (
@@ -1201,7 +1201,7 @@ fn mailbox_read_rejects_an_oversized_acceptance_before_loading_its_json() {
         .unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json = control_json || printf('%*s', ?1, '')
+            "UPDATE agent_controls SET control_payload = control_json || printf('%*s', ?1, '')
              WHERE session_id = ?2 AND seq = (SELECT accepted_control_seq FROM agent_messages WHERE session_id=?2 AND message_id=?3)",
             rusqlite::params![
                 i64::try_from(rsi_agent_session_protocol::MAXIMUM_SESSION_FACT_BYTES + 1).unwrap(),
@@ -1221,7 +1221,7 @@ fn mailbox_read_rejects_an_oversized_acceptance_before_loading_its_json() {
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json=?1 WHERE session_id=?2 AND seq=1",
+            "UPDATE agent_controls SET control_payload=?1 WHERE session_id=?2 AND seq=1",
             rusqlite::params![original_control_json, session.as_str()],
         )
         .unwrap();
@@ -1274,7 +1274,7 @@ fn mailbox_summary_bounds_completion_identity_rows_before_decoding() {
             "WITH RECURSIVE counter(value) AS (
                  SELECT 2 UNION ALL SELECT value + 1 FROM counter WHERE value < {corrupt_count}
              )
-             INSERT INTO agent_controls (session_id, seq, control_json, fact_seq)
+             INSERT INTO agent_controls (session_id, seq, control_payload, fact_seq)
              SELECT '{session}', value, source.control_json, source.fact_seq
              FROM counter
              JOIN agent_controls AS source
@@ -1883,7 +1883,7 @@ async fn verification_derives_activation_lineage_from_the_immutable_header() {
     let connection = Connection::open(database).unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json = ?1",
+            "UPDATE agent_controls SET control_payload = ?1",
             [serde_json::to_string(&corrupted).unwrap()],
         )
         .unwrap();
@@ -2363,7 +2363,7 @@ async fn exact_message_read_does_not_decode_unrelated_pending_payloads() {
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json = '{}' WHERE (session_id, seq) IN (SELECT session_id, accepted_control_seq FROM agent_messages WHERE message_id = ?1)",
+            "UPDATE agent_controls SET control_payload = '{}' WHERE (session_id, seq) IN (SELECT session_id, accepted_control_seq FROM agent_messages WHERE message_id = ?1)",
             [unrelated.as_str()],
         )
         .unwrap();
@@ -2545,7 +2545,7 @@ async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_
         .unwrap();
     connection
         .execute(
-            "UPDATE agent_controls SET control_json='{}' WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')",
+            "UPDATE agent_controls SET control_payload='{}' WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')",
             [],
         )
         .unwrap();
@@ -2553,7 +2553,7 @@ async fn pending_option_projection_avoids_payload_reads_and_detects_index_drift_
         store.inspect_session(&session).await.unwrap().pending,
         pending
     );
-    connection.execute("UPDATE agent_controls SET control_json=?1 WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')", [&original]).unwrap();
+    connection.execute("UPDATE agent_controls SET control_payload=?1 WHERE (session_id,seq) IN (SELECT session_id,accepted_control_seq FROM agent_messages WHERE message_id='message-1')", [&original]).unwrap();
     connection
         .execute(
             "UPDATE agent_messages SET has_turn_options=1 WHERE message_id='message-1'",
@@ -2611,7 +2611,8 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
         )
         .await
         .unwrap();
-    assert_eq!(page.sessions[0].session_id.as_str(), "activity-a");
+    let damaged = page.sessions.iter().find(|row| row.session_id.as_str() == "activity-a")
+        .expect("activity metadata includes the Session whose history is corrupt");
     assert!(
         store
             .session_order_seed(&rsi_agent_store_protocol::ExecutionLocations::all(), None)
@@ -2619,7 +2620,7 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
             .is_ok()
     );
     assert!(matches!(
-        store.header(&page.sessions[0].session_id).await,
+        store.header(&damaged.session_id).await,
         Err(StoreError::Corrupt(_))
     ));
 }

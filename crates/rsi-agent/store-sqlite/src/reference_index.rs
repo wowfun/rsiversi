@@ -313,14 +313,14 @@ pub(super) fn validate_retiring_operation(
         (
             "sessions",
             "header",
-            "header_json",
+            "length(CAST(header_json AS BLOB)),header_json",
             "0",
             rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES,
         ),
         (
             "agent_controls",
             "control",
-            "control_json",
+            "control_bytes,control_payload",
             "seq",
             MAXIMUM_STORE_CONTROL_PAGE_BYTES,
         ),
@@ -334,7 +334,7 @@ pub(super) fn validate_retiring_operation(
                 "retiring reference sequence",
                 row.get(1).map_err(sql_error)?,
             )?;
-            let encoded = bounded_text(row, 2, maximum).map_err(sql_error)?;
+            let encoded = super::record_codec::payload(row, 2, maximum).map_err(sql_error)?;
             verify_encoded(connection, &id, stream, seq, &encoded)?;
             records += 1;
         }

@@ -12,8 +12,8 @@ macro_rules! fact_rows {
             "SELECT coalesce(f.logical_bytes, length(CAST(f.fact_json AS BLOB))),
                     length(CAST(f.fact_json AS BLOB)),
                     CASE WHEN length(CAST(f.fact_json AS BLOB)) <= ", $maximum, " THEN f.fact_json END,
-                    f.acceptance_control_seq, coalesce(length(CAST(c.control_json AS BLOB)),0),
-                    CASE WHEN length(CAST(c.control_json AS BLOB)) <= ", $maximum, " THEN c.control_json END,
+                    f.acceptance_control_seq, coalesce(c.control_bytes,0),
+                    CASE WHEN c.control_bytes <= ", $maximum, " THEN c.control_payload END,
                     f.seq, f.turn_id, f.fact_kind, f.session_id, f.intent_purpose, f.fact_frame IS NOT NULL,
                     CASE WHEN length(f.fact_frame) BETWEEN 1 AND f.logical_bytes - 1
                          AND f.logical_bytes <= ", $maximum, " THEN f.fact_frame END
@@ -151,12 +151,7 @@ pub(super) fn encode(
         && acceptance.is_none()
         && !matches!(fact.body(), SessionFactBody::ManualCompaction { .. })
     {
-        let packed = zstd::bulk::Compressor::new(3)
-            .and_then(|mut encoder| {
-                encoder.include_checksum(true)?;
-                encoder.compress(json.as_bytes())
-            })
-            .map_err(|error| StoreError::Io(format!("compressing session Fact: {error}")))?;
+        let packed = super::record_codec::compress(&json)?;
         let index = index_json(fact.body())?;
         if packed.len() + index.len() < json.len() {
             return Ok(EncodedFact {
@@ -192,9 +187,8 @@ fn decode_frame(
         .map_err(sql_error)?
         .as_blob()
         .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
-    let raw = zstd::bulk::decompress(frame, length)
+    let json = super::record_codec::expand(frame, length)
         .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
-    let json = String::from_utf8(raw).map_err(|error| StoreError::Corrupt(error.to_string()))?;
     let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
         "session Fact",
         (
@@ -246,7 +240,7 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
             "claim acceptance",
             (
                 row.get::<_, i64>(4).map_err(sql_error)?,
-                super::text::optional_borrowed_text(row, 5, MAXIMUM_SESSION_FACT_BYTES)
+                super::record_codec::projected(row, 4, MAXIMUM_SESSION_FACT_BYTES)
                     .map_err(sql_error)?,
             ),
             MAXIMUM_SESSION_FACT_BYTES,

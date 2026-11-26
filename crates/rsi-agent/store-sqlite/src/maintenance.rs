@@ -543,16 +543,16 @@ fn verify_selected(
     }
     let (column, maximum) = match stream {
         "header" => (
-            "header_json",
+            "length(CAST(header_json AS BLOB)),header_json",
             rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES,
         ),
-        _ => ("control_json", super::MAXIMUM_STORE_CONTROL_PAGE_BYTES),
+        _ => ("control_bytes,control_payload", super::MAXIMUM_STORE_CONTROL_PAGE_BYTES),
     };
     let encoded = transaction
         .query_row(
             &format!("SELECT {column} FROM {table} WHERE rowid=?1"),
             [rowid],
-            |row| bounded_text(row, 0, maximum),
+            |row| super::record_codec::payload(row, 0, maximum).map(std::borrow::Cow::into_owned),
         )
         .map_err(sql_error)?;
     let id = SessionId::new(session).map_err(|e| StoreError::Corrupt(e.to_string()))?;

@@ -96,7 +96,7 @@ async fn canonical_pages_ignore_unused_indexes_but_execution_refuses_them() {
 async fn canonical_pages_decode_only_selected_history() {
     let (_root, store, id) = damaged_store(
         "UPDATE facts SET fact_json = json_set(fact_json, '$.timestamp_ms', 'broken') WHERE seq = 2;
-         UPDATE agent_controls SET control_json = json_set(control_json, '$.timestamp_ms', 'broken') WHERE seq = 3;"
+         UPDATE agent_controls SET control_payload = json_set(control_json, '$.timestamp_ms', 'broken') WHERE seq = 3;"
     ).await;
     let bytes = MAXIMUM_STORE_FACT_PAGE_BYTES;
     assert_eq!(

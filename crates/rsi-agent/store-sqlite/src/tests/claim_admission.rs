@@ -156,7 +156,7 @@ async fn mailbox_claim_resolves_one_canonical_body_and_rolls_back_atomically() {
                     Some(|event: TraceEvent<'_>| {
                         if let TraceEvent::Stmt(_, sql) = event
                             && sql.trim_start().starts_with("SELECT")
-                            && sql.contains("control_json")
+                            && sql.contains("control_payload")
                         {
                             BODY_READS.fetch_add(1, Ordering::Relaxed);
                         }

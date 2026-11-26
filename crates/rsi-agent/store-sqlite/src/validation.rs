@@ -1501,8 +1501,8 @@ fn validate_agent_indexes_observed(
     let mut successor_link = None;
     let mut statement = connection
         .prepare(
-            "SELECT length(CAST(control_json AS BLOB)),
-                CASE WHEN length(CAST(control_json AS BLOB)) <= ?1 THEN control_json END, seq, fact_seq
+            "SELECT control_bytes,
+                CASE WHEN control_bytes <= ?1 THEN control_payload END, seq, fact_seq, frame_bytes IS NOT NULL
          FROM agent_controls WHERE session_id = ?2 ORDER BY seq",
         )
         .map_err(sql_error)?;
@@ -1514,15 +1514,22 @@ fn validate_agent_indexes_observed(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let (record, encoded): (AgentControlRecord, String) =
+        let (record, encoded): (AgentControlRecord, _) =
             super::cas::decode_projected_json_with_source(
                 "Agent control record",
                 (
                     row.get(0).map_err(sql_error)?,
-                    row.get(1).map_err(sql_error)?,
+                    super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES).map_err(sql_error)?,
                 ),
                 MAXIMUM_SESSION_FACT_BYTES,
             )?;
+        if row.get::<_, bool>(4).map_err(sql_error)?
+            && !super::record_codec::direct_acceptance(&record)
+        {
+            return Err(StoreError::Corrupt(
+                "indexed control stored in an acceptance frame".into(),
+            ));
+        }
         decoded += 1;
         observer.control(selected, &record, &encoded)?;
         activity.observe_control(&record);

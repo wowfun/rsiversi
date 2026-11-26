@@ -54,7 +54,7 @@ async fn control_fact_cuts_survive_reopen_and_reject_corrupt_anchors() {
         Some("UPDATE sessions SET control_seq = 2"),
         Some("UPDATE sessions SET control_seq = 4"),
         Some(
-            "UPDATE agent_controls SET control_json = json_set(control_json, '$.seq', 4) WHERE seq = 3",
+            "UPDATE agent_controls SET control_payload = json_set(control_json, '$.seq', 4) WHERE seq = 3",
         ),
     ] {
         let root = private_tempdir();
@@ -108,7 +108,8 @@ async fn cold_control_replay_scans_canonical_rows_once() {
     static SCANS: AtomicU64 = AtomicU64::new(0);
     fn trace(event: TraceEvent<'_>) {
         if let TraceEvent::Profile(statement, _) = event
-            && statement.sql().contains("FROM agent_controls")
+            // The Header also contains an indexed cwd subquery, skipped for this Session.
+            && statement.sql().rsplit_once("FROM ").is_some_and(|(_, from)| from.starts_with("agent_controls "))
         {
             SCANS.fetch_add(1, Ordering::Relaxed);
         }
@@ -749,7 +750,7 @@ async fn control_projection_replay_enforces_the_individual_control_bound() {
         },
     )
     .unwrap();
-    writer.execute("INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,1,?2 || printf('%*s',?3,''),0)",
+    writer.execute("INSERT INTO agent_controls (session_id,seq,control_payload,fact_seq) VALUES (?1,1,?2 || printf('%*s',?3,''),0)",
         params![header.session_id().as_str(), serde_json::to_string(&record).unwrap(), i64::try_from(MAXIMUM_SESSION_FACT_BYTES).unwrap()]).unwrap();
     writer
         .execute("UPDATE sessions SET control_seq = 1", [])
@@ -1760,7 +1761,7 @@ async fn control_pages_admit_stored_lengths_before_materializing_the_next_body()
             json.extend(std::iter::repeat_n(' ', 32 * 1024 * 1024));
             writer
                 .execute(
-                    "INSERT INTO agent_controls (session_id,seq,control_json,fact_seq) VALUES (?1,?2,?3,0)",
+                    "INSERT INTO agent_controls (session_id,seq,control_payload,fact_seq) VALUES (?1,?2,?3,0)",
                     params![
                         header.session_id().as_str(),
                         i64::try_from(seq).unwrap(),
@@ -3934,8 +3935,8 @@ async fn domain_reads_batch_distinct_controls_and_reject_missing_canonical_rows(
     for mutation in [
         "DELETE FROM agent_controls WHERE session_id = ?1 AND seq = 1",
         "DELETE FROM agent_controls WHERE session_id = ?1 AND seq = 2",
-        "UPDATE agent_controls SET control_json = json_set(control_json, '$.seq', 3) WHERE session_id = ?1 AND seq = 2",
-        "UPDATE agent_controls SET control_json = json_set(control_json, '$.padding', hex(zeroblob(1048576))) WHERE session_id = ?1 AND seq = 2",
+        "UPDATE agent_controls SET control_payload = json_set(control_json, '$.seq', 3) WHERE session_id = ?1 AND seq = 2",
+        "UPDATE agent_controls SET control_payload = json_set(control_json, '$.padding', hex(zeroblob(1048576))) WHERE session_id = ?1 AND seq = 2",
     ] {
         connection
             .execute_batch("SAVEPOINT corrupt_domain")

@@ -290,11 +290,15 @@ async fn capture_current_writer() {
         drop(store);
         SqliteStore::verify(&path).unwrap();
     }
+    archive_capture(&root);
+}
+
+fn archive_capture(root: &Path) {
     let baseline = Baseline {
         session_format: SESSION_FORMAT_VERSION,
         store_schema: AGENT_STORE_SCHEMA_VERSION,
         schema_sha256: schema_hash(&root.join("mechanical")),
-        files: file_hashes(&root),
+        files: file_hashes(root),
     };
     for name in baseline.files.keys() {
         let path = root.join(name);
@@ -659,7 +663,7 @@ async fn retained_writer_corpus() {
             );
             assert_encoding::<AgentControlRecord>(
                 &db,
-                "SELECT control_json FROM agent_controls ORDER BY session_id, seq",
+                "SELECT control_payload,control_bytes FROM agent_controls ORDER BY session_id, seq",
             );
             drop(db);
             // Cold admission and public queries consume the captured database;

@@ -75,7 +75,7 @@ async fn cold_mailbox_validation_does_not_reload_acceptance_bodies() {
             Some(|event: rusqlite::trace::TraceEvent<'_>| {
                 if let TraceEvent::Stmt(_, sql) = event
                     && sql.contains("FROM agent_messages")
-                    && sql.contains("control_json")
+                    && (sql.contains("control_json") || sql.contains("control_payload"))
                 {
                     BODY_RESELECTS.fetch_add(1, Ordering::Relaxed);
                 }
@@ -237,7 +237,7 @@ async fn summary_observes_pending_step_order_without_materializing_bodies() {
                         && sql.trim_start().starts_with("SELECT")
                     {
                         SELECTS.fetch_add(1, Ordering::Relaxed);
-                        if ["control_json", "fact_json", "header_json"]
+                        if ["control_json", "control_payload", "fact_json", "header_json"]
                             .iter()
                             .any(|column| sql.contains(column))
                         {
