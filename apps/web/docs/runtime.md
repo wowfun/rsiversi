@@ -455,8 +455,9 @@ also recheck the connection and attachment after completion.
 ## Workspace identities
 
 History pickers use pane `workspace.key` and catalog Workspace `key`, both
-coordinate-scoped. Creation and draft reuse use the registration ID in the
-creation receipt. The document does not derive or interchange these identities.
+coordinate-scoped. Choosing a workspace opens a registered conversation through
+the Host. It selects an unstarted member or saves a new identity. The editor
+binds the returned Session ID and registration before moving input.
 An attached pane displays its immutable `workspace.coordinates` and resolved
 registration, including off-page registrations. An unavailable or deleted
 registration never falls back to the starting draft or first catalog entry.

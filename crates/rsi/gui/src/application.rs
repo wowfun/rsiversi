@@ -198,8 +198,6 @@ pub(crate) enum Command {
         pane: crate::SurfaceId,
         workspace: rsi_workspace_protocol::WorkspaceId,
         agent_preset_id: Option<rsi_agent_session_protocol::AgentPresetId>,
-        #[serde(default)]
-        reuse: Option<crate::panes::ReuseDraft>,
     },
     InspectImage {
         pane: crate::SurfaceId,

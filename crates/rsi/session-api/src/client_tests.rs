@@ -717,6 +717,7 @@ async fn descendant_approvals_use_one_validated_tree_and_reuse_its_membership() 
 fn session_proxy_keeps_local_call_versions_without_constructor_admission() {
     let versions = [
         (Operation::Create, 12),
+        (Operation::WorkspaceConversation, 1),
         (Operation::Attach, 9),
         (Operation::Recent, 11),
         (Operation::DraftSnapshot, 10),
@@ -881,6 +882,7 @@ fn workflow_failures_are_bound_to_their_actual_operations() {
             matches!(
                 operation,
                 Operation::Create
+                    | Operation::WorkspaceConversation
                     | Operation::SelectPreset
                     | Operation::SelectPublishedPreset
                     | Operation::Submit

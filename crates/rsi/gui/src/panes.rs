@@ -54,31 +54,10 @@ pub(crate) struct Pane {
     selection: std::sync::atomic::AtomicU64,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ReuseDraft {
-    generation: String,
-    header: String,
-    session: Option<SessionId>,
-}
-
-#[derive(Debug)]
-struct PreviousBlank {
-    generation: u64,
-    header: String,
-    workspace: rsi_workspace_protocol::WorkspaceId,
-    defaults: [rsi_settings_protocol::SettingsVersion; 2],
-}
-
-struct ReopenedBlank {
-    id: SessionId,
-    handle: Arc<dyn SessionHandle>,
-    header: rsi_agent_session_protocol::SessionHeader,
-}
-
 enum Open {
     Existing(Option<Arc<dyn SessionHandle>>),
-    Create(rsi_session_protocol::CreateSession, Option<ReuseDraft>),
+    Create(rsi_session_protocol::CreateSession),
+    Workspace(rsi_session_protocol::OpenWorkspaceConversation),
     Preset {
         generation: String,
         header: String,
@@ -88,7 +67,6 @@ enum Open {
 
 #[derive(Debug)]
 pub(crate) struct SubmissionState {
-    previous_blank: Mutex<Option<PreviousBlank>>,
     model_command: rsi_client::CommandSubmission,
     receipt: Mutex<Option<rsi_agent_session_protocol::SessionCommandReceipt>>,
     owned: Mutex<BTreeMap<MessageId, Option<u64>>>,
@@ -126,7 +104,6 @@ impl SubmissionState {
     }
     fn new() -> Self {
         Self {
-            previous_blank: Mutex::default(),
             model_command: rsi_client::CommandSubmission::default(),
             receipt: Mutex::new(None),
             owned: Mutex::new(BTreeMap::new()),
@@ -175,7 +152,6 @@ struct Attachment {
     protected: bool,
     can_stop_without_navigation: bool,
     creation: Option<rsi_session_protocol::CreateSession>,
-    defaults: Option<[rsi_settings_protocol::SettingsVersion; 2]>,
     surface: Mutex<Option<Surface>>,
     handle: Arc<dyn SessionHandle>,
     controller: Arc<SessionController>,
@@ -261,25 +237,6 @@ impl Attachment {
                 rsi_agent_session_protocol::CommandRevision::Durable { .. }
             ),
         ))
-    }
-
-    fn remember_blank(&self) {
-        let origin = self
-            .defaults
-            .as_ref()
-            .zip(self.creation.as_ref())
-            .filter(|_| !self.durable.load(std::sync::atomic::Ordering::Acquire))
-            .map(|(defaults, request)| PreviousBlank {
-                generation: self.generation,
-                header: self.header.clone(),
-                workspace: request.workspace_id.clone(),
-                defaults: defaults.clone(),
-            });
-        *self
-            .submission
-            .previous_blank
-            .lock()
-            .expect("Web blank origin poisoned") = origin;
     }
 
     async fn close(&self) -> Result<()> {
@@ -737,7 +694,7 @@ impl GuiApplication {
             }),
         };
         self.pane(pane)?.attachment(generation)?;
-        self.open(pane, id, Open::Create(request, None)).await
+        self.open(pane, id, Open::Create(request)).await
     }
 
     pub(crate) fn add_surface(&self, id: crate::SurfaceId) -> Result<()> {
@@ -947,28 +904,16 @@ impl GuiApplication {
                 pane,
                 workspace,
                 agent_preset_id,
-                reuse,
             } => {
-                if agent_preset_id.is_none()
-                    && let Some(current) =
-                        reuse.as_ref().filter(|binding| binding.session.is_none())
-                    && self.reuse_draft(pane, &workspace, current).await?
-                {
-                    return Ok(());
-                }
                 let id = SessionId::new(rsi_ui::fresh_identity("web")?).map_err(error)?;
                 self.open(
                     pane,
                     id.clone(),
-                    Open::Create(
-                        rsi_session_protocol::CreateSession {
-                            fork: None,
-                            session_id: id,
-                            workspace_id: workspace,
-                            agent_preset_id,
-                        },
-                        reuse,
-                    ),
+                    Open::Workspace(rsi_session_protocol::OpenWorkspaceConversation {
+                        fresh: id,
+                        workspace_id: workspace,
+                        agent_preset_id,
+                    }),
                 )
                 .await
             }
@@ -1109,38 +1054,43 @@ impl GuiApplication {
         if pane.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err("Surface is retiring".into());
         }
-        let reopening = matches!(source, Open::Existing(_));
-        let before_defaults = if matches!(&source, Open::Create(request, _) if request.fork.is_none() && request.agent_preset_id.is_none())
-        {
-            self.defaults_stamp().await
-        } else {
-            None
-        };
-        let previous = match (&source, &before_defaults) {
-            (Open::Create(request, Some(candidate)), Some(defaults)) => {
-                self.previous_blank(&pane, &request.workspace_id, candidate, defaults)
-                    .await
-            }
-            _ => None,
-        };
-        let reused = previous.is_some();
-        if let Some(previous) = &previous {
-            id = previous.id.clone();
-        }
-        let draft = pane.submission(&id)?;
         let mut creation = None;
         let mut selected_header = None;
+        let mut reopening = matches!(source, Open::Existing(_));
         let mut published_selection = false;
         let _preset_permit;
         let selected_handle = match source {
-            Open::Create(mut request, _) => {
-                let handle = if let Some(previous) = previous {
-                    request.session_id = id.clone();
-                    selected_header = Some(previous.header);
-                    previous.handle
-                } else {
-                    self.session.create(request.clone()).await.map_err(error)?
-                };
+            Open::Workspace(request) => {
+                let workspace_id = request.workspace_id.clone();
+                let agent_preset_id = request.agent_preset_id.clone();
+                let handle = self.session.open_workspace(request).await.map_err(error)?;
+                let header = handle.header().await.map_err(error)?;
+                let fingerprint = header.fingerprint().map_err(error)?;
+                if pane
+                    .current
+                    .lock()
+                    .expect("Web pane poisoned")
+                    .as_ref()
+                    .is_some_and(|attached| {
+                        attached.id == *header.session_id() && attached.header == fingerprint
+                    })
+                {
+                    self.select_open_pane(&pane)?;
+                    return Ok(());
+                }
+                reopening = header.session_id() != &id;
+                id = header.session_id().clone();
+                creation = Some(rsi_session_protocol::CreateSession {
+                    session_id: id.clone(),
+                    workspace_id,
+                    agent_preset_id,
+                    fork: None,
+                });
+                selected_header = Some(header);
+                Some(handle)
+            }
+            Open::Create(request) => {
+                let handle = self.session.create(request.clone()).await.map_err(error)?;
                 creation = Some(request);
                 Some(handle)
             }
@@ -1151,7 +1101,8 @@ impl GuiApplication {
                 preset,
             } => {
                 let attached = pane.attachment(&generation)?;
-                _preset_permit = draft
+                _preset_permit = attached
+                    .submission
                     .submissions
                     .clone()
                     .try_acquire_owned()
@@ -1166,6 +1117,7 @@ impl GuiApplication {
                 Some(attached.handle.clone())
             }
         };
+        let draft = pane.submission(&id)?;
         let surface = self
             .shell
             .open(surface_program(&id, self.has_files))
@@ -1301,13 +1253,6 @@ impl GuiApplication {
             can_stop_without_navigation: self.navigation.is_none()
                 && controller.is_host_owner().await.unwrap_or(false),
             creation,
-            defaults: if reused {
-                before_defaults
-            } else if let Some(before) = before_defaults {
-                self.defaults_stamp().await.filter(|after| *after == before)
-            } else {
-                None
-            },
             surface: Mutex::new(Some(surface)),
             handle,
             controller,
@@ -1329,7 +1274,6 @@ impl GuiApplication {
         let old = {
             let mut current = pane.current.lock().expect("Web pane poisoned");
             if let Some(old) = current.as_ref() {
-                old.remember_blank();
                 self.details
                     .lock()
                     .expect("Web details poisoned")
@@ -1337,15 +1281,7 @@ impl GuiApplication {
             }
             current.replace(attachment.clone())
         };
-        pane.selection
-            .fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |value| value.checked_add(1),
-            )
-            .map_err(|_| "Surface selection capacity exhausted")?;
-        pane.changed();
-        self.changed();
+        self.select_open_pane(&pane)?;
         if let Some(old) = old
             && let Err(error) = old.close().await
         {
@@ -1360,112 +1296,7 @@ impl GuiApplication {
         }
         Ok(())
     }
-    async fn previous_blank(
-        &self,
-        pane: &Pane,
-        workspace: &rsi_workspace_protocol::WorkspaceId,
-        candidate: &ReuseDraft,
-        defaults: &[rsi_settings_protocol::SettingsVersion; 2],
-    ) -> Option<ReopenedBlank> {
-        let session = candidate.session.as_ref()?;
-        let submission = pane
-            .submissions
-            .lock()
-            .expect("Web submissions poisoned")
-            .get(session)?
-            .clone();
-        let origin = submission
-            .previous_blank
-            .lock()
-            .expect("Web blank origin poisoned")
-            .take()?;
-        if origin.generation.to_string() != candidate.generation
-            || origin.header != candidate.header
-            || &origin.workspace != workspace
-            || &origin.defaults != defaults
-            || !submission
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .is_empty()
-        {
-            return None;
-        }
-        let _permit = submission.submissions.try_acquire().ok()?;
-        let model = submission.model_command.view();
-        if model.pending.is_some() || model.receipt.is_some() {
-            return None;
-        }
-        let handle = self.session.attach(session).await.ok()?;
-        let draft = handle.draft_snapshot().await.ok()?;
-        if draft.revision != 0 || draft.header.fingerprint().ok()? != origin.header {
-            return None;
-        }
-        Some(ReopenedBlank {
-            id: session.clone(),
-            handle,
-            header: draft.header,
-        })
-    }
-
-    async fn defaults_stamp(&self) -> Option<[rsi_settings_protocol::SettingsVersion; 2]> {
-        let version = |namespace| async move {
-            self.settings
-                .read(namespace)
-                .await
-                .map(|snapshot| snapshot.version())
-        };
-        let (agent, presets) =
-            tokio::try_join!(version("rsi.agent"), version("rsi.agent-presets")).ok()?;
-        Some([agent, presets])
-    }
-    async fn reuse_draft(
-        &self,
-        index: crate::SurfaceId,
-        workspace: &rsi_workspace_protocol::WorkspaceId,
-        reuse: &ReuseDraft,
-    ) -> Result<bool> {
-        let pane = self.pane(index)?;
-        let _switching = pane.switching.lock().await;
-        if pane.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err("Surface is retiring".into());
-        }
-        let Some(attached) = pane.current.lock().expect("Web pane poisoned").clone() else {
-            return Ok(false);
-        };
-        let Some(creation) = &attached.creation else {
-            return Ok(false);
-        };
-        if attached.generation.to_string() != reuse.generation
-            || attached.header != reuse.header
-            || &creation.workspace_id != workspace
-            || attached.durable.load(std::sync::atomic::Ordering::Acquire)
-            || !attached
-                .submission
-                .owned
-                .lock()
-                .expect("Web pending identities poisoned")
-                .is_empty()
-            || attached.defaults.is_none()
-        {
-            return Ok(false);
-        }
-        let Ok(_submission) = attached.submission.submissions.try_acquire() else {
-            return Ok(false);
-        };
-        if attached.defaults != self.defaults_stamp().await {
-            return Ok(false);
-        }
-        let Ok(draft) = attached.handle.draft_snapshot().await else {
-            return Ok(false);
-        };
-        if draft.revision != 0
-            || draft.header.fingerprint().map_err(error)? != attached.header
-            || *attached.model.lock().expect("Web model poisoned")
-                != rsi_agent_session_protocol::ModelSelection::baseline(draft.header.settings())
-        {
-            return Ok(false);
-        }
+    fn select_open_pane(&self, pane: &Pane) -> Result<()> {
         pane.selection
             .fetch_update(
                 std::sync::atomic::Ordering::AcqRel,
@@ -1475,7 +1306,7 @@ impl GuiApplication {
             .map_err(|_| "Surface selection capacity exhausted")?;
         pane.changed();
         self.changed();
-        Ok(true)
+        Ok(())
     }
     async fn cancel(
         &self,

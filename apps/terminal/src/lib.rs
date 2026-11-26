@@ -518,12 +518,7 @@ pub(crate) async fn resolve_application_handle(
             agent_preset_id,
         } => {
             let session_id = session_id.map_or_else(generated_cli_session_id, Ok)?;
-            let cwd = std::path::absolute(cwd)
-                .map_err(|error| RsiError::Boot(format!("workspace: {error}")))?;
-            let registered = workspace
-                .get_or_create(&cwd)
-                .await
-                .map_err(|error| RsiError::Boot(error.to_string()))?;
+            let registered = register_session_directory(workspace.as_ref(), cwd).await?;
             application
                 .create(CreateSession {
                     fork: None,
@@ -549,6 +544,17 @@ pub(crate) async fn resolve_application_handle(
             Ok(handle)
         }
     }
+}
+
+async fn register_session_directory(
+    workspace: &dyn rsi_workspace_protocol::WorkspaceRegistry,
+    cwd: PathBuf,
+) -> Result<rsi_workspace_protocol::WorkspaceRecord, HandleError> {
+    let cwd = std::path::absolute(cwd).map_err(|e| RsiError::Boot(format!("workspace: {e}")))?;
+    Ok(workspace
+        .get_or_create(&cwd)
+        .await
+        .map_err(|e| RsiError::Boot(e.to_string()))?)
 }
 
 async fn check_resume_workspace(cwd: &std::path::Path, expected: &str) -> Result<()> {

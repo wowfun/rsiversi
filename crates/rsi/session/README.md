@@ -241,8 +241,9 @@ Submission defers execution dependencies
 until the selected operation requires them; fresh publication serializes the
 one transition from draft to durable attachment. Each fresh publication freezes
 that retained payload, including its baseline digest, under the same admission.
-With Navigation mounted, publication of an ordinary native draft enrolls its
-identity in the registration selected by its creator. A manual fork inherits
+With Navigation mounted, opening a new workspace conversation saves its Header
+and enrolls it in the chosen registration during Host-owned preparation. An
+exact-ID private draft enrolls when published. A manual fork inherits
 the source's explicit membership at preparation. Private frozen workflows and
 independently created plugin Agents do not enroll. An application fork uses its
 authorized source's directory, including when that directory is unregistered.

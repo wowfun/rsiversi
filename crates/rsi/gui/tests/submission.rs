@@ -103,6 +103,7 @@ struct Backend {
     export_gate: Mutex<Option<Arc<admission::HeaderGate>>>,
     task_panels: Arc<task_panels::Scenario>,
     unpublished: std::sync::atomic::AtomicBool,
+    reuse_workspace: std::sync::atomic::AtomicBool,
     publish_before_draft_read: std::sync::atomic::AtomicBool,
     draft_reads: std::sync::atomic::AtomicUsize,
     reject_submissions: std::sync::atomic::AtomicBool,
@@ -175,6 +176,25 @@ impl SessionService for Service {
             .unwrap(),
         );
         Ok(self.0.clone())
+    }
+    async fn open_workspace(
+        &self,
+        request: rsi_session_protocol::OpenWorkspaceConversation,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        if self
+            .0
+            .reuse_workspace
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(self.0.clone());
+        }
+        self.create(CreateSession {
+            session_id: request.fresh,
+            workspace_id: request.workspace_id,
+            agent_preset_id: request.agent_preset_id,
+            fork: None,
+        })
+        .await
     }
     async fn attach(&self, id: &SessionId) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
         self.0

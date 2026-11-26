@@ -150,7 +150,10 @@ pub(super) fn failure(
         Failure::QueueOperationConflict { .. } | Failure::QueueOutcomeUnknown { .. } => {
             operation == Operation::MutateQueue
         }
-        Failure::DraftConflict { .. } => operation == Operation::Create,
+        Failure::DraftConflict { .. } => matches!(
+            operation,
+            Operation::Create | Operation::WorkspaceConversation
+        ),
         Failure::Conflict { .. } => operation == Operation::Image,
         Failure::MessageConflict { .. } | Failure::MessageOutcomeUnknown { .. } => {
             operation == Operation::Submit
@@ -180,6 +183,7 @@ pub(super) fn failure(
         Failure::WorkflowUnavailable { .. } => matches!(
             operation,
             Operation::Create
+                | Operation::WorkspaceConversation
                 | Operation::SelectPreset
                 | Operation::SelectPublishedPreset
                 | Operation::Submit
@@ -371,13 +375,6 @@ impl SessionService for SessionClient {
             return Err(malformed(Operation::Create));
         }
         let header = created.draft.header;
-        let workspace = rsi_workspace_protocol::WorkspaceRecord {
-            name: None,
-            created_at_ms: None,
-            renamed_at_ms: None,
-            id: request.workspace_id,
-            coordinates: header.coordinates().clone(),
-        };
         if header.session_id() != &request.session_id
             || header.execution_owner().is_some()
             || !match (&request.fork, header.history_origin()) {
@@ -389,7 +386,6 @@ impl SessionService for SessionClient {
                 }
                 _ => false,
             }
-            || workspace.validate().is_err()
             || (created.draft.revision == 0
                 && request
                     .agent_preset_id
@@ -399,6 +395,22 @@ impl SessionService for SessionClient {
             return Err(malformed(Operation::Create));
         }
         self.handle(header, Some(created.draft.revision))
+    }
+    async fn open_workspace(
+        &self,
+        request: rsi_session_protocol::OpenWorkspaceConversation,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        let header: SessionHeader = self
+            .state
+            .call(Operation::WorkspaceConversation, &request)
+            .await?;
+        if header.history_origin().is_some()
+            || header.execution_owner().is_some()
+            || header.protection().is_some()
+        {
+            return Err(malformed(Operation::WorkspaceConversation));
+        }
+        self.handle(header, None)
     }
     async fn attach(
         &self,

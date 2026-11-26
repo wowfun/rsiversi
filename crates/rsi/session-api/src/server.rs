@@ -252,6 +252,23 @@ fn root_operations(
         }),
     )?;
     let attach_scratch = scratch.clone();
+    let workspace_service = service.clone();
+    let workspace_scratch = scratch.clone();
+    let workspace_conversation = registrar.register(
+        Operation::WorkspaceConversation.spec(),
+        json_handler(
+            move |context, request: rsi_session_protocol::OpenWorkspaceConversation| {
+                let service = workspace_service.scoped(context.origin);
+                let scratch = workspace_scratch.clone();
+                async move {
+                    let reservation = scratch.reserve(Operation::WorkspaceConversation).await?;
+                    let result =
+                        async { service.open_workspace(request).await?.header().await }.await;
+                    admitted(result, reservation)
+                }
+            },
+        ),
+    )?;
     let attach_service = service.clone();
     let attach = registrar.register(
         Operation::Attach.spec(),
@@ -340,7 +357,14 @@ fn root_operations(
             }
         }),
     )?;
-    maintenance.extend([create, attach, read_summary, recent, catalog]);
+    maintenance.extend([
+        create,
+        workspace_conversation,
+        attach,
+        read_summary,
+        recent,
+        catalog,
+    ]);
     Ok(maintenance)
 }
 #[allow(clippy::too_many_lines)] // Keep the closed operation-to-handler mapping reviewable in one place.

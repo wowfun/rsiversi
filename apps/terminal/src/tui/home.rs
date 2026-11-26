@@ -47,6 +47,26 @@ struct Menu {
     detail_offset: usize,
 }
 
+async fn interactive_selection(
+    application: &Arc<dyn SessionService>,
+    workspace: &Arc<dyn rsi_workspace_protocol::WorkspaceRegistry>,
+    selection: SessionSelection,
+) -> std::result::Result<Attachment, HandleError> {
+    if let SessionSelection::Fresh {
+        cwd,
+        session_id: None,
+        agent_preset_id,
+    } = selection
+    {
+        let registered = crate::register_session_directory(workspace.as_ref(), cwd).await?;
+        workspace_attachment(application.as_ref(), registered.id, agent_preset_id).await
+    } else {
+        let resumed = matches!(selection, SessionSelection::Resume { .. });
+        let handle = resolve_application_handle(application, workspace, selection).await?;
+        Ok(attachment(handle, resumed, None).await?)
+    }
+}
+
 async fn startup(
     context: &rsi_meta::Context,
     application: &Arc<dyn SessionService>,
@@ -58,16 +78,14 @@ async fn startup(
     if !resumed && let Some(reason) = needs_setup(context, catalog).await? {
         return Ok(Startup::Home(reason));
     }
-    let handle = match resolve_application_handle(application, workspace, selection).await {
-        Ok(handle) => handle,
+    let attached = match interactive_selection(application, workspace, selection).await {
+        Ok(selected) => selected,
         Err(HandleError::Session(SessionError::SetupRequired)) if !resumed => {
             return Ok(Startup::Home("Default model configuration is no longer available. Use /login or /model to start.".into()));
         }
         Err(error) => return Err(error.into()),
     };
-    Ok(Startup::Attached(Box::new(
-        attachment(handle, resumed, None).await?,
-    )))
+    Ok(Startup::Attached(Box::new(attached)))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -169,12 +187,7 @@ pub(super) async fn run(
             let workspace = workspace.clone();
             let selection = selection.clone();
             attaching = Some(Box::pin(async move {
-                attachment(
-                    resolve_application_handle(&application, &workspace, selection).await?,
-                    false,
-                    None,
-                )
-                .await
+                Ok(interactive_selection(&application, &workspace, selection).await?)
             }));
             status = "Starting session… Draft retained.".into();
         }
@@ -342,6 +355,13 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl SessionService for CreateFailure {
+        async fn open_workspace(
+            &self,
+            _: rsi_session_protocol::OpenWorkspaceConversation,
+        ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            Err(self.error.clone())
+        }
         async fn read_summary(
             &self,
             _: &rsi_agent_session_protocol::SessionId,

@@ -18,6 +18,7 @@ pub(crate) fn operations() -> Vec<OperationSpec> {
             | Operation::Purge
             | Operation::PurgeStatus
             | Operation::Create
+            | Operation::WorkspaceConversation
             | Operation::Recent
             | Operation::ScheduledTasks
             | Operation::ScheduledTasksObserve

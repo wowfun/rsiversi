@@ -43,6 +43,7 @@ mod resources;
 mod schedule_catalog;
 mod terminal;
 mod workflow;
+mod workspace_conversation;
 pub use plugin::SessionFactory;
 use references::map_reference_error;
 
@@ -536,6 +537,7 @@ impl LocalSessionService {
                     lease.enrollment = Some(input.workspace_id);
                 }
                 rsi_session_protocol::BlankSession {
+                    workspace: None,
                     session_id: input.session_id,
                     coordinates: workspace.coordinates,
                     agent_preset_id: input.agent_preset_id,
@@ -595,8 +597,13 @@ impl LocalSessionService {
             None => (header, Arc::clone(&self.composition)),
         };
         let register = lease.shared;
-        self.compose_draft(header, composition, lease, register)
-            .await
+        let handle = self
+            .compose_draft(header, composition, lease, register)
+            .await?;
+        if let Some(workspace) = request.workspace {
+            handle.enroll_workspace(&workspace).await?;
+        }
+        Ok(handle)
     }
 
     async fn compose_draft(
@@ -821,6 +828,12 @@ impl SessionService for LocalSessionService {
         self.attach_local(session_id)
             .await
             .map(|handle| handle as Arc<dyn SessionHandle>)
+    }
+    async fn open_workspace(
+        &self,
+        request: rsi_session_protocol::OpenWorkspaceConversation,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        self.open_workspace_conversation(request).await
     }
 
     async fn list_recent(
@@ -1291,11 +1304,21 @@ impl LocalSessionHandle {
         let Some(lease) = &self.lease else {
             return Ok(());
         };
-        if let Some(workspace) = lease.workspace()
-            && let Some(navigation) = self
-                .plugin_context
-                .as_ref()
-                .and_then(|ctx| ctx.lookup_local::<rsi_navigation::NavigationContract>())
+        if let Some(workspace) = lease.workspace() {
+            self.enroll_workspace(workspace).await?;
+        }
+        lease.published();
+        Ok(())
+    }
+
+    async fn enroll_workspace(
+        &self,
+        workspace: &rsi_workspace_protocol::WorkspaceId,
+    ) -> Result<()> {
+        if let Some(navigation) = self
+            .plugin_context
+            .as_ref()
+            .and_then(|ctx| ctx.lookup_local::<rsi_navigation::NavigationContract>())
         {
             let failure = |error| {
                 SessionError::Backend(format!(
@@ -1312,7 +1335,6 @@ impl LocalSessionHandle {
                 .map_err(&failure)?;
             attach.await.map_err(failure)?;
         }
-        lease.published();
         Ok(())
     }
 

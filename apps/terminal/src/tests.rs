@@ -377,6 +377,7 @@ async fn cancelled_terminal_keeps_its_finish_line_under_renderer_backpressure() 
 #[derive(Debug, Default)]
 pub(crate) struct UnknownThenAcceptedHandle {
     pub(crate) created: std::sync::Mutex<Vec<CreateSession>>,
+    pub(crate) draft_header: std::sync::Mutex<Option<rsi_agent_session_protocol::SessionHeader>>,
     pub(crate) approvals: std::sync::Mutex<Vec<rsi_approval_protocol::ApprovalRequest>>,
     pub(crate) approval_answers: std::sync::atomic::AtomicUsize,
     pub(crate) approval_failure: std::sync::atomic::AtomicBool,
@@ -585,7 +586,16 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn draft_snapshot(
         &self,
     ) -> rsi_session_protocol::Result<rsi_session_protocol::SessionDraftView> {
-        panic!("unexpected draft snapshot")
+        Ok(rsi_session_protocol::SessionDraftView {
+            header: self
+                .draft_header
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("fixture draft"),
+            revision: 0,
+            command_inputs: Vec::new(),
+        })
     }
     async fn observe_draft(
         &self,
@@ -745,6 +755,9 @@ impl SessionHandle for UnknownThenAcceptedHandle {
         &self,
     ) -> rsi_session_protocol::Result<rsi_agent_session_protocol::SessionHeader> {
         use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader};
+        if let Some(header) = self.draft_header.lock().unwrap().as_ref() {
+            return Ok(header.clone());
+        }
         Ok(SessionHeader::new_local(
             SessionId::new("session-reconcile").unwrap(),
             1,

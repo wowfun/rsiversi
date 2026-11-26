@@ -1,6 +1,25 @@
 use super::*;
 
 #[tokio::test]
+async fn workspace_open_uses_the_chosen_identity_without_a_second_attachment() {
+    let remote = Remote::new();
+    let client = SessionClient::new(remote.clone());
+    let chosen = header();
+    let request = rsi_session_protocol::OpenWorkspaceConversation {
+        workspace_id: rsi_workspace_protocol::WorkspaceId::from_bytes([3; 32]),
+        fresh: SessionId::new("unused-fresh").unwrap(),
+        agent_preset_id: None,
+    };
+    remote.reply(&chosen);
+    let handle = client.open_workspace(request.clone()).await.unwrap();
+    assert_eq!(handle.header().await.unwrap(), chosen);
+    assert_eq!(
+        remote.requests.lock().unwrap().as_slice(),
+        &[(Operation::WorkspaceConversation.spec(), json!(request))]
+    );
+}
+
+#[tokio::test]
 async fn fork_create_rejects_missing_or_different_history_even_with_matching_request_echo() {
     use rsi_agent_session_protocol::{ForkPoint, TurnId};
     let turn = TurnId::new("selected-turn").unwrap();

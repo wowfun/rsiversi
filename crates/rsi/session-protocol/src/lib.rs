@@ -175,6 +175,18 @@ pub struct CreateSession {
     pub fork: Option<ForkDraft>,
 }
 
+/// Opens a conversation in a registered workspace, reusing an eligible member.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenWorkspaceConversation {
+    /// Exact Host registration chosen by the user.
+    pub workspace_id: WorkspaceId,
+    /// Identity to claim if a new conversation is needed.
+    pub fresh: SessionId,
+    /// When specified, only a member using this preset can be reused.
+    pub agent_preset_id: Option<AgentPresetId>,
+}
+
 /// Manual fork selection; source identity is authorized before any history is read.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1207,6 +1219,13 @@ pub trait SessionService: fmt::Debug + Send + Sync + 'static {
     async fn read_summary(&self, session_id: &SessionId) -> Result<SessionSummary>;
     /// Creates one unpublished draft handle after rejecting a durable identity collision.
     async fn create(&self, request: CreateSession) -> Result<Arc<dyn SessionHandle>>;
+    /// Opens an unstarted member or enrolls a newly created conversation.
+    async fn open_workspace(
+        &self,
+        _request: OpenWorkspaceConversation,
+    ) -> Result<Arc<dyn SessionHandle>> {
+        Err(SessionError::Api(rsi_api_protocol::ApiError::Unavailable))
+    }
     /// Resolves a live draft or attaches to one exact durable session from Store alone.
     async fn attach(&self, session_id: &SessionId) -> Result<Arc<dyn SessionHandle>>;
     /// Lists one bounded creation-time-descending page.
@@ -1244,6 +1263,8 @@ pub enum DraftClaim {
 /// Ordinary Session preparation at an already resolved execution directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlankSession {
+    /// Registration to enroll in. Independent plugin Agents omit it.
+    pub workspace: Option<WorkspaceId>,
     /// Identity reserved through preparation and durable publication.
     pub session_id: SessionId,
     /// Directory canonicalized by the registered location or its filesystem owner.

@@ -13,7 +13,6 @@ pub(super) struct Fixture {
     writes: AtomicUsize,
     read_only: AtomicBool,
     changed_scope: AtomicBool,
-    defaults_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     snapshot: Mutex<SettingsSnapshot>,
 }
 impl Default for Fixture {
@@ -26,7 +25,6 @@ impl Default for Fixture {
             writes: AtomicUsize::new(0),
             read_only: AtomicBool::new(false),
             changed_scope: AtomicBool::new(false),
-            defaults_barrier: Mutex::default(),
             snapshot: Mutex::new(SettingsSnapshot {
                 scope_id: SettingsScopeId::parse("0".repeat(32)).unwrap(),
                 revision: 0,
@@ -92,96 +90,21 @@ async fn reopening_a_publishing_draft_seeds_the_durable_history() {
 }
 
 #[tokio::test]
-async fn empty_draft_reuse_preserves_attachment_and_rejects_changed_defaults_or_pending_work() {
+async fn workspace_selection_uses_the_host_identity_and_preserves_the_active_editor() {
     let (runtime, backend, app) = fixture().await;
-    backend.unpublished.store(true, Ordering::Release);
     let first = view(&app)["surfaces"]["main"].clone();
-    let create = |current: &serde_json::Value| {
-        json!({"action":"create","pane":"main","workspace":"a".repeat(64),
-        "reuse":{"generation":current["generation"],"header":current["header"]}})
-        .to_string()
-    };
-    let mut obsolete: serde_json::Value = serde_json::from_str(&create(&first)).unwrap();
-    obsolete["trust"] = json!(true);
-    assert!(app.command(&obsolete.to_string()).await.is_err());
-    assert_eq!(view(&app)["surfaces"]["main"]["session"], first["session"]);
-    *backend.settings.defaults_barrier.lock().unwrap() =
-        Some(Arc::new(tokio::sync::Barrier::new(2)));
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.command(&create(&first)),
-    )
-    .await
-    .expect("both independent default reads should reach the barrier")
-    .unwrap();
-    *backend.settings.defaults_barrier.lock().unwrap() = None;
-    let reused = view(&app)["surfaces"]["main"].clone();
-    assert_eq!(first["session"], reused["session"]);
-    assert_eq!(first["generation"], reused["generation"]);
-    assert_ne!(first["selection"], reused["selection"]);
-    backend
-        .settings
-        .changed_scope
-        .store(true, Ordering::Release);
-    app.command(&create(&reused)).await.unwrap();
-    let changed = view(&app)["surfaces"]["main"].clone();
-    assert_ne!(changed["session"], reused["session"]);
-    let generation = changed["generation"].as_str().unwrap();
-    let prepared = prepare(&app, generation, "unconfirmed input", vec![], false).await;
-    assert_eq!(
-        dispatch(&app, generation, &prepared, "dispatch").await["status"],
-        "unknown"
-    );
-    app.command(&create(&changed)).await.unwrap();
-    assert_ne!(
-        view(&app)["surfaces"]["main"]["session"],
-        changed["session"]
-    );
-    assert!(runtime.shutdown().await.is_clean());
-}
-
-#[tokio::test]
-async fn workspace_can_reopen_its_previous_blank_but_not_after_a_default_change() {
-    let (runtime, backend, app) = fixture().await;
-    backend.unpublished.store(true, Ordering::Release);
-    let original_header = backend.header.lock().unwrap().clone();
-    let original = view(&app)["surfaces"]["main"].clone();
-    let workspace = "a".repeat(64);
-    let create = json!({"action":"create","pane":"main","workspace":workspace});
-    let candidate = |surface: &serde_json::Value| {
-        json!({"action":"create","pane":"main","workspace":workspace,
-        "reuse":{"session":surface["session"],"generation":surface["generation"],"header":surface["header"]}})
-    };
-    app.command(&create.to_string()).await.unwrap();
-    *backend.header.lock().unwrap() = original_header.clone();
-    let count = backend.creations.lock().unwrap().len();
-    let previous_reads = backend.settings.calls.load(Ordering::SeqCst);
-    app.command(&candidate(&original).to_string())
-        .await
-        .unwrap();
-    let restored = view(&app)["surfaces"]["main"].clone();
-    assert_eq!(restored["session"], original["session"]);
-    assert_eq!(restored["creation"], original["creation"]);
-    assert_ne!(restored["generation"], original["generation"]);
-    assert_eq!(backend.creations.lock().unwrap().len(), count);
-    assert_eq!(
-        backend.settings.calls.load(Ordering::SeqCst) - previous_reads,
-        2
-    );
-
-    app.command(&create.to_string()).await.unwrap();
-    *backend.header.lock().unwrap() = original_header;
-    backend
-        .settings
-        .changed_scope
-        .store(true, Ordering::Release);
-    app.command(&candidate(&restored).to_string())
-        .await
-        .unwrap();
-    assert_ne!(
-        view(&app)["surfaces"]["main"]["session"],
-        original["session"]
-    );
+    let create = json!({"action":"create","pane":"main","workspace":"a".repeat(64)}).to_string();
+    let reads = backend.settings.calls.load(Ordering::SeqCst);
+    backend.reuse_workspace.store(true, Ordering::Release);
+    app.command(&create).await.unwrap();
+    let same = view(&app)["surfaces"]["main"].clone();
+    assert_eq!(first["session"], same["session"]);
+    assert_eq!(first["generation"], same["generation"]);
+    assert_ne!(first["selection"], same["selection"]);
+    assert_eq!(backend.settings.calls.load(Ordering::SeqCst), reads);
+    backend.reuse_workspace.store(false, Ordering::Release);
+    app.command(&create).await.unwrap();
+    assert_ne!(view(&app)["surfaces"]["main"]["session"], first["session"]);
     assert!(runtime.shutdown().await.is_clean());
 }
 impl Fixture {
@@ -245,12 +168,6 @@ impl SettingsAccess for Fixture {
         })
     }
     async fn read(&self, namespace: &str) -> rsi_settings_protocol::Result<SettingsSnapshot> {
-        if matches!(namespace, "rsi.agent" | "rsi.agent-presets") {
-            let barrier = self.defaults_barrier.lock().unwrap().clone();
-            if let Some(barrier) = barrier {
-                barrier.wait().await;
-            }
-        }
         if namespace == rsi_client_preferences::NAMESPACE
             && !self.preference_enabled.load(Ordering::SeqCst)
         {

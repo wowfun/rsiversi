@@ -37,6 +37,112 @@ async fn query(running: &RunningRsi, origin: CallOrigin, archived: bool) -> Navi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_new_reuses_queued_input_after_restart_and_stops_reusing_after_a_turn() {
+    use rsi_session_protocol::{
+        BlankSession, DraftClaim, OpenWorkspaceConversation, SessionIngressContract,
+    };
+    let (endpoint, provider) = provider().await;
+    let fixture = fixture(&endpoint);
+    let first = SessionId::new("queued-workspace-member").unwrap();
+    let message = MessageId::new("retained-context").unwrap();
+    let profile = host_profile(&fixture);
+    let workspace;
+    let receipt;
+    {
+        let host = RunningRsi::boot_host_profile(composition(fixture.paths.clone()), &profile)
+            .await
+            .unwrap();
+        let registration = host
+            .workspace_registry()
+            .unwrap()
+            .get_or_create(&fixture.workspace)
+            .await
+            .unwrap();
+        workspace = registration.id;
+        let service = host.session_service().unwrap();
+        let opened = service
+            .open_workspace(OpenWorkspaceConversation {
+                workspace_id: workspace.clone(),
+                fresh: first.clone(),
+                agent_preset_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            service.read_summary(&first).await.unwrap().durable_fact_seq,
+            0
+        );
+        receipt = opened
+            .submit(SubmitInput {
+                origin: rsi_session_protocol::SubmissionOrigin::User,
+                attribution: None,
+                reasoning_effort: None,
+                delivery: rsi_agent_session_protocol::MessageDelivery::NextStep,
+                message_id: message.clone(),
+                content: vec![SessionInput::Text {
+                    text: "keep until the first turn".into(),
+                }]
+                .try_into()
+                .unwrap(),
+                model: None,
+                sandbox: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            service.read_summary(&first).await.unwrap().durable_fact_seq,
+            0
+        );
+        assert!(host.shutdown().await.is_clean());
+    }
+    let host = composition(fixture.paths.clone())
+        .build()
+        .unwrap()
+        .start_file(&fixture.profile)
+        .await
+        .unwrap();
+    crate::product::ready(&host).await;
+    let ingress = host.lookup_local::<SessionIngressContract>().unwrap();
+    let service = ingress.scoped(CallOrigin::Local);
+    let header = service.read_summary(&first).await.unwrap().header;
+    ingress
+        .create_shared_blank(
+            BlankSession {
+                workspace: None,
+                coordinates: header.coordinates().clone(),
+                session_id: SessionId::new("separate-plugin-agent").unwrap(),
+                agent_preset_id: None,
+            },
+            CallOrigin::Local,
+            DraftClaim::Exclusive,
+        )
+        .await
+        .unwrap();
+    let open = |fresh: &str, agent_preset_id| {
+        service.open_workspace(OpenWorkspaceConversation {
+            workspace_id: workspace.clone(),
+            fresh: SessionId::new(fresh).unwrap(),
+            agent_preset_id,
+        })
+    };
+    let reused = open("unused-fresh", None).await.unwrap();
+    assert_eq!(reused.header().await.unwrap().session_id(), &first);
+    assert_eq!(reused.message_status(&message).await.unwrap(), receipt);
+    let matching = open("explicit-unused", Some(header.agent_preset_id().clone()))
+        .await
+        .unwrap();
+    assert_eq!(matching.header().await.unwrap().session_id(), &first);
+    run_message_to_terminal(&reused, "start-turn").await;
+    let next = open("started-needs-fresh", None).await.unwrap();
+    assert_eq!(
+        next.header().await.unwrap().session_id().as_str(),
+        "started-needs-fresh"
+    );
+    assert!(host.shutdown().await.is_clean());
+    provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn detached_agent_and_fork_survive_restart_without_registering_their_directory() {
     use rsi_agent_session_protocol::{ForkPoint, ForkTurnSelection, TurnOutcome};
     use rsi_session_protocol::{BlankSession, DraftClaim, ForkDraft, SessionIngressContract};
@@ -63,6 +169,7 @@ async fn detached_agent_and_fork_survive_restart_without_registering_their_direc
         let agent = ingress
             .create_shared_blank(
                 BlankSession {
+                    workspace: None,
                     session_id: source.clone(),
                     coordinates: coordinates.clone(),
                     agent_preset_id: None,

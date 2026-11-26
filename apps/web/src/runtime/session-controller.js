@@ -351,7 +351,6 @@ export function createPaneClass(context) {
         return;
       this.editors.set(key, editor);
       this.editor = editor;
-      editor.reuseGeneration = data.creation && !editor.record.everDispatched ? generation : undefined;
       this.bindingError =
         editor.record.header !== data.header
           ? "Saved Session Header changed. The draft is retained and cannot be sent to this Session."

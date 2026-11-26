@@ -203,8 +203,9 @@ of cursor position; invalid arguments retain the draft. Multi-line input startin
 with other reserved names and `//` input are literal Human text in both dispatch layers.
 `/export` rejects multiline arguments and never submits them as Human text.
 Editing and submission keys follow the [interaction design](docs/tui-design.md).
-`/new` stays on the attached session's execution target and directory. It uses
-the Host default unless a preset is supplied. If that default requires a local
+`/new` opens a conversation on the attached session's execution target and
+directory through the [workspace selection contract](../../crates/rsi/session-protocol/README.md).
+It uses the Host default unless a preset is supplied. If that default requires a local
 application, use `/new <native-preset-id>` in the SSH workspace.
 Incomplete metrics retain their progress until the next inspection or explicit
 refresh; receiving an incomplete result does not immediately issue another read.

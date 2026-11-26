@@ -290,7 +290,7 @@ impl GuiApplication {
                 Restore::Create { mut creation, .. } => {
                     creation.session_id = SessionId::new(rsi_ui::fresh_identity("web")?).map_err(error)?;
                     let id = creation.session_id.clone();
-                    app.open(pane, id.clone(), super::Open::Create(creation, None)).await?;
+                    app.open(pane, id.clone(), super::Open::Create(creation)).await?;
                     (id, None)
                 }
             };

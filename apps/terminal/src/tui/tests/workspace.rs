@@ -135,10 +135,11 @@ async fn new_with_explicit_preset_stays_on_the_attached_ssh_target() {
         header.session_id().clone(),
         1,
         coordinates.clone(),
-        header.agent_preset_id().clone(),
+        AgentPresetId::new("standard").unwrap(),
         header.settings().clone(),
     )
     .unwrap();
+    *handle.draft_header.lock().unwrap() = Some(client.state.header.clone());
     client.workspace = registry.clone();
     for (command, expected) in [("/new", None), ("/new standard", Some("standard"))] {
         client.state.editor.insert(command).unwrap();
@@ -147,8 +148,13 @@ async fn new_with_explicit_preset_stays_on_the_attached_ssh_target() {
             panic!("expected a new session command");
         };
         client.action(Action::New(preset));
-        client.tasks.next().await.unwrap().result.unwrap();
+        let Update::Attached(attached) = client.tasks.next().await.unwrap().result.unwrap() else {
+            panic!("expected the registered workspace conversation");
+        };
+        assert_eq!(attached.header, client.state.header);
+        assert!(attached.inspection.is_none());
         let request = handle.created.lock().unwrap().pop().unwrap();
+        assert_ne!(&request.session_id, attached.header.session_id());
         assert_eq!(request.workspace_id, WorkspaceId::from_bytes([1; 32]));
         assert_eq!(
             request.agent_preset_id.as_ref().map(AgentPresetId::as_str),

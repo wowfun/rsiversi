@@ -49,6 +49,7 @@ pub enum Operation {
     TerminalOutput,
     TerminalInput,
     Create,
+    WorkspaceConversation,
     Attach,
     ReadSummary,
     Recent,
@@ -110,7 +111,7 @@ pub enum Operation {
 }
 impl Operation {
     /// Current Session operation descriptors.
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 73] = [
         Self::CasGcPreview,
         Self::CasGc,
         Self::CasGcStatus,
@@ -126,6 +127,7 @@ impl Operation {
         Self::TerminalOutput,
         Self::TerminalInput,
         Self::Create,
+        Self::WorkspaceConversation,
         Self::Attach,
         Self::ReadSummary,
         Self::Recent,
@@ -207,6 +209,9 @@ impl Operation {
             Self::TerminalInput => ("terminal-input", Data, Mutation, 512 * 1024, 8192),
             Self::TerminalOutput => ("terminal-output", Subscription, Read, 8192, 128 * 1024),
             Self::Create => ("create", Data, Mutation, 8192, DRAFT_REPLY + 8192),
+            Self::WorkspaceConversation => {
+                ("workspace-conversation", Data, Mutation, 8192, HEADER_REPLY)
+            }
             Self::ReadSummary => ("read-summary", Data, Read, 4096, HEADER_REPLY + 256),
             Self::Attach => ("attach", Data, Read, 4096, HEADER_REPLY),
             Self::Recent => ("recent", Data, Read, 4096, LARGE_REPLY),
@@ -312,6 +317,7 @@ impl Operation {
             access: if matches!(
                 self,
                 Self::Cancel
+                    | Self::WorkspaceConversation
                     | Self::CancelWorkflow
                     | Self::GoalControl
                     | Self::StopBackgroundJob
@@ -643,6 +649,7 @@ mod setup_tests {
             Operation::ExecuteCommand,
             Operation::SelectPreset,
             Operation::SelectPublishedPreset,
+            Operation::WorkspaceConversation,
             Operation::Compact,
         ] {
             assert_eq!(

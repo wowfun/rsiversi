@@ -244,6 +244,15 @@ Durable commands retain the Kernel's canonical receipt semantics. Unknown
 outcomes preserve the typed request identity for explicit query; no adapter
 automatically repeats a callback.
 
+Opening a conversation in a registered Workspace selects its most recently active
+visible, unarchived ordinary member that has yet to start a Turn. An explicit
+preset selects a matching member. When using the Host default, only the owner
+can change a candidate's preset. A paired creator can always choose the initial
+preset of a fresh conversation. If no member qualifies, the Host saves the new
+Header and enrolls it in the Workspace before returning. Unsent text and images
+retain their browser ownership. Exact-ID draft creation and history forks keep
+their own admission semantics.
+
 Draft snapshots atomically expose the current Header and mutation revision. Preset
 selection prepares a complete replacement outside mutation admission, then applies
 it only to the same still-unpublished draft at the expected revision. Preparation

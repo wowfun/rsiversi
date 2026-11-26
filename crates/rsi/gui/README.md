@@ -31,9 +31,8 @@ resolve that registration by coordinate key, independently of catalog paging;
 late observations cannot replace another attachment's presentation. Attachment
 resolves only its own registration after retiring the prior owner; catalog refresh
 resolves attached registrations before page reads so a failed page cannot hide a
-registry outage. Catalog
-`key` identifies the same coordinate-scoped history. Creation receipts retain
-registration IDs only for draft reuse.
+registry outage. The catalog `key` identifies the same coordinate-scoped history.
+Draft recovery retains the Workspace registration and preset from the creation request.
 
 The model catalog retains one 64-item page shared by Settings and composers.
 The directory picker receives its result in the initiating call. Listing folders,
@@ -387,22 +386,12 @@ and the queue. The replacement controller subscribes to durable history,
 including queued inputs and subsequent activity from another client.
 Forking a conversation inherits its effective preset through the Session service.
 
-Repeated new-conversation actions in a workspace may reuse the pane's current
-empty draft or one it previously created and left untouched. Candidates must
-still be unpublished at revision zero with matching WorkspaceId/Header and unchanged
-agent/default-preset Settings versions. Only ordinary new-conversation drafts
-capture a defaults stamp for reuse. Each stamp reads the independent Agent and
-preset versions concurrently. New drafts capture matching stamps before and
-after creation. Reattaching an eligible blank compares its creation stamp to
-the current versions once. Recovery opens the handle whose Header was checked.
-The document offers its exact binding only
-after an empty text/image record has flushed and has no pending request or active
-submission/upload. Rust independently checks draft ownership and admission. A
-coalesced selection revision completes in-place reuse. Reopening a previous blank
-binds a fresh presentation generation to its original SessionId. Only its origin
-is retained with the pane's existing bounded submission records. The document
-checks device-local saved input before offering a previous blank. Read uncertainty disables reuse; it never makes
-Session creation invalid or reuses a historical/durable Session.
+Workspace New opens the identity chosen by the
+[Session service](../session-protocol/README.md). If the selected Session and
+Header already match the pane, its selection revision advances and its editor
+stays bound. Another selection binds its own controller and restores any
+accepted input from the Host. Device-local text and attachments follow the
+[Web persistence contract](../../../apps/web/docs/persistence.md).
 
 Detail previews read through the current exact-source ticket. A restored draft
 thumbnail can read its canonical Media reference with the attached pane generation.

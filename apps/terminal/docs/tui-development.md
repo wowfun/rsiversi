@@ -221,9 +221,9 @@ tui_rsi host start --profile dev
 tui_rsi run dev-tui --cwd "$tui_dev/workspace" --resume tui-dev
 ```
 
-A fresh Session becomes durable after input acceptance. Resume a Session that
-has accepted input; opening and closing an unused draft does not establish a
-durable history. The line profile can inspect the same Session while a
+The explicit `--session-id tui-dev` above creates a private draft. Accept an
+input before resuming it. Interactive workspace New instead saves its selected
+identity before the first input. The line profile can inspect the same Session while a
 compatible daemon owns it, or after the embedded client has exited:
 
 ```bash

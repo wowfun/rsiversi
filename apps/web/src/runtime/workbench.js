@@ -223,24 +223,6 @@ const Pane = createPaneClass({openModels:()=>settingsPanel.set("models"), DraftE
 const panes = new Map();
 listen(window, "rsi:detail-mode",()=>{for(const pane of panes.values())if(pane.lastTranscript)pane.renderTranscript(pane.lastTranscript,false);});
 const ExternalPane = externalPaneClass({command,perform});
-async function workspaceBlank(pane, workspace, store) {
-  if (!store) return;
-  const eligible = editor => editor?.store === store && editor.reuseGeneration && editor.record.creation?.workspace_id === workspace &&
-    !editor.record.everDispatched && !editor.dirty && !editor.failure && !editor.record.pending &&
-    !editor.text && !editor.images.length && !editor.references.length && !editor.record.releases.length;
-  if (eligible(pane.editor)) return {generation:pane.generation, header:pane.editor.record.header};
-  for (const editor of pane.editors.values()) {
-    if (!eligible(editor)) continue;
-    const record = editor.record;
-    const generation = editor.reuseGeneration;
-    editor.reuseGeneration = undefined;
-    const session = record.key[3];
-    try { if (await store.get(pane.index, session)) continue; }
-    catch { return; }
-    return {session, generation, header:record.header};
-  }
-}
-
 function select(index) {
   selected = index;
   selectSurface(index);
@@ -266,9 +248,7 @@ async function openInSelected(fields, startingText) {
       owner.restoring = undefined;
     }
     await pane.flush();
-    const reuse = fields.action === "create" && !fields.agent_preset_id
-      ? await workspaceBlank(pane, fields.workspace, owner.drafts) : undefined;
-    await owner.request("command", JSON.stringify({ ...fields, pane: pane.index, ...(reuse ? {reuse} : {}) }));
+    await owner.request("command", JSON.stringify({ ...fields, pane: pane.index }));
     if (startingText && fields.action === "new_conversation") {
       const target = panes.get(pane.index);
       await target?.startBinding;

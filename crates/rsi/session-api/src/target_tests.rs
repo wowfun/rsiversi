@@ -136,6 +136,7 @@ async fn actual_dispatch_rejects_cross_session_and_origin_forgery_before_invocat
         Operation::DeleteScheduledTask,
         Operation::RunScheduledTask,
         Operation::Create,
+        Operation::WorkspaceConversation,
         Operation::Recent,
         Operation::ReadSummary,
         Operation::WorkflowReadiness,

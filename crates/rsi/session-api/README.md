@@ -1,5 +1,9 @@
 # rsi-session-api
 
+The credential-scoped `workspace-conversation` mutation opens an eligible
+member or creates a shared blank in the named registration. It returns the
+chosen Header so the client can address the actual Session in its next request.
+
 `surface-observe` follows one attached conversation.
 One read subscription carries tagged Session updates under the authenticated
 target and immutable Header. A draft receives projections and Goal state. A

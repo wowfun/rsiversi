@@ -843,6 +843,7 @@ fn workspace_id() -> WorkspaceId {
 fn shared_blank(path: &Path, id: impl Into<String>) -> rsi_session_protocol::BlankSession {
     let path = rsi_workspace_protocol::canonical_native_path(path.canonicalize().unwrap());
     rsi_session_protocol::BlankSession {
+        workspace: None,
         coordinates: rsi_workspace_protocol::ExecutionCoordinates::new(
             rsi_workspace_protocol::ExecutionLocation::Local,
             path.to_str().unwrap(),

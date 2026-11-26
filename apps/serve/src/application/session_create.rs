@@ -137,30 +137,19 @@ impl Sessions {
             .caller(&input.request)
             .map_err(|_| Error::Cancelled)?;
         let creation = BlankSession {
+            workspace: input.workspace.clone(),
             coordinates,
             session_id: id,
             agent_preset_id: input.preset,
         };
         let handle = self
             .ingress
-            .create_shared_blank(creation, origin.clone(), claim)
+            .create_shared_blank(creation, origin, claim)
             .await
             .map_err(remote)?;
         let header = handle.header().await.map_err(remote)?;
         let mut result = receipt(&header, None);
         if let Some(workspace) = input.workspace {
-            let failure = |error| {
-                remote(format!(
-                    "Session '{}' was created but could not join Workspace '{}': {error}",
-                    header.session_id(),
-                    workspace
-                ))
-            };
-            self.navigation
-                .attach_workspace_session(origin, workspace.clone(), header.session_id().clone())
-                .map_err(&failure)?
-                .await
-                .map_err(failure)?;
             result["workspace_updated_at"] =
                 json!(self.navigation.workspace_changed_at(&workspace));
         }

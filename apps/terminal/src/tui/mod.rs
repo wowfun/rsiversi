@@ -151,6 +151,25 @@ async fn read_page(
     Ok(HistoryPage { history, inputs })
 }
 
+async fn workspace_attachment(
+    service: &dyn SessionService,
+    workspace_id: rsi_workspace_protocol::WorkspaceId,
+    preset: Option<AgentPresetId>,
+) -> std::result::Result<Attachment, HandleError> {
+    let fresh = super::generated_cli_session_id()?;
+    let handle = service
+        .open_workspace(rsi_session_protocol::OpenWorkspaceConversation {
+            workspace_id,
+            fresh: fresh.clone(),
+            agent_preset_id: preset,
+        })
+        .await
+        .map_err(HandleError::Session)?;
+    let header = handle.header().await.map_err(HandleError::Session)?;
+    let reused = header.session_id() != &fresh;
+    Ok(attachment_from_header(handle, header, reused, None).await?)
+}
+
 async fn attachment(
     handle: Arc<dyn SessionHandle>,
     durable: bool,
@@ -160,8 +179,26 @@ async fn attachment(
         .header()
         .await
         .map_err(|failure| error(format!("Session header read failed: {failure}")))?;
+    attachment_from_header(handle, header, durable, display_seq).await
+}
+
+async fn attachment_from_header(
+    handle: Arc<dyn SessionHandle>,
+    header: SessionHeader,
+    durable: bool,
+    display_seq: Option<u64>,
+) -> Result<Attachment> {
     let inspection = if durable {
-        Some(read(|| handle.inspect()).await?)
+        let execution = rsi_meta::Execution::native(tokio::runtime::Handle::current());
+        match rsi_client::read_with_capacity_retry(&execution, || handle.inspect()).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(SessionError::NotFound(_)) => match handle.draft_snapshot().await {
+                Ok(_) => None,
+                Err(SessionError::NotFound(_)) => Some(read(|| handle.inspect()).await?),
+                Err(other) => return Err(error(other)),
+            },
+            Err(other) => return Err(error(other)),
+        }
     } else {
         None
     };
@@ -1265,24 +1302,15 @@ impl Client {
                 let coordinates = self.state.header.coordinates().clone();
                 let workspace = self.workspace.clone();
                 self.spawn(async move {
-                    let session_id = super::generated_cli_session_id().map_err(error)?;
                     let registered = select_workspace(workspace.as_ref(), &coordinates)
                         .await
                         .map_err(|failure| {
                             error(format!("Workspace selection failed: {failure}"))
                         })?;
-                    let handle = application
-                        .create(CreateSession {
-                            fork: None,
-                            workspace_id: registered.id,
-                            session_id,
-                            agent_preset_id,
-                        })
-                        .await
-                        .map_err(|failure| error(format!("Session creation failed: {failure}")))?;
-                    attachment(handle, false, None)
-                        .await
-                        .map(|attached| Update::Attached(Box::new(attached)))
+                    let attached =
+                        workspace_attachment(application.as_ref(), registered.id, agent_preset_id)
+                            .await?;
+                    Ok(Update::Attached(Box::new(attached)))
                 });
             }
             Action::Attach(id) => {

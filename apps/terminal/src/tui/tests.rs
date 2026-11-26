@@ -1130,6 +1130,18 @@ struct Application(Arc<UnknownThenAcceptedHandle>);
 
 #[async_trait::async_trait]
 impl SessionService for Application {
+    async fn open_workspace(
+        &self,
+        request: rsi_session_protocol::OpenWorkspaceConversation,
+    ) -> rsi_session_protocol::Result<Arc<dyn SessionHandle>> {
+        self.create(CreateSession {
+            session_id: request.fresh,
+            workspace_id: request.workspace_id,
+            agent_preset_id: request.agent_preset_id,
+            fork: None,
+        })
+        .await
+    }
     async fn read_summary(
         &self,
         _: &rsi_agent_session_protocol::SessionId,
