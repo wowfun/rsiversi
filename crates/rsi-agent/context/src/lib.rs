@@ -56,9 +56,9 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 22;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v22\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v22\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 23;
+const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v23\0";
+const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v23\0";
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -295,13 +295,14 @@ fn assembled_system(
 }
 
 impl ContextFold {
+    fn source_session(&self) -> &rsi_agent_session_protocol::SessionId {
+        self.ingesting_source
+            .as_ref()
+            .unwrap_or_else(|| self.header.session_id())
+    }
+
     fn turn_key(&self, turn: &TurnId) -> TurnKey {
-        TurnKey::new(
-            self.ingesting_source
-                .as_ref()
-                .unwrap_or_else(|| self.header.session_id()),
-            turn,
-        )
+        TurnKey::new(self.source_session(), turn)
     }
     /// Starts an empty projection for one immutable session.
     #[cfg(test)]
@@ -1175,6 +1176,14 @@ impl ContextFold {
                 // boundary or install an uncompleted internal summary.
                 self.assemblers
                     .retain(|_, active| active.turn_id.as_ref() != Some(turn_id));
+            }
+            SessionFactBody::PluginContextCompacted {
+                effect_id,
+                checkpoint,
+                view_sha256,
+                ..
+            } => {
+                self.install_plugin_checkpoint(effect_id, seq, checkpoint, view_sha256)?;
             }
             SessionFactBody::StepPrepared { prompt: None, .. }
             | SessionFactBody::CancelRequested { .. }

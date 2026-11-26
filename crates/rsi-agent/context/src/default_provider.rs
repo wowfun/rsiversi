@@ -21,7 +21,7 @@ impl Default for DefaultContextBuilder {
         Self {
             identity: ContextBuilderIdentity::new(
                 "rsi.agent.context.default",
-                "2.17.0",
+                "2.18.0",
                 hex::encode(Sha256::digest(b"null")),
             )
             .expect("static builder identity is valid"),
@@ -127,6 +127,9 @@ impl ModelContextCursor for DefaultCursor {
         profile: &LanguageProfile,
     ) -> std::result::Result<crate::ContextPreparation, crate::ContextPreparationError> {
         self.fold.prepare_request(options, model, profile)
+    }
+    fn plugin_region_view(&self, start: u32, end: u32) -> Result<String> {
+        self.fold.plugin_region_view(start, end)
     }
     fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         self.fold.summary_installed(effect)

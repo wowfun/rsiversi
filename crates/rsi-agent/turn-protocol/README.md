@@ -1,5 +1,9 @@
 # rsi-agent-turn-protocol
 
+Regional compaction binds the plugin's selection to the observed native Fact
+cut and open Turn. Only the driver retaining that Turn's live claim may
+dispatch a model request. Its effect identity identifies the installed summary.
+
 Trusted Host plugins can move a local Session to an existing directory. Each
 change and its next-step notice share one commit. A full mailbox leaves the
 move in effect and the Host reports the undelivered notice. Selecting the

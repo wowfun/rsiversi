@@ -1,5 +1,10 @@
 # rsi-agent-kernel
 
+A model effect summarizing an explicitly selected region is owned by the open
+Turn. It can read earlier messages while an existing tool or conversation call
+is running. One region can be in flight per Turn. Its start and settlement
+preserve the conversation's tool-call provenance and scheduling decisions.
+
 Resident Sessions retain their immutable Header fingerprint, computed before
 acquiring the global Kernel lock for publication. Jobs status reads compare that value
 before and after awaiting the current source; both checks retain the live claim,

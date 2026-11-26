@@ -44,7 +44,7 @@ in the canonical control. Reading a Session with a change fetches its path by
 the control primary key in the same snapshot. Cold validation checks the pointer
 against control replay.
 
-The Store uses Header format 46 with separate history provenance and Agent
+The Store uses Header format 47 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating

@@ -3,6 +3,64 @@
 use crate::{EffectId, Result, SessionError, SessionId, TurnId, validate_sha256};
 use serde::{Deserialize, Serialize};
 
+/// A trusted application's replacement for an inclusive span of the current model input.
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCheckpoint {
+    /// Enabled plugin whose summarizer produced the replacement.
+    pub plugin: String,
+    /// Native Fact prefix against which the application selected its range.
+    pub through_seq: u64,
+    /// First retained message after the protected system prompt, zero-based.
+    pub start: u32,
+    /// Last message, inclusive.
+    pub end: u32,
+    /// Exact user-role checkpoint, including the plugin's framing.
+    pub message: rsi_ai_protocol::Message,
+    /// Optional half-open range of replacement blocks containing the human-readable summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_blocks: Option<std::ops::Range<u32>>,
+    /// Application presentation and provenance fields, bounded by the owning Fact envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<serde_json::Value>,
+}
+
+impl PluginCheckpoint {
+    /// Checks externally supplied provenance, coordinates and replacement content.
+    pub fn validate(&self) -> Result<()> {
+        crate::validate_plugin_name(&self.plugin)?;
+        if self.through_seq == 0 || self.start > self.end {
+            return Err(SessionError::Invalid(
+                "invalid plugin checkpoint range".into(),
+            ));
+        }
+        Self::validate_message(&self.message)?;
+        if self.summary_blocks.as_ref().is_some_and(|range| {
+            range.start > range.end || range.end as usize > self.message.content().len()
+        }) {
+            return Err(SessionError::Invalid(
+                "plugin summary blocks are outside the checkpoint".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A checkpoint may contribute text with user authority.
+    pub fn validate_message(message: &rsi_ai_protocol::Message) -> Result<()> {
+        if message.role() != rsi_ai_protocol::MessageRole::User
+            || !message
+                .content()
+                .iter()
+                .all(|part| matches!(part, rsi_ai_protocol::MessageContent::Text { .. }))
+        {
+            return Err(SessionError::Invalid(
+                "plugin checkpoint requires a user text message".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A paid compaction owned by an explicit command on an idle session.
 /// The session fact envelope supplies ordering and time for each transition.
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -190,6 +248,11 @@ pub enum ModelEventPurpose {
 }
 
 impl ModelPurpose {
+    /// Whether the effect summarizes a region chosen by a trusted plugin during a Turn.
+    pub fn is_region(&self) -> bool {
+        matches!(self, Self::ContextCompaction(plan) if matches!(plan.trigger, CompactionTrigger::Region { .. }))
+    }
+
     pub(crate) fn validate_snapshot(
         &self,
         snapshot: &rsi_ai_protocol::PreparedCallSnapshot,
@@ -276,6 +339,13 @@ pub struct CompactionPrior {
 pub enum CompactionTrigger {
     /// An explicit request to compact eligible history in an idle Session.
     Manual,
+    /// A trusted caller selected one contiguous interval in the open Turn's history.
+    Region {
+        /// Inclusive first conversation position after the system prompt.
+        start: u32,
+        /// Inclusive last conversation position after the system prompt.
+        end: u32,
+    },
     /// Last successful ordinary response reported this input Usage.
     Usage {
         /// Originating Session of this successful Conversation effect.
@@ -326,6 +396,12 @@ pub struct ContextCompactionPlan {
 impl ContextCompactionPlan {
     /// Validates bounded durable data without reading source Facts or live services.
     pub fn validate(&self) -> Result<()> {
+        let prior_only = matches!(self.trigger, CompactionTrigger::Region { start: 0, end: 0 })
+            && self.prior.is_some()
+            && self.selections.is_empty();
+        if matches!(self.trigger, CompactionTrigger::Region { start, end } if start > end) {
+            return Err(SessionError::Invalid("reversed compaction region".into()));
+        }
         if self.version == 0
             || self.through_seq == 0
             || self.original_bytes == 0
@@ -333,9 +409,9 @@ impl ContextCompactionPlan {
             || self.maximum_text_bytes > 32 * 1024
             || self.maximum_output_tokens == 0
             || self.maximum_output_tokens > 8192
-            || self.sources.is_empty()
+            || (self.sources.is_empty() && !prior_only)
             || self.sources.len() > 1024
-            || self.selections.is_empty()
+            || (self.selections.is_empty() && !prior_only)
             || self.selections.len() > 4096
         {
             return Err(SessionError::Invalid(

@@ -843,15 +843,44 @@ impl LocalContract for SessionArchiveContract {
     type Service = dyn SessionArchive;
 }
 
+/// Retained conversation coordinates of a trusted plugin's explicit selection.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionRegion {
+    /// Open Turn in the observed Session.
+    pub turn_id: TurnId,
+    /// Native Fact prefix from which the plugin's surface was derived.
+    pub through_seq: u64,
+    /// Inclusive positions after the system prompt.
+    pub start: u32,
+    /// Inclusive final position.
+    pub end: u32,
+}
+
 /// Executor-selected language route, context limits and summary dispatch.
 #[async_trait]
 pub trait ManualCompactor: fmt::Debug + Send + Sync {
+    /// Installs the trusted plugin's supplied content under the exact open Turn.
+    async fn install_plugin_checkpoint(
+        &self,
+        session: &SessionId,
+        turn: &TurnId,
+        effect: EffectId,
+        checkpoint: rsi_agent_session_protocol::PluginCheckpoint,
+    ) -> Result<()>;
     /// Executes at most one paid summary under a live idle reservation.
     async fn compact(
         &self,
         lease: Box<dyn IdleCompaction>,
         model: rsi_agent_session_protocol::ModelSelection,
     ) -> Result<CompactionOutcome>;
+    /// Summarizes the selected interval using the driver's current execution claim.
+    async fn compact_region(
+        self: Arc<Self>,
+        session: &SessionId,
+        region: CompactionRegion,
+        model: rsi_agent_session_protocol::ModelSelection,
+    ) -> Result<EffectId>;
 }
 
 /// Current executor's manual compaction capability.

@@ -32,9 +32,14 @@ pub(super) fn admitted_options(
     ),
     rsi_agent_session_protocol::TurnOutcome,
 > {
-    let definition_bytes = composition
-        .tool_definition_weight()
-        .map_err(|error| failure_outcome("context.capacity", error.to_string()))?;
+    let include_tools = selected_tools.is_none_or(|names| !names.is_empty());
+    let definition_bytes = if include_tools {
+        composition
+            .tool_definition_weight()
+            .map_err(|error| failure_outcome("context.capacity", error.to_string()))?
+    } else {
+        0
+    };
     let mut credit = budget
         .reserve(
             definition_bytes
@@ -57,19 +62,23 @@ pub(super) fn admitted_options(
             .with_max_output_tokens(cap)
             .map_err(|error| options_failure(&error))?;
     }
-    let mut definitions: Vec<_> = composition
-        .tools()
-        .definitions()
-        .into_iter()
-        .filter(|definition| {
-            selected_tools.is_none_or(|names| {
-                names
-                    .binary_search_by(|name| name.as_str().cmp(definition.name()))
-                    .is_ok()
-            })
+    let mut definitions: Vec<_> = if include_tools {
+        composition.tools().definitions()
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .filter(|definition| {
+        selected_tools.is_none_or(|names| {
+            names
+                .binary_search_by(|name| name.as_str().cmp(definition.name()))
+                .is_ok()
         })
-        .collect();
-    if let Some(order) = composition.tool_order() {
+    })
+    .collect();
+    if definitions.len() > 1
+        && let Some(order) = composition.tool_order()
+    {
         let positions: std::collections::HashMap<_, _> = order
             .iter()
             .enumerate()
@@ -103,8 +112,8 @@ pub(super) fn admitted_options(
 }
 
 pub(super) struct PreparedRequestOptions {
-    profile: rsi_ai_protocol::LanguageProfile,
-    options: rsi_ai_protocol::LanguageRequestOptions,
+    pub(super) profile: rsi_ai_protocol::LanguageProfile,
+    pub(super) options: rsi_ai_protocol::LanguageRequestOptions,
     _credit: rsi_agent_context::ContextCredit,
 }
 

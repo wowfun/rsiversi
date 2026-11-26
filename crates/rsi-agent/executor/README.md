@@ -1,5 +1,17 @@
 # rsi-agent-executor
 
+A trusted plugin's regional summary uses the running executor's original Turn
+claim and selected builder. An independent summary does not replace the chat's
+live assistant stream or consume its pending tool results. Recovery continues
+to classify the foreground attempt from its own lifecycle. Cancelling the caller
+cancels the summary. Before committing a concluding tool result or releasing
+the Turn, the driver cancels and joins any unfinished region so it can record
+the provider result under the claim.
+
+For an application-supplied checkpoint, the executor checks the observed
+conversation and commits the supplied content under the open Turn's claim.
+This operation requires no model configuration and starts no provider call.
+
 At each new Conversation request series, the executor asks Kernel for a prepared
 generation update. It reconstructs Context from framework history with the new
 builder before committing selection. An unchanged source adds no history or Domain

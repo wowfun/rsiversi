@@ -3,6 +3,22 @@
 An explicit manual compaction uses the same complete, ordered source units as
 automatic compaction. It may select eligible history below the usage trigger.
 When all remaining input is protected, the planner returns no work.
+The plan records adjacent selected messages in the same Turn as one range.
+Replay compares the selected positions. A protected gap or a different source
+Session or Turn always starts a new range.
+
+An explicitly selected region belongs to an open Turn. A trusted plugin can
+supply the replacement without a model route. Replay and checkpoint restoration
+preserve the supplied user role and text blocks. The inclusive positions are
+in retained conversation order, after the system prompt. Provider-only
+synthetic results do not occupy positions. A pending tool call can follow the
+selected range. Both ends must coincide with complete interaction boundaries.
+The selected messages alone supply the
+checkpoint input. Installation replaces that region in place and preserves
+the earlier and later messages. A plugin's selection observes the retained
+messages and the identity of the installed checkpoint. Replacing a node with
+identical text still invalidates an earlier selection. A fork whose seed
+omits the bound view keeps its own raw messages.
 
 The cursor exposes the last retained, entered `RuntimeContext` snapshot for native
 request preparation. Each Turn retains its message position; text is borrowed
@@ -14,8 +30,8 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v22 and
-builder 2.17.0 bind explicit prompt ownership and retained runtime-context positions.
+unprepared claims separately from entered model history. Fold checkpoint v23 and
+builder 2.18.0 bind explicit prompt ownership and retained runtime-context positions.
 Earlier projection caches are incompatible.
 
 Each retained Turn records the last entered PluginContext Fact timestamp per
@@ -69,7 +85,7 @@ exposes that same tagged value for Executor equality; new Steps and terminal Tur
 reset it. Context never calls native prompt providers or repeats interpolation.
 Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v22, so recovery cannot retain an exited Plan's old instructions.
+checkpoint v23, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -92,7 +108,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.17.0, Session format 46, the v22 fold
+The allocation golden binds builder 2.18.0, Session format 47, the v23 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and
@@ -159,7 +175,7 @@ summary shrink checks share that view.
 Raw Facts remain unchanged.
 
 Retention and emission are distinct. Each attempt supplies its described target
-LanguageProfile along with frozen Language request options. Builder 2.17.0 emits
+LanguageProfile along with frozen Language request options. Builder 2.18.0 emits
 nested ToolResult images only when that profile positively declares image Tool
 results. No or Unknown uses deterministic descriptor text in the same block
 position, without reading Media or changing call IDs and error status. Ordinary
@@ -469,6 +485,6 @@ Tool batch metadata retains typed spill references beside each settled call.
 Notices are absent from the retained raw messages and their pruning budgets.
 Projection renders their retrieval notice, and pruning redraws that notice from
 the typed references after selecting text. It does not infer protected cache
-identities from arbitrary Tool text. Checkpoint v22 carries this metadata; older
+identities from arbitrary Tool text. Checkpoint v23 carries this metadata; older
 checkpoints rebuild from canonical Facts. Semantic compaction preserves the
 original Fact coordinates for source retrieval.

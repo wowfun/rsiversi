@@ -31,6 +31,370 @@ fn capacity_error(dispatch: DispatchStatus) -> StartOutcome {
 }
 
 #[tokio::test]
+async fn plugin_checkpoint_is_durable_with_no_registered_model() {
+    use rsi_agent_session_protocol::{EffectId, PluginCheckpoint};
+    use rsi_agent_turn_protocol::ManualCompactorContract;
+
+    let stack = BaseStack::activate().await;
+    let seed_language = stack
+        .activate_language(
+            "fixture.previous-provider",
+            language_fixture(&stack, vec![StartOutcome::Stream(answer_script())]),
+        )
+        .await;
+    let seed_executor = stack.activate_executor("seed-offline-history").await;
+    let (previous, outcome) = stack.submit_and_wait("historical source").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(seed_executor.dispose().await.is_clean());
+    assert!(seed_language.dispose().await.is_clean());
+
+    let credentials = activate_fixture(
+        &stack.runtime,
+        "fixture.empty-credentials",
+        "1",
+        Arc::new(rsi_credentials_testkit::MemoryCredentialsFactory),
+    )
+    .await;
+    let router = activate_fixture(
+        &stack.runtime,
+        "fixture.empty-router",
+        "1",
+        Arc::new(rsi_ai::LanguageRouterFactory),
+    )
+    .await;
+    let (observer, owner) = observation::install(&stack).await;
+    let executor = stack
+        .activate_executor_with_config(json!({
+            "executor_id":"offline-checkpoint", "observe_execution":true
+        }))
+        .await;
+    let root = stack.runtime.root();
+    let turns = root.lookup_local::<TurnServiceContract>().unwrap();
+    let compactor = root.lookup_local::<ManualCompactorContract>().unwrap();
+    let session = &previous.session_id;
+    let turn = turns
+        .submit(SubmitTurn {
+            reasoning_effort: None,
+            turn_id: client_turn_id(),
+            session: SubmitSession::Resume(turns.prepare_resume(session).await.unwrap()),
+            text: "continue offline".into(),
+            model: None,
+            sandbox: None,
+        })
+        .await
+        .unwrap();
+    observer.entered.notified().await;
+    let through_seq = stack
+        .store
+        .session_summary(session)
+        .await
+        .unwrap()
+        .durable_fact_seq;
+    let unavailable = root
+        .lookup_local::<LanguageCallContract>()
+        .unwrap()
+        .describe(header().settings().default_model())
+        .unwrap_err();
+    let checkpoint = PluginCheckpoint {
+        plugin: "offline-engine".into(),
+        through_seq,
+        start: 0,
+        end: 0,
+        message: rsi_ai_protocol::Message::user_text("offline summary").unwrap(),
+        summary_blocks: None,
+        presentation: None,
+    };
+    compactor
+        .install_plugin_checkpoint(
+            session,
+            &turn.turn_id,
+            EffectId::new("offline-summary").unwrap(),
+            checkpoint.clone(),
+        )
+        .await
+        .unwrap();
+    assert_latest_is(&stack.store, |fact| {
+        matches!(fact, SessionFactBody::PluginContextCompacted { checkpoint: recorded, .. }
+            if recorded.as_ref() == &checkpoint)
+    })
+    .await;
+    observer.release.cancel();
+    assert!(matches!(
+        wait_for_outcome(&turns, &turn).await,
+        TurnOutcome::Failed { message, .. } if message == unavailable.safe_summary()
+    ));
+    drop((compactor, turns));
+    assert!(executor.dispose().await.is_clean());
+    assert!(owner.dispose().await.is_clean());
+    assert!(router.dispose().await.is_clean());
+    assert!(credentials.dispose().await.is_clean());
+    stack.dispose_services().await;
+}
+
+#[tokio::test]
+async fn plugin_checkpoint_changes_the_next_request_without_dispatching_a_summary() {
+    use rsi_agent_session_protocol::{EffectId, PluginCheckpoint};
+    use rsi_agent_turn_protocol::ManualCompactorContract;
+    let mut stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider = language_fixture(
+        &stack,
+        vec![
+            gated_answer(&entered, &release),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.plugin-checkpoint", provider.clone())
+        .await;
+    let executor = stack.activate_executor("plugin-checkpoint").await;
+    let root = stack.runtime.root();
+    let turns = root.lookup_local::<TurnServiceContract>().unwrap();
+    let compactor = root.lookup_local::<ManualCompactorContract>().unwrap();
+    let turn = stack
+        .submit_fresh(&turns, "plugin-checkpoint", "ORIGINAL-source")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let session = &turn.session_id;
+    let facts = stack
+        .store
+        .read_facts(
+            session,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    let original = PluginCheckpoint {
+        plugin: "template-summarizer".into(),
+        through_seq: facts.last().unwrap().seq(),
+        start: 0,
+        end: 0,
+        message: rsi_ai_protocol::Message::user_text("OFFLINE-ORCHID").unwrap(),
+        summary_blocks: None,
+        presentation: None,
+    };
+    let effect = EffectId::new("template-operation").unwrap();
+    compactor
+        .install_plugin_checkpoint(session, &turn.turn_id, effect.clone(), original.clone())
+        .await
+        .unwrap();
+    let committed = stack
+        .store
+        .read_facts(
+            session,
+            original.through_seq,
+            32,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    assert_eq!(committed.len(), 1);
+    assert!(
+        matches!(committed[0].body(), SessionFactBody::PluginContextCompacted { checkpoint, .. }
+        if checkpoint.as_ref() == &original)
+    );
+    assert!(
+        compactor
+            .install_plugin_checkpoint(session, &turn.turn_id, effect, original)
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    release.notify_one();
+    assert_eq!(
+        wait_for_outcome(&turns, &turn).await,
+        TurnOutcome::Completed
+    );
+    drop((turns, compactor));
+    assert!(executor.dispose().await.is_clean());
+    stack.restart_kernel().await;
+    let replacement = stack.activate_executor("plugin-reopen").await;
+    assert_eq!(
+        stack.resume_and_wait("follow up", session.clone()).await.1,
+        TurnOutcome::Completed
+    );
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            serde_json::to_string(&requests[0])
+                .unwrap()
+                .contains("ORIGINAL-source")
+        );
+        let next = serde_json::to_string(&requests[1]).unwrap();
+        assert!(next.contains("OFFLINE-ORCHID") && !next.contains("ORIGINAL-source"));
+    }
+    stack.dispose(language, replacement).await;
+}
+
+#[tokio::test]
+async fn trusted_region_summarizes_selected_input_while_the_foreground_model_is_streaming() {
+    use rsi_agent_session_protocol::ModelSelection;
+    use rsi_agent_turn_protocol::{CompactionRegion, ManualCompactorContract};
+    let stack = BaseStack::activate().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let summary_entered = Arc::new(Notify::new());
+    let summary_hold = Arc::new(Notify::new());
+    let provider = language_fixture(
+        &stack,
+        vec![
+            gated_answer(&entered, &release),
+            gated_answer(&summary_entered, &summary_hold),
+            StartOutcome::Stream(answer_script()),
+            StartOutcome::Stream(answer_script()),
+        ],
+    );
+    let language = stack
+        .activate_language("test.language.region", provider.clone())
+        .await;
+    let executor = stack.activate_executor("region").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let compactor = stack
+        .runtime
+        .root()
+        .lookup_local::<ManualCompactorContract>()
+        .unwrap();
+    let original = "source-ORCHID ".repeat(256);
+    let turn = stack.submit_fresh(&turns, "region", &original).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let session = &turn.session_id;
+    let prefix = stack
+        .store
+        .read_facts(
+            session,
+            0,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    let region = CompactionRegion {
+        turn_id: turn.turn_id.clone(),
+        through_seq: prefix.last().unwrap().seq(),
+        start: 0,
+        end: 0,
+    };
+    let model = ModelSelection::baseline(header().settings());
+    assert!(
+        Arc::clone(&compactor)
+            .compact_region(
+                session,
+                CompactionRegion {
+                    end: 99,
+                    ..region.clone()
+                },
+                model.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
+    let mut pending = Arc::clone(&compactor).compact_region(session, region.clone(), model.clone());
+    tokio::select! {
+        result = &mut pending => panic!("region settled before releasing its provider: {result:?}"),
+        () = summary_entered.notified() => {}
+    }
+    let duplicate = Arc::clone(&compactor)
+        .compact_region(session, region.clone(), model.clone())
+        .await;
+    assert!(
+        duplicate
+            .unwrap_err()
+            .to_string()
+            .contains("already running")
+    );
+    drop(pending);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let page = stack
+                .store
+                .read_facts(
+                    session,
+                    region.through_seq,
+                    32,
+                    rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+                )
+                .await
+                .unwrap();
+            let cancelled = page.facts.iter().any(|fact| {
+                matches!(fact.body(),
+                    SessionFactBody::ModelAttemptSettled {
+                        purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
+                        attempt, ..
+                    } if matches!(attempt.terminal(), LanguageEvent::Failed { .. })
+                )
+            });
+            if cancelled {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let installed = Arc::clone(&compactor)
+        .compact_region(session, region.clone(), model.clone())
+        .await
+        .unwrap();
+    let installed_facts = stack
+        .store
+        .read_facts(
+            session,
+            region.through_seq,
+            512,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap()
+        .facts;
+    assert!(
+        matches!(installed_facts.last().unwrap().body(), SessionFactBody::ContextCompactionInstalled { effect_id, .. } if effect_id == &installed)
+    );
+    release.notify_one();
+    assert_eq!(
+        wait_for_outcome(&turns, &turn).await,
+        TurnOutcome::Completed
+    );
+    assert!(
+        compactor
+            .compact_region(session, region, model)
+            .await
+            .is_err()
+    );
+    let (_, outcome) = stack.resume_and_wait("follow up", session.clone()).await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(
+            serde_json::to_string(&requests[2])
+                .unwrap()
+                .contains("source-ORCHID")
+        );
+        assert!(requests[2].tools().is_empty());
+        let next = serde_json::to_string(&requests[3]).unwrap();
+        assert!(next.contains("Internal context summary"));
+        assert!(!next.contains("source-ORCHID"));
+    }
+    stack.dispose(language, executor).await;
+}
+
+#[tokio::test]
 async fn small_history_with_high_reported_usage_still_reaches_the_next_provider_call() {
     let stack = BaseStack::activate().await;
     let mut pressured = answer_script();

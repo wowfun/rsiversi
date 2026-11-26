@@ -673,6 +673,7 @@ struct TurnControl {
 
     tool_source: Option<Arc<tool_origin::ToolSource>>,
     unconfirmed_summary: Option<(EffectId, u64)>,
+    region: Option<Arc<RegionEffect>>,
     selected_tools: Option<Arc<[String]>>,
     application: Arc<ApplicationRegistrations>,
 
@@ -726,6 +727,19 @@ struct ClaimOwner {
 struct TreeClaimLane {
     pool: Arc<Semaphore>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+#[derive(Clone)]
+struct RegionEffect {
+    id: EffectId,
+    stage: RegionStage,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RegionStage {
+    Prepared,
+    Started,
+    Settled(u64),
 }
 
 #[derive(Clone)]
@@ -783,6 +797,7 @@ impl TurnControl {
             conclusion: None,
             tool_source: None,
             unconfirmed_summary: None,
+            region: None,
             selected_tools: None,
             application: Arc::default(),
 

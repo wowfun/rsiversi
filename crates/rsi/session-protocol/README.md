@@ -229,6 +229,10 @@ and read existing receipts. Model selection has a separate typed request that
 uses the model contribution's canonical command receipt. Goal controls and
 other dedicated operations retain their own authority.
 
+A trusted application acting for the Host owner can request a summary of a
+specific retained interval in an open Turn. The Session handle chooses the
+current model and delegates the observed interval to the active executor.
+
 Draft commands and first publication share mutation admission. Concurrent exact
 draft requests join one service-owned callback, with a 30-second deadline and
 64 distinct in-flight mutations, shared with preset preparation, per Session

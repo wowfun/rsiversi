@@ -107,7 +107,7 @@ pub(super) async fn publish_nonterminal_with_capacity_retry(
     config: &ExecutorConfig,
     claim: &TurnClaim,
     mut bodies: Vec<SessionFactBody>,
-) -> std::result::Result<rsi_agent_turn_protocol::PublishedFacts, DriveFailure> {
+) -> rsi_agent_turn_protocol::Result<rsi_agent_turn_protocol::PublishedFacts> {
     let mut flushed = false;
     loop {
         let fallback = evidence::budget_fallback(&bodies);
@@ -116,8 +116,8 @@ pub(super) async fn publish_nonterminal_with_capacity_retry(
             Ok(PublishAttempt::FlushRequired { unpublished }) if !flushed => {
                 let tail = live_tail(turns, claim).await?;
                 if tail == 0 {
-                    return Err(fatal(
-                        "Fact publication requires a nonempty flushable prefix",
+                    return Err(TurnError::Invariant(
+                        "Fact publication requires a nonempty flushable prefix".into(),
                     ));
                 }
                 flush_execution_prefix(turns, config, claim, tail).await?;
@@ -125,14 +125,14 @@ pub(super) async fn publish_nonterminal_with_capacity_retry(
                 bodies = unpublished;
             }
             Ok(PublishAttempt::FlushRequired { .. }) => {
-                return Err(fatal(
-                    "Fact publication remained full after its durable flush",
+                return Err(TurnError::Invariant(
+                    "Fact publication remained full after its durable flush".into(),
                 ));
             }
             Err(TurnError::EvidenceBudget) if fallback.is_some() => {
                 bodies = fallback.expect("available evidence has a bounded replacement");
             }
-            Err(error) => return Err(turn_failure(error)),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -154,10 +154,10 @@ pub(super) async fn publish_terminal(
         .map_err(turn_failure)
 }
 
-pub(super) async fn live_tail(
+async fn live_tail(
     turns: &dyn TurnExecution,
     claim: &TurnClaim,
-) -> std::result::Result<u64, DriveFailure> {
+) -> rsi_agent_turn_protocol::Result<u64> {
     // Facts at or before the claim were already represented by its live watermark.
     // Only scan the executor-owned suffix when recovering publication capacity.
     let mut cursor = claim.live_seq();
@@ -168,14 +168,15 @@ pub(super) async fn live_tail(
                 cursor,
                 rsi_agent_session_protocol::MAXIMUM_FACTS_PER_READ,
             )
-            .await
-            .map_err(fatal)?;
+            .await?;
         let tail = page.through_seq;
         if tail == cursor {
             return Ok(cursor);
         }
         if tail <= cursor {
-            return Err(fatal("Fact scan made no progress before terminal retry"));
+            return Err(TurnError::Invariant(
+                "Fact scan made no progress before terminal retry".into(),
+            ));
         }
         cursor = tail;
     }
@@ -186,16 +187,15 @@ pub(super) async fn flush_execution_prefix(
     config: &ExecutorConfig,
     claim: &TurnClaim,
     through_seq: u64,
-) -> std::result::Result<u64, DriveFailure> {
+) -> rsi_agent_turn_protocol::Result<u64> {
     tokio::time::timeout(config.durability_wait(), turns.flush(claim, through_seq))
         .await
         .map_err(|_| {
-            fatal(format!(
+            TurnError::Flush(format!(
                 "Fact durability wait exceeded {} ms",
                 config.durability_wait_ms
             ))
         })?
-        .map_err(fatal)
 }
 
 pub(super) fn prepare_tool_effect(

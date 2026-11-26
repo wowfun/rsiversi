@@ -1,5 +1,21 @@
 # rsi-agent-session-protocol
 
+An explicit region trigger records the inclusive start and end offsets in the
+current conversation after the system prompt. A prior head checkpoint, when
+present, occupies offset zero. Turn selections and the view digest bind these
+positions to the source history used by the summary.
+
+A trusted application may supply the replacement itself. The Session records
+the authoring plugin, the selected range, its observed native prefix and the
+replacement shown to the model. If it frames the summary for the model, it
+can identify the half-open range of content blocks to show in the reader.
+The Host binds installation to a digest of the selected source identities
+and their conversation view. A fork can reuse the summary only if its
+visible history reconstructs the same view.
+A plugin-authored checkpoint carries no
+provider settlement unless a provider actually ran. The original Facts stay
+available in transcript history.
+
 Durable format verification uses the actual serialization representation of
 `SessionHeader`, `SessionFact`, `AgentControlRecord` and their reachable payloads.
 The serialization-mode JSON schema is structural evidence, not a substitute for
@@ -379,7 +395,7 @@ canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 46 is accepted; all other formats are unsupported. Header protection is
+format 47 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.

@@ -937,7 +937,7 @@ async fn nonterminal_publication_flushes_the_live_tail_when_the_fold_lags() {
 #[tokio::test]
 async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection() {
     use rsi_agent_session_protocol::{EvidencePart, EvidenceUnavailable, RequestEvidence};
-    for mode in ["budget", "flush_error", "flushed_budget"] {
+    for mode in ["budget", "flush_error", "flushed_budget", "stale_prefix"] {
         let budget = mode == "budget";
         let after_flush = mode == "flushed_budget";
         let (claim, accepted) = claim();
@@ -947,6 +947,8 @@ async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection(
             } else {
                 Some(if budget {
                     || TurnError::EvidenceBudget
+                } else if mode == "stale_prefix" {
+                    || TurnError::Invalid("plugin checkpoint prefix changed".into())
                 } else {
                     || TurnError::Flush("uncertain durable write".into())
                 })
@@ -1012,7 +1014,13 @@ async fn evidence_fallback_is_only_for_explicit_prepublication_budget_rejection(
                 if after_flush { 3 } else { 2 }
             );
         } else {
-            assert!(result.is_err());
+            if mode == "stale_prefix" {
+                assert!(
+                    matches!(result, Err(TurnError::Invalid(message)) if message == "plugin checkpoint prefix changed")
+                );
+            } else {
+                assert!(matches!(result, Err(TurnError::Flush(_))));
+            }
             assert_eq!(
                 turns.publish_calls.load(Ordering::SeqCst),
                 if after_flush { 2 } else { 1 }

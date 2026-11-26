@@ -110,6 +110,16 @@ pub(super) fn apply_executor_body(
         | SessionFactBody::ToolCallsSuperseded { .. }
         | SessionFactBody::ToolStarted { .. }
         | SessionFactBody::ToolResult { .. } => apply_tool_body(turn, body)?,
+        SessionFactBody::PluginContextCompacted { .. } => {
+            if turn
+                .region
+                .as_ref()
+                .is_some_and(|region| !matches!(region.stage, RegionStage::Settled(_)))
+                || has_summary_model(turn)
+            {
+                return Err(TurnError::Invalid("a compaction is already active".into()));
+            }
+        }
         SessionFactBody::StepStarted { .. }
         | SessionFactBody::ToolContextsClaimed { .. }
         | SessionFactBody::StepInputsPrepared { .. }
@@ -128,6 +138,7 @@ pub(super) fn apply_executor_body(
 
             turn.terminal = Some(outcome.clone());
             turn.effects.clear();
+            turn.region = None;
         }
         SessionFactBody::TurnAccepted { .. }
         | SessionFactBody::MessageTurnAccepted { .. }
@@ -279,6 +290,18 @@ fn prepare_inputs(
     Ok(())
 }
 
+fn has_summary_model(turn: &TurnControl) -> bool {
+    turn.effects.values().any(|effect| {
+        matches!(
+            effect,
+            ActiveEffect::Model {
+                purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
+                ..
+            }
+        )
+    })
+}
+
 pub(super) fn apply_model_body(
     turn: &mut TurnControl,
     body: &SessionFactBody,
@@ -291,6 +314,28 @@ pub(super) fn apply_model_body(
             snapshot,
             ..
         } => {
+            if matches!(
+                purpose,
+                rsi_agent_session_protocol::ModelPurpose::ContextCompaction(_)
+            ) && turn
+                .region
+                .as_ref()
+                .is_some_and(|r| !matches!(r.stage, RegionStage::Settled(_)))
+            {
+                return Err(TurnError::Invalid("a compaction is already active".into()));
+            }
+            if purpose.is_region() {
+                if turn.effects.contains_key(effect_id) || has_summary_model(turn) {
+                    return Err(TurnError::Invalid(
+                        "region overlaps another summary or reuses an active effect".into(),
+                    ));
+                }
+                turn.region = Some(Arc::new(RegionEffect {
+                    id: effect_id.clone(),
+                    stage: RegionStage::Prepared,
+                }));
+                return Ok(());
+            }
             ensure_no_active_effect(turn)?;
             turn.unconfirmed_summary = None;
             if matches!(
@@ -322,6 +367,17 @@ pub(super) fn apply_model_body(
                 },
             );
         }
+        SessionFactBody::ModelStarted { effect_id, .. }
+            if turn.region.as_ref().is_some_and(|r| r.id == *effect_id) =>
+        {
+            let region = turn.region.as_mut().expect("matched the region effect");
+            if region.stage != RegionStage::Prepared {
+                return Err(TurnError::Invalid(
+                    "region start requires its prepared effect".into(),
+                ));
+            }
+            Arc::make_mut(region).stage = RegionStage::Started;
+        }
         SessionFactBody::ModelStarted { effect_id, .. } => match turn.effects.get_mut(effect_id) {
             Some(ActiveEffect::Model { started, .. }) if !*started => *started = true,
             _ => return Err(TurnError::Invalid("model start has no exact intent".into())),
@@ -332,6 +388,29 @@ pub(super) fn apply_model_body(
             attempt,
             ..
         } => {
+            if let Some(region) = &mut turn.region
+                && region.id == *effect_id
+            {
+                if region.stage != RegionStage::Started
+                    || *purpose != rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction
+                {
+                    return Err(TurnError::Invalid(
+                        "region settlement requires its started summary effect".into(),
+                    ));
+                }
+                if matches!(
+                    attempt.terminal(),
+                    rsi_ai_protocol::LanguageEvent::Finished {
+                        reason: rsi_ai_protocol::FinishReason::Stop,
+                        ..
+                    }
+                ) {
+                    Arc::make_mut(region).stage = RegionStage::Settled(seq);
+                } else {
+                    turn.region = None;
+                }
+                return Ok(());
+            }
             match turn.effects.get(effect_id) {
                 Some(ActiveEffect::Model {
                     started: true,
@@ -378,6 +457,12 @@ pub(super) fn apply_model_body(
             settlement_seq,
             ..
         } => {
+            if turn.region.as_ref().is_some_and(|r| {
+                r.id == *effect_id && r.stage == RegionStage::Settled(*settlement_seq)
+            }) {
+                turn.region = None;
+                return Ok(());
+            }
             if !turn
                 .unconfirmed_summary
                 .as_ref()
@@ -664,6 +749,7 @@ pub(super) fn clone_turn_control(turn: &TurnControl) -> TurnControl {
         conclusion: turn.conclusion.clone(),
         tool_source: turn.tool_source.clone(),
         unconfirmed_summary: turn.unconfirmed_summary.clone(),
+        region: turn.region.clone(),
 
         accepted_at_ms: turn.accepted_at_ms,
         accepted_seq: turn.accepted_seq,

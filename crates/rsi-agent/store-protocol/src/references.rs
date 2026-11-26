@@ -228,6 +228,7 @@ pub fn fact_references(record: &SessionFact) -> Result<ReferenceCollector> {
             | SessionFactBody::CancelRequested { .. }
             | SessionFactBody::ManualCompaction { .. }
             | SessionFactBody::ContextCompactionInstalled { .. }
+            | SessionFactBody::PluginContextCompacted { .. }
             | SessionFactBody::ModelIntent { .. }
             | SessionFactBody::ModelStarted { .. }
             | SessionFactBody::ImageIntent { .. }

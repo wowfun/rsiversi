@@ -11,7 +11,7 @@ use crate::{
 use rsi_agent_session_protocol::{
     CompactionBuilder, CompactionPrior, CompactionSelection, CompactionSource, CompactionTrigger,
     ContextCompactionPlan, EffectId, MAXIMUM_COMPACTION_PLAN_BYTES, ModelPurpose, SessionFact,
-    SessionId,
+    SessionId, TurnId,
 };
 use rsi_ai_protocol::{
     ContentBlock, FinishReason, LanguageOutput, LanguageProfile, LanguageRequest,
@@ -33,6 +33,28 @@ struct SummaryReplacement {
     remap: TurnRemap,
 }
 type SummaryReplacements = BTreeMap<TurnKey, SummaryReplacement>;
+
+fn adjacent(left: &CompactionSelection, right: &CompactionSelection) -> bool {
+    left.first + left.count == right.first
+        && left.turn == right.turn
+        && left.session == right.session
+}
+
+/// Source coordinates follow conversation order, including gaps left by protected input.
+fn selection_ranges(
+    selections: &[CompactionSelection],
+) -> impl Iterator<Item = (&SessionId, &TurnId, u32, u32)> {
+    selections.chunk_by(adjacent).map(|run| {
+        let first = &run[0];
+        let last = &run[run.len() - 1];
+        (
+            &first.session,
+            &first.turn,
+            first.first,
+            last.first + last.count,
+        )
+    })
+}
 
 pub(super) struct TurnRemap(Vec<Option<usize>>);
 impl TurnRemap {
@@ -69,16 +91,19 @@ impl TurnRemap {
 
 fn assemble_view<'a>(
     system: Option<&'a Message>,
-    summary: Option<&str>,
+    summary: Option<Cow<'a, Message>>,
     turns: impl Iterator<Item = (&'a [Message], &'a crate::outcomes::Batches, bool)>,
+    region: bool,
 ) -> Result<Vec<Cow<'a, Message>>> {
     let mut messages = Vec::new();
     messages.extend(system.map(Cow::Borrowed));
-    if let Some(text) = summary {
-        messages.push(Cow::Owned(summary_message(text)?));
-    }
+    messages.extend(summary);
     for (turn, batches, terminal) in turns {
-        messages.extend(crate::outcomes::normalize(turn, batches, terminal)?);
+        if region {
+            messages.extend(turn.iter().map(Cow::Borrowed));
+        } else {
+            messages.extend(crate::outcomes::normalize(turn, batches, terminal)?);
+        }
     }
     messages
         .into_iter()
@@ -106,6 +131,8 @@ pub(crate) struct SemanticState {
     last_human: BTreeMap<TurnKey, usize>,
     usage: Option<ConversationUsage>,
     summary: Option<InstalledSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_region: Option<EffectId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,9 +148,32 @@ struct ConversationUsage {
 #[serde(deny_unknown_fields)]
 struct InstalledSummary {
     prior: CompactionPrior,
-    text: String,
+    text: CheckpointContent,
     sources: Vec<CompactionSource>,
     through_seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CheckpointContent {
+    Native(String),
+    Plugin(Message),
+}
+
+impl CheckpointContent {
+    fn message(&self) -> Result<Cow<'_, Message>> {
+        match self {
+            Self::Native(text) => summary_message(text).map(Cow::Owned),
+            Self::Plugin(message) => Ok(Cow::Borrowed(message)),
+        }
+    }
+
+    fn digest(&self) -> Result<String> {
+        match self {
+            Self::Native(text) => Ok(hex::encode(Sha256::digest(text.as_bytes()))),
+            Self::Plugin(message) => view_digest(&[Cow::Borrowed(message)]).map(|(hash, _)| hash),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -137,12 +187,16 @@ impl SemanticState {
         Ok([
             crate::budget::weight(&self.identity)?,
             self.usage_weight()?,
-            crate::budget::weight(&self.summary)?,
+            crate::budget::weight(&(&self.summary, &self.last_region))?,
         ])
     }
     #[cfg(test)]
     pub(super) fn measured_global_weight(&self) -> Result<usize> {
-        crate::budget::weight(&(&self.identity, &self.usage, &self.summary))
+        crate::budget::weight(&(
+            &self.identity,
+            &self.usage,
+            (&self.summary, &self.last_region),
+        ))
     }
     pub(super) fn usage_weight(&self) -> Result<usize> {
         crate::budget::weight(&self.usage)
@@ -190,7 +244,14 @@ impl SemanticState {
             last_human: BTreeMap::new(),
             usage: None,
             summary: None,
+            last_region: None,
         }
+    }
+
+    fn selected_prior(&self, trigger: &CompactionTrigger) -> Option<&InstalledSummary> {
+        self.summary
+            .as_ref()
+            .filter(|_| !matches!(trigger, CompactionTrigger::Region { start, .. } if *start != 0))
     }
 
     pub fn record_input(
@@ -325,7 +386,7 @@ fn summary_message(text: &str) -> Result<Message> {
 fn invalid(message: impl Into<String>) -> ContextError {
     ContextError::Invalid(message.into())
 }
-fn view_digest(messages: &[Cow<'_, Message>]) -> Result<(String, u64)> {
+fn view_digest(value: &(impl Serialize + ?Sized)) -> Result<(String, u64)> {
     #[derive(Default)]
     struct Writer {
         hash: Sha256,
@@ -345,7 +406,7 @@ fn view_digest(messages: &[Cow<'_, Message>]) -> Result<(String, u64)> {
         }
     }
     let mut writer = Writer::default();
-    serde_json::to_writer(&mut writer, messages).map_err(|error| invalid(error.to_string()))?;
+    serde_json::to_writer(&mut writer, value).map_err(|error| invalid(error.to_string()))?;
     Ok((hex::encode(writer.hash.finalize()), writer.bytes))
 }
 
@@ -467,17 +528,27 @@ impl ContextFold {
             }
         }
         if let Some(summary) = &state.summary {
-            if summary.text.trim().is_empty()
-                || summary.text.len() > 32 * 1024
-                || summary.sources.is_empty()
+            match &summary.text {
+                CheckpointContent::Native(text)
+                    if text.trim().is_empty() || text.len() > 32 * 1024 =>
+                {
+                    return Err(invalid("semantic cache summary text is invalid"));
+                }
+                CheckpointContent::Plugin(message) => {
+                    rsi_agent_session_protocol::PluginCheckpoint::validate_message(message)
+                        .map_err(|error| invalid(error.to_string()))?
+                }
+                _ => {}
+            }
+            if summary.sources.is_empty()
                 || summary.sources.len() > 1024
                 || summary.prior.finished_seq == 0
                 || summary.through_seq == 0
-                || hex::encode(Sha256::digest(summary.text.as_bytes())) != summary.prior.text_sha256
+                || summary.text.digest()? != summary.prior.text_sha256
             {
                 return Err(invalid("semantic cache summary binding is invalid"));
             }
-            summary_message(&summary.text)?;
+            summary.text.message()?;
             for source in &summary.sources {
                 if source.after_seq >= source.through_seq {
                     return Err(invalid("semantic cache summary interval is empty"));
@@ -490,23 +561,26 @@ impl ContextFold {
 
     pub(crate) fn semantic_messages(&self) -> Result<Vec<Message>> {
         let projected = self.projected_turns()?;
-        self.semantic_messages_from(&projected)
+        self.semantic_messages_from(&projected, false)
             .map(|messages| messages.into_iter().map(Cow::into_owned).collect())
     }
 
     fn semantic_messages_from<'a>(
         &'a self,
         projected: &'a crate::pruning::ProjectedTurns<'_>,
+        region: bool,
     ) -> Result<Vec<Cow<'a, Message>>> {
         assemble_view(
             self.system_message.as_ref(),
             self.semantic()
                 .summary
                 .as_ref()
-                .map(|summary| summary.text.as_str()),
+                .map(|summary| summary.text.message())
+                .transpose()?,
             self.turns
                 .iter()
                 .map(|turn| (projected[&turn.id].as_ref(), &turn.batches, turn.terminal)),
+            region,
         )
     }
 
@@ -542,12 +616,19 @@ impl ContextFold {
             .map_err(Failure::Compaction)?;
         let projected = self.projected_turns().map_err(Failure::Compaction)?;
         let view = self
-            .semantic_messages_from(&projected)
+            .semantic_messages_from(&projected, false)
             .map_err(Failure::Compaction)?;
         let bytes = crate::encoded_bytes(&view).map_err(Failure::Compaction)?;
         let planned = self
             .plan_compaction_from(
-                &options, model, profile, None, false, &projected, &view, bytes,
+                &options,
+                model,
+                profile,
+                None,
+                false,
+                &projected,
+                &view,
+                || Ok(bytes),
             )
             .map_err(Failure::Compaction)?;
         if let Some(plan) = planned {
@@ -586,10 +667,19 @@ impl ContextFold {
         self.ensure_usable()?;
         let credit = self.projection_credit(options.encoded_weight())?;
         let projected = self.projected_turns()?;
-        let view = self.semantic_messages_from(&projected)?;
-        let bytes = crate::encoded_bytes(&view)?;
+        let view = self.semantic_messages_from(
+            &projected,
+            matches!(force, Some(CompactionTrigger::Region { .. })),
+        )?;
         let planned = self.plan_compaction_from(
-            options, model, profile, force, shrink, &projected, &view, bytes,
+            options,
+            model,
+            profile,
+            force,
+            shrink,
+            &projected,
+            &view,
+            || crate::encoded_bytes(&view),
         )?;
         drop(view);
         drop(projected);
@@ -610,7 +700,7 @@ impl ContextFold {
         shrink: bool,
         projected: &crate::pruning::ProjectedTurns<'_>,
         view: &[Cow<'_, Message>],
-        view_bytes: usize,
+        view_bytes: impl FnOnce() -> Result<usize>,
     ) -> Result<Option<PlannedCompaction>> {
         let input_window = u64::from(
             profile
@@ -618,12 +708,22 @@ impl ContextFold {
                 .map_err(|error| invalid(error.to_string()))?,
         );
         let state = self.semantic();
-        let manual = matches!(force, Some(CompactionTrigger::Manual));
-        if self
-            .assemblers
-            .values()
-            .any(|active| active.turn_id.is_some() || !manual)
+        if force.is_none()
+            && self
+                .assemblers
+                .values()
+                .any(|active| active.purpose.is_region())
         {
+            return Ok(None);
+        }
+        let unfinished = self.assemblers.values().any(|active| match &force {
+            Some(CompactionTrigger::Region { .. }) => {
+                !matches!(active.purpose, ModelPurpose::Conversation)
+            }
+            Some(CompactionTrigger::Manual) => active.turn_id.is_some(),
+            _ => true,
+        });
+        if unfinished {
             return Err(invalid("cannot compact an unfinished interaction"));
         }
         let limits = crate::emission_limits(self.retention_limits, options)?;
@@ -637,7 +737,7 @@ impl ContextFold {
         .requires_compaction()
             || view.len() > limits.max_messages
             || state.sources.len() >= PLAN_SOURCES
-            || view_bytes > limits.max_bytes
+            || view_bytes()? > limits.max_bytes
         {
             CompactionTrigger::CanonicalLimit
         } else if let Some(usage) = &state.usage {
@@ -659,36 +759,42 @@ impl ContextFold {
             return Ok(None);
         };
 
-        let units = self.selectable_units(projected)?;
-        let selected = self.compaction_selections_from(shrink, projected, &units)?;
-        if selected.is_empty() {
-            return if matches!(trigger, CompactionTrigger::Manual)
-                || (optional && matches!(trigger, CompactionTrigger::Usage { .. }))
-            {
-                Ok(None)
-            } else {
-                Err(ContextError::TooLarge)
-            };
-        }
-
-        self.ensure_protected_fit(&units, limits)?;
+        let selected = if let CompactionTrigger::Region { start, end } = trigger {
+            self.region_selections(projected, start, end)?
+        } else {
+            let units = self.selectable_units(projected)?;
+            let selected = self.compaction_selections_from(shrink, projected, &units)?;
+            if selected.is_empty() {
+                return if matches!(trigger, CompactionTrigger::Manual)
+                    || (optional && matches!(trigger, CompactionTrigger::Usage { .. }))
+                {
+                    Ok(None)
+                } else {
+                    Err(ContextError::TooLarge)
+                };
+            }
+            self.ensure_protected_fit(&units, limits)?;
+            selected
+        };
         let (view_sha256, original_bytes) = view_digest(view)?;
         let mut sources = BTreeMap::new();
         let mut materialized = Vec::new();
-        if let Some(summary) = &state.summary {
-            materialized.push(summary_message(&summary.text)?);
+        let prior = state.selected_prior(&trigger);
+        if let Some(summary) = prior {
+            materialized.push(summary.text.message()?.into_owned());
         }
         for selection in &selected {
+            let key = selection_key(selection);
             let source = state
                 .sources
-                .get(&selection_key(selection))
+                .get(&key)
                 .ok_or_else(|| invalid("missing compaction source binding"))?;
             sources.insert(
                 (source.session.clone(), source.turn.clone()),
                 source.clone(),
             );
             let messages = projected
-                .get(&selection_key(selection))
+                .get(&key)
                 .ok_or_else(|| invalid("missing selected Turn"))?;
             materialized.extend_from_slice(
                 &messages[selection.first as usize..(selection.first + selection.count) as usize],
@@ -704,7 +810,7 @@ impl ContextFold {
                 .map_err(|error| invalid(error.to_string()))?,
             sources: sources.into_values().collect(),
             selections: selected,
-            prior: state.summary.as_ref().map(|summary| summary.prior.clone()),
+            prior: prior.map(|summary| summary.prior.clone()),
             trigger,
             through_seq: self.through_seq,
             view_sha256,
@@ -726,26 +832,42 @@ impl ContextFold {
         Ok(Some(PlannedCompaction { plan, request }))
     }
 
-    fn summary_replacements(&self, selections: &[CompactionSelection]) -> SummaryReplacements {
+    fn summary_replacements(
+        &self,
+        selections: &[CompactionSelection],
+        mut checkpoint: Option<Message>,
+    ) -> SummaryReplacements {
         let mut replacements = BTreeMap::new();
         let mut remaining = selections;
         for turn in &self.turns {
+            if remaining.is_empty() {
+                break;
+            }
             let count = remaining
                 .iter()
-                .take_while(|selection| selection_key(selection) == turn.id)
+                .take_while(|selection| {
+                    selection.session == turn.id.session && selection.turn == turn.id.turn
+                })
                 .count();
             if count == 0 {
                 continue;
             }
-            let remap = TurnRemap::new(turn.messages.len(), &remaining[..count]);
+            let first = remaining[0].first as usize;
+            let mut remap = TurnRemap::new(turn.messages.len(), &remaining[..count]);
             remaining = &remaining[count..];
-            let messages = turn
+            let mut messages: Vec<_> = turn
                 .messages
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| remap.get(*index).is_some())
                 .map(|(_, message)| message.clone())
                 .collect();
+            if let Some(message) = checkpoint.take() {
+                messages.insert(first, message);
+                for destination in remap.0[first..].iter_mut().flatten() {
+                    *destination += 1;
+                }
+            }
             let batches = crate::outcomes::retained(&turn.batches, &remap);
             replacements.insert(
                 turn.id.clone(),
@@ -766,7 +888,8 @@ impl ContextFold {
     fn replacement_view_size(
         &self,
         replacements: &SummaryReplacements,
-        text: &str,
+        head: Option<Cow<'_, Message>>,
+        region: bool,
     ) -> Result<(usize, usize)> {
         let projected = crate::pruning::project(self.turns.iter().map(|turn| {
             (
@@ -783,7 +906,7 @@ impl ContextFold {
         }))?;
         let view = assemble_view(
             self.system_message.as_ref(),
-            Some(text),
+            head,
             self.turns.iter().map(|turn| {
                 (
                     projected[&turn.id].as_ref(),
@@ -793,6 +916,7 @@ impl ContextFold {
                     turn.terminal,
                 )
             }),
+            region,
         )?;
         Ok((view.len(), crate::encoded_bytes(&view)?))
     }
@@ -813,8 +937,9 @@ impl ContextFold {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let replacements = self.summary_replacements(&removable);
-        let (messages, bytes) = self.replacement_view_size(&replacements, "x")?;
+        let replacements = self.summary_replacements(&removable, None);
+        let head = Cow::Owned(summary_message("x")?);
+        let (messages, bytes) = self.replacement_view_size(&replacements, Some(head), false)?;
         if messages > limits.max_messages || bytes > limits.max_bytes {
             return Err(ContextError::TooLarge);
         }
@@ -877,6 +1002,59 @@ impl ContextFold {
         tail_start
     }
 
+    fn region_selections(
+        &self,
+        projected: &crate::pruning::ProjectedTurns<'_>,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<CompactionSelection>> {
+        if start > end || self.turns.back().is_none_or(|turn| turn.terminal) {
+            return Err(invalid(
+                "compaction region requires an ordered range and an open Turn",
+            ));
+        }
+        let mut position = usize::from(self.semantic().summary.is_some());
+        let start = start as usize;
+        let through = (end as usize)
+            .checked_add(1)
+            .ok_or(ContextError::TooLarge)?;
+        let mut selected = Vec::new();
+        for turn in &self.turns {
+            if position >= through {
+                break;
+            }
+            let messages = &projected[&turn.id];
+            let first = start.saturating_sub(position);
+            let limit = (through - position).min(messages.len());
+            if first < limit {
+                for unit in crate::pruning::shapes(messages, true)? {
+                    let end = unit.first + unit.count;
+                    if unit.first < limit
+                        && end > first
+                        && (unit.first < first || end > limit || !unit.complete)
+                    {
+                        return Err(invalid(
+                            "compaction region splits an unfinished or paired interaction",
+                        ));
+                    }
+                }
+                selected.push(CompactionSelection {
+                    session: turn.id.session.clone(),
+                    turn: turn.id.turn.clone(),
+                    first: u32::try_from(first).map_err(|_| ContextError::TooLarge)?,
+                    count: u32::try_from(limit - first).map_err(|_| ContextError::TooLarge)?,
+                });
+            }
+            position += messages.len();
+        }
+        if position < through {
+            return Err(invalid(
+                "compaction region is outside the current conversation",
+            ));
+        }
+        Ok(selected)
+    }
+
     fn selectable_units(
         &self,
         projected: &crate::pruning::ProjectedTurns<'_>,
@@ -934,7 +1112,7 @@ impl ContextFold {
             ),
         )?)?;
         if let Some(summary) = &state.summary {
-            request_bytes += quoted_bytes(&summary_message(&summary.text)?)? + 1;
+            request_bytes += quoted_bytes(summary.text.message()?.as_ref())? + 1;
         }
         for InteractionUnit {
             turn,
@@ -972,9 +1150,11 @@ impl ContextFold {
             }
             request_bytes += source_bytes;
             encoded_bytes = next_bytes;
-            selected_turns.insert(turn.clone());
+            selected_turns.insert(turn);
             selected.push(selection);
-            selected_bytes.push(*bytes);
+            if shrink {
+                selected_bytes.push(*bytes);
+            }
         }
         if shrink {
             let mut remaining = selected_bytes.iter().sum::<usize>() / 2;
@@ -990,6 +1170,14 @@ impl ContextFold {
                 })
                 .collect();
         }
+        selected.dedup_by(|next, previous| {
+            if adjacent(previous, next) {
+                previous.count += next.count;
+                true
+            } else {
+                false
+            }
+        });
         Ok(selected)
     }
 
@@ -997,7 +1185,7 @@ impl ContextFold {
         let state = self.semantic();
         if plan.version != 2
             || plan.builder != state.identity
-            || plan.prior.as_ref() != state.summary.as_ref().map(|s| &s.prior)
+            || plan.prior.as_ref() != state.selected_prior(&plan.trigger).map(|s| &s.prior)
         {
             return false;
         }
@@ -1018,16 +1206,22 @@ impl ContextFold {
         let Ok(projected) = self.projected_turns() else {
             return false;
         };
-        let Ok(units) = self.selectable_units(&projected) else {
-            return false;
+        let same_positions = |selections: Vec<CompactionSelection>| {
+            selection_ranges(&selections).eq(selection_ranges(&plan.selections))
         };
-        if !self
-            .compaction_selections_from(false, &projected, &units)
-            .is_ok_and(|selections| selections == plan.selections)
-            && !self
-                .compaction_selections_from(true, &projected, &units)
-                .is_ok_and(|selections| selections == plan.selections)
-        {
+        let selected = if let CompactionTrigger::Region { start, end } = plan.trigger {
+            self.region_selections(&projected, start, end)
+                .is_ok_and(same_positions)
+        } else {
+            let Ok(units) = self.selectable_units(&projected) else {
+                return false;
+            };
+            [false, true].into_iter().any(|shrink| {
+                self.compaction_selections_from(shrink, &projected, &units)
+                    .is_ok_and(same_positions)
+            })
+        };
+        if !selected {
             return false;
         }
         if plan.selections.iter().any(|selection| {
@@ -1076,9 +1270,12 @@ impl ContextFold {
                 return false;
             }
         }
-        self.semantic_messages_from(&projected)
-            .and_then(|view| view_digest(&view))
-            .is_ok_and(|(sha256, bytes)| sha256 == plan.view_sha256 && bytes == plan.original_bytes)
+        self.semantic_messages_from(
+            &projected,
+            matches!(plan.trigger, CompactionTrigger::Region { .. }),
+        )
+        .and_then(|view| view_digest(&view))
+        .is_ok_and(|(sha256, bytes)| sha256 == plan.view_sha256 && bytes == plan.original_bytes)
     }
 
     pub(crate) fn observe_conversation_usage(
@@ -1092,7 +1289,7 @@ impl ContextFold {
             return;
         }
         if let Some(usage) = usage {
-            let session = self.observed_session();
+            let session = self.source_session().clone();
             self.accounting_impact = crate::AccountingImpact::Usage;
             self.semantic_mut().usage = Some(ConversationUsage {
                 session,
@@ -1123,21 +1320,7 @@ impl ContextFold {
         let Ok(text) = validate_summary_output(plan, output) else {
             return Ok(());
         };
-        self.install_summary(effect, plan, self.observed_session(), seq, text)
-    }
-
-    fn observed_session(&self) -> SessionId {
-        self.seed_source
-            .as_ref()
-            .map_or(&self.header, |(header, _)| header)
-            .history_origin()
-            .filter(|origin| {
-                self.through_seq == 0 && self.seed_through_seq < origin.resolved_terminal_seq
-            })
-            .map_or_else(
-                || self.header.session_id().clone(),
-                |origin| origin.parent_session_id.clone(),
-            )
+        self.install_summary(effect, plan, self.source_session().clone(), seq, text)
     }
 
     #[allow(clippy::too_many_lines)] // One replay transaction stages, checks shrink, and installs the exact summary and coordinates.
@@ -1150,15 +1333,116 @@ impl ContextFold {
         text: String,
     ) -> Result<()> {
         let projected = self.projected_turns()?;
-        let current = self.semantic_messages_from(&projected)?;
+        let region = matches!(plan.trigger, CompactionTrigger::Region { .. });
+        let current = self.semantic_messages_from(&projected, region)?;
         if view_digest(&current)?.0 != plan.view_sha256 {
             return Ok(());
         }
-        let replacements = self.summary_replacements(&plan.selections);
-        let (_, bytes) = self.replacement_view_size(&replacements, &text)?;
+        let in_turn = region && plan.prior.is_none();
+        let checkpoint = in_turn.then(|| summary_message(&text)).transpose()?;
+        let replacements = self.summary_replacements(&plan.selections, checkpoint);
+        let head = if in_turn {
+            self.semantic()
+                .summary
+                .as_ref()
+                .map(|s| s.text.message())
+                .transpose()?
+        } else {
+            Some(Cow::Owned(summary_message(&text)?))
+        };
+        let (_, bytes) = self.replacement_view_size(&replacements, head, region)?;
         if bytes as u64 >= plan.original_bytes {
             return Ok(());
         }
+        self.commit_replacement(
+            effect,
+            session,
+            seq,
+            plan.through_seq,
+            &plan.sources,
+            (!in_turn).then_some(CheckpointContent::Native(text)),
+            replacements,
+        )
+    }
+
+    /// Validates the range at its observed cut and fingerprints the current model input.
+    pub(super) fn plugin_region_view(&self, start: u32, end: u32) -> Result<String> {
+        self.plugin_region_snapshot(start, end)
+            .map(|(_, hash)| hash)
+    }
+
+    fn plugin_region_snapshot(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<(Vec<CompactionSelection>, String)> {
+        let projected = self.projected_turns()?;
+        let selections = self.region_selections(&projected, start, end)?;
+        let state = self.semantic();
+        let (hash, _) = view_digest(&(
+            self.semantic_messages_from(&projected, true)?,
+            &selections,
+            &state.last_region,
+            state.summary.as_ref().map(|summary| &summary.prior),
+        ))?;
+        Ok((selections, hash))
+    }
+
+    pub(super) fn install_plugin_checkpoint(
+        &mut self,
+        effect: &EffectId,
+        seq: u64,
+        checkpoint: &rsi_agent_session_protocol::PluginCheckpoint,
+        view_sha256: &str,
+    ) -> Result<()> {
+        let inherited = self.source_session() != self.header.session_id();
+        let selections = match self.plugin_region_snapshot(checkpoint.start, checkpoint.end) {
+            Ok((selections, hash)) if hash == view_sha256 => selections,
+            Ok(_) | Err(ContextError::Invalid(_)) if inherited => return Ok(()),
+            Ok(_) => return Err(invalid("plugin checkpoint view differs from its source")),
+            Err(error) => return Err(error),
+        };
+        let head = checkpoint.start == 0 && self.semantic().summary.is_some();
+        let replacements =
+            self.summary_replacements(&selections, (!head).then(|| checkpoint.message.clone()));
+        let mut sources = Vec::new();
+        if head {
+            for selection in &selections {
+                let source = self
+                    .semantic()
+                    .sources
+                    .get(&selection_key(selection))
+                    .ok_or_else(|| invalid("missing plugin checkpoint source"))?;
+                if sources.last() != Some(source) {
+                    sources.push(source.clone());
+                }
+            }
+        }
+        self.commit_replacement(
+            effect,
+            self.source_session().clone(),
+            seq,
+            checkpoint.through_seq,
+            &sources,
+            head.then(|| CheckpointContent::Plugin(checkpoint.message.clone())),
+            replacements,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_replacement(
+        &mut self,
+        effect: &EffectId,
+        session: SessionId,
+        seq: u64,
+        through_seq: u64,
+        sources: &[CompactionSource],
+        head: Option<CheckpointContent>,
+        replacements: SummaryReplacements,
+    ) -> Result<()> {
+        let head = head
+            .map(|content| -> Result<_> { Ok((content.digest()?, content)) })
+            .transpose()?;
         let mut replacements = replacements
             .into_iter()
             .map(|(id, replacement)| {
@@ -1224,17 +1508,30 @@ impl ContextFold {
         self.retained_messages = retained_messages;
         self.retained_message_bytes = retained_bytes;
         let state = self.semantic_mut();
-        state.summary = Some(InstalledSummary {
-            prior: CompactionPrior {
-                session,
-                effect: effect.clone(),
-                finished_seq: seq,
-                text_sha256: hex::encode(Sha256::digest(text.as_bytes())),
-            },
-            text,
-            sources: plan.sources.clone(),
-            through_seq: plan.through_seq,
-        });
+        if let Some((text_sha256, text)) = head {
+            state.last_region = None;
+            state.summary = Some(InstalledSummary {
+                prior: CompactionPrior {
+                    session,
+                    effect: effect.clone(),
+                    finished_seq: seq,
+                    text_sha256,
+                },
+                text,
+                sources: if sources.is_empty() {
+                    state
+                        .summary
+                        .take()
+                        .expect("a checkpoint-only plan selected the prior summary")
+                        .sources
+                } else {
+                    sources.to_vec()
+                },
+                through_seq,
+            });
+        } else {
+            state.last_region = Some(effect.clone());
+        }
         state.usage = None;
         self.release_summarized_turns();
         self.accounting_impact = crate::AccountingImpact::Full;
@@ -1265,10 +1562,12 @@ impl ContextFold {
     }
 
     pub(crate) fn summary_installed(&self, effect: &EffectId) -> bool {
-        self.semantic
-            .as_ref()
-            .and_then(|state| state.summary.as_ref())
-            .is_some_and(|summary| &summary.prior.effect == effect)
+        self.semantic.as_ref().and_then(|state| {
+            state
+                .last_region
+                .as_ref()
+                .or_else(|| state.summary.as_ref().map(|summary| &summary.prior.effect))
+        }) == Some(effect)
     }
 }
 
@@ -1430,7 +1729,7 @@ mod view_tests {
         let untouched_bytes = fold.turns[1].message_bytes;
         let (digest, original_bytes) = view_digest(
             &fold
-                .semantic_messages_from(&fold.projected_turns().unwrap())
+                .semantic_messages_from(&fold.projected_turns().unwrap(), false)
                 .unwrap(),
         )
         .unwrap();
@@ -1439,7 +1738,13 @@ mod view_tests {
             version: 2,
             builder: fold.semantic.as_ref().unwrap().identity.clone(),
             header_fingerprint: fold.header.fingerprint().unwrap(),
-            sources: vec![],
+            sources: vec![CompactionSource {
+                session: affected.session.clone(),
+                turn: affected.turn.clone(),
+                after_seq: 0,
+                through_seq: 1,
+                facts_sha256: "1".repeat(64),
+            }],
             selections: vec![
                 CompactionSelection {
                     session: fold.turns[0].id.session.clone(),

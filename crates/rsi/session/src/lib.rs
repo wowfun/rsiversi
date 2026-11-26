@@ -1148,6 +1148,14 @@ fn background_sample(
 }
 
 impl LocalSessionHandle {
+    fn compactor(&self) -> Result<Arc<dyn rsi_agent_turn_protocol::ManualCompactor>> {
+        self.plugin_context
+            .as_ref()
+            .and_then(
+                rsi_meta::Context::lookup_local::<rsi_agent_turn_protocol::ManualCompactorContract>,
+            )
+            .ok_or_else(|| SessionError::Invalid("no active compaction executor".into()))
+    }
     async fn background_scope(
         &self,
     ) -> Result<(Arc<dyn rsi_jobs::Jobs>, rsi_jobs::JobScopeAuthority)> {
@@ -2058,15 +2066,7 @@ impl SessionHandle for LocalSessionHandle {
             ManualCompactionAdmission::Busy => Ok(CompactionOutcome::Busy),
             ManualCompactionAdmission::Recorded(outcome) => Ok(outcome),
             ManualCompactionAdmission::Idle(lease) => {
-                let compactor = self
-                    .plugin_context
-                    .as_ref()
-                    .and_then(
-                        rsi_meta::Context::lookup_local::<
-                            rsi_agent_turn_protocol::ManualCompactorContract,
-                        >,
-                    )
-                    .ok_or_else(|| SessionError::Invalid("no active compaction executor".into()))?;
+                let compactor = self.compactor()?;
                 let header = self.header_snapshot().await?;
                 let model = self.current_model_selection(&header).await?;
                 compactor
@@ -2075,6 +2075,35 @@ impl SessionHandle for LocalSessionHandle {
                     .map_err(map_turn_error)
             }
         }
+    }
+    async fn compact_application_region(
+        &self,
+        region: rsi_agent_turn_protocol::CompactionRegion,
+    ) -> Result<rsi_agent_session_protocol::EffectId> {
+        self.require_host_owner()?;
+        let _operation = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        let compactor = self.compactor()?;
+        let header = self.header_snapshot().await?;
+        let model = self.current_model_selection(&header).await?;
+        compactor
+            .compact_region(self.session_id(), region, model)
+            .await
+            .map_err(map_turn_error)
+    }
+    async fn install_plugin_checkpoint(
+        &self,
+        turn: rsi_agent_session_protocol::TurnId,
+        effect: rsi_agent_session_protocol::EffectId,
+        checkpoint: rsi_agent_session_protocol::PluginCheckpoint,
+    ) -> Result<()> {
+        self.require_host_owner()?;
+        let _operation = self.admit_mutation()?;
+        let _activity = self.begin_activity()?;
+        self.compactor()?
+            .install_plugin_checkpoint(self.session_id(), &turn, effect, checkpoint)
+            .await
+            .map_err(map_turn_error)
     }
     async fn execute_command(
         &self,

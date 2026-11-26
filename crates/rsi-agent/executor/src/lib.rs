@@ -7,9 +7,9 @@
 mod checkpoint;
 mod checkpoint_diagnostics;
 mod compaction;
-mod manual_compaction;
 mod controlled_work;
 mod jobs;
+mod manual_compaction;
 mod observation;
 mod parallelism;
 
@@ -277,13 +277,26 @@ struct Driver {
     sandbox: Arc<dyn Sandbox>,
     jobs: Arc<dyn Jobs>,
     active_tools: Mutex<BTreeMap<(SessionId, TurnId), BTreeMap<ToolResultIdentity, TrackedTool>>>,
-    controlled_work: Mutex<BTreeMap<(SessionId, TurnId), Arc<controlled_work::Tracker>>>,
+    controlled_work: Mutex<BTreeMap<(SessionId, TurnId), RunningTurn>>,
     retirement_tasks: Mutex<Vec<JoinHandle<()>>>,
     observations: observation::Observations,
     parallelism: Arc<parallelism::Parallelism>,
     checkpoints: Arc<CheckpointScheduler>,
     config: ExecutorConfig,
     context_budget: rsi_agent_context::ContextBudget,
+}
+
+#[derive(Debug)]
+struct RunningTurn {
+    claim: Option<TurnClaim>,
+    work: Arc<controlled_work::Tracker>,
+    region: Option<RegionWork>,
+}
+
+#[derive(Debug)]
+struct RegionWork {
+    cancel: CancellationToken,
+    done: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -415,6 +428,7 @@ struct ScannedTurn {
     completed_model_without_successor: bool,
     completed_model_source: Option<EffectId>,
     conversation_source: Option<EffectId>,
+    region_effect: Option<EffectId>,
     pending_model_calls: BTreeMap<u32, (String, bool)>,
     max_tokens: bool,
     request: ModelRequest,
@@ -497,6 +511,10 @@ fn scan_turn(
                 purpose,
                 ..
             } if turn_id == claim.turn_id() => {
+                if purpose.is_region() {
+                    state.region_effect = Some(effect_id.clone());
+                    continue;
+                }
                 if matches!(
                     purpose,
                     rsi_agent_session_protocol::ModelPurpose::Conversation
@@ -513,6 +531,9 @@ fn scan_turn(
                 });
             }
             SessionFactBody::ModelStarted { turn_id, effect_id } if turn_id == claim.turn_id() => {
+                if state.region_effect.as_ref() == Some(effect_id) {
+                    continue;
+                }
                 let Some(ResumeEffect::Model { started, .. }) = state.effects.iter_mut().find(
                     |effect| matches!(effect, ResumeEffect::Model { effect_id: current, .. } if current == effect_id),
                 ) else {
@@ -542,6 +563,10 @@ fn scan_turn(
                 attempt,
                 ..
             } if turn_id == claim.turn_id() => {
+                if state.region_effect.as_ref() == Some(effect_id) {
+                    state.region_effect = None;
+                    continue;
+                }
                 let Some(index) = state.effects.iter().position(
                     |effect| matches!(effect, ResumeEffect::Model { effect_id: current, started: true, .. } if current == effect_id),
                 ) else { return Err("model settlement lacks exact start"); };
@@ -700,6 +725,7 @@ fn scan_turn(
             | SessionFactBody::StepInputsPrepared { .. }
             | SessionFactBody::ManualCompaction { .. }
             | SessionFactBody::ContextCompactionInstalled { .. }
+            | SessionFactBody::PluginContextCompacted { .. }
             | SessionFactBody::StepPrepared { .. } => {}
         }
     }
@@ -797,7 +823,9 @@ impl PluginFactory for ExecutorFactory {
             context_budget,
             config,
         });
-        let compactor = plan.context().provide_local::<rsi_agent_turn_protocol::ManualCompactorContract>(driver.clone())?;
+        let compactor = plan
+            .context()
+            .provide_local::<rsi_agent_turn_protocol::ManualCompactorContract>(driver.clone())?;
         let task_stop = stop.clone();
         let task_driver = Arc::clone(&driver);
         let mut worker = tokio::spawn(async move {

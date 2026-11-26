@@ -69,7 +69,7 @@ fn runtime_context_is_remapped_or_removed_by_summary_and_checkpoint_replay() {
         assert_eq!(state.runtime_context(), Some("runtime snapshot"));
         let frozen = plan(&state);
         // A private cache encoding change must preserve durable summary eligibility.
-        assert_eq!(frozen.builder.semantic_version, "2.17.0");
+        assert_eq!(frozen.builder.semantic_version, "2.18.0");
         // A small recent tail retains the snapshot at index 1, which must move
         // to 0. A large tail makes both old messages eligible for summary.
         assert!(
@@ -1110,6 +1110,360 @@ fn history(usage: Option<u64>) -> (ModelContextState, Vec<Arc<SessionFact>>, u64
 }
 
 #[test]
+fn explicit_region_replaces_only_its_selected_messages_across_replay() {
+    let (mut state, mut facts, _) = history(None);
+    let options = rsi_ai_protocol::LanguageRequestOptions::default();
+    let model = ModelRef::new("deployment", "model").unwrap();
+    let profile = profile();
+    let plan = |state: &ModelContextState, start, end| {
+        state.plan_compaction(
+            &options,
+            &model,
+            &profile,
+            Some(CompactionTrigger::Region { start, end }),
+            false,
+        )
+    };
+    assert!(plan(&state, 2, 1).is_err());
+    assert!(plan(&state, 1, 3).is_err());
+    let selected = plan(&state, 1, 1).unwrap().unwrap();
+    assert_eq!(selected.plan.selections.len(), 1);
+    assert_eq!(
+        (
+            selected.plan.selections[0].first,
+            selected.plan.selections[0].count
+        ),
+        (1, 1)
+    );
+    let request = serde_json::to_string(&selected.request).unwrap();
+    assert!(request.contains("evidence evidence"));
+    assert!(!request.contains("older private task"));
+    assert!(!request.contains("original task"));
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "selected-region",
+            ModelPurpose::ContextCompaction(Box::new(selected.plan)),
+            "Regional checkpoint",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(state.summary_installed(&EffectId::new("selected-region").unwrap()));
+    let projected = wire(&state);
+    assert!(!projected.contains("evidence evidence"));
+    assert!(
+        projected.find("older private task").unwrap()
+            < projected.find("Regional checkpoint").unwrap()
+    );
+    assert!(
+        projected.find("Regional checkpoint").unwrap() < projected.find("original task").unwrap()
+    );
+    let mut restored = cursor();
+    restored.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&restored), projected);
+    let checkpoint = state.restored(&state.checkpoint().unwrap()).unwrap();
+    assert_eq!(wire(&checkpoint), projected);
+    assert!(checkpoint.summary_installed(&EffectId::new("selected-region").unwrap()));
+    append(
+        &mut restored,
+        &mut facts,
+        vec![SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new("current").unwrap(),
+            outcome: TurnOutcome::Completed,
+            result: None,
+        }],
+    );
+    assert!(plan(&restored, 1, 1).is_err());
+}
+
+#[test]
+fn a_plugin_checkpoint_keeps_its_user_message_and_needs_no_model_attempt() {
+    use rsi_agent_session_protocol::PluginCheckpoint;
+    use rsi_ai_protocol::{Message, MessageContent};
+    let (mut state, mut facts, _) = history(None);
+    let effect = EffectId::new("template-plugin-checkpoint").unwrap();
+    let message = Message::user(vec![
+        MessageContent::Text {
+            text: "Checkpoint follows".into(),
+        },
+        MessageContent::Text {
+            text: "Plugin-generated ORCHID".into(),
+        },
+    ])
+    .unwrap();
+    let checkpoint = PluginCheckpoint {
+        plugin: "dsh-template".into(),
+        through_seq: facts.last().unwrap().seq(),
+        start: 1,
+        end: 1,
+        message: message.clone(),
+        summary_blocks: Some(1..2),
+        presentation: None,
+    };
+    assert!(
+        PluginCheckpoint {
+            message: Message::developer_text("elevated").unwrap(),
+            ..checkpoint.clone()
+        }
+        .validate()
+        .is_err()
+    );
+    let body = SessionFactBody::PluginContextCompacted {
+        turn_id: TurnId::new("current").unwrap(),
+        effect_id: effect.clone(),
+        view_sha256: state.plugin_region_view(1, 1).unwrap(),
+        checkpoint: Box::new(checkpoint.clone()),
+    };
+    let before = facts.len();
+    append(&mut state, &mut facts, vec![body]);
+    assert_eq!(facts.len(), before + 1);
+    assert!(state.summary_installed(&effect));
+    let view = wire(&state);
+    assert!(view.contains(&serde_json::to_string(&message).unwrap()));
+    assert!(!view.contains("evidence evidence"));
+    assert!(
+        view.find("older private task").unwrap() < view.find("Plugin-generated ORCHID").unwrap()
+    );
+    assert!(view.find("Plugin-generated ORCHID").unwrap() < view.find("original task").unwrap());
+    assert!(facts[..before].iter().any(|fact| match fact.body() {
+        SessionFactBody::ModelAttemptSettled { attempt, .. } => attempt.events().any(|event| {
+            let (_, event) = event.unwrap();
+            serde_json::to_string(&event)
+                .unwrap()
+                .contains("evidence evidence")
+        }),
+        _ => false,
+    }));
+    let restored = state.restored(&state.checkpoint().unwrap()).unwrap();
+    assert_eq!(wire(&restored), view);
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&replay), view);
+    let selected = state.plugin_region_view(1, 1).unwrap();
+    let through_seq = facts.last().unwrap().seq();
+    append(
+        &mut state,
+        &mut facts,
+        vec![SessionFactBody::PluginContextCompacted {
+            turn_id: TurnId::new("current").unwrap(),
+            effect_id: EffectId::new("second-identical-checkpoint").unwrap(),
+            view_sha256: selected.clone(),
+            checkpoint: Box::new(PluginCheckpoint {
+                through_seq,
+                ..checkpoint
+            }),
+        }],
+    );
+    assert_eq!(wire(&state), view);
+    assert_ne!(state.plugin_region_view(1, 1).unwrap(), selected);
+}
+
+#[test]
+fn a_model_reply_outside_the_region_during_summarization_prevents_installation() {
+    let (mut state, mut facts, _) = history(None);
+    let mut conversation = model_bodies(
+        "current",
+        "already-streaming",
+        ModelPurpose::Conversation,
+        "new material outside the chosen region",
+        None,
+        FinishReason::Stop,
+    );
+    let finished = conversation.pop().unwrap();
+    append(&mut state, &mut facts, conversation);
+    let planned = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::Region { start: 1, end: 1 }),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let mut summary = model_bodies(
+        "current",
+        "stale-region",
+        ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+        "outdated checkpoint",
+        None,
+        FinishReason::Stop,
+    );
+    let settled = summary.pop().unwrap();
+    append(&mut state, &mut facts, summary);
+    append(&mut state, &mut facts, vec![finished, settled]);
+    assert!(!state.summary_installed(&EffectId::new("stale-region").unwrap()));
+    let view = wire(&state);
+    assert!(view.contains("evidence evidence") && view.contains("new material outside"));
+    assert!(!view.contains("outdated checkpoint"));
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&replay), view);
+}
+
+#[test]
+fn region_keeps_a_pending_tool_outside_its_range() {
+    let mut state = cursor();
+    let mut facts = Vec::new();
+    let mut bodies = partial_tool_batch(Some(0));
+    bodies[0] = accepted("interrupted", &"earlier context ".repeat(1000));
+    append(&mut state, &mut facts, bodies);
+    let plan = |start, end| {
+        state.plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::Region { start, end }),
+            false,
+        )
+    };
+    for (start, end) in [(0, 1), (1, 1), (2, 2), (1, 2)] {
+        assert!(plan(start, end).is_err());
+    }
+    let selected = plan(0, 0).unwrap().unwrap();
+    let request = serde_json::to_string(&selected.request).unwrap();
+    assert!(request.contains("earlier context"));
+    assert!(!request.contains("missing-0"));
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "interrupted",
+            "region-before-pending-tool",
+            ModelPurpose::ContextCompaction(Box::new(selected.plan)),
+            "Earlier checkpoint",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    assert!(state.summary_installed(&EffectId::new("region-before-pending-tool").unwrap()));
+    append(
+        &mut state,
+        &mut facts,
+        vec![SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new("interrupted").unwrap(),
+            outcome: TurnOutcome::Interrupted {
+                effect: None,
+                reason: "fixture stopped".into(),
+            },
+            result: None,
+        }],
+    );
+    let view = wire(&state);
+    assert!(
+        view.contains("Earlier checkpoint")
+            && view.contains("partial result")
+            && view.contains("missing-1")
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&replay), view);
+}
+
+#[test]
+fn region_replaces_a_previous_head_checkpoint_without_losing_its_source() {
+    let (mut state, mut facts, _) = history(None);
+    let first = plan(&state);
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "first-checkpoint",
+            ModelPurpose::ContextCompaction(Box::new(first)),
+            &"prior checkpoint ".repeat(350),
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let planned = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::Region { start: 0, end: 0 }),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(planned.plan.selections.is_empty());
+    assert_eq!(
+        planned.plan.prior.as_ref().unwrap().effect.as_str(),
+        "first-checkpoint"
+    );
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "current",
+            "shorter-head",
+            ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            "Shorter checkpoint",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let view = wire(&state);
+    assert!(view.contains("Shorter checkpoint") && view.contains("original task"));
+    assert!(!view.contains("prior checkpoint"));
+    assert_eq!(
+        wire(&state.restored(&state.checkpoint().unwrap()).unwrap()),
+        view
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    assert_eq!(wire(&replay), view);
+}
+
+#[test]
+fn compacted_ranges_replay_the_same_positions_as_individual_units() {
+    let (original, history, _) = history(None);
+    let planned = plan(&original);
+    let [range] = planned.selections.as_slice() else {
+        panic!("one contiguous span of old input and response");
+    };
+    assert_eq!((range.first, range.count), (0, 2));
+    for (positions, installs) in [
+        (vec![(0, 2)], true),
+        (vec![(0, 1), (1, 1)], true),
+        // The retry budget admits the shorter reply by itself.
+        (vec![(1, 1)], true),
+        (vec![(0, 1)], false),
+    ] {
+        let mut replay = cursor();
+        replay.ingest(ContextPage::Canonical(&history)).unwrap();
+        let mut facts = history.clone();
+        let mut plan = planned.clone();
+        plan.selections = positions
+            .into_iter()
+            .map(
+                |(first, count)| rsi_agent_session_protocol::CompactionSelection {
+                    first,
+                    count,
+                    ..range.clone()
+                },
+            )
+            .collect();
+        append(
+            &mut replay,
+            &mut facts,
+            model_bodies(
+                "current",
+                "region-summary",
+                ModelPurpose::ContextCompaction(Box::new(plan)),
+                "Retained checkpoint",
+                None,
+                FinishReason::Stop,
+            ),
+        );
+        assert_eq!(wire(&replay).contains("Retained checkpoint"), installs);
+    }
+}
+
+#[test]
 fn manual_compaction_can_select_history_without_usage_and_skips_protected_input() {
     let model = ModelRef::new("deployment", "model").unwrap();
     let options = rsi_ai_protocol::LanguageRequestOptions::default();
@@ -1446,9 +1800,44 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             FinishReason::Stop,
         ),
     );
+    assert_fork_summary_visibility(&mut parent, &mut history, old_end);
+}
+
+#[test]
+fn a_truncated_fork_does_not_install_a_plugin_summary_over_its_first_visible_input() {
+    let (mut parent, mut history, old_end) = history(None);
+    let checkpoint = rsi_agent_session_protocol::PluginCheckpoint {
+        plugin: "template".into(),
+        through_seq: history.last().unwrap().seq(),
+        start: 0,
+        end: 0,
+        message: rsi_ai_protocol::Message::user_text("private summary of all earlier work")
+            .unwrap(),
+        summary_blocks: None,
+        presentation: None,
+    };
+    let view_sha256 = parent.plugin_region_view(0, 0).unwrap();
     append(
         &mut parent,
         &mut history,
+        vec![SessionFactBody::PluginContextCompacted {
+            turn_id: TurnId::new("current").unwrap(),
+            effect_id: EffectId::new("template-operation").unwrap(),
+            view_sha256,
+            checkpoint: Box::new(checkpoint),
+        }],
+    );
+    assert_fork_summary_visibility(&mut parent, &mut history, old_end);
+}
+
+fn assert_fork_summary_visibility(
+    parent: &mut ModelContextState,
+    history: &mut Vec<Arc<SessionFact>>,
+    old_end: u64,
+) {
+    append(
+        parent,
+        history,
         vec![SessionFactBody::TurnTerminal {
             turn_id: TurnId::new("current").unwrap(),
             outcome: TurnOutcome::Completed,
@@ -1461,12 +1850,12 @@ fn fork_reuses_only_summaries_whose_complete_transitive_sources_are_visible() {
             .fork_origin()
             .unwrap()
             .clone();
-        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+        let rsi_agent_session_protocol::AgentParent::History(inherited) = &mut origin.parent else {
             panic!("expected inherited history")
         };
-        history.resolved_after_seq = after_seq;
-        history.effective_turns = if reused { 2 } else { 1 };
-        history.requested_turns = if reused {
+        inherited.resolved_after_seq = after_seq;
+        inherited.effective_turns = if reused { 2 } else { 1 };
+        inherited.requested_turns = if reused {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)
@@ -1793,12 +2182,12 @@ fn fork_checks_prior_chain_after_transitive_bindings_are_released() {
             .fork_origin()
             .unwrap()
             .clone();
-        let rsi_agent_session_protocol::AgentParent::History(history) = &mut origin.parent else {
+        let rsi_agent_session_protocol::AgentParent::History(inherited) = &mut origin.parent else {
             panic!("expected inherited history")
         };
-        history.resolved_after_seq = after;
-        history.effective_turns = if reuse { 2 } else { 1 };
-        history.requested_turns = if reuse {
+        inherited.resolved_after_seq = after;
+        inherited.effective_turns = if reuse { 2 } else { 1 };
+        inherited.requested_turns = if reuse {
             ForkTurnSelection::All
         } else {
             ForkTurnSelection::Last(1)

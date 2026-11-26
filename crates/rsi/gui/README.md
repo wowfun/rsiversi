@@ -252,6 +252,9 @@ An automatic summary contributes one compaction row to its Turn's process.
 Its request metadata remains available for inspection. The GUI skips summary
 tokens and updates the row when the live attempt starts, reconnects or ends.
 Manual and automatic compaction publish the settled Fact sequence after confirmed installation.
+For a plugin-supplied checkpoint the marker cites the installation Fact itself.
+Its reader shows the summary blocks the plugin selected for display, or the
+whole user-role replacement when it supplied no display range.
 Opening the marker reads that Fact in the attached Session and
 returns its visible text in content-block order, with Markdown rendered on
 demand. Closing the reader or retiring the attachment releases the pending

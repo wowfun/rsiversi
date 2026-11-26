@@ -2265,6 +2265,7 @@ fn fact_kind(body: &SessionFactBody) -> &'static str {
         SessionFactBody::StepPrepared { .. } => "step_tools_selected",
         SessionFactBody::ManualCompaction { .. } => "manual_compaction",
         SessionFactBody::ContextCompactionInstalled { .. } => "context_compaction_installed",
+        SessionFactBody::PluginContextCompacted { .. } => "plugin_context_compacted",
         SessionFactBody::StepInputsPrepared { .. } => "step_inputs_prepared",
     }
 }

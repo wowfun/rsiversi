@@ -912,6 +912,16 @@ impl Transcript {
                     Some(*settlement_seq),
                 );
             }
+            SessionFactBody::PluginContextCompacted {
+                turn_id, effect_id, ..
+            } => {
+                self.project_compaction(
+                    automatic_compaction_key(turn_id, effect_id),
+                    fact.seq(),
+                    CompactionState::Recorded(CompactionOutcome::Compacted),
+                    Some(fact.seq()),
+                );
+            }
             SessionFactBody::ImageOutput {
                 turn_id,
                 effect_id,
@@ -1052,7 +1062,21 @@ fn automatic_compaction_key(
 }
 
 pub(super) fn summary_document(fact: &SessionFact) -> Option<SummaryDocument> {
-    let attempt = match fact.body() {
+    let text = match fact.body() {
+        SessionFactBody::PluginContextCompacted { checkpoint, .. } => {
+            let mut text = String::new();
+            let content = checkpoint.message.content();
+            let blocks = checkpoint.summary_blocks.as_ref().map_or(content, |range| {
+                &content[range.start as usize..range.end as usize]
+            });
+            for part in blocks {
+                let rsi_ai_protocol::MessageContent::Text { text: part } = part else {
+                    return None;
+                };
+                text.push_str(part);
+            }
+            text
+        }
         SessionFactBody::ManualCompaction {
             event: rsi_agent_session_protocol::ManualCompactionEvent::Settled { attempt },
             ..
@@ -1061,20 +1085,23 @@ pub(super) fn summary_document(fact: &SessionFact) -> Option<SummaryDocument> {
             purpose: ModelEventPurpose::ContextCompaction,
             attempt,
             ..
-        } => attempt,
+        } if matches!(
+            attempt.terminal(),
+            rsi_ai_protocol::LanguageEvent::Finished {
+                reason: rsi_ai_protocol::FinishReason::Stop,
+                ..
+            }
+        ) =>
+        {
+            let (text, clipped) = rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
+            if clipped {
+                return None;
+            }
+            text
+        }
         _ => return None,
     };
-    if !matches!(
-        attempt.terminal(),
-        rsi_ai_protocol::LanguageEvent::Finished {
-            reason: rsi_ai_protocol::FinishReason::Stop,
-            ..
-        }
-    ) {
-        return None;
-    }
-    let (text, clipped) = rsi_conversation::compaction_preview(attempt, MAX_BLOCK_BYTES);
-    if clipped || text.trim().is_empty() {
+    if text.trim().is_empty() {
         return None;
     }
     Some(match crate::markdown::parse(&text) {
@@ -1288,6 +1315,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn plugin_compaction_marker_reads_only_its_display_blocks() {
+        use rsi_agent_session_protocol::{EffectId, PluginCheckpoint};
+        use rsi_ai_protocol::{Message, MessageContent};
+        let message = Message::user(
+            ["model preamble", "visible summary", "end tag"]
+                .map(|text| MessageContent::Text { text: text.into() })
+                .into(),
+        )
+        .unwrap();
+        let fact = SessionFact::new(
+            5,
+            17,
+            SessionFactBody::PluginContextCompacted {
+                turn_id: TurnId::new("turn").unwrap(),
+                effect_id: EffectId::new("checkpoint").unwrap(),
+                view_sha256: "1".repeat(64),
+                checkpoint: Box::new(PluginCheckpoint {
+                    plugin: "template".into(),
+                    through_seq: 4,
+                    start: 0,
+                    end: 0,
+                    message,
+                    summary_blocks: Some(1..2),
+                    presentation: None,
+                }),
+            },
+        )
+        .unwrap();
+        let mut transcript = Transcript::default();
+        transcript.fact(&fact);
+        transcript.fact(&fact);
+        let rows = serde_json::to_value(&transcript.blocks).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["summary_seq"], "5");
+        assert_eq!(rows[0]["title"], "Compacted conversation history.");
+        assert!(!rows.to_string().contains("visible summary"));
+        let document = serde_json::to_string(&super::summary_document(&fact).unwrap()).unwrap();
+        assert!(document.contains("visible summary"));
+        assert!(!document.contains("model preamble") && !document.contains("end tag"));
     }
 
     #[test]

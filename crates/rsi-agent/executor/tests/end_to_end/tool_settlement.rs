@@ -527,7 +527,9 @@ async fn retained_settlement(uncertain: bool) {
 }
 
 #[tokio::test]
-async fn conclusion_and_domain_update_share_the_exact_result_commit() {
+async fn conclusion_and_domain_update_share_the_exact_result_commit_after_region_settlement() {
+    use rsi_agent_session_protocol::ModelSelection;
+    use rsi_agent_turn_protocol::{CompactionRegion, ManualCompactorContract};
     let stack = BaseStack::activate().await;
     let (callback, callbacks) = setup_conclusion(&stack, true).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -545,10 +547,18 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
             }),
         })
         .unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let summarizing = Arc::new(Notify::new());
     let provider = Arc::new(LanguageFixture {
-        outcomes: Mutex::new(VecDeque::from([StartOutcome::Stream(tool_calls_script(
-            &[("first", "echo", "{}"), ("never", "echo", "{}")],
-        ))])),
+        outcomes: Mutex::new(VecDeque::from([
+            StartOutcome::GatedStream {
+                events: tool_calls_script(&[("first", "echo", "{}"), ("never", "echo", "{}")]),
+                waiting_after_first: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            },
+            gated_answer(&summarizing, &Arc::new(Notify::new())),
+        ])),
         requests: Mutex::new(vec![]),
         starts: Arc::new(AtomicUsize::new(0)),
         store: stack.store.clone(),
@@ -558,11 +568,56 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
         .activate_language("concluding.provider", provider.clone())
         .await;
     let executor = stack.activate_executor("concluding-executor").await;
-    let (submitted, outcome) = stack.submit_and_wait("conclude after one result").await;
+    let turns = stack
+        .runtime
+        .root()
+        .lookup_local::<TurnServiceContract>()
+        .unwrap();
+    let compactor = stack
+        .runtime
+        .root()
+        .lookup_local::<ManualCompactorContract>()
+        .unwrap();
+    let submitted = stack
+        .submit_fresh(
+            &turns,
+            "tool-conclusion",
+            &"conclude after one result ".repeat(200),
+        )
+        .await;
+    entered.notified().await;
+    let prefix = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    let region = CompactionRegion {
+        turn_id: submitted.turn_id.clone(),
+        through_seq: prefix.facts.last().unwrap().seq(),
+        start: 0,
+        end: 0,
+    };
+    let mut summary = compactor.compact_region(
+        &submitted.session_id,
+        region,
+        ModelSelection::baseline(header().settings()),
+    );
+    tokio::select! {
+        result = &mut summary => panic!("summary finished before the tool: {result:?}"),
+        () = summarizing.notified() => {}
+    }
+    release.notify_one();
+    assert!(summary.await.is_err());
+    let outcome = wait_for_outcome(&turns, &submitted).await;
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(callback.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
     let facts = stack
         .store
         .read_facts(
@@ -586,6 +641,12 @@ async fn conclusion_and_domain_update_share_the_exact_result_commit() {
             )
         })
         .unwrap();
+    assert!(facts.iter().any(|record| record.seq() < fact.seq()
+        && matches!(record.body(),
+        SessionFactBody::ModelAttemptSettled {
+            purpose: rsi_agent_session_protocol::ModelEventPurpose::ContextCompaction,
+            attempt, ..
+        } if matches!(attempt.terminal(), LanguageEvent::Failed { .. }))));
     let controls = stack
         .store
         .read_controls(

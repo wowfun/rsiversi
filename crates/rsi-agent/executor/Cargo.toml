@@ -55,6 +55,8 @@ rsi-agent-kernel = { path = "../kernel" }
 rsi-agent-store-protocol = { path = "../store-protocol" }
 rsi-agent-testkit = { path = "../testkit" }
 rsi-ai-testkit = { path = "../../rsi-ai/testkit" }
+rsi-ai = { path = "../../rsi-ai/core" }
+rsi-credentials-testkit = { path = "../../rsi-credentials/testkit" }
 rsi-jobs-local = { path = "../../rsi-jobs/local" }
 rsi-tools = { path = "../../rsi-tools/core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "test-util"] }

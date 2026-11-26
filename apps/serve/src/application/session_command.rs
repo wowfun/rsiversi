@@ -18,6 +18,18 @@ enum Operation {
         control: rsi_goal::GoalControl,
     },
     DisarmGoal,
+    Compact {
+        request_id: DomainRequestId,
+    },
+    CompactRegion {
+        region: rsi_agent_turn_protocol::CompactionRegion,
+    },
+    CheckCheckpointOwner,
+    InstallPluginCheckpoint {
+        turn: rsi_agent_session_protocol::TurnId,
+        effect: rsi_agent_session_protocol::EffectId,
+        checkpoint: rsi_agent_session_protocol::PluginCheckpoint,
+    },
     Status {
         request_id: DomainRequestId,
     },
@@ -32,17 +44,11 @@ struct Input {
 impl BoundSessions {
     pub(super) async fn command(&self, payload: Value) -> Result<Value> {
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
-        let handle = if matches!(
-            input.operation,
-            Operation::Prepare { .. }
-                | Operation::Execute { .. }
-                | Operation::Goal { .. }
-                | Operation::DisarmGoal
-        ) {
-            self.interactive_credential_handle(&input.request, &input.session_id)
+        let handle = if matches!(input.operation, Operation::List | Operation::Status { .. }) {
+            self.interactive_handle(&input.request, &input.session_id)
                 .await?
         } else {
-            self.interactive_handle(&input.request, &input.session_id)
+            self.interactive_credential_handle(&input.request, &input.session_id)
                 .await?
         };
         let reply = match input.operation {
@@ -68,6 +74,32 @@ impl BoundSessions {
                 handle.disarm_application_goal().await.map_err(remote)?;
                 return Ok(Value::Null);
             }
+            Operation::Compact { request_id } => {
+                serde_json::to_value(handle.compact(request_id).await.map_err(remote)?)
+            }
+            Operation::CompactRegion { region } => serde_json::to_value(
+                handle
+                    .compact_application_region(region)
+                    .await
+                    .map_err(remote)?,
+            ),
+            Operation::CheckCheckpointOwner => {
+                Ok(Value::Bool(handle.is_host_owner().await.map_err(remote)?))
+            }
+            Operation::InstallPluginCheckpoint {
+                turn,
+                effect,
+                checkpoint,
+            } => match handle
+                .install_plugin_checkpoint(turn, effect, checkpoint)
+                .await
+            {
+                Ok(()) => Ok(Value::Null),
+                Err(rsi_session_protocol::SessionError::Invalid(reason)) => {
+                    Ok(serde_json::json!({ "rejected": reason }))
+                }
+                Err(error) => return Err(remote(error)),
+            },
             Operation::Status { request_id } => {
                 serde_json::to_value(handle.command_status(&request_id).await.map_err(remote)?)
             }

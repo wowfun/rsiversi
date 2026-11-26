@@ -163,14 +163,8 @@ impl ExecutionOwner {
         {
             return Err(invalid("program execution owner ordinal is out of bounds"));
         }
-        if let Self::Plugin { plugin, .. } = self
-            && (plugin.is_empty()
-                || plugin.len() > 256
-                || !plugin.bytes().all(|byte| byte.is_ascii_graphic()))
-        {
-            return Err(invalid(
-                "plugin execution owner requires a bounded package identity",
-            ));
+        if let Self::Plugin { plugin, .. } = self {
+            crate::validate_plugin_name(plugin)?;
         }
         Ok(())
     }

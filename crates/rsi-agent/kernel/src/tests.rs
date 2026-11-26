@@ -314,27 +314,71 @@ fn automatic_compaction_confirmation_belongs_to_one_naturally_settled_effect() {
         effect_id: EffectId::new(id).unwrap(),
         settlement_seq,
     };
-    for (purpose, reason, installable) in [
-        (ModelEventPurpose::Conversation, FinishReason::Stop, false),
+    for (purpose, reason, region, installable) in [
+        (
+            ModelEventPurpose::Conversation,
+            FinishReason::Stop,
+            false,
+            false,
+        ),
         (
             ModelEventPurpose::ContextCompaction,
             FinishReason::MaxTokens,
+            false,
             false,
         ),
         (
             ModelEventPurpose::ContextCompaction,
             FinishReason::Stop,
+            false,
             true,
+        ),
+        (
+            ModelEventPurpose::ContextCompaction,
+            FinishReason::Stop,
+            true,
+            true,
+        ),
+        (
+            ModelEventPurpose::ContextCompaction,
+            FinishReason::MaxTokens,
+            true,
+            false,
         ),
     ] {
         let mut turn = TurnControl::new(1, 1);
-        turn.effects.insert(
-            effect.clone(),
-            ActiveEffect::Model {
-                purpose,
-                started: true,
-            },
-        );
+        let foreground = EffectId::new("foreground").unwrap();
+        if region {
+            turn.region = Some(Arc::new(RegionEffect {
+                id: effect.clone(),
+                stage: RegionStage::Prepared,
+            }));
+            turn.effects.insert(
+                foreground.clone(),
+                ActiveEffect::Model {
+                    purpose: ModelEventPurpose::Conversation,
+                    started: true,
+                },
+            );
+            turn.tool_source = Some(Arc::new(tool_origin::tests::source(&[(
+                "call-1",
+                "tool_first",
+            )])));
+            let start = SessionFactBody::ModelStarted {
+                turn_id: turn_id.clone(),
+                effect_id: effect.clone(),
+            };
+            turn_state::apply_executor_body(&mut turn, &start, 6).unwrap();
+            assert!(turn_state::apply_executor_body(&mut turn, &start, 7).is_err());
+        } else {
+            turn.effects.insert(
+                effect.clone(),
+                ActiveEffect::Model {
+                    purpose,
+                    started: true,
+                },
+            );
+        }
         let attempt = ModelAttemptLog::from_events(
             [
                 LanguageEvent::ContentStarted {
@@ -376,6 +420,10 @@ fn automatic_compaction_confirmation_belongs_to_one_naturally_settled_effect() {
             installable
         );
         assert!(turn_state::apply_executor_body(&mut turn, &exact, 10).is_err());
+        if region {
+            assert!(turn.tool_source.is_some());
+            assert!(turn.effects.contains_key(&foreground));
+        }
     }
 }
 

@@ -1,0 +1,31 @@
+{
+  "session_format": 47,
+  "store_schema": 59,
+  "schema_sha256": "916b336dcaf201f742d14e157f10c2333724a87b1c3b57ca93bc414fcb63c367",
+  "files": {
+    "domains/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "domains/sessions.sqlite3": "a4f907f38ff3711343684fe6168b1584d68347b2215acdbad8a3d6964aadd900",
+    "generations/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "generations/sessions.sqlite3": "e7619775cd28d24e3807a0e3b5d7a1d9c612208ddf875f78e4ec94b4c8aa1415",
+    "mechanical/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "mechanical/cas/a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7": "a48cc7e0a304bd81152c334aa512c26591b920374a743cb2b167d679991d22d7",
+    "mechanical/cas/staging/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mechanical/sessions.sqlite3": "8302a9fa84b73d23982c5fe831eebebcb400878f1d94604ed97917c96b85f7dc",
+    "mechanical/sessions.sqlite3-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "mechanical/sessions.sqlite3-wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "model-tools/media-fixture.png": "559c2b5a952c931a1d3794d806dcb4eecde89c58a3f8f0e26c1673374483bad9",
+    "model-tools/sessions.sqlite3": "8c0fef7ca06ac9b7c559ad26ea511a077291d585ced59593b2d3381a47204ce6",
+    "plugin-child/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "plugin-child/sessions.sqlite3": "74f4b3dae086a1546932d9a4ae8e99c7d2be9182ea424d928960a340af1bbc36",
+    "program/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/cas/84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882": "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882",
+    "program/cas/staging/.rsi-namespace-pin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "program/sessions.sqlite3": "488e5d92257995f17e3c1d4f4108dc01f4bb9aa555f932ff477963d93b48995d",
+    "queue/.writer.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "queue/sessions.sqlite3": "050ecd1aabbfef001291e7b8f609000df94ba642cf315134f7a9f0d694aa8321"
+  }
+}

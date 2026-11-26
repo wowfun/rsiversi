@@ -252,7 +252,13 @@ pub trait ModelContextCursor: fmt::Debug + Send + 'static {
     ) -> Result<Option<crate::PlannedCompaction>> {
         Ok(None)
     }
-    /// Reports whether the exact summary effect installed through its Finished event.
+    /// Validates a plugin's selected interval and identifies its complete model-visible input.
+    fn plugin_region_view(&self, _start: u32, _end: u32) -> Result<String> {
+        Err(invalid(
+            "selected context builder does not support plugin checkpoints",
+        ))
+    }
+    /// Reports whether the exact summary effect installed.
     fn summary_installed(&self, _effect: &rsi_agent_session_protocol::EffectId) -> bool {
         false
     }
@@ -430,7 +436,11 @@ impl ModelContextState {
         self.cursor
             .plan_compaction(options, model, profile, force, shrink)
     }
-    /// Reports the sole installing Finished event's effect identity.
+    /// Validates plugin-selected positions without requiring a provider or building a request.
+    pub fn plugin_region_view(&self, start: u32, end: u32) -> Result<String> {
+        self.cursor.plugin_region_view(start, end)
+    }
+    /// Reports whether this builder installed the supplied effect.
     pub fn summary_installed(&self, effect: &rsi_agent_session_protocol::EffectId) -> bool {
         self.cursor.summary_installed(effect)
     }

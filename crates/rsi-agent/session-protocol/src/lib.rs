@@ -51,7 +51,8 @@ mod program;
 pub use program::*;
 mod compaction;
 pub use compaction::{
-    LanguageAttemptFact, LanguageAttemptStage, ManualCompactionEvent, PreparedManualCompaction,
+    LanguageAttemptFact, LanguageAttemptStage, ManualCompactionEvent, PluginCheckpoint,
+    PreparedManualCompaction,
 };
 mod structured;
 pub use structured::*;
@@ -128,7 +129,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 46;
+pub const SESSION_FORMAT_VERSION: u32 = 47;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -2601,6 +2602,17 @@ pub enum SessionFactBody {
         /// Canonical settlement containing the installed text.
         settlement_seq: u64,
     },
+    /// An enabled plugin installed its own checkpoint while this Turn was open.
+    PluginContextCompacted {
+        /// Turn owning the selected model input.
+        turn_id: TurnId,
+        /// Identity of this application operation.
+        effect_id: EffectId,
+        /// Context builder digest of the selected source identities and their visible view.
+        view_sha256: String,
+        /// Attributed replacement at the exact preceding native prefix.
+        checkpoint: Box<PluginCheckpoint>,
+    },
     /// One Tool call was pinned before execution.
     ToolIntent {
         /// Exact target turn.
@@ -2879,6 +2891,20 @@ impl SessionFactBody {
                 }
                 Ok(())
             }
+            Self::PluginContextCompacted {
+                checkpoint,
+                view_sha256,
+                ..
+            } => {
+                validate_sha256("plugin checkpoint view", view_sha256)?;
+                checkpoint.validate()?;
+                if seq.is_some_and(|seq| seq.checked_sub(1) != Some(checkpoint.through_seq)) {
+                    return Err(SessionError::Invalid(
+                        "plugin checkpoint prefix changed".into(),
+                    ));
+                }
+                Ok(())
+            }
             Self::ModelAttemptSettled {
                 effect_id, attempt, ..
             } => {
@@ -2995,6 +3021,7 @@ impl SessionFactBody {
             | Self::ImageOutput { turn_id, .. }
             | Self::ModelAttemptSettled { turn_id, .. }
             | Self::ContextCompactionInstalled { turn_id, .. }
+            | Self::PluginContextCompacted { turn_id, .. }
             | Self::ToolIntent { turn_id, .. }
             | Self::ToolCallsSuperseded { turn_id, .. }
             | Self::ToolRejected { turn_id, .. }
@@ -3490,6 +3517,18 @@ pub fn validate_safe_diagnostic(kind: &str, value: &str) -> Result<()> {
 /// Validates one user turn text using the durable Fact contract.
 pub fn validate_turn_text(value: &str) -> Result<()> {
     validate_safe_text("turn text", value, MAXIMUM_TURN_TEXT_BYTES, false)
+}
+
+fn validate_plugin_name(plugin: &str) -> Result<()> {
+    if plugin.is_empty()
+        || plugin.len() > 256
+        || !plugin.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(SessionError::Invalid(
+            "plugin requires a bounded package identity".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_safe_text(kind: &str, value: &str, maximum: usize, allow_empty: bool) -> Result<()> {

@@ -278,6 +278,67 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn an_application_cannot_compact_with_a_paired_devices_session_handle() {
+    use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, DeviceId};
+    use rsi_session_protocol::SessionIngress as _;
+    let fixture = Fixture::new().await;
+    let request = Fixture::request("region-owner");
+    let id = request.session_id.clone();
+    let guest = fixture
+        .service
+        .create_from(
+            request,
+            CallOrigin::Device(AuthenticatedDevice {
+                id: DeviceId::from_bytes([7; 16]),
+                revoked: CancellationToken::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    let initial = guest.draft_snapshot().await.unwrap();
+    let command = DomainRequestId::new("compact").unwrap();
+    assert!(matches!(
+        guest.compact(command.clone()).await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    let region = rsi_agent_turn_protocol::CompactionRegion {
+        turn_id: rsi_agent_session_protocol::TurnId::new("claimed").unwrap(),
+        through_seq: 1,
+        start: 0,
+        end: 0,
+    };
+    assert!(matches!(
+        guest.compact_application_region(region.clone()).await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    assert!(matches!(
+        guest
+            .install_plugin_checkpoint(
+                region.turn_id,
+                rsi_agent_session_protocol::EffectId::new("template").unwrap(),
+                rsi_agent_session_protocol::PluginCheckpoint {
+                    through_seq: 1,
+                    start: 0,
+                    end: 0,
+                    plugin: "sample-plugin".into(),
+                    message: rsi_ai_protocol::Message::user_text("template checkpoint").unwrap(),
+                    summary_blocks: None,
+                    presentation: None,
+                }
+            )
+            .await,
+        Err(SessionError::Api(ApiError::Unauthorized))
+    ));
+    let owner = fixture.service.attach(&id).await.unwrap();
+    assert_eq!(
+        owner.compact(command).await.unwrap(),
+        rsi_agent_turn_protocol::CompactionOutcome::NoChange
+    );
+    assert_eq!(guest.draft_snapshot().await.unwrap(), initial);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn draft_reconnect_retains_receipt_and_first_submit_freezes_the_changed_state() {
     let fixture = Fixture::new().await;
     let handle = fixture.create("draft-command").await;

@@ -456,6 +456,18 @@ clients. Execution returns its actual draft or durable receipt; the application
 cannot choose a publication sequence or replace the expected revision silently.
 The owner application's `disarm_goal` operation drops the addressed Session's
 live scheduling permission. It returns an acknowledgement without a Store write.
+The `compact` operation takes the explicit command's `request_id` and returns
+the addressed Session's native manual compaction outcome. It requires the
+current caller's credential and the Session owner's authority. A retry reuses
+any model attempt recorded for that command.
+An enabled trusted application can send `compact_region` for the current
+owner's open Turn. Its region names the observed native Fact prefix and the
+inclusive positions of retained messages after the system prompt. The reply
+identifies the installed summary effect. The executor retains all source Facts.
+An engine that provides its own text can use `install_plugin_checkpoint` instead.
+The reply is null on durable installation. A rejected selection returns its
+reason so the application can close the attempt. A lost acknowledgement leaves
+the outcome unresolved until the Session is observed.
 A workbench uses draft locations to place blank conversations before their
 first message publishes them into the durable Navigation catalog.
 

@@ -68,6 +68,7 @@ impl AgentKernel {
                     SessionFactBody::TurnTerminal { .. }
                         | SessionFactBody::ModelAttemptSettled { .. }
                         | SessionFactBody::ContextCompactionInstalled { .. }
+                        | SessionFactBody::PluginContextCompacted { .. }
                 )
             })
         {

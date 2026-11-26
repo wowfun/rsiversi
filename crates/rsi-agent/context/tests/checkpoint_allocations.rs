@@ -60,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 #[test]
-fn full_builder_preserves_v22_payload_and_v6_envelope_without_a_third_full_copy() {
+fn full_builder_preserves_v23_payload_and_v6_envelope_without_a_third_full_copy() {
     let header = SessionHeader::new_local(
         SessionId::new("checkpoint-probe").unwrap(),
         1,
@@ -164,7 +164,7 @@ fn full_builder_preserves_v22_payload_and_v6_envelope_without_a_third_full_copy(
 }
 
 fn assert_checkpoint_contract(bytes: &[u8]) {
-    // v22 binds each projected Turn to its source Session and keeps pending
+    // v23 binds each projected Turn to its source Session and keeps pending
     // claims separate from prepared messages and current Step instructions,
     // plus entered context timestamps per producer and retained Turn;
     // the v6 outer envelope binds the selected builder and current Session header.
@@ -172,16 +172,17 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     let metadata_len = u32::from_le_bytes(bytes[prefix..prefix + 4].try_into().unwrap()) as usize;
     let metadata: serde_json::Value =
         serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
-    assert_eq!(metadata["builder"]["semantic_version"], "2.17.0");
+    assert_eq!(metadata["builder"]["semantic_version"], "2.18.0");
     println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
-    let fold_magic = b"rsi-agent-context-checkpoint-v22\0";
+    let fold_magic = b"rsi-agent-context-checkpoint-v23\0";
     assert!(payload.starts_with(fold_magic));
     let decoded: serde_json::Value =
         serde_json::from_slice(&payload[fold_magic.len() + 32..]).unwrap();
-    assert_eq!(decoded["version"], 22);
+    assert_eq!(decoded["version"], 23);
     assert!(decoded.get("omitted_turns").is_none());
     assert!(decoded["semantic"].is_object());
+    assert!(decoded["semantic"].get("last_region").is_none());
     assert_eq!(
         decoded["step_prompt"],
         serde_json::json!({"mode":"append_to_header", "sections":[]})
@@ -210,7 +211,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "6fa483082f33ddb899f035f2d706c597cc19b394e0f9733e5c87217fb42babb3"
+        "adb4577a193f8fc7599747e09a8ea0d2576b263766f286fbdf49d82d1cd030b3"
     );
 }
 

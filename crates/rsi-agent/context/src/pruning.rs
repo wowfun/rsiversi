@@ -19,10 +19,10 @@ pub(crate) struct InteractionUnit {
     pub complete: bool,
 }
 
-struct UnitShape {
-    first: usize,
-    count: usize,
-    complete: bool,
+pub(super) struct UnitShape {
+    pub first: usize,
+    pub count: usize,
+    pub complete: bool,
 }
 
 pub(crate) fn units(
@@ -50,7 +50,7 @@ pub(crate) fn units(
 }
 
 /// Missing results remain evidence; an orphan or reordered result never does.
-fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec<UnitShape>> {
+pub(super) fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec<UnitShape>> {
     let invalid = |message: &str| ContextError::Invalid(message.into());
     let mut result = Vec::new();
     let mut index = 0;

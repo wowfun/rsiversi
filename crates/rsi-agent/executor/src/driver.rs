@@ -41,7 +41,14 @@ impl Driver {
         self.controlled_work
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone(), tracker);
+            .insert(
+                key.clone(),
+                RunningTurn {
+                    claim: Some(claim.clone()),
+                    work: tracker,
+                    region: None,
+                },
+            );
         let deadline = tokio::time::Instant::now() + observation::OBSERVATION_WAIT;
         let preparation_stop = stop.child_token();
         let preparation_guard = preparation_stop.clone().drop_guard();
@@ -77,6 +84,7 @@ impl Driver {
             Ok(interval) => interval,
             Err(error) => {
                 preparation_stop.cancel();
+                self.close_region(&claim).await;
                 let _ = publish_terminal(
                     &*self.turns,
                     &self.config,
@@ -106,10 +114,15 @@ impl Driver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
         drop(unconfirmed);
-        self.controlled_work
+        let running = self
+            .controlled_work
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
+        if let Some(region) = running.and_then(|turn| turn.region) {
+            region.cancel.cancel();
+            region.done.cancelled().await;
+        }
         guard.confirm();
         let _ignored = self.turns.release(&claim);
         if let Some(interval) = interval {
@@ -1653,12 +1666,14 @@ impl Driver {
         let mut settlement = self
             .tool_settlement_proposals(claim, composition, &intent, &result)
             .await?;
+        if settlement.conclusion.is_some() {
+            self.close_region(claim).await;
+        }
         let body = SessionFactBody::ToolResult {
             turn_id: claim.turn_id().clone(),
             effect_id: effect_id.clone(),
             identity: identity.clone(),
             result,
-
             conclusion: settlement.conclusion,
         };
         let mut committed_domains = None;
@@ -1760,7 +1775,7 @@ impl Driver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&key)
-            .cloned();
+            .map(|running| Arc::clone(&running.work));
         let mut settlement = tracker.as_ref().map(controlled_work::Tracker::guard);
         self.active_tools
             .lock()
@@ -2088,6 +2103,7 @@ impl Driver {
         job_scope: Option<&JobScopeAuthority>,
         outcome: TurnOutcome,
     ) -> std::result::Result<Arc<SessionFact>, DriveFailure> {
+        self.close_region(claim).await;
         let outcome = self.resolve_outcome(claim, job_scope, outcome).await;
         publish_terminal(self.turns.as_ref(), &self.config, claim, outcome).await
     }
@@ -2113,7 +2129,7 @@ impl Driver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&(claim.session_id().clone(), claim.turn_id().clone()))
-            .cloned();
+            .map(|running| Arc::clone(&running.work));
         if let Some(tracker) = tracker {
             tracker.finalized(matches!(&finalized, Ok(Ok(_))));
         }
@@ -2189,7 +2205,8 @@ impl Driver {
             claim,
             bodies,
         )
-        .await?;
+        .await
+        .map_err(execution_support::turn_failure)?;
         let facts = receipt.facts();
         if facts
             .first()
@@ -2235,6 +2252,7 @@ impl Driver {
             through_seq,
         )
         .await
+        .map_err(fatal)
     }
 
     pub(super) async fn sync_fold(
@@ -2334,7 +2352,7 @@ impl Driver {
         );
         operation.record.scan.sequence_lag = claim.live_seq();
         let result = self
-            .load_claim_measured(claim, fold, &mut operation.record.scan)
+            .load_claim_measured(claim, fold, &mut operation.record.scan, None)
             .await;
         operation.record.outcome = if result.is_ok() {
             crate::checkpoint_diagnostics::Outcome::Ready
@@ -2344,11 +2362,12 @@ impl Driver {
         result
     }
 
-    async fn load_claim_measured(
+    pub(super) async fn load_claim_measured(
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
         scan: &mut crate::checkpoint_diagnostics::Scan,
+        through: Option<u64>,
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
         let mut cursor = 0;
@@ -2385,7 +2404,10 @@ impl Driver {
             self.load_fork_seed(claim, fold, scan).await?;
         }
         loop {
-            let page = self
+            if through == Some(cursor) {
+                return Ok(state);
+            }
+            let mut page = self
                 .turns
                 .read_facts(
                     claim,
@@ -2394,6 +2416,11 @@ impl Driver {
                 )
                 .await
                 .map_err(execution_support::turn_failure)?;
+            if let Some(through) = through {
+                page.through_seq = page.through_seq.min(through);
+                page.facts
+                    .truncate(page.facts.partition_point(|fact| fact.seq() <= through));
+            }
             scan.page(false, &page.facts);
             if page.through_seq == cursor {
                 return Ok(state);
@@ -2404,7 +2431,7 @@ impl Driver {
                 through_seq: page.through_seq,
             })
             .map_err(|error| context_failure("context.invalid", &error))?;
-            {
+            if through.is_none() {
                 let mut evidence = self
                     .evidence
                     .lock()
@@ -2412,9 +2439,9 @@ impl Driver {
                 for fact in &page.facts {
                     evidence.observe(claim.session_id(), fact);
                 }
+                scan_turn(claim, &mut state, &page.facts)
+                    .map_err(|message| failed("executor.invalid_history", message))?;
             }
-            scan_turn(claim, &mut state, &page.facts)
-                .map_err(|message| failed("executor.invalid_history", message))?;
         }
     }
 

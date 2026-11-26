@@ -727,6 +727,26 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
             "manual compaction unavailable".into(),
         ))
     }
+    /// Summarizes the trusted application's retained interval in the open Turn.
+    async fn compact_application_region(
+        &self,
+        _region: rsi_agent_turn_protocol::CompactionRegion,
+    ) -> Result<rsi_agent_session_protocol::EffectId> {
+        Err(SessionError::Invalid(
+            "application region compaction unavailable".into(),
+        ))
+    }
+    /// Installs attributed text supplied by a trusted Host application for the open Turn.
+    async fn install_plugin_checkpoint(
+        &self,
+        _turn: rsi_agent_session_protocol::TurnId,
+        _effect: rsi_agent_session_protocol::EffectId,
+        _checkpoint: rsi_agent_session_protocol::PluginCheckpoint,
+    ) -> Result<()> {
+        Err(SessionError::Invalid(
+            "plugin checkpoint installation unavailable".into(),
+        ))
+    }
     /// Releases an unsubmitted frozen-reference reservation for this exact Session.
     async fn release_reference(
         &self,
