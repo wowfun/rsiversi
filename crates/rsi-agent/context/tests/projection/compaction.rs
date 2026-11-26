@@ -839,21 +839,27 @@ fn missed_source_pressure_opportunity_does_not_poison_later_replay() {
     let mut history = Vec::new();
     // No model attempt at the trigger: stopped or describe-failed Turns are legal.
     for index in 0..1300 {
-        append(
-            &mut state,
-            &mut history,
-            vec![
-                accepted(&format!("old-{index}"), "old evidence"),
-                SessionFactBody::TurnTerminal {
-                    turn_id: TurnId::new(format!("old-{index}")).unwrap(),
-                    outcome: TurnOutcome::Interrupted {
-                        effect: None,
-                        reason: "fixture stopped".into(),
-                    },
-                    result: None,
-                },
-            ],
-        );
+        let turn = format!("old-{index}");
+        let mut bodies = vec![accepted(&turn, "old evidence")];
+        if index == 1023 {
+            bodies.extend(model_bodies(
+                &turn,
+                "last-admitted-reply",
+                ModelPurpose::Conversation,
+                "more evidence from the same source",
+                None,
+                FinishReason::Stop,
+            ));
+        }
+        bodies.push(SessionFactBody::TurnTerminal {
+            turn_id: TurnId::new(turn).unwrap(),
+            outcome: TurnOutcome::Interrupted {
+                effect: None,
+                reason: "fixture stopped".into(),
+            },
+            result: None,
+        });
+        append(&mut state, &mut history, bodies);
     }
     append(
         &mut state,
@@ -877,6 +883,11 @@ fn missed_source_pressure_opportunity_does_not_poison_later_replay() {
         assert!(planned.plan.sources.len() <= 1024);
         if index == 0 {
             assert_eq!(planned.plan.sources.len(), 1024);
+            let last = planned.plan.selections.last().unwrap();
+            assert_eq!(
+                (last.turn.as_str(), last.first, last.count),
+                ("old-1023", 0, 2)
+            );
         }
         let effect = format!("summary-{index}");
         append(

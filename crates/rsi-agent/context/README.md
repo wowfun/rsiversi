@@ -231,7 +231,8 @@ messages, rebuilding only messages whose provider-private blocks must be removed
 The pruning view borrows Turn identities and unchanged messages. It checks
 pairing across the conversation and retains only units with Tool results for
 the pruning pass. The latest complete unit keeps its full result. Compaction
-measures candidate units into one list with borrowed Turn identities. The
+measures candidate units in conversation order and charges the source binding
+once per selected Turn, including when protected messages separate its ranges. The
 frozen plan owns its selected coordinates. Replay eligibility shares one
 projection across its checks.
 Planning and replay hash the borrowed semantic view directly into a counting

@@ -214,22 +214,6 @@ impl SemanticState {
             self.last_human.get(turn),
         ))
     }
-    fn selection_bytes(
-        &self,
-        selection: &CompactionSelection,
-        first_in_turn: bool,
-    ) -> Result<usize> {
-        let source_bytes = if first_in_turn {
-            crate::encoded_bytes(
-                self.sources
-                    .get(&selection_key(selection))
-                    .ok_or_else(|| invalid("missing compaction source binding"))?,
-            )? + 1
-        } else {
-            0
-        };
-        Ok(source_bytes + crate::encoded_bytes(selection)? + 1)
-    }
     pub fn new(identity: &ContextBuilderIdentity) -> Self {
         Self {
             identity: CompactionBuilder {
@@ -1100,7 +1084,8 @@ impl ContextFold {
         let state = self.semantic();
         let mut selected = Vec::new();
         let mut selected_bytes = Vec::new();
-        let mut selected_turns = std::collections::BTreeSet::new();
+        let mut last_turn = None;
+        let mut source_count = 0;
         let mut encoded_bytes = 0;
         let mut request_bytes = crate::encoded_bytes(&summary_request(
             "[]".into(),
@@ -1123,7 +1108,8 @@ impl ContextFold {
             ..
         } in units
         {
-            if !selected_turns.contains(turn) && selected_turns.len() == PLAN_SOURCES {
+            let new_source = last_turn != Some(turn);
+            if new_source && source_count == PLAN_SOURCES {
                 break;
             }
             let selection = CompactionSelection {
@@ -1132,8 +1118,14 @@ impl ContextFold {
                 first: u32::try_from(first).map_err(|_| invalid("compaction position overflow"))?,
                 count: u32::try_from(count).map_err(|_| invalid("compaction count overflow"))?,
             };
-            let next_bytes = encoded_bytes
-                + state.selection_bytes(&selection, !selected_turns.contains(turn))?;
+            let mut next_bytes = encoded_bytes + crate::encoded_bytes(&selection)? + 1;
+            if new_source {
+                let source = state
+                    .sources
+                    .get(turn)
+                    .ok_or_else(|| invalid("missing compaction source binding"))?;
+                next_bytes += crate::encoded_bytes(source)? + 1;
+            }
             if next_bytes > PLAN_SELECTION_BYTES {
                 break;
             }
@@ -1150,7 +1142,10 @@ impl ContextFold {
             }
             request_bytes += source_bytes;
             encoded_bytes = next_bytes;
-            selected_turns.insert(turn);
+            if new_source {
+                last_turn = Some(turn);
+                source_count += 1;
+            }
             selected.push(selection);
             if shrink {
                 selected_bytes.push(bytes);
