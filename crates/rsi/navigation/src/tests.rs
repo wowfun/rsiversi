@@ -580,7 +580,8 @@ async fn provisional_members_remain_discoverable_in_pages_pins_and_exact_order()
 #[tokio::test]
 async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch() {
     use std::sync::atomic::Ordering::SeqCst;
-    let mut owner = owner().await;
+    let store = Arc::new(rsi_agent_testkit::MemoryStore::new());
+    let mut owner = owner_with_store(store.clone()).await;
     let workspaces = Arc::new(Workspaces::default());
     Arc::get_mut(&mut owner).unwrap().workspace = workspaces.clone();
     let page = owner
@@ -589,6 +590,7 @@ async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch()
         .await
         .unwrap();
     assert_eq!(page.entries.len(), 64);
+    let page_reads = store.activity_read_counts();
     assert_eq!(workspaces.calls.swap(0, SeqCst), 1);
     let sessions = page.entries[..3]
         .iter()
@@ -617,6 +619,7 @@ async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch()
         .await
         .unwrap();
     assert_eq!(pins.entries.len(), 3);
+    let pin_reads = store.activity_read_counts();
     assert_eq!(workspaces.calls.swap(0, SeqCst), 1);
     let page = owner
         .summaries(
@@ -637,6 +640,15 @@ async fn grouping_queries_each_coordinate_once_per_page_pins_and_summary_batch()
         sessions
     );
     assert_eq!(workspaces.calls.load(SeqCst), 1);
+    let exact_reads = store.activity_read_counts();
+    assert_eq!(
+        [
+            (page_reads.1, page_reads.2),
+            (pin_reads.1, pin_reads.2),
+            (exact_reads.1, exact_reads.2)
+        ],
+        [(1, 0), (2, 0), (3, 0)]
+    );
 }
 #[tokio::test]
 async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
@@ -669,9 +681,13 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
         .iter()
         .map(Some)
         .chain([None, Some(&coordinates[0])]);
-    let lookups = owner.workspace_lookups(selected.clone());
+    let lookups = owner.workspace_lookups(selected.clone().enumerate());
     assert_eq!(workspaces.calls.load(SeqCst), 0);
-    let rows = lookups.try_collect::<Vec<_>>().await.unwrap();
+    let rows = lookups
+        .map(|(_, workspace)| workspace)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
     assert_eq!(
         rows,
         selected
@@ -687,9 +703,9 @@ async fn workspace_lookup_prefetch_is_bounded_ordered_shared_and_lazy() {
     let input = coordinates.iter().map(Some).inspect(|_| {
         prepared.fetch_add(1, SeqCst);
     });
-    let mut lookups = owner.workspace_lookups(input);
+    let mut lookups = owner.workspace_lookups(input.enumerate());
     assert_eq!(prepared.load(SeqCst), 0);
-    lookups.next().await.unwrap().unwrap();
+    lookups.next().await.unwrap().1.unwrap();
     drop(lookups);
     assert!(prepared.load(SeqCst) <= 4);
     assert!(workspaces.calls.load(SeqCst) <= 4);

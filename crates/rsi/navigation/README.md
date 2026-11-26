@@ -18,7 +18,7 @@ removes the selected Session from a former registration in the same transaction.
 Reordering changes only the selected account. Enrollment checks other accounts
 only for the identity being attached.
 Discovery intersects the account with the caller's visible Store identities.
-For complete manual order and exact summaries, Navigation admits the selected
+Sidebar pages, pins, complete manual order and exact summaries admit selected
 identities in bounded Store batches. Each batch observes protection and first-Turn
 state together. The reader holds all granted protection leases through publication.
 For catalog pages, Navigation checks the registered directory of each accounted
@@ -106,7 +106,8 @@ Workspace grouping resolves exact registered identities without filesystem acces
 or registration side effects. Each page, pin list or exact-summary request shares
 one lookup per distinct coordinate, with at most four lookups in flight. Results
 retain input order. Coordinate selection and lookup preparation advance with
-the four in-flight slots. An ordinary page stops at its match limit.
+the four in-flight slots. An ordinary page reads access for at most its remaining
+match capacity at a time. It reuses a granted entry when publishing the newest key.
 The [wire contract](../navigation-api/README.md)
 owns external fields, bounds and client validation.
 

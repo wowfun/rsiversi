@@ -1,7 +1,7 @@
 use super::{
     ApiError, Arc, BoxFuture, CallOrigin, Document, Navigation, Result, SessionId, navigation_entry,
 };
-use futures_util::{StreamExt, TryStreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt};
 use rsi_agent_store_protocol::{MAXIMUM_ACCESS_SESSIONS, StoreOrderSeed};
 use rsi_navigation_api::{
     OrderMember, OrderMembership, OrderScope, OrderSeed, SummaryPage, SummaryRequest,
@@ -82,7 +82,7 @@ impl Navigation {
             })
         })
     }
-    async fn visible_batch(
+    pub(super) async fn visible_batch(
         &self,
         sessions: &[SessionId],
         origin: &CallOrigin,
@@ -95,7 +95,7 @@ impl Navigation {
             .store
             .session_access(sessions)
             .await
-            .map_err(super::store_read_error)?;
+            .map_err(|error| super::store_read_error(&error))?;
         rows.into_iter()
             .map(|row| {
                 let Some(row) = super::visible_summary(row)? else {
@@ -124,7 +124,12 @@ impl Navigation {
             });
         }
         let registrations = self
-            .workspace_lookups(visible_coordinates.into_iter().map(Some))
+            .workspace_lookups(
+                visible_coordinates
+                    .into_iter()
+                    .map(|coordinate| ((), Some(coordinate))),
+            )
+            .map(|((), registration)| registration)
             .try_collect::<Vec<_>>()
             .await?;
         let mut positions = std::collections::HashMap::new();
@@ -233,9 +238,13 @@ impl Navigation {
                     };
                     entries.push(entry);
                 }
-                let lookups = owner
-                    .workspace_lookups(rows.iter().flatten().map(|row| Some(&row.coordinates)));
-                let mut admitted = stream::iter(entries.iter_mut().flatten()).zip(lookups);
+                let mut admitted = owner.workspace_lookups(
+                    entries
+                        .iter_mut()
+                        .flatten()
+                        .zip(rows.iter().flatten())
+                        .map(|(entry, row)| (entry, Some(&row.coordinates))),
+                );
                 while let Some((entry, workspace)) = admitted.next().await {
                     entry.workspace = document.membership(workspace?, &entry.session);
                 }

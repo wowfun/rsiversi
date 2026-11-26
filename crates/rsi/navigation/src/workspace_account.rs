@@ -224,12 +224,11 @@ impl Navigation {
         }
         // A replacement registration at the same directory has a new identity.
         drop(document);
-        let registrations = self.workspace_lookups(
+        let mut checked = self.workspace_lookups(
             candidates
-                .iter()
-                .map(|&index| Some(sessions[index].header.coordinates())),
+                .into_iter()
+                .map(|index| (index, Some(sessions[index].header.coordinates()))),
         );
-        let mut checked = futures_util::stream::iter(candidates.iter().copied()).zip(registrations);
         while let Some((index, registered)) = checked.next().await {
             let registered = registered?;
             if rows[index].account.as_ref().map(|(id, _)| id) != registered.as_ref() {

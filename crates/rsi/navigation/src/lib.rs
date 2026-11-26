@@ -452,11 +452,10 @@ impl Navigation {
         let mut entries = Vec::new();
         let mut leases = Vec::new();
         let mut scanned = 0;
-        let mut cursor = None;
-        let mut visible_cut = after.as_ref().and_then(|c| c.after.clone());
+        let mut last_visible = None;
         let query = filter.query.to_lowercase();
         let default_metadata = SessionMetadata::default();
-        let lookups = self.workspace_lookups(page.sessions.iter().map(|row| {
+        let candidates = page.sessions.iter().enumerate().filter_map(|(index, row)| {
             let metadata = document
                 .records
                 .get(&row.session_id)
@@ -469,48 +468,47 @@ impl Navigation {
                     metadata,
                     Some(row.coordinates.path()),
                 ))
-            .then_some(&row.coordinates)
-        }));
-        let mut rows = stream::iter(&page.sessions).zip(lookups);
-        while let Some((row, workspace)) = rows.next().await {
-            scanned += 1;
-            cursor = Some(row.cursor());
-            let id = &row.session_id;
-            let metadata = document
-                .records
-                .get(id)
-                .map_or(&default_metadata, |row| &row.metadata);
-            if !filter.matches_archive(metadata.archived) || metadata.pinned {
-                continue;
+            .then_some(((index, row, metadata), Some(&row.coordinates)))
+        });
+        let mut rows = self.workspace_lookups(candidates);
+        let mut batch = Vec::new();
+        while entries.len() < 64 && scanned < page.sessions.len() {
+            while batch.len() < 64 - entries.len() {
+                let Some(((index, row, metadata), registered)) = rows.next().await else {
+                    scanned = page.sessions.len();
+                    break;
+                };
+                scanned = index + 1;
+                let workspace = document.membership(registered?, &row.session_id);
+                if filter.workspace.matches(workspace.as_ref()) {
+                    batch.push((row, metadata, workspace));
+                }
             }
-            let path = row.coordinates.path();
-            if !matches_query(&query, id, metadata, Some(path)) {
-                continue;
-            }
-            let workspace = document.membership(workspace?, id);
-            if !filter.workspace.matches(workspace.as_ref()) {
-                continue;
-            }
-            let Some(blank) = self.visible_session_blank(id, &origin, &mut leases).await? else {
-                continue;
-            };
-            if blank && !query.is_empty() {
-                continue;
-            }
-            visible_cut = Some(row.cursor());
-            entries.push(navigation_entry(row, blank, workspace, metadata));
-            if entries.len() == 64 {
-                break;
+            let ids = batch
+                .iter()
+                .map(|(row, _, _)| row.session_id.clone())
+                .collect::<Vec<_>>();
+            let grants = self.visible_batch(&ids, &origin, &mut leases).await?;
+            for ((row, metadata, workspace), grant) in batch.drain(..).zip(grants) {
+                if let Some((_, blank)) = grant
+                    && (!blank || query.is_empty())
+                {
+                    last_visible = Some(row);
+                    entries.push(navigation_entry(row, blank, workspace, metadata));
+                }
             }
         }
         drop(rows);
         let more = scanned < page.sessions.len() || page.has_more;
         let newest = match page.newest {
             Some(key) => {
-                if self
-                    .visible_session_blank(&key.session_id, &origin, &mut leases)
-                    .await?
-                    .is_some()
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.session == key.session_id)
+                    || self
+                        .visible_session_blank(&key.session_id, &origin, &mut leases)
+                        .await?
+                        .is_some()
                 {
                     Some(key)
                 } else {
@@ -527,8 +525,9 @@ impl Navigation {
             entries,
             scanned: u16::try_from(scanned).map_err(|_| ApiError::Unavailable)?,
             next: if more {
-                cursor
-                    .map(|cut| {
+                page.sessions[..scanned]
+                    .last()
+                    .map(|row| {
                         self.cursors
                             .lock()
                             .map_err(|_| ApiError::Unavailable)?
@@ -537,8 +536,10 @@ impl Navigation {
                                 filter,
                                 self.epoch.clone(),
                                 document.revision.to_string(),
-                                cut,
-                                visible_cut.clone(),
+                                row.cursor(),
+                                last_visible
+                                    .map(rsi_agent_store_protocol::StoreActivityRow::cursor)
+                                    .or_else(|| after.as_ref().and_then(|c| c.after.clone())),
                                 after.as_ref(),
                             )
                     })
@@ -567,13 +568,13 @@ impl Navigation {
             .map_err(|_| ApiError::Unavailable)
     }
     // Shared futures retain one result per coordinate without starting unpolled lookups.
-    fn workspace_lookups<'a>(
+    fn workspace_lookups<'a, T: Send + 'a>(
         &'a self,
-        coordinates: impl Iterator<Item = Option<&'a ExecutionCoordinates>> + Send + 'a,
-    ) -> stream::BoxStream<'a, Result<Option<WorkspaceId>>> {
+        rows: impl Iterator<Item = (T, Option<&'a ExecutionCoordinates>)> + Send + 'a,
+    ) -> stream::BoxStream<'a, (T, Result<Option<WorkspaceId>>)> {
         let mut distinct = BTreeMap::new();
-        stream::iter(coordinates)
-            .map(move |coordinates| {
+        stream::iter(rows)
+            .map(move |(row, coordinates)| {
                 let read = coordinates.map(|coordinates| {
                     distinct
                         .entry(coordinates)
@@ -581,10 +582,11 @@ impl Navigation {
                         .clone()
                 });
                 async move {
-                    match read {
+                    let workspace = match read {
                         Some(read) => read.await,
                         None => Ok(None),
-                    }
+                    };
+                    (row, workspace)
                 }
             })
             .buffered(4)
@@ -594,10 +596,6 @@ impl Navigation {
     ///
     /// # Panics
     /// Panics if a prior panic poisoned navigation state.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Keep cursor issuance and authorized delivery in one owning operation"
-    )]
     pub fn pinned(
         self: &Arc<Self>,
         origin: CallOrigin,
@@ -608,12 +606,7 @@ impl Navigation {
         self.run_read(move |owner| {
             Box::pin(async move {
                 owner.domain.ensure_available().map_err(storage_error)?;
-                let document = owner
-                    .state
-                    .lock()
-                    .expect("navigation state poisoned")
-                    .document
-                    .clone();
+                let document = owner.document();
                 let mut available = Vec::new();
                 let mut leases = Vec::new();
                 let mut missing = Vec::new();
@@ -625,7 +618,7 @@ impl Navigation {
                         metadata.pinned && filter.matches_archive(metadata.archived)
                     })
                     .collect::<Vec<_>>();
-                let ids = selected
+                let mut ids = selected
                     .iter()
                     .map(|(id, _)| (*id).clone())
                     .collect::<Vec<_>>();
@@ -634,55 +627,48 @@ impl Navigation {
                     .session_activity_summaries(&ids)
                     .await
                     .map_err(|_| ApiError::Unavailable)?;
-                let lookups = owner.workspace_lookups(rows.iter().zip(&selected).map(
-                    |(row, (id, metadata))| {
-                        row.as_ref()
-                            .filter(|row| {
-                                visibility.locations().contains(row.coordinates.location())
-                                    && matches_query(
-                                        &query,
-                                        id,
-                                        metadata,
-                                        Some(row.coordinates.path()),
-                                    )
-                            })
-                            .map(|row| &row.coordinates)
+                let include_missing =
+                    matches!(origin, CallOrigin::Local) && filter.workspace == WorkspaceFilter::All;
+                let candidates = rows
+                    .iter()
+                    .zip(selected)
+                    .filter(|(row, (id, metadata))| {
+                        let path = match row {
+                            Some(row)
+                                if visibility.locations().contains(row.coordinates.location()) =>
+                            {
+                                Some(row.coordinates.path())
+                            }
+                            None if include_missing => None,
+                            _ => return false,
+                        };
+                        matches_query(&query, id, metadata, path)
+                    })
+                    .collect::<Vec<_>>();
+                ids.clear();
+                ids.extend(candidates.iter().map(|(_, (id, _))| (*id).clone()));
+                let grants = owner.visible_batch(&ids, &origin, &mut leases).await?;
+                let admitted = candidates.into_iter().zip(grants).filter_map(
+                    |((row, (id, metadata)), grant)| {
+                        let (_, blank) = grant?;
+                        (!blank || query.is_empty()).then(|| {
+                            (
+                                (row, id, metadata, blank),
+                                row.as_ref().map(|row| &row.coordinates),
+                            )
+                        })
                     },
-                ));
-                let mut rows = stream::iter(rows.iter().enumerate()).zip(lookups);
-                while let Some(((index, row), workspace)) = rows.next().await {
-                    let (id, metadata) = selected[index];
-                    if row.as_ref().is_some_and(|row| {
-                        !visibility.locations().contains(row.coordinates.location())
-                    }) {
-                        continue;
-                    }
-                    let Some(blank) = owner
-                        .visible_session_blank(id, &origin, &mut leases)
-                        .await?
-                    else {
-                        continue;
-                    };
-                    if blank && !query.is_empty() {
-                        continue;
-                    }
+                );
+                let mut resolved = owner.workspace_lookups(admitted);
+                while let Some(((row, id, metadata, blank), registered)) = resolved.next().await {
                     let Some(row) = row else {
-                        if matches!(origin, CallOrigin::Local)
-                            && filter.workspace == WorkspaceFilter::All
-                            && matches_query(&query, id, metadata, None)
-                        {
-                            missing.push(PinnedEntry::Missing {
-                                session: id.clone(),
-                                metadata: metadata.metadata.clone(),
-                            });
-                        }
+                        missing.push(PinnedEntry::Missing {
+                            session: id.clone(),
+                            metadata: metadata.metadata.clone(),
+                        });
                         continue;
                     };
-                    let path = row.coordinates.path();
-                    if !matches_query(&query, id, metadata, Some(path)) {
-                        continue;
-                    }
-                    let workspace = document.membership(workspace?, id);
+                    let workspace = document.membership(registered?, id);
                     if !filter.workspace.matches(workspace.as_ref()) {
                         continue;
                     }
@@ -1300,10 +1286,10 @@ fn visible_summary<T>(result: rsi_agent_store_protocol::Result<T>) -> Result<Opt
     match result {
         Ok(summary) => Ok(Some(summary)),
         Err(StoreError::NotFound(_)) => Ok(None),
-        Err(error) => Err(store_read_error(error)),
+        Err(error) => Err(store_read_error(&error)),
     }
 }
-fn store_read_error(error: rsi_agent_store_protocol::StoreError) -> ApiError {
+fn store_read_error(error: &rsi_agent_store_protocol::StoreError) -> ApiError {
     use rsi_agent_store_protocol::StoreError;
     match error {
         StoreError::ReadCapacity | StoreError::ValidationBusy => ApiError::Capacity,
