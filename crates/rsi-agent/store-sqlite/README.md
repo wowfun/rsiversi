@@ -471,6 +471,7 @@ commit publishes its proof even if its last waiter subsequently leaves. Long col
 therefore do not hold the foreground reader or writer.
 Multi-statement reads, including fork selection,
 use a deferred transaction so watermarks and rows come from one WAL snapshot.
+Checking a selected fork interval reads Fact identities within its sequence bounds.
 Nonempty fork selections resolve on the validation lane. Empty selections retain
 the foreground indexed lookup. A Store-private LRU retains at most 256 successful
 fork boundaries, keyed by Session, invoking Turn and exact selection. Admission

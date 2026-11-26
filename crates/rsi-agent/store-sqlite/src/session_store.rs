@@ -1328,8 +1328,10 @@ impl SessionStore for SqliteStore {
                     .and_then(|value| decode_u64("fork interval turn count", value))?;
                 let interval_fact_turns = transaction
                     .query_row(
-                        "SELECT COUNT(DISTINCT turn_id) FROM facts
-                             WHERE session_id = ?1 AND seq > ?2 AND seq <= ?3",
+                        "SELECT COUNT(DISTINCT turn_id) FROM (
+                             SELECT turn_id FROM facts WHERE session_id = ?1 AND seq > ?2 AND seq <= ?3
+                             ORDER BY seq
+                         )",
                         params![
                             session_id.as_str(),
                             sqlite_u64("fork interval start", resolved_after_seq)?,
