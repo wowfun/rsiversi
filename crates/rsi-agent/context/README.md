@@ -225,8 +225,9 @@ pass; no-pressure attempts do not hash the view. Live outcome validation travers
 without materializing messages. Remainder preflight and installation use the same
 post-selection pruning and provider-view assembly.
 Remainder measurement borrows turns with no removed messages; turns changed by
-selection own their retained subset. Selection byte counting borrows
-provider-neutral messages and copies only provider-state changes.
+selection own their retained subset. Selection limits count encoded coordinates
+and source bindings directly. Summary requests serialize borrowed selected
+messages, rebuilding only messages whose provider-private blocks must be removed.
 The pruning view borrows Turn identities and unchanged messages. It checks
 pairing across the conversation and retains only units with Tool results for
 the pruning pass. The latest complete unit keeps its full result. Compaction

@@ -220,17 +220,15 @@ impl SemanticState {
         first_in_turn: bool,
     ) -> Result<usize> {
         let source_bytes = if first_in_turn {
-            encoded(
+            crate::encoded_bytes(
                 self.sources
                     .get(&selection_key(selection))
                     .ok_or_else(|| invalid("missing compaction source binding"))?,
-            )?
-            .len()
-                + 1
+            )? + 1
         } else {
             0
         };
-        Ok(source_bytes + encoded(selection)?.len() + 1)
+        Ok(source_bytes + crate::encoded_bytes(selection)? + 1)
     }
     pub fn new(identity: &ContextBuilderIdentity) -> Self {
         Self {
@@ -408,10 +406,6 @@ fn view_digest(value: &(impl Serialize + ?Sized)) -> Result<(String, u64)> {
     let mut writer = Writer::default();
     serde_json::to_writer(&mut writer, value).map_err(|error| invalid(error.to_string()))?;
     Ok((hex::encode(writer.hash.finalize()), writer.bytes))
-}
-
-fn encoded<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|error| invalid(error.to_string()))
 }
 
 // Count JSON bytes as content inside another JSON string, without materializing
@@ -778,10 +772,10 @@ impl ContextFold {
         };
         let (view_sha256, original_bytes) = view_digest(view)?;
         let mut sources = BTreeMap::new();
-        let mut materialized = Vec::new();
+        let mut transcript = Vec::new();
         let prior = state.selected_prior(&trigger);
         if let Some(summary) = prior {
-            materialized.push(summary.text.message()?.into_owned());
+            transcript.push(summary.text.message()?);
         }
         for selection in &selected {
             let key = selection_key(selection);
@@ -789,16 +783,18 @@ impl ContextFold {
                 .sources
                 .get(&key)
                 .ok_or_else(|| invalid("missing compaction source binding"))?;
-            sources.insert(
-                (source.session.clone(), source.turn.clone()),
-                source.clone(),
-            );
+            sources.insert((&source.session, &source.turn), source);
             let messages = projected
                 .get(&key)
                 .ok_or_else(|| invalid("missing selected Turn"))?;
-            materialized.extend_from_slice(
-                &messages[selection.first as usize..(selection.first + selection.count) as usize],
-            );
+            let range = selection.first as usize..(selection.first + selection.count) as usize;
+            for message in &messages[range] {
+                if let Some(message) =
+                    crate::without_unscoped_provider_message(Cow::Borrowed(message))?
+                {
+                    transcript.push(message);
+                }
+            }
         }
         let plan = ContextCompactionPlan {
             session: self.header.session_id().clone(),
@@ -808,7 +804,7 @@ impl ContextFold {
                 .header
                 .fingerprint()
                 .map_err(|error| invalid(error.to_string()))?,
-            sources: sources.into_values().collect(),
+            sources: sources.into_values().cloned().collect(),
             selections: selected,
             prior: prior.map(|summary| summary.prior.clone()),
             trigger,
@@ -820,10 +816,8 @@ impl ContextFold {
         };
         plan.validate()
             .map_err(|error| invalid(error.to_string()))?;
-        let source = String::from_utf8(encoded(&crate::without_unscoped_provider_state(
-            materialized,
-        )?)?)
-        .map_err(|error| invalid(error.to_string()))?;
+        let source =
+            serde_json::to_string(&transcript).map_err(|error| invalid(error.to_string()))?;
         let request = summary_request(
             source,
             plan.maximum_output_tokens,
@@ -1839,7 +1833,7 @@ mod view_tests {
             .unwrap();
         assert!(matches!(borrowed[0], Cow::Borrowed(_)));
         assert!(matches!(borrowed[1], Cow::Owned(_)));
-        let expected = encoded(&[&plain, &visible]).unwrap();
+        let expected = serde_json::to_vec(&[&plain, &visible]).unwrap();
         assert_eq!(
             view_digest(&borrowed).unwrap(),
             (

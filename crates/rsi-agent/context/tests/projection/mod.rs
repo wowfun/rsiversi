@@ -711,8 +711,7 @@ fn tool_call_and_result_remain_adjacent_and_workspace_is_not_implicit() {
     assert!(!encoded.contains("secret/workspace-name"));
 }
 
-#[test]
-fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
+fn history_with_provider_private_reply() -> ContextFold {
     let previous = TurnId::new("turn-previous").unwrap();
     let current = TurnId::new("turn-current").unwrap();
     let effect = EffectId::new("model-replay").unwrap();
@@ -799,7 +798,12 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
     ]))
     .unwrap();
 
-    let request = fold
+    fold
+}
+
+#[test]
+fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
+    let request = history_with_provider_private_reply()
         .request(
             ContextLimits::default(),
             rsi_ai_protocol::LanguageRequestOptions::default(),
@@ -813,6 +817,28 @@ fn provider_replay_does_not_elide_history_without_an_exact_route_identity() {
     assert!(encoded.contains("previous user input"));
     assert!(!encoded.contains("private reasoning"));
     assert!(!encoded.contains("resp-1"));
+}
+
+#[test]
+fn selected_summary_transcript_omits_a_provider_private_reply() {
+    let planned = history_with_provider_private_reply()
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &compaction::profile(),
+            Some(rsi_agent_session_protocol::CompactionTrigger::Region { start: 0, end: 1 }),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let visible =
+        serde_json::to_string(&[
+            rsi_ai_protocol::Message::user_text("previous user input").unwrap()
+        ])
+        .unwrap();
+    assert!(
+        matches!(planned.request.messages()[1].content(), [MessageContent::Text { text }] if text == &visible)
+    );
 }
 
 #[test]
