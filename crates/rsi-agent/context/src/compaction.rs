@@ -921,7 +921,11 @@ impl ContextFold {
         Ok((view.len(), crate::encoded_bytes(&view)?))
     }
 
-    fn ensure_protected_fit(&self, units: &[InteractionUnit], limits: ContextLimits) -> Result<()> {
+    fn ensure_protected_fit(
+        &self,
+        units: &[InteractionUnit<'_>],
+        limits: ContextLimits,
+    ) -> Result<()> {
         // A bounded plan may make partial progress. Reject only input that cannot
         // fit even after every selectable unit has been summarized.
         let removable = units
@@ -959,11 +963,11 @@ impl ContextFold {
     fn interaction_units(
         &self,
         projected: &crate::pruning::ProjectedTurns<'_>,
-    ) -> Result<Vec<InteractionUnit>> {
+    ) -> Result<Vec<InteractionUnit<'_>>> {
         let mut units = Vec::new();
         for turn in &self.turns {
             crate::outcomes::validate_view(&projected[&turn.id], &turn.batches, turn.terminal)?;
-            units.extend(crate::pruning::units(
+            for unit in crate::pruning::units(
                 &turn.id,
                 &projected[&turn.id],
                 turn.terminal
@@ -971,12 +975,14 @@ impl ContextFold {
                         .batches
                         .values()
                         .any(|batch| batch.calls.values().any(|call| call.superseded)),
-            )?);
+            ) {
+                units.push(unit?);
+            }
         }
         Ok(units)
     }
 
-    fn protected_tail_start(&self, units: &[InteractionUnit]) -> usize {
+    fn protected_tail_start(&self, units: &[InteractionUnit<'_>]) -> usize {
         let mut tail_start = units.len();
         let mut tail_bytes: usize = 0;
         let mut tail_messages = 0_usize;
@@ -1059,7 +1065,7 @@ impl ContextFold {
     fn selectable_units(
         &self,
         projected: &crate::pruning::ProjectedTurns<'_>,
-    ) -> Result<Vec<InteractionUnit>> {
+    ) -> Result<Vec<InteractionUnit<'_>>> {
         let state = self.semantic();
         let units = self.interaction_units(projected)?;
         let Some(current) = self.turns.back() else {
@@ -1076,13 +1082,13 @@ impl ContextFold {
             .take(tail_start)
             .filter(|unit| {
                 unit.complete
-                    && !state.instructions.get(&unit.turn).is_some_and(|indices| {
+                    && !state.instructions.get(unit.turn).is_some_and(|indices| {
                         indices
                             .range(unit.first..unit.first + unit.count)
                             .next()
                             .is_some()
                     })
-                    && (unit.turn != current.id
+                    && (unit.turn != &current.id
                         || ![original_input, latest_steer]
                             .into_iter()
                             .flatten()
@@ -1095,7 +1101,7 @@ impl ContextFold {
         &self,
         shrink: bool,
         projected: &crate::pruning::ProjectedTurns<'_>,
-        units: &[InteractionUnit],
+        units: &[InteractionUnit<'_>],
     ) -> Result<Vec<CompactionSelection>> {
         let state = self.semantic();
         let mut selected = Vec::new();
@@ -1115,7 +1121,7 @@ impl ContextFold {
         if let Some(summary) = &state.summary {
             request_bytes += quoted_bytes(summary.text.message()?.as_ref())? + 1;
         }
-        for InteractionUnit {
+        for &InteractionUnit {
             turn,
             first,
             count,
@@ -1129,16 +1135,15 @@ impl ContextFold {
             let selection = CompactionSelection {
                 session: turn.session.clone(),
                 turn: turn.turn.clone(),
-                first: u32::try_from(*first)
-                    .map_err(|_| invalid("compaction position overflow"))?,
-                count: u32::try_from(*count).map_err(|_| invalid("compaction count overflow"))?,
+                first: u32::try_from(first).map_err(|_| invalid("compaction position overflow"))?,
+                count: u32::try_from(count).map_err(|_| invalid("compaction count overflow"))?,
             };
             let next_bytes = encoded_bytes
                 + state.selection_bytes(&selection, !selected_turns.contains(turn))?;
             if next_bytes > PLAN_SELECTION_BYTES {
                 break;
             }
-            let messages = &projected[turn][*first..first + count];
+            let messages = &projected[turn][first..first + count];
             // The placeholder already includes the array brackets. Count a
             // separator per unit, including one conservative trailing comma.
             let source = messages
@@ -1154,7 +1159,7 @@ impl ContextFold {
             selected_turns.insert(turn);
             selected.push(selection);
             if shrink {
-                selected_bytes.push(*bytes);
+                selected_bytes.push(bytes);
             }
         }
         if shrink {

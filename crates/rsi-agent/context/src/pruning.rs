@@ -11,8 +11,8 @@ const HEAD: usize = 4096;
 const TAIL: usize = 1024;
 const MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
-pub(crate) struct InteractionUnit {
-    pub turn: TurnKey,
+pub(crate) struct InteractionUnit<'a> {
+    pub turn: &'a TurnKey,
     pub first: usize,
     pub count: usize,
     pub bytes: usize,
@@ -25,28 +25,26 @@ pub(super) struct UnitShape {
     pub complete: bool,
 }
 
-pub(crate) fn units(
-    turn: &TurnKey,
+pub(crate) fn units<'a>(
+    turn: &'a TurnKey,
     messages: &[Message],
     allow_incomplete: bool,
-) -> Result<Vec<InteractionUnit>> {
-    shapes(messages, allow_incomplete)
-        .map(|shape| {
-            let shape = shape?;
-            Ok(InteractionUnit {
-                turn: turn.clone(),
-                first: shape.first,
-                count: shape.count,
-                complete: shape.complete,
-                bytes: messages[shape.first..shape.first + shape.count]
-                    .iter()
-                    .try_fold(0usize, |sum, message| {
-                        sum.checked_add(encoded_message_bytes(message)?)
-                            .ok_or(ContextError::TooLarge)
-                    })?,
-            })
+) -> impl Iterator<Item = Result<InteractionUnit<'a>>> {
+    shapes(messages, allow_incomplete).map(move |shape| {
+        let shape = shape?;
+        Ok(InteractionUnit {
+            turn,
+            first: shape.first,
+            count: shape.count,
+            complete: shape.complete,
+            bytes: messages[shape.first..shape.first + shape.count]
+                .iter()
+                .try_fold(0usize, |sum, message| {
+                    sum.checked_add(encoded_message_bytes(message)?)
+                        .ok_or(ContextError::TooLarge)
+                })?,
         })
-        .collect()
+    })
 }
 
 /// Missing results remain evidence; an orphan or reordered result never does.
@@ -488,7 +486,7 @@ mod tests {
             project([(&id, messages.as_slice())]).unwrap()[&id],
             messages
         );
-        assert!(units(&id, &messages, false).is_err());
+        assert!(units(&id, &messages, false).next().unwrap().is_err());
         messages.push(
             Message::tool_result(
                 "call",

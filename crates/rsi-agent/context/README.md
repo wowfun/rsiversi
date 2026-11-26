@@ -229,8 +229,10 @@ selection own their retained subset. Selection byte counting borrows
 provider-neutral messages and copies only provider-state changes.
 The pruning view borrows Turn identities and unchanged messages. It checks
 pairing across the conversation and retains only units with Tool results for
-the pruning pass. The latest complete unit keeps its full result. Replay
-eligibility shares one projection across its checks.
+the pruning pass. The latest complete unit keeps its full result. Compaction
+measures candidate units into one list with borrowed Turn identities. The
+frozen plan owns its selected coordinates. Replay eligibility shares one
+projection across its checks.
 Planning and replay hash the borrowed semantic view directly into a counting
 SHA-256 writer, without copying unchanged messages or buffering their JSON.
 Provider-private reasoning is removed under the same projection rules as ordinary
