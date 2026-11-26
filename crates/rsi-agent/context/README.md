@@ -227,8 +227,10 @@ post-selection pruning and provider-view assembly.
 Remainder measurement borrows turns with no removed messages; turns changed by
 selection own their retained subset. Selection byte counting borrows
 provider-neutral messages and copies only provider-state changes.
-Unchanged turns borrow their retained messages; only turns containing a pruned
-result are copied. Replay eligibility also shares one projection across its checks.
+The pruning view borrows Turn identities and unchanged messages. It checks
+pairing across the conversation and retains only units with Tool results for
+the pruning pass. The latest complete unit keeps its full result. Replay
+eligibility shares one projection across its checks.
 Planning and replay hash the borrowed semantic view directly into a counting
 SHA-256 writer, without copying unchanged messages or buffering their JSON.
 Provider-private reasoning is removed under the same projection rules as ordinary

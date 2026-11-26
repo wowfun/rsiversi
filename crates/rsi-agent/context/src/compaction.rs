@@ -1027,7 +1027,8 @@ impl ContextFold {
             let first = start.saturating_sub(position);
             let limit = (through - position).min(messages.len());
             if first < limit {
-                for unit in crate::pruning::shapes(messages, true)? {
+                for unit in crate::pruning::shapes(messages, true) {
+                    let unit = unit?;
                     let end = unit.first + unit.count;
                     if unit.first < limit
                         && end > first

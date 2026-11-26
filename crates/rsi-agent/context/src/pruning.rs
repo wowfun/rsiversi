@@ -4,7 +4,7 @@ use crate::TurnKey;
 use crate::{ContextError, Result, encoded_message_bytes};
 use rsi_ai_protocol::{Message, MessageContent, MessageRole};
 use std::{borrow::Cow, collections::BTreeMap};
-pub(crate) type ProjectedTurns<'a> = BTreeMap<TurnKey, Cow<'a, [Message]>>;
+pub(crate) type ProjectedTurns<'a> = BTreeMap<&'a TurnKey, Cow<'a, [Message]>>;
 
 const THRESHOLD: usize = 8192;
 const HEAD: usize = 4096;
@@ -30,9 +30,9 @@ pub(crate) fn units(
     messages: &[Message],
     allow_incomplete: bool,
 ) -> Result<Vec<InteractionUnit>> {
-    shapes(messages, allow_incomplete)?
-        .into_iter()
+    shapes(messages, allow_incomplete)
         .map(|shape| {
+            let shape = shape?;
             Ok(InteractionUnit {
                 turn: turn.clone(),
                 first: shape.first,
@@ -50,17 +50,19 @@ pub(crate) fn units(
 }
 
 /// Missing results remain evidence; an orphan or reordered result never does.
-pub(super) fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec<UnitShape>> {
+pub(super) fn shapes(
+    messages: &[Message],
+    allow_incomplete: bool,
+) -> impl Iterator<Item = Result<UnitShape>> {
     let invalid = |message: &str| ContextError::Invalid(message.into());
-    let mut result = Vec::new();
     let mut index = 0;
-    while index < messages.len() {
+    std::iter::from_fn(move || {
         let first = index;
-        let message = &messages[index];
-        if message.role() == MessageRole::Tool {
-            return Err(invalid("orphan Tool result in compaction input"));
-        }
+        let message = messages.get(index)?;
         index += 1;
+        if message.role() == MessageRole::Tool {
+            return Some(Err(invalid("orphan Tool result in compaction input")));
+        }
         let mut complete = true;
         for call in message
             .content()
@@ -75,36 +77,39 @@ pub(super) fn shapes(messages: &[Message], allow_incomplete: bool) -> Result<Vec
             } else if allow_incomplete {
                 complete = false;
             } else {
-                return Err(invalid("unfinished or misordered live Tool batch in compaction input"));
+                return Some(Err(invalid("unfinished or misordered live Tool batch in compaction input")));
             }
         }
-        result.push(UnitShape {
+        Some(Ok(UnitShape {
             first,
             count: index - first,
             complete,
-        });
-    }
-    Ok(result)
+        }))
+    })
 }
 
 pub(crate) fn project<'a, 'b>(
     turns: impl IntoIterator<Item = (&'a TurnKey, &'a [Message], &'b crate::outcomes::Batches)>,
 ) -> Result<ProjectedTurns<'a>> {
-    let mut all_units = Vec::new();
+    let mut tool_units = Vec::new();
+    let mut latest = None;
     let mut projected = BTreeMap::new();
     for (id, messages, batches) in turns {
-        all_units.extend(
-            shapes(messages, true)?
-                .into_iter()
-                .map(|shape| (id, shape, batches)),
-        );
-        projected.insert(id.clone(), Cow::Borrowed(messages));
+        for unit in shapes(messages, true) {
+            let unit = unit?;
+            if unit.complete {
+                latest = Some((id, unit.first));
+            }
+            if unit.count > 1 {
+                tool_units.push((id, unit, batches));
+            }
+        }
+        projected.insert(id, Cow::Borrowed(messages));
     }
-    let latest = all_units.iter().rposition(|(_, unit, _)| unit.complete);
-    for (index, (turn, unit, batches)) in all_units.iter().enumerate() {
-        let prune = unit.complete && Some(index) != latest;
+    for (turn, unit, batches) in tool_units {
+        let prune = unit.complete && Some((turn, unit.first)) != latest;
         let messages = projected.get_mut(turn).expect("captured Turn");
-        for index in unit.first..unit.first + unit.count {
+        for index in unit.first + 1..unit.first + unit.count {
             let spills = match messages[index].content() {
                 [MessageContent::ToolResult { call_id, .. }] => batches
                     .get(&unit.first)
@@ -330,6 +335,11 @@ mod tests {
         let changed = project([(&id, long.as_slice()), (&tail, plain.as_slice())]).unwrap();
         assert!(matches!(changed[&id], Cow::Owned(_)));
         assert!(matches!(changed[&tail], Cow::Borrowed(_)));
+
+        // An unanswered call in a newer Turn leaves the previous complete unit protected.
+        let pending = project([(&id, long.as_slice()), (&tail, &long[..1])]).unwrap();
+        assert!(matches!(pending[&id], Cow::Borrowed(_)));
+        assert_eq!(pending[&tail].as_ref(), &long[..1]);
     }
 
     #[test]
