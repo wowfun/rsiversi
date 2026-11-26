@@ -138,10 +138,11 @@ caller supplies the encoded page budget, from two bytes through the existing
 serialized Fact ceiling. Encoding stops before the first Fact that would exceed
 the budget; an individually oversized first Fact returns capacity. It never
 returns part of a Fact or allocates beyond the supplied encoding budget.
-Each `model_attempt_settled` row retains its sequence, timestamp, Turn, effect and
-purpose, but its `attempt` contains `retain_context` and ordered
-`(elapsed_ms, LanguageEvent)` values from the canonical decoder. Other rows
-retain their canonical representation. The encoded attempt chunks are not sent
+For `model_attempt_settled` and the `settled` stage of `manual_compaction`,
+the nested `attempt` contains `retain_context` and ordered
+`(elapsed_ms, LanguageEvent)` values from the canonical decoder. The surrounding
+Fact retains its canonical fields, including the command identity for an idle
+compaction. Other rows retain their canonical representation. The encoded attempt chunks are not sent
 alongside that view, and there is no separate attempt-read callback. The complete
 page stays within the existing 36 MiB ceiling, cutting before a later row when
 needed; an individually oversized projection fails without truncation. The

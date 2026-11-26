@@ -1,6 +1,7 @@
 use crate::encoding::BoundedBytes;
 use rsi_agent_session_protocol::{
-    EffectId, ModelAttemptLog, ModelEventPurpose, SessionFact, SessionFactBody, TurnId,
+    DomainRequestId, EffectId, ManualCompactionEvent, ModelAttemptLog, ModelEventPurpose,
+    SessionFact, SessionFactBody, TurnId,
 };
 use rsi_extension::{Error, Result};
 use serde::{Serialize, ser::SerializeSeq};
@@ -25,15 +26,39 @@ struct Attempt<'a> {
     retain_context: bool,
     events: Events<'a>,
 }
+impl<'a> From<&'a ModelAttemptLog> for Attempt<'a> {
+    fn from(attempt: &'a ModelAttemptLog) -> Self {
+        Self {
+            retain_context: attempt.retain_context(),
+            events: Events(attempt),
+        }
+    }
+}
 #[derive(Serialize)]
 struct AttemptFact<'a> {
     seq: u64,
     timestamp_ms: u64,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    turn_id: &'a TurnId,
-    effect_id: &'a EffectId,
-    purpose: &'a ModelEventPurpose,
+    #[serde(flatten)]
+    body: Settlement<'a>,
+}
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Settlement<'a> {
+    ModelAttemptSettled {
+        turn_id: &'a TurnId,
+        effect_id: &'a EffectId,
+        purpose: &'a ModelEventPurpose,
+        attempt: Attempt<'a>,
+    },
+    ManualCompaction {
+        command_id: &'a DomainRequestId,
+        effect_id: &'a EffectId,
+        event: CompactionSettlement<'a>,
+    },
+}
+#[derive(Serialize)]
+struct CompactionSettlement<'a> {
+    stage: &'static str,
     attempt: Attempt<'a>,
 }
 struct Fact<'a>(&'a SessionFact);
@@ -42,27 +67,38 @@ impl Serialize for Fact<'_> {
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        match self.0.body() {
+        let body = match self.0.body() {
             SessionFactBody::ModelAttemptSettled {
                 turn_id,
                 effect_id,
                 purpose,
                 attempt,
-            } => AttemptFact {
-                seq: self.0.seq(),
-                timestamp_ms: self.0.timestamp_ms(),
-                kind: "model_attempt_settled",
+            } => Settlement::ModelAttemptSettled {
                 turn_id,
                 effect_id,
                 purpose,
-                attempt: Attempt {
-                    retain_context: attempt.retain_context(),
-                    events: Events(attempt),
+                attempt: attempt.into(),
+            },
+            SessionFactBody::ManualCompaction {
+                command_id,
+                effect_id,
+                event: ManualCompactionEvent::Settled { attempt },
+            } => Settlement::ManualCompaction {
+                command_id,
+                effect_id,
+                event: CompactionSettlement {
+                    stage: "settled",
+                    attempt: attempt.into(),
                 },
-            }
-            .serialize(serializer),
-            _ => self.0.serialize(serializer),
+            },
+            _ => return self.0.serialize(serializer),
+        };
+        AttemptFact {
+            seq: self.0.seq(),
+            timestamp_ms: self.0.timestamp_ms(),
+            body,
         }
+        .serialize(serializer)
     }
 }
 
@@ -118,6 +154,44 @@ pub fn project_history_page<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_settlement_keeps_its_command_and_decodes_the_provider_attempt() {
+        let events = serde_json::json!([
+            [0, {"type":"content_started","index":0,"content":{"type":"text"}}],
+            [7, {"type":"content_delta","index":0,"delta":{"type":"text","value":"checkpoint"}}],
+            [12, {"type":"content_finished","index":0}],
+            [19, {"type":"finished","reason":"stop","replay":null}]
+        ]);
+        let attempt = ModelAttemptLog::from_events(
+            serde_json::from_value::<Vec<_>>(events.clone()).unwrap(),
+            false,
+        )
+        .unwrap();
+        let fact = SessionFact::new(
+            7,
+            21,
+            SessionFactBody::ManualCompaction {
+                command_id: DomainRequestId::new("manual").unwrap(),
+                effect_id: EffectId::new("summary").unwrap(),
+                event: ManualCompactionEvent::Settled { attempt },
+            },
+        )
+        .unwrap();
+        let expected = serde_json::json!([{"seq":7,"timestamp_ms":21,"type":"manual_compaction",
+            "command_id":"manual","effect_id":"summary","event":{"stage":"settled",
+            "attempt":{"retain_context":false,"events":events}}}]);
+        let (through, page) = project_history_page([&fact], 7, 1024).unwrap();
+        assert_eq!(through, 7);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&page).unwrap(),
+            expected
+        );
+        assert!(matches!(
+            project_history_page([&fact], 7, page.len() - 1),
+            Err(Error::Capacity)
+        ));
+    }
 
     #[test]
     fn page_capacity_keeps_whole_facts_and_claim_invisible_cursors() {
