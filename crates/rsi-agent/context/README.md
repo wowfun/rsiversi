@@ -1,7 +1,10 @@
 # rsi-agent-context
 
-An explicit manual compaction uses the same complete, ordered source units as
-automatic compaction. It may select eligible history below the usage trigger.
+Manual compaction keeps the last complete interaction unit, active project
+instructions and incomplete tool batches. Earlier complete units, including
+the original user input, are eligible even in a short conversation.
+Manual plans record policy version 3. Replay evaluates each recorded plan
+under its own policy so existing version 2 checkpoints keep their source ranges.
 When all remaining input is protected, the planner returns no work.
 The plan records adjacent selected messages in the same Turn as one range.
 Replay compares the selected positions. A protected gap or a different source
@@ -134,7 +137,7 @@ An optional Usage trigger with no selectable whole unit leaves the ordinary
 request unchanged. Forced or canonical pressure without a selection is a limit.
 No estimate substitutes for missing Usage. Hard canonical
 byte/message limits and explicit provider ContextLimit handle first calls.
-Compaction preserves active instructions, the current original task input, latest
+Automatic compaction preserves active instructions, the current original task input, latest
 human steering and whole recent interaction units. The optional recent tail
 uses at most 64 KiB and half the lesser of the configured and AI message
 allowances; the last unit is always retained intact. A terminal Turn's incomplete

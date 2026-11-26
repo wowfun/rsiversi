@@ -1475,6 +1475,67 @@ fn compacted_ranges_replay_the_same_positions_as_individual_units() {
 }
 
 #[test]
+fn manual_compaction_of_a_short_exchange_retains_the_answer_and_replays_the_summary() {
+    let mut state = cursor();
+    let mut facts = Vec::new();
+    append(
+        &mut state,
+        &mut facts,
+        vec![accepted("short", &"early detail ".repeat(115))],
+    );
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "short",
+            "answer",
+            ModelPurpose::Conversation,
+            "latest answer",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let planned = state
+        .plan_compaction(
+            &rsi_ai_protocol::LanguageRequestOptions::default(),
+            &ModelRef::new("deployment", "model").unwrap(),
+            &profile(),
+            Some(CompactionTrigger::Manual),
+            false,
+        )
+        .unwrap()
+        .expect("a short completed exchange has an eligible user message");
+    assert_eq!(planned.plan.version, 3);
+    assert_eq!(planned.plan.selections.len(), 1);
+    assert_eq!(
+        (
+            planned.plan.selections[0].first,
+            planned.plan.selections[0].count
+        ),
+        (0, 1)
+    );
+    append(
+        &mut state,
+        &mut facts,
+        model_bodies(
+            "short",
+            "checkpoint",
+            ModelPurpose::ContextCompaction(Box::new(planned.plan)),
+            "short summary",
+            None,
+            FinishReason::Stop,
+        ),
+    );
+    let mut replay = cursor();
+    replay.ingest(ContextPage::Canonical(&facts)).unwrap();
+    for view in [&state, &replay] {
+        let messages = wire(view);
+        assert!(messages.contains("short summary") && messages.contains("latest answer"));
+        assert!(!messages.contains("early detail"));
+    }
+}
+
+#[test]
 fn manual_compaction_can_select_history_without_usage_and_skips_protected_input() {
     let model = ModelRef::new("deployment", "model").unwrap();
     let options = rsi_ai_protocol::LanguageRequestOptions::default();

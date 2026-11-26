@@ -367,7 +367,7 @@ pub enum CompactionTrigger {
 pub struct ContextCompactionPlan {
     /// Session in which this model effect was planned.
     pub session: SessionId,
-    /// Policy and summary format version; currently two.
+    /// Frozen selection policy. Version 3 selects a single retained unit for manual compaction.
     pub version: u32,
     /// Selected builder identity.
     pub builder: CompactionBuilder,

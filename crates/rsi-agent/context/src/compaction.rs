@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use std::{borrow::Cow, collections::BTreeMap};
 
 const TAIL_BYTES: usize = 64 * 1024;
+const MANUAL_SINGLE_UNIT_VERSION: u32 = 3;
 const PLAN_SOURCES: usize = 1024;
 // IDs are at most 256 bytes; bounded builder, prior, trigger and fixed fields
 // fit here even at their maximum JSON escaping and numeric widths.
@@ -740,7 +741,8 @@ impl ContextFold {
         let selected = if let CompactionTrigger::Region { start, end } = trigger {
             self.region_selections(projected, start, end)?
         } else {
-            let units = self.selectable_units(projected)?;
+            let units =
+                self.selectable_units(projected, matches!(trigger, CompactionTrigger::Manual))?;
             let selected = self.compaction_selections_from(shrink, projected, &units)?;
             if selected.is_empty() {
                 return if matches!(trigger, CompactionTrigger::Manual)
@@ -782,7 +784,11 @@ impl ContextFold {
         }
         let plan = ContextCompactionPlan {
             session: self.header.session_id().clone(),
-            version: 2,
+            version: if matches!(trigger, CompactionTrigger::Manual) {
+                MANUAL_SINGLE_UNIT_VERSION
+            } else {
+                2
+            },
             builder: state.identity.clone(),
             header_fingerprint: self
                 .header
@@ -1043,6 +1049,7 @@ impl ContextFold {
     fn selectable_units(
         &self,
         projected: &crate::pruning::ProjectedTurns<'_>,
+        manual_single_unit: bool,
     ) -> Result<Vec<InteractionUnit<'_>>> {
         let state = self.semantic();
         let units = self.interaction_units(projected)?;
@@ -1054,7 +1061,11 @@ impl ContextFold {
             .iter()
             .position(|m| m.role() == MessageRole::User);
         let latest_steer = state.last_human.get(&current.id).copied();
-        let tail_start = self.protected_tail_start(&units);
+        let tail_start = if manual_single_unit {
+            units.iter().rposition(|unit| unit.complete).unwrap_or(0)
+        } else {
+            self.protected_tail_start(&units)
+        };
         Ok(units
             .into_iter()
             .take(tail_start)
@@ -1066,7 +1077,8 @@ impl ContextFold {
                             .next()
                             .is_some()
                     })
-                    && (unit.turn != &current.id
+                    && (manual_single_unit
+                        || unit.turn != &current.id
                         || ![original_input, latest_steer]
                             .into_iter()
                             .flatten()
@@ -1178,7 +1190,9 @@ impl ContextFold {
 
     pub(crate) fn summary_eligible(&self, plan: &ContextCompactionPlan) -> bool {
         let state = self.semantic();
-        if plan.version != 2
+        let manual_single_unit = plan.version == MANUAL_SINGLE_UNIT_VERSION
+            && matches!(plan.trigger, CompactionTrigger::Manual);
+        if (plan.version != 2 && !manual_single_unit)
             || plan.builder != state.identity
             || plan.prior.as_ref() != state.selected_prior(&plan.trigger).map(|s| &s.prior)
         {
@@ -1208,7 +1222,7 @@ impl ContextFold {
             self.region_selections(&projected, start, end)
                 .is_ok_and(same_positions)
         } else {
-            let Ok(units) = self.selectable_units(&projected) else {
+            let Ok(units) = self.selectable_units(&projected, manual_single_unit) else {
                 return false;
             };
             [false, true].into_iter().any(|shrink| {
