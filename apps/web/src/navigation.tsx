@@ -31,6 +31,7 @@ function searchInput(value: string) {
 }
 
 export interface NavigationProps {
+  bindScrollerRef: React.RefCallback<HTMLElement>;
   conversationVisible: boolean;
   searchOpen: boolean;
   setSearchOpen(open: boolean): void;
@@ -47,7 +48,7 @@ export function NavigationSearchButton({rail=false, open}: {rail?:boolean; open:
   </Tooltip>;
 }
 
-export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversationVisible}: NavigationProps) {
+export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversationVisible, bindScrollerRef}: NavigationProps) {
   const selected = useSelected(value=>value);
   const currentSession = useView(view=>{
     const surface = view?.surfaces[selected];
@@ -298,185 +299,189 @@ export function Navigation({searchOpen, setSearchOpen, searchInputRef, conversat
   }
   return (
     <>
-      <div className={`section-heading ${css.heading}`}>
-        {searchOpen ? <form ref={searchRoot} className="navigation-search" onSubmit={event=>{event.preventDefault();submitSearch.current?.()}}>
-          <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={14}/></Button>
-          <input ref={searchInputRef} autoFocus data-navigation-initial-focus="" aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>{setReveal(undefined);setSearchText(searchInput(event.target.value));}} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch()}}}/>
-          <Button size="sm" aria-label="Close search" onClick={closeSearch}><IconCloseOutlineRegular size={16}/></Button>
-        </form> : <>
-          <h2 data-testid="workspace-heading">Workspaces</h2>
-          <div className="navigation-actions">
-            <NavigationSearchButton open={()=>setSearchOpen(true)}/>
-            <NavigationOptions device={device} filter={mode} onFilter={selectFilter} refresh={async()=>{await input.command({action:'refresh'});await search()}}/>
-            <Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}><IconProjectAddOutlineRegular size={16}/></Button>
-          </div>
-        </>}
-      </div>
-      {workspaceSeed?.kind === "too_large" && (
-        <p role="status" className="hint">
-          Workspace ordering is paused because complete membership exceeds its
-          limit. Saved order is preserved.
-        </p>
-      )}
-      {device.notice && (
-        <p role="alert" className="settings-error">
-          {device.notice}
-        </p>
-      )}
-      {device.paused && (
-        <p role="status" className="hint">
-          Manual order is paused because complete membership exceeds its limit.
-          Your saved order is preserved; showing updated conversations.
-        </p>
-      )}
-      {nav?.newer_activity && (
-        <p role="status" className="hint">
-          Newer activity is available.{" "}
-          <button onClick={() => run(() => search())}>
-            Refresh conversations
-          </button>
-        </p>
-      )}
-      {nav?.diagnostic && (
-        <p role="alert" className="settings-error">
-          {nav.diagnostic}
-        </p>
-      )}
-      {mode === "attention" && !query ? (
-        <AttentionNavigation nav={nav} />
-      ) : (
-        <>
-          {!query && !awaitingQuery && !!pins.length && (
-            <section
-              className="pinned-conversations"
-              aria-label="Pinned conversations"
-            >
-              <h3>Pinned</h3>
-              {pins.map((pin) =>
-                pin.status === "available" ? (
-                  row(pin.entry)
-                ) : (
-                  <div className="session-row stale" key={pin.session}>
-                    <span>
-                      {pin.metadata.title ?? pin.session} — unavailable
-                    </span>
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        run(() =>
-                          mutate(pin.session, {
-                            ...pin.metadata,
-                            pinned: false,
-                          }),
-                        )
-                      }
-                    >
-                      Unpin
-                    </Button>
-                  </div>
-                ),
-              )}
-            </section>
+      <section className={css.workspaceBrowser} data-search-expanded={searchOpen || undefined}>
+        <div className={`section-heading ${css.heading}`}>
+          {searchOpen ? <form ref={searchRoot} className="navigation-search" onSubmit={event=>{event.preventDefault();submitSearch.current?.()}}>
+            <Button size="sm" type="submit" aria-label="Search"><IconSearchOutlineRegular size={14}/></Button>
+            <input ref={searchInputRef} autoFocus data-navigation-initial-focus="" aria-label="Search conversations" placeholder="Search conversations" value={searchText} onChange={event=>{setReveal(undefined);setSearchText(searchInput(event.target.value));}} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch()}}}/>
+            <Button size="sm" aria-label="Close search" onClick={closeSearch}><IconCloseOutlineRegular size={16}/></Button>
+          </form> : <>
+            <h2 data-testid="workspace-heading">Workspaces</h2>
+            <div className="navigation-actions">
+              <NavigationSearchButton open={()=>setSearchOpen(true)}/>
+              <NavigationOptions device={device} filter={mode} onFilter={selectFilter} refresh={async()=>{await input.command({action:'refresh'});await search()}}/>
+              <Button size="sm" data-testid="choose-workspace" aria-label="Choose workspace" onClick={chooseWorkspace}><IconProjectAddOutlineRegular size={16}/></Button>
+            </div>
+          </>}
+        </div>
+        <div ref={bindScrollerRef} className={css.listArea} data-sidebar-list-area="">
+          {workspaceSeed?.kind === "too_large" && (
+            <p role="status" className="hint">
+              Workspace ordering is paused because complete membership exceeds its
+              limit. Saved order is preserved.
+            </p>
           )}
-          <div id="sessions" className="nav-list">
-            {awaitingQuery && !query ? <p role="status" className="hint">Loading conversations…</p> : !query && device.manual ? (
-              <>
-                {device.loading ? (
-                  <p role="status" className="hint">
-                    Loading conversations…
-                  </p>
-                ) : device.preferences.view === "flat" ? (
-                  device.entries.map(row)
+          {device.notice && (
+            <p role="alert" className="settings-error">
+              {device.notice}
+            </p>
+          )}
+          {device.paused && (
+            <p role="status" className="hint">
+              Manual order is paused because complete membership exceeds its limit.
+              Your saved order is preserved; showing updated conversations.
+            </p>
+          )}
+          {nav?.newer_activity && (
+            <p role="status" className="hint">
+              Newer activity is available.{" "}
+              <button onClick={() => run(() => search())}>
+                Refresh conversations
+              </button>
+            </p>
+          )}
+          {nav?.diagnostic && (
+            <p role="alert" className="settings-error">
+              {nav.diagnostic}
+            </p>
+          )}
+          {mode === "attention" && !query ? (
+            <AttentionNavigation nav={nav} />
+          ) : (
+            <>
+              {!query && !awaitingQuery && !!pins.length && (
+                <section
+                  className="pinned-conversations"
+                  aria-label="Pinned conversations"
+                >
+                  <h3>Pinned</h3>
+                  {pins.map((pin) =>
+                    pin.status === "available" ? (
+                      row(pin.entry)
+                    ) : (
+                      <div className="session-row stale" key={pin.session}>
+                        <span>
+                          {pin.metadata.title ?? pin.session} — unavailable
+                        </span>
+                        <Button
+                          size="sm"
+                          onClick={() =>
+                            run(() =>
+                              mutate(pin.session, {
+                                ...pin.metadata,
+                                pinned: false,
+                              }),
+                            )
+                          }
+                        >
+                          Unpin
+                        </Button>
+                      </div>
+                    ),
+                  )}
+                </section>
+              )}
+              <div id="sessions" className="nav-list">
+                {awaitingQuery && !query ? <p role="status" className="hint">Loading conversations…</p> : !query && device.manual ? (
+                  <>
+                    {device.loading ? (
+                      <p role="status" className="hint">
+                        Loading conversations…
+                      </p>
+                    ) : device.preferences.view === "flat" ? (
+                      device.entries.map(row)
+                    ) : (
+                      <WorkspaceNavigation conversationVisible={conversationVisible} nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row} attention={attention} blankPin={blankPin}/>
+                    )}
+                    <div className="manual-pagination">
+                      <Button
+                        size="sm"
+                        disabled={device.offset === 0}
+                        onClick={device.previous}
+                      >
+                        Previous 64
+                      </Button>
+                      <span>
+                        {device.total ? device.offset + 1 : 0}–
+                        {Math.min(device.offset + 64, device.total)} /{" "}
+                        {device.total}
+                      </span>
+                      <Button
+                        size="sm"
+                        disabled={device.offset + 64 >= device.total}
+                        onClick={device.next}
+                      >
+                        Next 64
+                      </Button>
+                      <Button size="sm" onClick={device.refresh}>
+                        Refresh membership
+                      </Button>
+                    </div>
+                  </>
+                ) : query ||
+                  mode === "archived" ||
+                  device.preferences.view === "flat" ? (
+                  <>
+                    {(query ? searchEntries : flatEntries).map(row)}
+                    {awaitingQuery && <p role="status" className="hint">Searching conversations…</p>}
+                    {nav && !awaitingQuery && !(query ? searchEntries : flatEntries).length && (
+                      <p className="hint">
+                        {nav.more
+                          ? "Continue searching the remaining conversations."
+                          : "No matching conversations."}
+                      </p>
+                    )}
+                    {nav?.more && !awaitingQuery && (
+                      <Button
+                        id="sessions-next"
+                        size="sm"
+                        onClick={() =>
+                          run(() =>
+                            device.command({
+                              action: "navigate",
+                              command: { kind: "next", ticket: nav.ticket },
+                            }),
+                          )
+                        }
+                      >
+                        Continue conversations
+                      </Button>
+                    )}
+                  </>
                 ) : (
-                  <WorkspaceNavigation conversationVisible={conversationVisible} nav={nav} device={device} workspaces={workspaces} completeWorkspaces={completeWorkspaces} showUngrouped={showUngrouped} expand={expand} row={row} attention={attention} blankPin={blankPin}/>
+                  <>
+                    <WorkspaceNavigation
+                      conversationVisible={conversationVisible}
+                      nav={nav}
+                      device={device}
+                      workspaces={workspaces}
+                      completeWorkspaces={completeWorkspaces}
+                      showUngrouped={showUngrouped}
+                      expand={expand}
+                      row={row}
+                      attention={attention}
+                      blankPin={blankPin}
+                      reveal={reveal}
+                    />
+                    {!completeWorkspaces && catalog?.workspaces_more && (
+                      <Button
+                        id="workspaces-next"
+                        size="sm"
+                        onClick={() =>
+                          run(() => input.command({ action: "workspaces_next" }))
+                        }
+                      >
+                        More workspaces
+                      </Button>
+                    )}
+                  </>
                 )}
-                <div className="manual-pagination">
-                  <Button
-                    size="sm"
-                    disabled={device.offset === 0}
-                    onClick={device.previous}
-                  >
-                    Previous 64
-                  </Button>
-                  <span>
-                    {device.total ? device.offset + 1 : 0}–
-                    {Math.min(device.offset + 64, device.total)} /{" "}
-                    {device.total}
-                  </span>
-                  <Button
-                    size="sm"
-                    disabled={device.offset + 64 >= device.total}
-                    onClick={device.next}
-                  >
-                    Next 64
-                  </Button>
-                  <Button size="sm" onClick={device.refresh}>
-                    Refresh membership
-                  </Button>
-                </div>
-              </>
-            ) : query ||
-              mode === "archived" ||
-              device.preferences.view === "flat" ? (
-              <>
-                {(query ? searchEntries : flatEntries).map(row)}
-                {awaitingQuery && <p role="status" className="hint">Searching conversations…</p>}
-                {nav && !awaitingQuery && !(query ? searchEntries : flatEntries).length && (
-                  <p className="hint">
-                    {nav.more
-                      ? "Continue searching the remaining conversations."
-                      : "No matching conversations."}
-                  </p>
-                )}
-                {nav?.more && !awaitingQuery && (
-                  <Button
-                    id="sessions-next"
-                    size="sm"
-                    onClick={() =>
-                      run(() =>
-                        device.command({
-                          action: "navigate",
-                          command: { kind: "next", ticket: nav.ticket },
-                        }),
-                      )
-                    }
-                  >
-                    Continue conversations
-                  </Button>
-                )}
-              </>
-            ) : (
-              <>
-                <WorkspaceNavigation
-                  conversationVisible={conversationVisible}
-                  nav={nav}
-                  device={device}
-                  workspaces={workspaces}
-                  completeWorkspaces={completeWorkspaces}
-                  showUngrouped={showUngrouped}
-                  expand={expand}
-                  row={row}
-                  attention={attention}
-                  blankPin={blankPin}
-                  reveal={reveal}
-                />
-                {!completeWorkspaces && catalog?.workspaces_more && (
-                  <Button
-                    id="workspaces-next"
-                    size="sm"
-                    onClick={() =>
-                      run(() => input.command({ action: "workspaces_next" }))
-                    }
-                  >
-                    More workspaces
-                  </Button>
-                )}
-              </>
-            )}
-          </div>
-        </>
-      )}
-      <ExternalNavigation />
+              </div>
+            </>
+          )}
+          <ExternalNavigation />
+        </div>
+      </section>
       {feedback && <Toast key={feedback.sequence} text={feedback.text}
         tone={feedback.success ? "success" : undefined} icon={<IconWarningOutlineRegular/>}
         holdMs={feedback.undo ? 6000 : undefined}

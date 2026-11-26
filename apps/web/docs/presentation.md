@@ -889,6 +889,16 @@ or activity changes. Show more reveals five more loaded rows per click. Show
 less returns to the current required depth. Closing the group resets its depth.
 Loading another server page is a separate action.
 
+In the expanded sidebar, the brand, New session button and footer keep their
+positions while browsing a long list. Scrolling down moves the workspace tools
+above the list out of view, then scrolls the conversations below the workspace
+toolbar. Scrolling up reverses that order. A wheel gesture can cross the
+boundary in either direction. Dragging near an edge also scrolls the list.
+An open search keeps the workspace toolbar in place when its results are empty.
+The list reserves its scrollbar width. The thumb appears when the pointer
+enters the column and fades over 200 ms after a 500 ms absence. Reduced
+motion keeps the delay and removes the fade.
+
 Message clocks use durable Fact timestamps; transient blocks have no fabricated time.
 Completed Turn headings show recorded elapsed time when both boundaries are known.
 Assistant action rows expose copy, source inspection and **Turn usage** for a

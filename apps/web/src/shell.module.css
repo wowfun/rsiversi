@@ -513,6 +513,9 @@
   margin-top: 6px;
 }
 .sidebar:global(.sidebar) {
+  --sidebar-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --sidebar-scrollbar-hover: var(--dsw-alias-scrollbar-hover-l2);
+  overflow: hidden;
   padding: 6px 8px;
   font-size: 14px;
   gap: 0;
@@ -547,7 +550,37 @@
   gap: 4px;
   min-height: 50px;
 }
-.shortcuts { display: flex; flex-direction: column; gap: 4px; padding-bottom: 16px; }
+.shortcuts { display: flex; flex-direction: column; gap: 4px; padding-bottom: 20px; }
+.scrollFrame {
+  flex: 1;
+  min-height: 0;
+  container-type: size;
+}
+.scrollport {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  container-type: scroll-state;
+}
+@property --sidebar-scrollbar-thumb {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+@property --sidebar-scrollbar-hover {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+.sidebar:not(:hover) {
+  --sidebar-scrollbar-thumb: transparent;
+  --sidebar-scrollbar-hover: transparent;
+  transition: --sidebar-scrollbar-thumb 200ms linear 500ms, --sidebar-scrollbar-hover 200ms linear 500ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar:not(:hover) { transition-duration: 0s; }
+}
 .shortcuts > button { justify-content: start; height: 36px; padding: 6px 12px; gap: 8px; font-size: 14px; font-weight: 400; }
 .shortcuts > button[aria-pressed="true"], :global(.navigation-rail) > button[aria-pressed="true"] {
   background: var(--dsw-alias-interactive-bg-hover);

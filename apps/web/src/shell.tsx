@@ -9,6 +9,7 @@ import {
 } from "../vendor/dsh/dockkit-primitives/icons/index.tsx";
 import css from "./shell.module.css";
 import navigationCss from "./navigation.module.css";
+import {createScrollHandoff} from "../vendor/dsh/workspace/scroll-handoff.ts";
 import { DirectoryPickerHost } from "./directory-picker.tsx";
 import license from "../vendor/dsh/LICENSE?raw";
 import xtermLicense from "@xterm/xterm/LICENSE?raw";
@@ -98,6 +99,7 @@ export function Shell({
   );
   const [resourceWidth,setResourceWidth] = useState<number>();
   const [navigationWidth, setNavigationWidth] = useState(defaultNavigationWidth);
+  const [sidebarScroll] = useState(createScrollHandoff);
   const [deletedTask,setDeletedTask] = useState(0);
   const openingWidth = Math.max(300, Math.round(viewport.width * .45));
   useLayoutEffect(() => {
@@ -208,12 +210,16 @@ export function Shell({
         <IconNewChatOutlineRegular />
         New session
       </Button>
-      <nav className={css.shortcuts} aria-label="Workspace tools">
-        <Button aria-label="Open plugins" aria-pressed={page==='plugins'} onClick={e=>openPage('plugins',e.currentTarget)}><IconPluginPinwheelOutlineMedium/>Plugins</Button>
-        <Button aria-pressed={page==='tasks'} onClick={e=>openPage('tasks',e.currentTarget)}><IconClockOutlineRegular/>Automation tasks</Button>
-        {hasAutomation && <Button onClick={()=>{dismissNavigationDrawer();setAutomation(true)}}><IconClockOutlineRegular/>Deployment checks</Button>}
-      </nav>
-      {renderSlot("rsi.navigation", {searchOpen, setSearchOpen, searchInputRef, conversationVisible: !page})}
+      <div className={css.scrollFrame}>
+        <div className={css.scrollport} ref={sidebarScroll.bindViewportRef} data-sidebar-scrollport="">
+          <nav className={css.shortcuts} aria-label="Workspace tools">
+            <Button aria-label="Open plugins" aria-pressed={page==='plugins'} onClick={e=>openPage('plugins',e.currentTarget)}><IconPluginPinwheelOutlineMedium/>Plugins</Button>
+            <Button aria-pressed={page==='tasks'} onClick={e=>openPage('tasks',e.currentTarget)}><IconClockOutlineRegular/>Automation tasks</Button>
+            {hasAutomation && <Button onClick={()=>{dismissNavigationDrawer();setAutomation(true)}}><IconClockOutlineRegular/>Deployment checks</Button>}
+          </nav>
+          {renderSlot("rsi.navigation", {searchOpen, setSearchOpen, searchInputRef, conversationVisible: !page, bindScrollerRef: sidebarScroll.bindScrollerRef})}
+        </div>
+      </div>
       <div className={`sidebar-footer ${css.footer}`}>
         <details className={`application-options ${css.footerOptions}`}>
           <summary aria-label="More">

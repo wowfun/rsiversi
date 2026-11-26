@@ -608,6 +608,63 @@ try {
    assert.equal(await revealedGroup.getByTestId('conversation-row').count(),58);
    assert.equal(await hit.count(),1);
    await page.screenshot({path:join(report,name+'-revealed-search-result.png'),animations:'disabled'});
+   const bounds=await page.evaluate(()=>{
+     const sidebar=document.querySelector('aside[aria-label="Workspace navigation"]');
+     const box=el=>{const {top,bottom}=el.getBoundingClientRect();return {top,bottom}};
+     return {newSession:box(sidebar.querySelector('.new-conversation')),more:box(sidebar.querySelector('.sidebar-footer')),height:innerHeight};
+   });
+   assert(bounds.newSession.top>=0 && bounds.more.bottom<=bounds.height,'New session and More stay visible after revealing row 58: '+JSON.stringify(bounds));
+   const viewport=page.locator('[data-sidebar-scrollport]');
+   const list=page.locator('[data-sidebar-list-area]');
+   await page.setViewportSize({width:1440,height:500});
+   const thumb=()=>list.evaluate(el=>getComputedStyle(el).getPropertyValue('--sidebar-scrollbar-thumb').trim());
+   await page.mouse.move(80,240);
+   const revealedThumb=await thumb();
+   assert(revealedThumb && revealedThumb!=='rgba(0, 0, 0, 0)');
+   for(const motion of ['no-preference','reduce']){
+     await page.emulateMedia({reducedMotion:motion});
+     await page.mouse.move(900,240);
+     const transition=await list.evaluate(el=>{
+       const styles=getComputedStyle(el.closest('.sidebar'));
+       return [styles.transitionDelay,styles.transitionDuration];
+     });
+     assert(transition[0].split(',').every(value=>value.trim()==='0.5s'));
+     assert(transition[1].split(',').every(value=>value.trim()===(motion==='reduce'?'0s':'0.2s')));
+     await page.waitForFunction(()=>getComputedStyle(document.querySelector('[data-sidebar-list-area]')).getPropertyValue('--sidebar-scrollbar-thumb').trim()==='rgba(0, 0, 0, 0)');
+     await page.mouse.move(80,240);
+     assert.equal(await thumb(),revealedThumb);
+   }
+   await page.emulateMedia({reducedMotion:'no-preference'});
+   await list.evaluate(el=>{el.scrollTop=0});
+   await viewport.evaluate(el=>{el.scrollTop=0});
+   const range=await viewport.evaluate(el=>el.scrollHeight-el.clientHeight);
+   assert(range>50);
+   const edges=()=>page.evaluate(()=>['.new-conversation','.sidebar-footer'].map(selector=>
+     document.querySelector(selector).getBoundingClientRect().top));
+   const fixed=await edges();
+   await page.getByRole('navigation',{name:'Workspace tools'}).hover();
+   await page.mouse.wheel(0,range+60);
+   await page.waitForFunction(()=>document.querySelector('[data-sidebar-list-area]').scrollTop===60);
+   assert.equal(await viewport.evaluate(el=>el.scrollTop),range);
+   assert.deepEqual(await edges(),fixed);
+   await page.mouse.wheel(0,-110);
+   await page.waitForFunction(expected=>document.querySelector('[data-sidebar-scrollport]').scrollTop===expected,range-50);
+   assert.equal(await list.evaluate(el=>el.scrollTop),0);
+   await viewport.evaluate(el=>{el.scrollTop=el.scrollHeight});
+   await list.evaluate(el=>{
+     const bounds=el.getBoundingClientRect();
+     el.dispatchEvent(new DragEvent('dragover',{bubbles:true,clientY:bounds.bottom-2}));
+   });
+   await page.waitForFunction(()=>document.querySelector('[data-sidebar-list-area]').scrollTop>0);
+   await list.dispatchEvent('dragend');
+   await searchButton.click();
+   await searchInput.fill('no such workspace row');
+   await page.getByText('No matching conversations.',{exact:true}).waitFor();
+   assert.deepEqual(await edges(),fixed);
+   const toolbar=await searchInput.evaluate(el=>el.closest('.section-heading').getBoundingClientRect().top);
+   const portTop=(await viewport.boundingBox()).y;
+   assert(Math.abs(toolbar-portTop)<1,`empty search toolbar at ${toolbar}, viewport starts at ${portTop}`);
+   await page.screenshot({path:join(report,name+'-sidebar-scroll-empty-search.png'),animations:'disabled'});
    assert.deepEqual(errors,[]);results.push({browser:name,menu:true,keyboard:true,sessionContextMenu:true,composerReadShortcut:true,
      acknowledgedOnlyAfterLaterTurn:true,archiveAndCopyFeedbackExpires:true,sessionDialogFocus:true,flatActivityClearsTitle:true,collapseSurvivesEarlyFrame:true,archiveFilters:true,debouncedSearch:true,completePageSearchWithoutRpc:true,modelFreeRegistration:true,resourceFallback:true,searchRevealedRow:58});
   } catch (error) {

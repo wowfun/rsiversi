@@ -792,6 +792,13 @@
       "source_sha256": "31b29940b1ef5a2a223d83d5b354d63cc7dbfd54853315cc3535d689a7ac6a21",
       "adapted_sha256": "31b29940b1ef5a2a223d83d5b354d63cc7dbfd54853315cc3535d689a7ac6a21",
       "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
+    },
+    {
+      "path": "workspace/scroll-handoff.ts",
+      "source": "packages/client/ui-sidebar/src/client/scroll-handoff.ts",
+      "source_sha256": "4171df777afa4dca4820576582b67b65893c9d04a71c292379a266582ee7a8db",
+      "adapted_sha256": "f2611e7fbc9ec6271eb6c28279c0f1d861bfca8a437c7a4f7c70059d7239d301",
+      "revision": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96"
     }
   ]
 }
