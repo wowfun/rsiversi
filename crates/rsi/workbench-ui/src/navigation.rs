@@ -86,6 +86,53 @@ impl GroupPage {
         self.scanned = 0;
     }
 }
+struct GroupRead {
+    key: String,
+    workspace: WorkspaceFilter,
+    page: NavigationPage,
+    scanned: u32,
+}
+impl GroupRead {
+    fn install(self, view: &mut View, continued: bool) -> Result<()> {
+        let Self {
+            key,
+            workspace,
+            page,
+            scanned,
+        } = self;
+        if page.metadata_revision != view.metadata_revision {
+            return Err("Navigation changed; refresh before continuing this workspace".into());
+        }
+        if let Some(order) = &mut view.order {
+            order.observe_started_turns(page.entries.iter());
+        }
+        if !continued
+            && view.groups.get(&key).is_some_and(|previous| {
+                !previous.stale
+                    && !previous.continued
+                    && previous.entries == page.entries
+                    && previous.after == page.next
+                    && previous.scanned == scanned
+            })
+        {
+            return Ok(());
+        }
+        view.groups.insert(
+            key,
+            GroupPage {
+                ticket: rsi_ui::fresh_identity("group")?,
+                workspace,
+                entries: page.entries,
+                scanned,
+                more: page.next.is_some(),
+                continued,
+                stale: false,
+                after: page.next,
+            },
+        );
+        Ok(())
+    }
+}
 fn group_key(workspace: &WorkspaceFilter) -> Result<String> {
     match workspace {
         WorkspaceFilter::Registered { id } => Ok(id.to_string()),
@@ -407,7 +454,7 @@ impl NavigationFeature {
         }
         let refreshed = async {
             let (page, scanned) = self.finish_page(&filter, page).await?;
-            self.install_page(filter, page, scanned, false).await
+            self.install_page(filter, page, scanned, false, None).await
         }
         .await;
         if let Err(message) = refreshed {
@@ -499,9 +546,25 @@ impl NavigationFeature {
         }
         Ok((page, scanned))
     }
+    async fn read_group(
+        &self,
+        key: String,
+        workspace: WorkspaceFilter,
+        mut filter: NavigationFilter,
+        after: Option<NavigationCursor>,
+    ) -> Result<GroupRead> {
+        filter.workspace = workspace.clone();
+        let (page, scanned) = self.page(filter, after).await?;
+        Ok(GroupRead {
+            key,
+            workspace,
+            page,
+            scanned,
+        })
+    }
     async fn group(&self, workspace: WorkspaceFilter, ticket: Option<String>) -> Result<()> {
         let key = group_key(&workspace)?;
-        let (mut filter, after) = {
+        let (filter, after) = {
             let state = self.state.lock().expect("navigation view poisoned");
             let after = if let Some(ticket) = &ticket {
                 let group = state
@@ -527,40 +590,21 @@ impl NavigationFeature {
             }
             (state.view.filter.clone(), after)
         };
-        filter.workspace = workspace.clone();
-        let (page, scanned) = self.page(filter, after).await?;
-        let mut state = self.state.lock().expect("navigation view poisoned");
-        if page.metadata_revision != state.view.metadata_revision {
-            return Err("Navigation changed; refresh before continuing this workspace".into());
-        }
-        if let Some(order) = &mut state.view.order {
-            order.observe_started_turns(page.entries.iter());
-        }
-        if ticket.is_none()
-            && state.view.groups.get(&key).is_some_and(|previous| {
-                !previous.stale
-                    && !previous.continued
-                    && previous.entries == page.entries
-                    && previous.after == page.next
-                    && previous.scanned == scanned
-            })
-        {
-            return Ok(());
-        }
-        state.view.groups.insert(
-            key,
-            GroupPage {
-                ticket: rsi_ui::fresh_identity("group")?,
-                workspace,
-                entries: page.entries,
-                scanned,
-                more: page.next.is_some(),
-                continued: ticket.is_some(),
-                stale: false,
-                after: page.next,
-            },
-        );
-        Ok(())
+        let continued = ticket.is_some();
+        let read = self.read_group(key, workspace, filter, after).await?;
+        let filter = {
+            let mut state = self.state.lock().expect("navigation view poisoned");
+            if continued
+                || state.view.continued
+                || read.page.metadata_revision == state.view.metadata_revision
+            {
+                return read.install(&mut state.view, continued);
+            }
+            state.view.filter.clone()
+        };
+        let (page, scanned) = self.page(filter.clone(), None).await?;
+        self.install_page(filter, page, scanned, false, Some(read))
+            .await
     }
     async fn execute_inner(
         &self,
@@ -658,7 +702,8 @@ impl NavigationFeature {
     ) -> Result<()> {
         let continued = after.is_some();
         let (page, scanned) = self.page(filter.clone(), after).await?;
-        self.install_page(filter, page, scanned, continued).await
+        self.install_page(filter, page, scanned, continued, None)
+            .await
     }
 
     async fn install_page(
@@ -667,6 +712,7 @@ impl NavigationFeature {
         page: NavigationPage,
         scanned: u32,
         continued: bool,
+        opened: Option<GroupRead>,
     ) -> Result<()> {
         let pins = self.client.pinned(filter.clone()).await.map_err(error)?;
         if pins.metadata_revision != page.metadata_revision {
@@ -679,10 +725,14 @@ impl NavigationFeature {
             } else {
                 std::collections::BTreeMap::new()
             };
-            let refresh = groups
-                .values()
-                .filter(|group| !group.stale && !group.continued)
-                .map(|group| group.workspace.clone())
+            let mut refresh = groups
+                .iter()
+                .filter(|(key, group)| {
+                    !group.stale
+                        && !group.continued
+                        && opened.as_ref().is_none_or(|read| &read.key != *key)
+                })
+                .map(|(key, group)| (key.clone(), group.workspace.clone(), filter.clone()))
                 .collect::<Vec<_>>();
             let changed = page.metadata_revision != state.view.metadata_revision;
             if changed {
@@ -744,29 +794,34 @@ impl NavigationFeature {
                 },
                 after: page.next,
             };
+            if let Some(read) = opened {
+                if read.page.metadata_revision == state.view.metadata_revision {
+                    read.install(&mut state.view, false)?;
+                } else {
+                    refresh.push((read.key, read.workspace, state.view.filter.clone()));
+                }
+            }
             refresh
         };
-        let results = futures_util::stream::iter(groups)
-            .map(|group| async move {
-                let key = group_key(&group)?;
-                let result = self.group(group, None).await;
+        let failed = futures_util::stream::iter(groups)
+            .map(|(key, workspace, filter)| async move {
+                let read = self.read_group(key.clone(), workspace, filter, None).await;
+                let mut state = self.state.lock().expect("navigation view poisoned");
+                let result = read.and_then(|read| read.install(&mut state.view, false));
                 if result.is_err()
-                    && let Some(group) = self
-                        .state
-                        .lock()
-                        .expect("navigation view poisoned")
-                        .view
-                        .groups
-                        .get_mut(&key)
+                    && let Some(group) = state.view.groups.get_mut(&key)
                 {
                     group.invalidate();
                 }
                 result
             })
             .buffer_unordered(4)
-            .collect::<Vec<_>>()
+            .fold(
+                false,
+                |failed, result| async move { failed || result.is_err() },
+            )
             .await;
-        if results.iter().any(Result::is_err) {
+        if failed {
             return Err(
                 "Some workspace groups could not refresh; use Refresh this workspace".into(),
             );
@@ -1490,6 +1545,7 @@ mod group_tests {
                 },
                 1,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1573,6 +1629,80 @@ mod group_tests {
             refreshed, None,
             "foreground admission cancels automatic reads"
         );
+        owner.work.close().await;
+    }
+
+    #[tokio::test]
+    async fn opening_a_group_after_membership_changes_refreshes_the_head_and_reuses_its_read() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (api, owner) = fixture();
+        owner
+            .command(NavigationCommand::Query {
+                filter: NavigationFilter::default(),
+            })
+            .await
+            .unwrap();
+        let previous = owner.view()["ticket"].clone();
+        api.revision.store(2, SeqCst);
+        owner
+            .command(NavigationCommand::Group {
+                workspace: WorkspaceFilter::Unregistered,
+                ticket: None,
+            })
+            .await
+            .unwrap();
+        let view = owner.view();
+        assert_eq!(view["metadata_revision"], "2");
+        assert_ne!(view["ticket"], previous);
+        assert_eq!(view["groups"]["other"]["scanned"], 4096);
+        assert_eq!(view["groups"]["other"]["stale"], false);
+        assert!(view["diagnostic"].is_null());
+        assert_eq!(api.other_reads.load(SeqCst), 16);
+        assert_eq!(api.queries.load(SeqCst), 18);
+        api.revision.store(3, SeqCst);
+        let ticket = view["groups"]["other"]["ticket"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            owner
+                .command(NavigationCommand::Group {
+                    workspace: WorkspaceFilter::Unregistered,
+                    ticket: Some(ticket),
+                })
+                .await
+                .is_err()
+        );
+        let after = owner.view();
+        assert_eq!(after["metadata_revision"], "2");
+        assert_eq!(after["groups"], view["groups"]);
+        owner.work.close().await;
+    }
+
+    #[tokio::test]
+    async fn group_read_superseded_by_a_second_revision_is_read_at_the_new_head() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (api, owner) = fixture();
+        let filter = NavigationFilter::default();
+        let opened = owner
+            .read_group(
+                "other".into(),
+                WorkspaceFilter::Unregistered,
+                filter.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        api.revision.store(2, SeqCst);
+        let (page, scanned) = owner.page(filter.clone(), None).await.unwrap();
+        owner
+            .install_page(filter, page, scanned, false, Some(opened))
+            .await
+            .unwrap();
+        let view = owner.view();
+        assert_eq!(view["metadata_revision"], "2");
+        assert_eq!(view["groups"]["other"]["scanned"], 4096);
+        assert_eq!(api.other_reads.load(SeqCst), 32);
         owner.work.close().await;
     }
 

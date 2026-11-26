@@ -142,6 +142,10 @@ A metadata revision change retires old cursors and reloads
 the first page of each open, uncontinued group. A continued or previously failed
 group keeps its explicit refresh control so a change cannot silently reset its
 reading position. Its invalidated rows and mutation controls remain unavailable.
+Opening a workspace from the first activity page can encounter newly registered
+members before the background refresh. The workbench reads the current activity
+page and pins and publishes the requested group at their metadata revision.
+An older continuation still requires an explicit refresh.
 
 Navigation replacements carry the metadata revision displayed when the edit
 began. Both the view owner and Store reject stale revisions; a rename cannot
