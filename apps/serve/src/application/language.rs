@@ -1,6 +1,6 @@
 use super::BoundSessions;
 use futures_util::StreamExt;
-use rsi_ai_protocol::{LanguageEvent, LanguageRequest, ModelRef};
+use rsi_ai_protocol::{LanguageCallOrigin, LanguageEvent, LanguageRequest, ModelRef};
 use rsi_extension::{Error, Result, body::Body};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -57,16 +57,13 @@ impl BoundSessions {
                 })
                 .await?;
             drop(assembly);
+            let origin = LanguageCallOrigin {
+                active_session: false,
+                session_id: input.session_id,
+                purpose: input.purpose,
+            };
             let prepared = service
-                .prepare_for(
-                    input.model,
-                    body,
-                    rsi_ai_protocol::LanguageCallOrigin {
-                        active_session: false,
-                        session_id: input.session_id,
-                        purpose: input.purpose,
-                    },
-                )
+                .prepare_for(input.model, body, origin)
                 .await
                 .map_err(|e| Error::Remote(e.to_string()))?;
             let mut batches = prepared

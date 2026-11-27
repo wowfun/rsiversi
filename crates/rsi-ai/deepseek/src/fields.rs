@@ -73,6 +73,10 @@ fn invalid_fields() -> TransportError {
 fn extend(request: HttpRequest, base: Bytes, fields: Bytes) -> Result<HttpRequest, TransportError> {
     // Both envelopes are compact JSON objects. Parse names without allocating their values,
     // including inline images. Only the inner commas and braces change on the wire.
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "Deserialize JSON object keys without retaining the field values"
+    )]
     let keys = |bytes: &[u8]| {
         serde_json::from_slice::<BTreeMap<String, IgnoredAny>>(bytes).map_err(|_| invalid_fields())
     };

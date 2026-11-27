@@ -944,6 +944,23 @@ async fn route_visibility_is_gate_atomic_and_prepared_call_pins_provider_generat
     let request = LanguageRequest::new(vec![Message::user_text("hello").unwrap()]).unwrap();
     let prepared = calls.prepare(model.clone(), request.clone()).await.unwrap();
     assert_eq!(prepared.snapshot().config_generation, 1);
+    let originated = calls
+        .prepare_for(
+            model.clone(),
+            request.clone(),
+            rsi_ai_protocol::LanguageCallOrigin {
+                session_id: Some("private-session".into()),
+                purpose: Some("compaction".into()),
+                active_session: true,
+            },
+        )
+        .await
+        .unwrap();
+    let mut expected = prepared.snapshot().clone();
+    assert_ne!(expected.call_id, originated.snapshot().call_id);
+    expected.call_id.clone_from(&originated.snapshot().call_id);
+    assert_eq!(originated.snapshot(), &expected);
+    drop(originated);
     drop(first);
 
     let second_starts = Arc::new(AtomicUsize::new(0));

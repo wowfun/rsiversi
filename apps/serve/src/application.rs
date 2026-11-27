@@ -48,6 +48,10 @@ impl LocalContract for ApplicationContract {
 pub(crate) struct Factory(pub HostPaths);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "The Host can grant each application capability independently"
+)]
 struct Config {
     source: Assets,
     profile: String,

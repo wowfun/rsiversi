@@ -9,8 +9,8 @@ use futures_util::StreamExt as _;
 use rsi_ai_protocol::{
     AiCapability, AiError, DeferredLanguageCall, DeferredLanguageCheckpoint,
     DeferredLanguageStream, DeferredStatus, DispatchStatus, ErrorKind, ErrorPhase, LanguageCall,
-    LanguageCallContract, LanguageRequest, LanguageStream, MessageContent, ModelRef,
-    PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedLanguageCall,
+    LanguageCallContract, LanguageCallOrigin, LanguageRequest, LanguageStream, MessageContent,
+    ModelRef, PreparedCallSnapshot, PreparedDeferredLanguageCall, PreparedLanguageCall,
     sanitize_error_summary,
 };
 use rsi_ai_provider::{
@@ -306,14 +306,15 @@ impl LanguageCall for Router {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
-        self.prepare_for(model, request, Default::default()).await
+        self.prepare_for(model, request, LanguageCallOrigin::default())
+            .await
     }
 
     async fn prepare_for(
         &self,
         model: ModelRef,
         request: LanguageRequest,
-        origin: rsi_ai_protocol::LanguageCallOrigin,
+        origin: LanguageCallOrigin,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
         let route = self.route(&model)?;
         let (request, context) = self

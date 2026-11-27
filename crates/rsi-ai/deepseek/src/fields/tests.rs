@@ -13,6 +13,74 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+#[ignore = "requires an explicit DEEPSEEK_API_KEY; two official requests spend live quota"]
+async fn official_endpoints_accept_the_native_segmented_request_body() {
+    use rsi_ai_transport::{ReqwestTransport, collect_body};
+    use serde_json::json;
+
+    let key = SecretValue::new(std::env::var("DEEPSEEK_API_KEY").expect("explicit credential"))
+        .expect("valid credential");
+    let transport = ReqwestTransport::new().unwrap();
+    let message = json!({"role":"user","content":"Reply OK."});
+    let fields = Bytes::from(serde_json::to_vec(&json!({"dsh_session_log":{
+        "version":1,"sessionFormatVersion":4,"session":{"version":4,"id":"synthetic","createdAt":0},
+        "afterSeq":-1,"throughSeq":0,"events":[{"seq":0,"time":0,"type":"turn/start","data":{"turn":1}}]
+    }})).unwrap());
+    for (path, mut body, output) in [
+        (
+            "/responses",
+            json!({"input":[message],"max_output_tokens":64,"reasoning":{"effort":"none"}}),
+            "output",
+        ),
+        (
+            "/chat/completions",
+            json!({"messages":[message],"max_tokens":64,"thinking":{"type":"disabled"}}),
+            "choices",
+        ),
+    ] {
+        body["model"] = json!("deepseek-flash");
+        let request = HttpRequest::new(
+            "POST".parse().unwrap(),
+            format!("https://api.deepseek.com{path}"),
+        )
+        .unwrap()
+        .bearer_auth(&key)
+        .unwrap()
+        .header(
+            "content-type".parse().unwrap(),
+            "application/json".parse().unwrap(),
+        )
+        .unwrap();
+        let outgoing = extend(
+            request,
+            serde_json::to_vec(&body).unwrap().into(),
+            fields.clone(),
+        )
+        .unwrap();
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            let response = transport
+                .execute(outgoing, CancellationToken::new())
+                .await
+                .unwrap();
+            (
+                response.status,
+                collect_body(response.body, 512 * 1024).await.unwrap(),
+            )
+        })
+        .await
+        .expect("provider timed out");
+        assert!((200..300).contains(&status), "{path} HTTP {status}");
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            result[output]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        println!("{path} HTTP {status}, received model output");
+    }
+}
+
 #[derive(Debug, Default)]
 struct Contributor {
     enabled: AtomicBool,
@@ -93,7 +161,12 @@ impl HttpTransport for Wire {
         let mut requests = self.0.lock().unwrap();
         requests.push((request.url().path().to_owned(), body));
         Ok(HttpResponse {
-            status: if requests.len() == 2 { 503 } else { 200 },
+            status: match requests.len() {
+                2 => 503,
+                3 => 201,
+                4 => 204,
+                _ => 200,
+            },
             headers: Default::default(),
             body: Box::pin(stream::empty()),
         })
