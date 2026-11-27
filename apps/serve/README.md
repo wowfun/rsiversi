@@ -153,6 +153,9 @@ preparation, overlap classification, stopping, start, outcome, cancellation and 
 Its boolean result applies only to the supplied arguments at this admission. A missing
 or failed classification leaves the call exclusive. Classification executes no Tool body
 and produces no durable receipt. Native preset Tools retain their registered scheduling.
+Each Session's Agent loop schedules its own batch. A started application Tool
+keeps its caller authority until settlement or cancellation, including while
+other Sessions use the same listener.
 Before an
 idle language Turn settles, `POST /v1/stopping` names its producing view.
 The application returns JSON null once its stopping listeners and their native

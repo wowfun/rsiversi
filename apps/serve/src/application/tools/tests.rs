@@ -1,4 +1,5 @@
 use super::*;
+mod concurrent;
 mod transport_probe;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -77,7 +78,6 @@ async fn captured_full_access_policy_reaches_prepared_calls() {
             .unwrap(),
         endpoint: current,
         lifetime: CancellationToken::new(),
-        executions: Arc::new(Semaphore::new(8)),
     };
     assert_eq!(source.replaced_preset_tools(&custom), None);
     assert_eq!(
@@ -203,7 +203,6 @@ pub(super) fn captured_view(
         endpoint,
         current,
         lifetime: CancellationToken::new(),
-        executions: Arc::new(Semaphore::new(8)),
     }
 }
 

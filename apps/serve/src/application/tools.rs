@@ -52,7 +52,7 @@ struct Endpoint {
     started: std::sync::Mutex<Vec<Arc<AgentCallerAuthority>>>,
 }
 
-/// The executor's permit bounds this set. The capability expires with the call, including cancellation.
+/// The capability expires with the started call, including cancellation.
 struct StartedTool<'a> {
     endpoint: &'a Endpoint,
     caller: Arc<AgentCallerAuthority>,
@@ -176,7 +176,6 @@ pub(super) struct Source {
     catalogs: Arc<dyn ToolCatalogProvider>,
     endpoint: watch::Receiver<Option<Arc<Endpoint>>>,
     lifetime: CancellationToken,
-    executions: Arc<Semaphore>,
 }
 /// Owned by the application supervisor. A failed startup drops the last sender.
 #[derive(Clone, Debug)]
@@ -210,7 +209,6 @@ impl Source {
                 catalogs,
                 endpoint,
                 lifetime,
-                executions: Arc::new(Semaphore::new(8)),
             },
             Publisher {
                 endpoint: sender,
@@ -294,7 +292,6 @@ struct View {
     endpoint: Arc<Endpoint>,
     current: watch::Receiver<Option<Arc<Endpoint>>>,
     lifetime: CancellationToken,
-    executions: Arc<Semaphore>,
     release_permit: Option<OwnedSemaphorePermit>,
 }
 impl Drop for View {
@@ -373,7 +370,6 @@ impl RequestToolSource for Source {
             endpoint: endpoint.clone(),
             current: self.endpoint.clone(),
             lifetime: self.lifetime.clone(),
-            executions: self.executions.clone(),
             release_permit: Some(release_permit),
         });
         let mut model_selection =
@@ -557,12 +553,6 @@ impl ToolExecutor for Body {
         let effect = caller.tool_effect_id().ok_or_else(|| {
             ToolError::Execution("application tool requires a started model effect".into())
         })?;
-        let _permit = self
-            .view
-            .executions
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ToolError::Capacity)?;
         let started = caller.tool_identity().ok_or(ToolError::OutcomeUnknown)?;
         if started.call_id() != execution.call_id || started.invocation_id() != effect.as_str() {
             return Err(ToolError::OutcomeUnknown);
