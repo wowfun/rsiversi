@@ -1140,7 +1140,6 @@ pub async fn assert_mechanical_store_contract(
     );
     assert_eq!(none.effective_turns, 0);
     assert_eq!(none.resolved_terminal_control_seq, 0);
-    assert_eq!(none.terminal_control_prefix_sha256, "0".repeat(64));
     let all = store
         .resolve_fork_boundary(
             &session_id,
@@ -1219,11 +1218,11 @@ pub async fn assert_mechanical_store_contract(
         controls_at_terminal.durable_seq, 10,
         "later idle controls exist"
     );
-    assert_eq!(
-        all.terminal_control_prefix_sha256,
-        rsi_agent_session_protocol::control_prefix_sha256(controls_at_terminal.records.iter())
-            .unwrap()
-    );
+    assert!(matches!(
+        controls_at_terminal.records.last().unwrap().body(),
+        AgentControlRecordBody::TurnBoundaryRecorded { terminal_fact_seq, .. }
+            if *terminal_fact_seq == all.resolved_terminal_seq
+    ));
     assert_eq!(
         all.terminal_prefix_sha256,
         fact_prefix_sha256(
@@ -1245,7 +1244,6 @@ pub async fn assert_mechanical_store_contract(
             resolved_terminal_seq: all.resolved_terminal_seq,
             terminal_prefix_sha256: all.terminal_prefix_sha256.clone(),
             resolved_terminal_control_seq: all.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: all.terminal_control_prefix_sha256.clone(),
             requested_turns: ForkTurnSelection::All,
             effective_turns: all.effective_turns,
         }
@@ -1357,7 +1355,6 @@ pub async fn assert_mechanical_store_contract(
                     resolved_terminal_seq: 0,
                     terminal_prefix_sha256: "0".repeat(64),
                     resolved_terminal_control_seq: 0,
-                    terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: ForkTurnSelection::None,
                     effective_turns: 0,
                 }

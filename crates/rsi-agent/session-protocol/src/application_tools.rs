@@ -28,9 +28,6 @@ pub enum ApplicationToolView {
     Ready {
         /// Application process incarnation.
         generation: String,
-        /// Stable receipt source, when the application supports cold outcome recovery.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        receipt_source: Option<String>,
         /// Ordered by exact tool name.
         tools: Vec<ApplicationToolBinding>,
     },
@@ -43,15 +40,8 @@ impl ApplicationToolView {
             Self::Unavailable { reason } => {
                 validate_safe_text("application tool diagnostic", reason, 512, false)
             }
-            Self::Ready {
-                generation,
-                receipt_source,
-                tools,
-            } => {
+            Self::Ready { generation, tools } => {
                 validate_identifier("application generation", generation)?;
-                if let Some(source) = receipt_source {
-                    validate_identifier("application receipt source", source)?;
-                }
                 if tools.len() > MAXIMUM_REGISTERED_TOOLS {
                     return Err(SessionError::Invalid(
                         "application tool count exceeds capacity".into(),

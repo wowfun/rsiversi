@@ -104,7 +104,6 @@ impl AgentKernel {
             clock,
             ValidatedKernelLimits::new(limits)?,
             None,
-            None,
         )
         .await
     }
@@ -114,7 +113,6 @@ impl AgentKernel {
         composition: Arc<dyn AgentComposition>,
         clock: Arc<dyn Clock>,
         limits: ValidatedKernelLimits,
-        receipts: Option<&dyn ApplicationReceiptReader>,
         event_context: Option<rsi_meta::Context>,
     ) -> Result<Self> {
         let limits = limits.0;
@@ -126,7 +124,7 @@ impl AgentKernel {
             let has_more = page.has_more;
             let next_after = page.sessions.last().cloned();
             for session_id in page.sessions {
-                repair_unfinished_session(&store, clock.as_ref(), &session_id, receipts).await?;
+                repair_unfinished_session(&store, clock.as_ref(), &session_id).await?;
             }
             if !has_more {
                 break;

@@ -99,7 +99,7 @@ control message to the model's conversation context.
 
 Fork boundary selection accepts a typed point before an invoking Turn or through
 an already terminal Turn. Both modes resolve the same balanced completed-Turn
-window and exact Fact/control digests in one read snapshot. An open through-Turn
+window, exact control horizon and Fact-prefix digest in one read snapshot. An open through-Turn
 is rejected; selection never advances to a later terminal. Historical references
 and Agent-tree membership remain separate Store edges.
 
@@ -280,7 +280,7 @@ is rejected before mutation. Recovery repairs separate terminal boundaries in
 separate appends. This permits one exact Fact/control prefix pair for every
 completed historical Turn without inferring a control horizon from timestamps.
 
-The terminal index retains both sequences and rolling prefix digests, derived
+The terminal index retains both sequences and the rolling Fact-prefix digest, derived
 only from canonical records. Fork boundary reads return that exact pair.
 `none` inherits neither prefix; `all` and `N` use the selected terminal's control
 horizon, so later idle commands cannot alter an already selected historical
@@ -314,7 +314,7 @@ pending mailbox merely to classify its selected message.
 
 With the Session validation proof warm, fork `none` does not query completed
 history, and fixed `Last(k)` selection visits only the bounded completed suffix.
-Invoking-Turn identity, terminal digests and the selected Fact interval are still
+Invoking-Turn identity, the terminal Fact digest and the selected Fact interval are still
 validated. Cold canonical validation and work proportional to selected history
 are outside that selection-work bound.
 

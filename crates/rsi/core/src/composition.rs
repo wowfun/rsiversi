@@ -1483,7 +1483,6 @@ impl StandardComposition {
             self.coding_tools.clone(),
             agent_composition,
             self.agent_store_factory.clone(),
-            crate::application_receipts::Receipts(self.paths.clone()),
         )?;
         register(
             &mut builder,
@@ -1745,7 +1744,6 @@ fn register_factories(
     coding_tools: Option<StandardCodingTools>,
     agent_composition: AgentCompositionFactory,
     agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
-    receipt_reader: crate::application_receipts::Receipts,
 ) -> rsi_host::Result<()> {
     register(
         builder,
@@ -1826,7 +1824,7 @@ fn register_factories(
         rsi_agent_program::ProgramRuntimeFactory,
     )?;
     register_runtime_factories(builder, coding_tools, agent_composition)?;
-    register_agent_ai_factories(builder, agent_store_factory, receipt_reader)
+    register_agent_ai_factories(builder, agent_store_factory)
 }
 
 #[allow(clippy::too_many_lines)] // The standard linked catalog is one product-owned composition boundary.
@@ -2038,7 +2036,6 @@ fn register_runtime_factories(
 fn register_agent_ai_factories(
     builder: &mut StandardAddonBuilder,
     agent_store_factory: rsi_agent_store_sqlite::SqliteStoreFactory,
-    receipt_reader: crate::application_receipts::Receipts,
 ) -> rsi_host::Result<()> {
     register(
         builder,
@@ -2079,7 +2076,7 @@ fn register_agent_ai_factories(
         builder,
         KERNEL_FACTORY,
         UpdateMode::Replayable,
-        rsi_agent_kernel::KernelFactory::with_application_receipts(Arc::new(receipt_reader)),
+        rsi_agent_kernel::KernelFactory,
     )?;
     register(
         builder,
@@ -2697,20 +2694,9 @@ mod tests {
     #[test]
     fn portable_ai_is_an_explicit_service_factory_with_restart_semantics() {
         let mut builder = StandardAddonBuilder::new("test.providers");
-        let home = tempfile::tempdir().unwrap();
         register_agent_ai_factories(
             &mut builder,
             rsi_agent_store_sqlite::SqliteStoreFactory::default(),
-            crate::application_receipts::Receipts(
-                HostPaths::new(
-                    home.path(),
-                    home.path(),
-                    home.path(),
-                    home.path(),
-                    home.path(),
-                )
-                .unwrap(),
-            ),
         )
         .unwrap();
         let set = StandardAddonSet::new([builder.build().unwrap()]).unwrap();

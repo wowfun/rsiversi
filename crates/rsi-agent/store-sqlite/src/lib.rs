@@ -36,10 +36,10 @@ pub enum StoreOperation {
 }
 use rsi_agent_session_protocol::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
-    MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
-    MessageDiscardReason, MessageId, MessageTarget, SessionFact, SessionFactBody, SessionHeader,
-    SessionId, StepId, TurnId, advance_control_prefix_digest, advance_fact_prefix_digest,
+    EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, MAXIMUM_DURABLE_AGENT_TREE_NODES,
+    MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES, MessageDiscardReason, MessageId,
+    MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId, TurnId,
+    advance_fact_prefix_digest,
 };
 use rsi_agent_store_protocol::{
     AGENT_STORE_SCHEMA_VERSION, AppendBatch, AppendCommit, AtomicAgentCommit,
@@ -182,8 +182,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             inbox_paused INTEGER NOT NULL DEFAULT 0 CHECK (inbox_paused IN (0, 1)),
             directory_control_seq INTEGER NOT NULL DEFAULT 0 CHECK (directory_control_seq >= 0),
             last_settled_control_seq INTEGER NOT NULL DEFAULT 0
-                CHECK (last_settled_control_seq >= 0 AND last_settled_control_seq <= control_seq),
-            control_prefix_sha256 TEXT NOT NULL
+                CHECK (last_settled_control_seq >= 0 AND last_settled_control_seq <= control_seq)
          ) STRICT",
     ),
     (
@@ -243,7 +242,6 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
             terminal_seq INTEGER CHECK (terminal_seq > accepted_seq),
             terminal_prefix_sha256 TEXT,
             terminal_control_seq INTEGER CHECK (terminal_control_seq > 0),
-            terminal_control_prefix_sha256 TEXT,
             PRIMARY KEY (session_id, turn_id),
             UNIQUE (session_id, accepted_seq),
             UNIQUE (session_id, terminal_seq),

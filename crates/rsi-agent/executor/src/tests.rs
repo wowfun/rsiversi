@@ -791,7 +791,6 @@ fn fork_checkpoint_claim(parent_session_id: SessionId) -> TurnClaim {
             resolved_terminal_seq: 3,
             terminal_prefix_sha256: "b".repeat(64),
             resolved_terminal_control_seq: 1,
-            terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 1,
         }

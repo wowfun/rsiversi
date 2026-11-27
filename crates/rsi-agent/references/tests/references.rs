@@ -149,7 +149,6 @@ fn inherited(parent: &SessionHeader, after: u64, terminal: u64) -> SessionHeader
                     resolved_terminal_seq: terminal,
                     terminal_prefix_sha256: "a".repeat(64),
                     resolved_terminal_control_seq: 1,
-                    terminal_control_prefix_sha256: "b".repeat(64),
                     requested_turns: ForkTurnSelection::All,
                     effective_turns: 1,
                 }

@@ -301,7 +301,6 @@ async fn normalized_claim_preserves_selected_fork_history_after_reopen() {
                 resolved_terminal_seq: boundary.resolved_terminal_seq,
                 terminal_prefix_sha256: boundary.terminal_prefix_sha256,
                 resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
                 requested_turns: ForkTurnSelection::Last(1),
                 effective_turns: boundary.effective_turns,
             },
@@ -372,7 +371,11 @@ async fn normalized_claim_rejects_broken_references_and_false_byte_projections()
                     },
                 )
                 .unwrap();
-            db.execute("UPDATE agent_controls SET control_payload=?1,frame_bytes=NULL WHERE seq=1", [original]).unwrap();
+            db.execute(
+                "UPDATE agent_controls SET control_payload=?1,frame_bytes=NULL WHERE seq=1",
+                [original],
+            )
+            .unwrap();
         }
         db.execute(sql, []).unwrap();
         drop(db);

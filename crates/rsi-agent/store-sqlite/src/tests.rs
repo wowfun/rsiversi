@@ -2283,7 +2283,6 @@ fn test_child_header(parent: &SessionHeader, id: &str) -> SessionHeader {
                     resolved_terminal_seq: 0,
                     terminal_prefix_sha256: "0".repeat(64),
                     resolved_terminal_control_seq: 0,
-                    terminal_control_prefix_sha256: "0".repeat(64),
                     requested_turns: rsi_agent_session_protocol::ForkTurnSelection::None,
                     effective_turns: 0,
                 }
@@ -2796,10 +2795,10 @@ async fn prepared_proof_survives_its_own_validated_tail_advances() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit() {
+async fn cold_control_replay_rejects_an_out_of_range_fact_anchor_before_read_or_commit() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
-    let id = seed_session(&store, "changed-control-prefix").await;
+    let id = seed_session(&store, "changed-control-anchor").await;
     store
         .commit_agent(settlement::commit(vec![settlement::append(&id, 0)]))
         .await
@@ -2807,15 +2806,15 @@ async fn cold_control_proof_rejects_a_changed_final_prefix_before_read_or_commit
     drop(store);
     let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     db.execute(
-        "UPDATE sessions SET control_prefix_sha256 = ?1 WHERE session_id = ?2",
-        rusqlite::params!["f".repeat(64), id.as_str()],
+        "UPDATE agent_controls SET fact_seq = 999 WHERE session_id = ?1 AND seq = 2",
+        [id.as_str()],
     )
     .unwrap();
     drop(db);
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(matches!(
         store.prepare_session(&id).await,
-        Err(StoreError::Corrupt(message)) if message.contains("control-prefix digest")
+        Err(StoreError::Corrupt(message)) if message.contains("control Fact anchors")
     ));
     assert!(!store.touch_validated_session(&id));
     assert!(matches!(

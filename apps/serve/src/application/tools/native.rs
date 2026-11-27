@@ -310,14 +310,13 @@ mod tests {
     use super::super::tests::{captured_view, endpoint};
     use super::*;
     use serde_json::json;
-    use tokio::sync::{oneshot, watch};
+    use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
 
     #[tokio::test]
     async fn losing_the_application_withdraws_the_parked_question_on_its_original_socket() {
         let (listener, endpoint) = endpoint().await;
-        let (_publish, current) = watch::channel(Some(endpoint.clone()));
-        let view = Arc::new(captured_view(endpoint, current));
+        let view = Arc::new(captured_view(endpoint));
         let (parked, wait) = oneshot::channel();
         let peer = async {
             let mut socket = accept_async(listener.accept().await.unwrap().0)
@@ -367,8 +366,7 @@ mod tests {
     #[tokio::test]
     async fn a_retired_view_never_polls_the_waiting_native_body() {
         let (listener, endpoint) = endpoint().await;
-        let (_publish, current) = watch::channel(Some(endpoint.clone()));
-        let view = captured_view(endpoint, current);
+        let view = captured_view(endpoint);
         let (socket, _peer) = tokio::join!(view.native_socket(), async {
             accept_async(listener.accept().await.unwrap().0)
                 .await
@@ -389,8 +387,7 @@ mod tests {
     #[tokio::test]
     async fn native_render_keeps_wide_values_and_control_frames_do_not_cancel_the_body() {
         let (listener, endpoint) = endpoint().await;
-        let (_publish, current) = watch::channel(Some(endpoint.clone()));
-        let view = captured_view(endpoint, current);
+        let view = captured_view(endpoint);
         let stop = CancellationToken::new();
         let (finish, done) = oneshot::channel();
         let peer = async {
@@ -452,8 +449,7 @@ mod tests {
     #[tokio::test]
     async fn loss_after_next_cancels_and_drains_the_native_body() {
         let (listener, endpoint) = endpoint().await;
-        let (_publish, current) = watch::channel(Some(endpoint.clone()));
-        let view = captured_view(endpoint, current);
+        let view = captured_view(endpoint);
         let stop = CancellationToken::new();
         let (entered, entry) = oneshot::channel();
         let mut drained = false;

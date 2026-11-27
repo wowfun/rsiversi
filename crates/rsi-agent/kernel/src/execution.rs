@@ -1515,8 +1515,8 @@ pub(super) fn validate_tool_admission(
         _ => None,
     };
     if let Some((name, id, origin, role)) = registration {
-        if let Some(binding) = turn.application.tools.get(name) {
-            if binding.owner != id.owner_id()
+        if let Some(owner) = turn.application.get(name) {
+            if owner != id.owner_id()
                 || *role != rsi_tools_protocol::ToolProgramRole::Unavailable
                 || !matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. })
             {
@@ -1526,9 +1526,8 @@ pub(super) fn validate_tool_admission(
             }
         } else if turn
             .application
-            .tools
             .values()
-            .any(|binding| binding.owner == id.owner_id())
+            .any(|owner| owner == id.owner_id())
         {
             return Err(TurnError::Invalid(
                 "application Tool owner belongs to another name".into(),

@@ -1,7 +1,7 @@
 //! Immutable history provenance, independent of Agent execution ownership.
 use crate::{
-    AgentPath, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, Result,
-    SessionError, SessionId, TurnId, validate_identifier, validate_sha256,
+    AgentPath, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, Result, SessionError, SessionId,
+    TurnId, validate_identifier, validate_sha256,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,8 +62,6 @@ pub struct HistoryOrigin {
     pub terminal_prefix_sha256: String,
     /// Exact canonical control horizon recorded with the selected terminal, or zero.
     pub resolved_terminal_control_seq: u64,
-    /// Canonical control-prefix digest at that horizon.
-    pub terminal_control_prefix_sha256: String,
     /// Caller-requested selection.
     pub requested_turns: ForkTurnSelection,
     /// Number of completed turns actually retained.
@@ -76,10 +74,6 @@ impl HistoryOrigin {
         self.requested_turns.validate()?;
         validate_sha256("parent header fingerprint", &self.parent_header_fingerprint)?;
         validate_sha256("fork terminal prefix", &self.terminal_prefix_sha256)?;
-        validate_sha256(
-            "fork terminal control prefix",
-            &self.terminal_control_prefix_sha256,
-        )?;
         let cursors_empty = self.resolved_after_seq == 0 && self.resolved_terminal_seq == 0;
         if (self.effective_turns == 0) != cursors_empty {
             return Err(SessionError::Invalid(
@@ -88,10 +82,7 @@ impl HistoryOrigin {
         }
         let empty = cursors_empty && self.effective_turns == 0;
         if (self.resolved_terminal_control_seq == 0) != empty
-            || (empty
-                && (self.terminal_prefix_sha256 != hex::encode(EMPTY_FACT_PREFIX_DIGEST)
-                    || self.terminal_control_prefix_sha256
-                        != hex::encode(EMPTY_CONTROL_PREFIX_DIGEST)))
+            || (empty && self.terminal_prefix_sha256 != hex::encode(EMPTY_FACT_PREFIX_DIGEST))
         {
             return Err(SessionError::Invalid(
                 "fork boundary requires an exact Fact/control pair".into(),

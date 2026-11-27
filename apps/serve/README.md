@@ -152,7 +152,7 @@ All other preset names retain precedence and delegated Sessions still obey
 their tool allowlist.
 
 An application configured with `tools = true` can advertise a separate private
-loopback listener in its opening reply. Tool protocol 17 owns capture, input
+loopback listener in its opening reply. Tool protocol 18 owns capture, input
 preparation, overlap classification, stopping, start, outcome, cancellation and view release.
 `POST /v1/parallel-safe` receives the producing view, registration and model call.
 Its boolean result applies only to the supplied arguments at this admission. A missing
@@ -188,17 +188,10 @@ Each captured registration declares `requires_full_access`; native admission
 attaches that trusted declaration to the exact Tool definition. A true value
 requires full access in the actual Turn or native per-call approval before start.
 It does not infer authority from the application's operator-level process mode.
-Outcome reads and cancellation carry the registration and exact identity from
-the durable Tool intent. Start returns the settled outcome after the Worker has
-committed it. A lost start response triggers only read-only outcome queries.
-The source can read the same receipt from a replacement process. The effect
-body is admitted once. An absent or mismatched receipt cannot prove a result.
-Execution admission requires the original live captured view and registration.
-Duplicate start can return an existing matching receipt without that live view;
-it cannot enter a replacement registration. The native source sends only outcome
-queries after losing a start reply. The durable native Tool intent is the
-execution admission record; the application keeps live pending state in memory and persists only a settled
-result before returning it. Process loss without that result remains unknown.
+The captured view, registration and exact native intent identity bind start, outcome reads
+and cancellation. A lost start response permits queries on that view while it is
+alive. Source retirement ends those queries with an unknown outcome. The durable
+native Tool intent prevents re-execution after a crash.
 Capture includes `modelSelection` with the native request's provider, model and
 optional reasoning effort. This is the admitted request choice, independent of
 the immutable Session Header and any later model-selection command.
@@ -213,13 +206,11 @@ until acknowledged or that process generation retires. Definite endpoint refusal
 end delivery; a replacement listener never receives an old
 view's release. Release does not prove that a non-cooperative callback returned.
 The process supervisor owns forced termination after graceful close expires.
-The Host supplies a profile-specific receipt directory at application open.
-An application result can include ordered text context messages with source
-metadata. A confirmed receipt returns the same result and deferred input on
-the running Host and during cold recovery.
-The same directory is available to the standard Kernel before the Worker
-starts. The application atomically records an outcome there before replying.
-Cancellation allows five seconds for a receipt. A body that ignores its
+The application returns its materialized result and ordered context messages from
+the captured view. If a reply is lost, the Host queries that view while its Worker
+is alive. Releasing the view discards its results. A retired Worker leaves any
+uncommitted outcome unknown. The native ToolResult Fact owns durable results.
+Cancellation allows five seconds for a live outcome. A body that ignores its
 signal keeps its Worker admission until it actually exits. The native caller
 receives an unknown outcome when that grace expires.
 

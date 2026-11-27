@@ -47,36 +47,24 @@ async fn program_notice_graph_rejects_canonical_control_corruption() {
     let (id, _) = program_contract(&store).await;
     drop(store);
     let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    let mut records: Vec<AgentControlRecord> = connection
-        .prepare("SELECT control_json FROM agent_controls WHERE session_id=?1 ORDER BY seq")
-        .unwrap()
-        .query_map([id.as_str()], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
-        .collect();
-    let notice = records.last_mut().unwrap();
-    let mut value = serde_json::to_value(&*notice).unwrap();
+    let json: String = connection
+        .query_row(
+            "SELECT control_json FROM agent_controls WHERE session_id=?1 ORDER BY seq DESC LIMIT 1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
     value["message"]["source"]["source"]["run_id"] = serde_json::json!("missing-run");
-    *notice = serde_json::from_value(value).unwrap();
+    let notice: AgentControlRecord = serde_json::from_value(value).unwrap();
     connection
         .execute(
             "UPDATE agent_controls SET control_payload=?1 WHERE session_id=?2 AND seq=?3",
             params![
-                serde_json::to_string(notice).unwrap(),
+                serde_json::to_string(&notice).unwrap(),
                 id.as_str(),
                 i64::try_from(notice.seq()).unwrap()
             ],
-        )
-        .unwrap();
-    let digest = records
-        .iter()
-        .fold(EMPTY_CONTROL_PREFIX_DIGEST, |digest, record| {
-            advance_control_prefix_digest(digest, record).unwrap()
-        });
-    connection
-        .execute(
-            "UPDATE sessions SET control_prefix_sha256=?1 WHERE session_id=?2",
-            params![hex::encode(digest), id.as_str()],
         )
         .unwrap();
     drop(connection);

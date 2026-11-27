@@ -226,26 +226,15 @@ fn apply_step_body(turn: &mut TurnControl, body: &SessionFactBody, seq: u64) -> 
                 }
                 turn.selected_tools = Some(names.clone().into());
                 if let Some(rsi_agent_session_protocol::ApplicationToolView::Ready {
-                    receipt_source,
-                    tools,
-                    ..
+                    tools, ..
                 }) = application
                 {
-                    turn.application = Arc::new(ApplicationRegistrations {
-                        source: receipt_source.clone(),
-                        tools: tools
+                    turn.application = Arc::new(
+                        tools
                             .iter()
-                            .map(|row| {
-                                (
-                                    row.name.clone(),
-                                    CapturedRegistration {
-                                        owner: row.owner.clone(),
-                                        registration: row.registration.clone(),
-                                    },
-                                )
-                            })
+                            .map(|row| (row.name.clone(), row.owner.clone()))
                             .collect(),
-                    });
+                    );
                 } else {
                     turn.application = Arc::default();
                 }

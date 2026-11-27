@@ -1465,7 +1465,7 @@ impl rsi_agent_composition_protocol::RequestToolSource for SelectionTools {
             callbacks: None,
             instructions: String::new(),
             generation: "selected-model-tools".into(),
-            receipt_source: None,
+
             registrations: std::collections::BTreeMap::default(),
             runtime: self.catalogs.begin_stage().unwrap().seal().unwrap(),
         })

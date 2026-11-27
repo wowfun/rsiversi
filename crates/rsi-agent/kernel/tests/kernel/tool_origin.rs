@@ -308,7 +308,7 @@ async fn application_registration_binds_owner_without_forcing_approval() {
                 }),
                 application: Some(ApplicationToolView::Ready {
                     generation: "worker".into(),
-                    receipt_source: Some("market".into()),
+
                     tools: vec![ApplicationToolBinding {
                         name: "file_read".into(),
                         owner: "application-owner".into(),

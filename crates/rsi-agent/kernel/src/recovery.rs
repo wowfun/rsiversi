@@ -1,36 +1,10 @@
 use super::*;
 
-/// Exact durable authority for a read-only application outcome lookup.
-#[derive(Clone, Debug)]
-pub struct ApplicationReceipt {
-    /// Stable source selected for the producing Step.
-    pub source: String,
-    /// Session containing the started effect.
-    pub session: SessionId,
-    /// Durable Tool effect.
-    pub effect: EffectId,
-    /// Registration captured for that tool name.
-    pub registration: String,
-    /// Result identity recorded by both the intent and the start.
-    pub identity: rsi_tools_protocol::ToolResultIdentity,
-}
-
-/// Optional embedding authority available before any application process starts.
-#[async_trait]
-pub trait ApplicationReceiptReader: std::fmt::Debug + Send + Sync + 'static {
-    /// Returns only a settled result bound to the exact receipt. Never executes a tool.
-    async fn read(
-        &self,
-        receipt: ApplicationReceipt,
-    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolResult>>;
-}
-
 #[allow(clippy::too_many_lines)] // Recovery classifies each unfinished Turn and commits its Fact/control boundary atomically.
 pub(super) async fn repair_unfinished_session(
     store: &Arc<dyn SessionStore>,
     clock: &dyn Clock,
     session_id: &SessionId,
-    receipts: Option<&dyn ApplicationReceiptReader>,
 ) -> Result<()> {
     store.validate_session(session_id).await?;
     let header = store.header(session_id).await?;
@@ -60,87 +34,20 @@ pub(super) async fn repair_unfinished_session(
             .expect("turn replay updates acceptance order and control state together");
         let mut final_seq = durable_seq;
         let mut repair = Vec::with_capacity(2);
-        let mut recovered = None;
-        let mut receipt_error = false;
-        if let (Some(reader), Some(source)) = (receipts, &turn.application.source) {
-            for (effect, active) in &turn.effects {
-                let ActiveEffect::Tool {
-                    name,
-                    started: true,
-                    identity,
-                    origin: rsi_agent_session_protocol::ToolOrigin::Model { .. },
-                    ..
-                } = active
-                else {
-                    continue;
-                };
-                let Some(binding) = turn
-                    .application
-                    .tools
-                    .get(name)
-                    .filter(|row| row.owner == identity.owner_id())
-                else {
-                    continue;
-                };
-                let receipt = ApplicationReceipt {
-                    source: source.clone(),
-                    session: session_id.clone(),
-                    effect: effect.clone(),
-                    registration: binding.registration.clone(),
-                    identity: identity.clone(),
-                };
-                match reader.read(receipt).await {
-                    Ok(Some(result)) => {
-                        // Request-scoped tools are exclusive, so at most one can have started.
-                        if recovered.is_some() {
-                            return Err(KernelError::Invariant(
-                                "overlapping application Tool starts".into(),
-                            ));
-                        }
-                        final_seq = final_seq.checked_add(1).ok_or_else(|| {
-                            KernelError::Invariant("recovery Fact sequence exhausted".into())
-                        })?;
-                        repair.push(SessionFact::new(
-                            final_seq,
-                            timestamp,
-                            SessionFactBody::ToolResult {
-                                turn_id: turn_id.clone(),
-                                effect_id: effect.clone(),
-                                identity: identity.clone(),
-                                result,
-                                conclusion: None,
-                            },
-                        )?);
-                        recovered = Some(effect);
-                    }
-                    Ok(None) => {}
-                    Err(_) => receipt_error = true,
-                }
-            }
-        }
         let outcome = if turn.cancel_requested {
             TurnOutcome::Cancelled
         } else {
-            let effect = turn
-                .effects
-                .iter()
-                .filter(|(id, _)| Some(*id) != recovered)
-                .find_map(|(_, effect)| match effect {
-                    ActiveEffect::Model { started: true, .. } => Some(EffectKind::Model),
-                    ActiveEffect::Image { started: true, .. } => Some(EffectKind::Image),
-                    ActiveEffect::Tool { started: true, .. } => Some(EffectKind::Tool),
-                    ActiveEffect::Model { started: false, .. }
-                    | ActiveEffect::Image { started: false, .. }
-                    | ActiveEffect::Tool { started: false, .. } => None,
-                });
+            let effect = turn.effects.values().find_map(|effect| match effect {
+                ActiveEffect::Model { started: true, .. } => Some(EffectKind::Model),
+                ActiveEffect::Image { started: true, .. } => Some(EffectKind::Image),
+                ActiveEffect::Tool { started: true, .. } => Some(EffectKind::Tool),
+                ActiveEffect::Model { started: false, .. }
+                | ActiveEffect::Image { started: false, .. }
+                | ActiveEffect::Tool { started: false, .. } => None,
+            });
             TurnOutcome::Interrupted {
                 effect,
-                reason: if receipt_error {
-                    "Kernel recovery could not read the started application Tool receipt"
-                } else {
-                    "Kernel recovery found a turn without a durable terminal Fact"
-                }
-                .into(),
+                reason: "Kernel recovery found a turn without a durable terminal Fact".into(),
             }
         };
         if let Some(step_id) = &turn.current_step {

@@ -34,7 +34,7 @@ pub(super) struct Listener {
 }
 impl Listener {
     pub(super) fn validate(&self) -> rsi_meta::Result<()> {
-        if self.protocol != 17 || self.port == 0 {
+        if self.protocol != 18 || self.port == 0 {
             return Err(failure("invalid application tool listener"));
         }
         rsi_agent_session_protocol::validate_identifier("application generation", &self.generation)
@@ -170,7 +170,6 @@ async fn response_bytes(
 
 #[derive(Debug)]
 pub(super) struct Source {
-    profile: String,
     replaced_preset_tools: Option<Arc<BTreeSet<String>>>,
     replace_tools_in_presets: Option<BTreeSet<AgentPresetId>>,
     catalogs: Arc<dyn ToolCatalogProvider>,
@@ -182,17 +181,14 @@ pub(super) struct Source {
 pub(super) struct Publisher {
     endpoint: watch::Sender<Option<Arc<Endpoint>>>,
     client: reqwest::Client,
-    pub(super) receipt_directory: std::path::PathBuf,
 }
 
 impl Source {
     pub(super) fn new(
         catalogs: Arc<dyn ToolCatalogProvider>,
         lifetime: CancellationToken,
-        profile: String,
         replaced_preset_tools: BTreeSet<String>,
         replace_tools_in_presets: Option<BTreeSet<AgentPresetId>>,
-        receipt_directory: std::path::PathBuf,
     ) -> rsi_meta::Result<(Self, Publisher)> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -202,7 +198,6 @@ impl Source {
         let (sender, endpoint) = watch::channel(None);
         Ok((
             Self {
-                profile,
                 replaced_preset_tools: (!replaced_preset_tools.is_empty())
                     .then(|| Arc::new(replaced_preset_tools)),
                 replace_tools_in_presets,
@@ -213,7 +208,6 @@ impl Source {
             Publisher {
                 endpoint: sender,
                 client,
-                receipt_directory,
             },
         ))
     }
@@ -290,7 +284,6 @@ struct View {
     id: String,
     session: rsi_agent_session_protocol::SessionId,
     endpoint: Arc<Endpoint>,
-    current: watch::Receiver<Option<Arc<Endpoint>>>,
     lifetime: CancellationToken,
     release_permit: Option<OwnedSemaphorePermit>,
 }
@@ -368,7 +361,6 @@ impl RequestToolSource for Source {
             id: hex::encode(nonce),
             session: header.session_id().clone(),
             endpoint: endpoint.clone(),
-            current: self.endpoint.clone(),
             lifetime: self.lifetime.clone(),
             release_permit: Some(release_permit),
         });
@@ -422,7 +414,6 @@ impl RequestToolSource for Source {
         let runtime = stage.seal().map_err(invalid)?;
         Ok(RequestToolCatalog {
             generation: captured.generation,
-            receipt_source: Some(self.profile.clone()),
             registrations,
             runtime,
             instructions: captured.instructions,
@@ -557,10 +548,9 @@ impl ToolExecutor for Body {
         if started.call_id() != execution.call_id || started.invocation_id() != effect.as_str() {
             return Err(ToolError::OutcomeUnknown);
         }
-        let identity = json!({"session":caller.session_id(),"effect":effect,
+        let identity = json!({"view":self.view.id,"session":caller.session_id(),"effect":effect,
             "registration":self.registration,"identity":started});
         let mut request = identity.clone();
-        request["view"] = json!(self.view.id);
         request["name"] = json!(self.name);
         request["args"] = args;
         if execution.cancellation.is_cancelled() {
@@ -608,21 +598,11 @@ impl View {
             Ok(Outcome::Pending) | Err(ToolError::OutcomeUnknown | ToolError::Execution(_)) => {}
             Err(error) => return Err(error),
         }
-        let mut current = self.current.clone();
-        let mut endpoint = self.endpoint.clone();
+        let endpoint = &self.endpoint;
         let mut cancel_sent = false;
         loop {
             if endpoint.retired.is_cancelled() {
-                let ready = current.wait_for(|candidate| {
-                    candidate
-                        .as_ref()
-                        .is_some_and(|peer| !peer.retired.is_cancelled())
-                });
-                endpoint = tokio::select! {biased;
-                    ()=self.lifetime.cancelled()=>return Err(ToolError::OutcomeUnknown),
-                    next=ready=>next.map_err(|_|ToolError::OutcomeUnknown)?.as_ref().cloned().ok_or(ToolError::OutcomeUnknown)?,
-                };
-                cancel_sent = false;
+                return Err(ToolError::OutcomeUnknown);
             }
             let cancelling = stop.is_cancelled();
             if cancelling && !cancel_sent {
@@ -644,7 +624,7 @@ impl View {
             }
             tokio::select! {biased;
                 ()=self.lifetime.cancelled()=>return Err(ToolError::OutcomeUnknown),
-                ()=endpoint.retired.cancelled()=>{},
+                ()=endpoint.retired.cancelled()=>return Err(ToolError::OutcomeUnknown),
                 ()=tokio::time::sleep(Duration::from_millis(100))=>{},
             }
         }

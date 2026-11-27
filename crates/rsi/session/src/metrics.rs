@@ -533,7 +533,6 @@ mod tests {
                             resolved_terminal_seq: 0,
                             terminal_prefix_sha256: "0".repeat(64),
                             resolved_terminal_control_seq: 0,
-                            terminal_control_prefix_sha256: "0".repeat(64),
                             requested_turns: ForkTurnSelection::None,
                             effective_turns: 0,
                         }

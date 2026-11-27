@@ -490,11 +490,6 @@ fn fork_header(system: &str, terminal_seq: u64, effective_turns: u64) -> Session
                         "a".repeat(64)
                     },
                     resolved_terminal_control_seq: effective_turns,
-                    terminal_control_prefix_sha256: if terminal_seq == 0 {
-                        "0".repeat(64)
-                    } else {
-                        "c".repeat(64)
-                    },
                     requested_turns: ForkTurnSelection::All,
                     effective_turns,
                 }

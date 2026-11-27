@@ -211,7 +211,7 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     }
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "adb4577a193f8fc7599747e09a8ea0d2576b263766f286fbdf49d82d1cd030b3"
+        "1b7aa88921939b21495cd42a54a46d38398618cc6e832feed5f5201baeab0ba0"
     );
 }
 

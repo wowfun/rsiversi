@@ -333,7 +333,6 @@ async fn spill_survives_pruning_compaction_source_and_restart_then_expires_expli
                     )
                     .unwrap(),
                     resolved_terminal_control_seq: 1,
-                    terminal_control_prefix_sha256: "c".repeat(64),
                     requested_turns: ForkTurnSelection::All,
                     effective_turns: 1,
                 }

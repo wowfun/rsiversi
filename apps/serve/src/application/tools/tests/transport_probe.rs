@@ -52,7 +52,7 @@ async fn native_tool_transport() {
                 let channel: Channel = serde_json::from_slice(&bytes).unwrap();
                 let endpoint = Arc::new(Endpoint {
                     listener: Listener {
-                        protocol: 17,
+                        protocol: 18,
                         generation: "transport-probe".into(),
                         port: channel.port,
                     },
@@ -62,15 +62,14 @@ async fn native_tool_transport() {
                     views: Arc::new(Semaphore::new(256)),
                     started: Default::default(),
                 });
-                let (_, current) = watch::channel(Some(endpoint.clone()));
-                view = Some(captured_view(endpoint, current));
+                view = Some(captured_view(endpoint));
                 report(json!({"bound": true}));
             }
             Command::Start { request } => {
                 invocations += 1;
                 let view = view.as_ref().expect("bind a listener before invoking it");
                 let identity = json!({
-                    "session":request["session"], "effect":request["effect"],
+                    "view":request["view"], "session":request["session"], "effect":request["effect"],
                     "registration":request["registration"], "identity":request["identity"],
                 });
                 let stop = CancellationToken::new();

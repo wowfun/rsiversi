@@ -69,7 +69,6 @@ async fn captured_full_access_policy_reaches_prepared_calls() {
     let custom = AgentPresetId::new("custom").unwrap();
     let assigned = Arc::new(BTreeSet::from(["schedule_list".to_owned()]));
     let mut source = Source {
-        profile: "fixture".into(),
         replaced_preset_tools: Some(assigned.clone()),
         replace_tools_in_presets: Some(BTreeSet::from([native_preset.clone()])),
         catalogs: runtime
@@ -179,7 +178,7 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     let port = socket.local_addr().unwrap().port();
     let endpoint = Arc::new(Endpoint {
         listener: Listener {
-            protocol: 17,
+            protocol: 18,
             generation: "worker".into(),
             port,
         },
@@ -192,16 +191,12 @@ pub(super) async fn endpoint() -> (TcpListener, Arc<Endpoint>) {
     (socket, endpoint)
 }
 
-pub(super) fn captured_view(
-    endpoint: Arc<Endpoint>,
-    current: watch::Receiver<Option<Arc<Endpoint>>>,
-) -> View {
+pub(super) fn captured_view(endpoint: Arc<Endpoint>) -> View {
     View {
         id: "capture".into(),
         release_permit: Some(endpoint.views.clone().try_acquire_owned().unwrap()),
         session: rsi_agent_session_protocol::SessionId::new("session").unwrap(),
         endpoint,
-        current,
         lifetime: CancellationToken::new(),
     }
 }
@@ -209,8 +204,7 @@ pub(super) fn captured_view(
 #[tokio::test]
 async fn rejected_preparation_reports_the_listener_diagnostic() {
     let (socket, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let request = view.callback::<Value>("prepare", &(), 128, CancellationToken::new());
     let peer = async {
         let mut stream = accept(&socket, "prepare", &Value::Null).await;
@@ -268,8 +262,7 @@ async fn capture_preparation_and_start_use_caller_deadlines_while_receipt_reads_
 #[tokio::test]
 async fn lost_callback_replies_read_the_original_view_without_repeating_hooks() {
     let (socket, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let turn = rsi_agent_session_protocol::TurnId::new("turn").unwrap();
     let step = rsi_agent_session_protocol::StepId::new("step").unwrap();
     let context = RequestInputContext {
@@ -316,8 +309,7 @@ async fn lost_callback_replies_read_the_original_view_without_repeating_hooks() 
 #[tokio::test]
 async fn stopping_can_be_cancelled_while_reading_the_original_callback_result() {
     let (socket, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let stop = CancellationToken::new();
     let worker = async {
         drop(accept(&socket, "stopping", &json!({"view": "capture"})).await);
@@ -368,9 +360,7 @@ async fn accept(listener: &TcpListener, operation: &str, payload: &Value) -> Tcp
 #[tokio::test]
 async fn lost_start_and_outcome_replies_do_not_reenter_the_tool_before_or_after_retirement() {
     let (old_socket, old) = endpoint().await;
-    let (new_socket, new) = endpoint().await;
-    let (publish, current) = watch::channel(Some(old.clone()));
-    let view = captured_view(old.clone(), current);
+    let view = captured_view(old.clone());
     let receipt = json!({"session":"session","effect":"effect","registration":"registration","identity":{"call_id":"call"}});
     let start = json!({"view":"capture","args":{}});
     let workers = async {
@@ -378,18 +368,14 @@ async fn lost_start_and_outcome_replies_do_not_reenter_the_tool_before_or_after_
         drop(accept(&old_socket, "outcome", &receipt).await);
         let lost = accept(&old_socket, "outcome", &receipt).await;
         old.retired.cancel();
-        publish.send_replace(Some(new));
         drop(lost);
-        let mut stream = accept(&new_socket, "outcome", &receipt).await;
-        let reply = r#"{"state":"settled","result":{"value":"one execution","content":[],"is_error":false}}"#;
-        respond(&mut stream, reply).await;
     };
     let verify = async {
-        let result = view
-            .start_and_observe(&start, &receipt, &CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(result.value, "one execution");
+        assert!(matches!(
+            view.start_and_observe(&start, &receipt, &CancellationToken::new())
+                .await,
+            Err(ToolError::OutcomeUnknown)
+        ));
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(workers, verify)
@@ -414,9 +400,8 @@ async fn respond(stream: &mut TcpStream, reply: &str) {
 #[tokio::test]
 async fn dropped_view_release_survives_lost_requests_and_replies() {
     let (listener, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
     let remaining = endpoint.views.clone().try_acquire_many_owned(255).unwrap();
-    drop(captured_view(endpoint.clone(), current));
+    drop(captured_view(endpoint.clone()));
     assert!(endpoint.views.clone().try_acquire_owned().is_err());
     let expected = json!({"view":"capture"});
     // Neither an unacknowledged request nor a lost reply proves delivery.
@@ -443,14 +428,11 @@ async fn dropped_view_release_survives_lost_requests_and_replies() {
     .await
     .expect("a lost reply must also be retried");
     respond(&mut acknowledged, "{}").await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while Arc::strong_count(&endpoint) > 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("acknowledged release must retire its task");
-    assert_eq!(endpoint.views.available_permits(), 1);
+    let released = tokio::time::timeout(Duration::from_secs(2), endpoint.views.acquire())
+        .await
+        .expect("acknowledged release must return the view permit")
+        .unwrap();
+    drop(released);
     drop(remaining);
 }
 
@@ -492,8 +474,7 @@ async fn dropped_view_release_stops_with_its_original_generation() {
 #[tokio::test]
 async fn settled_start_delivers_the_result_without_an_outcome_query() {
     let (listener, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let input = json!({"effect":"effect"});
     let value = "result".repeat(100);
     let worker = async {
@@ -514,8 +495,7 @@ async fn settled_start_delivers_the_result_without_an_outcome_query() {
 #[tokio::test]
 async fn cancellation_during_start_observes_the_committed_result() {
     let (listener, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let stop = CancellationToken::new();
     let request = json!({"view":"captured"});
     let identity = json!({"effect":"running"});
@@ -543,8 +523,7 @@ async fn cancellation_during_start_observes_the_committed_result() {
 #[tokio::test]
 async fn unreadable_receipt_is_unknown_after_an_acknowledged_start() {
     let (listener, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let request = json!({"effect":"effect"});
     let worker = async {
         respond(
@@ -575,8 +554,7 @@ async fn unreadable_receipt_is_unknown_after_an_acknowledged_start() {
 #[tokio::test]
 async fn cancellation_interrupts_a_stalled_read_and_an_unconfirmed_body_remains_unknown() {
     let (listener, endpoint) = endpoint().await;
-    let (_publish, current) = watch::channel(Some(endpoint.clone()));
-    let view = captured_view(endpoint, current);
+    let view = captured_view(endpoint);
     let start = json!({"view":"capture"});
     let receipt = json!({"effect":"effect"});
     let stop = CancellationToken::new();

@@ -27,7 +27,6 @@ impl Sandbox for UnusedSandbox {
 #[tokio::test]
 async fn independent_sessions_keep_all_started_calls_until_their_own_settlement() {
     let (_socket, endpoint) = endpoint().await;
-    let (_publisher, current) = watch::channel(Some(endpoint.clone()));
     let issuer = TurnClaimIssuer::new();
     let model = ModelRef::new("deployment", "model").unwrap();
     let mut calls = Vec::new();
@@ -58,7 +57,7 @@ async fn independent_sessions_keep_all_started_calls_until_their_own_settlement(
             1,
             1,
         );
-        let mut view = captured_view(endpoint.clone(), current.clone());
+        let mut view = captured_view(endpoint.clone());
         view.session = id;
         let body = Arc::new(Body {
             view: Arc::new(view),

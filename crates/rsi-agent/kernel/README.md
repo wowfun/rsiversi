@@ -75,12 +75,10 @@ composition. Both inbox-only clear and Session stop reconcile lost commit
 acknowledgements from their exact canonical records, without retargeting later
 input.
 
-Cold recovery can consult an explicitly supplied read-only receipt provider
-for a started model-origin application tool bound by the current Step. An
-exact returned result is appended before the interrupted Step and Turn in the
-same recovery commit. Missing receipts, unstarted effects and other tool
-owners cannot manufacture results. Recovery does not run the tool or start
-another model request. A cancelled Turn retains its cancellation outcome.
+Cold recovery uses the session Facts. A committed Tool result survives restart.
+A started call without a committed result leaves its effect uncertain on the
+interrupted Turn. Recovery never repeats the call. Cancellation retains its
+recorded outcome.
 Startup enumerates the open-Turn index once per selected Session. The same
 snapshot supplies both watermarks for the repair commit.
 

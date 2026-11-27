@@ -581,8 +581,8 @@ async fn open_application(
     if capabilities.language {
         payload["language"] = true.into();
     }
-    if let Some(source) = tools {
-        payload["tools"] = serde_json::json!({"outcomeDirectory":source.receipt_directory});
+    if tools.is_some() {
+        payload["tools"] = true.into();
     }
     let timing =
         std::env::var_os("RSI_PACKAGE_TIMINGS").as_deref() == Some(std::ffi::OsStr::new("1"));
@@ -686,11 +686,8 @@ impl PluginFactory for Factory {
             let (source, publisher) = tools::Source::new(
                 plan.local::<rsi_tools_protocol::ToolCatalogProviderContract>()?,
                 lifetime.clone(),
-                config.profile.clone(),
                 config.replace_preset_tools,
                 config.replace_tools_in_presets,
-                rsi::application_tool_receipt_directory(&self.0, &config.profile)
-                    .map_err(failure)?,
             )?;
             plan.context()
                 .provide_local::<rsi_agent_composition_protocol::RequestToolSourceContract>(

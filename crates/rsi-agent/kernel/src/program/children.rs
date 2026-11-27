@@ -150,7 +150,6 @@ impl LiveRun {
                 resolved_terminal_seq: fork.resolved_terminal_seq,
                 terminal_prefix_sha256: fork.terminal_prefix_sha256.clone(),
                 resolved_terminal_control_seq: fork.resolved_terminal_control_seq,
-                terminal_control_prefix_sha256: fork.terminal_control_prefix_sha256.clone(),
                 requested_turns: fork.requested_turns.clone(),
                 effective_turns: fork.effective_turns,
             }

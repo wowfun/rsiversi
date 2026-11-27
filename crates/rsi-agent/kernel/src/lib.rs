@@ -696,7 +696,7 @@ struct TurnControl {
     unconfirmed_summary: Option<(EffectId, u64)>,
     region: Option<Arc<RegionEffect>>,
     selected_tools: Option<Arc<[String]>>,
-    application: Arc<ApplicationRegistrations>,
+    application: Arc<BTreeMap<String, String>>,
 
     accepted_at_ms: u64,
     accepted_seq: u64,
@@ -720,17 +720,6 @@ struct DurableMessageEntry {
     wake_required: bool,
     accepted_control_seq: u64,
     state: MessageState,
-}
-
-#[derive(Default)]
-struct ApplicationRegistrations {
-    source: Option<String>,
-    tools: BTreeMap<String, CapturedRegistration>,
-}
-
-struct CapturedRegistration {
-    owner: String,
-    registration: String,
 }
 
 #[derive(Clone)]
@@ -1000,7 +989,6 @@ mod completion_reply;
 mod observation;
 mod queue_mutation;
 mod recovery;
-pub use recovery::{ApplicationReceipt, ApplicationReceiptReader};
 mod store_reads;
 mod tool_origin;
 mod turn_service;
@@ -1097,18 +1085,7 @@ pub type Result<T> = std::result::Result<T, KernelError>;
 
 /// Ordinary Kernel factory requiring exact Agent Store and composition supplies.
 #[derive(Clone, Debug, Default)]
-pub struct KernelFactory {
-    receipts: Option<Arc<dyn ApplicationReceiptReader>>,
-}
-impl KernelFactory {
-    /// Supplies a read-only receipt authority for Kernel startup repair.
-    #[must_use]
-    pub fn with_application_receipts(receipts: Arc<dyn ApplicationReceiptReader>) -> Self {
-        Self {
-            receipts: Some(receipts),
-        }
-    }
-}
+pub struct KernelFactory;
 
 #[async_trait]
 impl PluginFactory for KernelFactory {
@@ -1140,7 +1117,6 @@ impl PluginFactory for KernelFactory {
             plan.local::<AgentCompositionContract>()?,
             Arc::new(SystemClock),
             limits,
-            self.receipts.as_deref(),
             Some(plan.context().clone()),
         )
         .await

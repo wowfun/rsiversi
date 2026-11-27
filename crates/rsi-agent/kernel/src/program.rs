@@ -98,7 +98,6 @@ impl AgentKernel {
                 resolved_terminal_seq: boundary.resolved_terminal_seq,
                 terminal_prefix_sha256: boundary.terminal_prefix_sha256,
                 resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
                 effective_turns: boundary.effective_turns,
             },
             selection: request

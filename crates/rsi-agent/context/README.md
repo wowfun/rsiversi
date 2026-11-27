@@ -111,7 +111,7 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.18.0, Session format 47, the v23 fold
+The allocation golden binds builder 2.18.0, Session format 48, the v23 fold
 and the v6 envelope.
 
 The single deep module for prompt projection, incremental model context, and

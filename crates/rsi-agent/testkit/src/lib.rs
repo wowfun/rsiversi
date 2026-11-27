@@ -7,11 +7,10 @@
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
     ActivationId, ActivationOutcome, AgentControlRecord, AgentControlRecordBody, AgentMessage,
-    AgentMessageContent, AgentMessageSource, AgentPath, EMPTY_CONTROL_PREFIX_DIGEST,
-    EMPTY_FACT_PREFIX_DIGEST, ForkOrigin, ForkTurnSelection, InputMessageSource, MessageId,
-    MessageOptions, MessageTarget, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
-    TurnId, TurnOutcome, advance_control_prefix_digest, advance_fact_prefix_digest,
-    fact_prefix_sha256,
+    AgentMessageContent, AgentMessageSource, AgentPath, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin,
+    ForkTurnSelection, InputMessageSource, MessageId, MessageOptions, MessageTarget, SessionFact,
+    SessionFactBody, SessionHeader, SessionId, StepId, TurnId, TurnOutcome,
+    advance_fact_prefix_digest, fact_prefix_sha256,
 };
 use rsi_agent_store_protocol::{
     AgentActivationGuard, AppendBatch, AppendCommit, AtomicAgentCommit, AtomicAgentCommitResult,
@@ -94,7 +93,6 @@ struct MemorySession {
         (rsi_agent_store_protocol::StoreProgramHead, Vec<u64>),
     >,
     last_settled_control_seq: u64,
-    control_prefix_digest: [u8; 32],
     domain_versions: BTreeMap<String, Vec<rsi_agent_store_protocol::StoreDomainHead>>,
     domain_removals: BTreeMap<String, Vec<u64>>,
     generation_selections: BTreeSet<u64>,
@@ -108,7 +106,7 @@ struct MemoryTurnBoundary {
     accepted_seq: u64,
     terminal_seq: Option<u64>,
     terminal_prefix_sha256: Option<String>,
-    terminal_control: Option<(u64, String)>,
+    terminal_control_seq: Option<u64>,
 }
 
 impl MemoryStore {

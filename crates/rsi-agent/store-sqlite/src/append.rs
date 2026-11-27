@@ -1,8 +1,8 @@
 use super::bounded_text;
 use super::{
     ActivationId, AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageSource,
-    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection, EMPTY_CONTROL_PREFIX_DIGEST,
-    EMPTY_FACT_PREFIX_DIGEST, MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
+    AppendBatch, AtomicAgentCommit, AtomicSessionAppend, Connection, EMPTY_FACT_PREFIX_DIGEST,
+    MAXIMUM_INDEXED_MESSAGE_STATE_BYTES, MAXIMUM_SESSION_FACT_BYTES,
     MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MessageDiscardReason, MessageId, MessageTarget,
     OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
     StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
@@ -68,14 +68,14 @@ pub(super) fn validate_sqlite_quiescence_guard(
     Ok(None)
 }
 
-fn atomic_append_prefixes(
+fn atomic_fact_prefix(
     transaction: &Transaction<'_>,
     append: &AtomicSessionAppend,
     references: &super::reference_index::Writer<'_>,
-) -> Result<([u8; 32], [u8; 32])> {
+) -> Result<[u8; 32]> {
     let mut statement = transaction
         .prepare_cached(
-            "SELECT durable_seq, control_seq, fact_prefix_sha256, control_prefix_sha256
+            "SELECT durable_seq, control_seq, fact_prefix_sha256
              FROM sessions WHERE session_id = ?1",
         )
         .map_err(sql_error)?;
@@ -106,7 +106,7 @@ fn atomic_append_prefixes(
     match (existing, append.header.as_ref()) {
         (None, Some(header)) => {
             insert_session(transaction, header, references)?;
-            Ok((EMPTY_FACT_PREFIX_DIGEST, EMPTY_CONTROL_PREFIX_DIGEST))
+            Ok(EMPTY_FACT_PREFIX_DIGEST)
         }
         (None, None) => Err(StoreError::NotFound(append.session_id.to_string())),
         (Some(row), header) => {
@@ -116,16 +116,10 @@ fn atomic_append_prefixes(
                 actual_fact == 0 && actual_control == 0,
                 header,
             )?;
-            Ok((
-                decode_sha256(
-                    "Fact-prefix digest",
-                    super::text::borrowed_text(row, 2, 64).map_err(sql_error)?,
-                )?,
-                decode_sha256(
-                    "control-prefix digest",
-                    super::text::borrowed_text(row, 3, 64).map_err(sql_error)?,
-                )?,
-            ))
+            decode_sha256(
+                "Fact-prefix digest",
+                super::text::borrowed_text(row, 2, 64).map_err(sql_error)?,
+            )
         }
     }
 }
@@ -136,8 +130,7 @@ pub(super) fn apply_atomic_sqlite_append(
     append: AtomicSessionAppend,
 ) -> Result<StoreSessionWatermarks> {
     let references = super::reference_index::Writer::new(transaction, &append.session_id)?;
-    let (mut fact_digest, mut control_digest) =
-        atomic_append_prefixes(transaction, &append, &references)?;
+    let mut fact_digest = atomic_fact_prefix(transaction, &append, &references)?;
     let suffix = append.fact_suffix()?;
     let durable_fact_seq = suffix.last().map_or(
         append.expected_fact_seq,
@@ -260,9 +253,7 @@ pub(super) fn apply_atomic_sqlite_append(
                 &append.controls[index + 2],
             )?;
         }
-        let (json, next_digest) =
-            rsi_agent_session_protocol::encode_control_with_prefix_digest(control_digest, record)
-                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        let json = encode_json("control record", record)?;
         references.control(record, &json)?;
         if let Some(claim) = (ControlIndexer {
             transaction,
@@ -277,19 +268,24 @@ pub(super) fn apply_atomic_sqlite_append(
         {
             claimed_acceptances.push(claim);
         }
-        control_digest = next_digest;
         if let AgentControlRecordBody::TurnBoundaryRecorded {
             turn_id,
             terminal_fact_seq,
         } = record.body()
         {
-            let changed = transaction.execute(
-                "UPDATE turns SET terminal_control_seq = ?1, terminal_control_prefix_sha256 = ?2
-                 WHERE session_id = ?3 AND turn_id = ?4 AND terminal_seq = ?5
+            let changed = transaction
+                .execute(
+                    "UPDATE turns SET terminal_control_seq = ?1
+                 WHERE session_id = ?2 AND turn_id = ?3 AND terminal_seq = ?4
                    AND terminal_control_seq IS NULL",
-                params![sqlite_u64("terminal control sequence", record.seq())?, hex::encode(control_digest),
-                    append.session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?],
-            ).map_err(sql_error)?;
+                    params![
+                        sqlite_u64("terminal control sequence", record.seq())?,
+                        append.session_id.as_str(),
+                        turn_id.as_str(),
+                        sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?
+                    ],
+                )
+                .map_err(sql_error)?;
             if changed != 1 {
                 return Err(StoreError::Corrupt(
                     "SQLite lost the terminal Fact/control correlation".into(),
@@ -322,15 +318,14 @@ pub(super) fn apply_atomic_sqlite_append(
         .execute(
             "UPDATE sessions
              SET durable_seq = ?1, fact_prefix_sha256 = ?2,
-                 control_seq = ?3, control_prefix_sha256 = ?4,
-                 last_settled_control_seq = COALESCE(?8, last_settled_control_seq),
-                 directory_control_seq = COALESCE(?9, directory_control_seq)
-             WHERE session_id = ?5 AND durable_seq = ?6 AND control_seq = ?7",
+                 control_seq = ?3,
+                 last_settled_control_seq = COALESCE(?7, last_settled_control_seq),
+                 directory_control_seq = COALESCE(?8, directory_control_seq)
+             WHERE session_id = ?4 AND durable_seq = ?5 AND control_seq = ?6",
             params![
                 sqlite_u64("durable sequence", durable_fact_seq)?,
                 hex::encode(fact_digest),
                 sqlite_u64("control sequence", durable_control_seq)?,
-                hex::encode(control_digest),
                 append.session_id.as_str(),
                 sqlite_u64("expected sequence", append.expected_fact_seq)?,
                 sqlite_u64("expected control sequence", append.expected_control_seq)?,
@@ -1249,14 +1244,13 @@ pub(super) fn insert_session(
         .execute(
             "INSERT INTO sessions
                 (session_id, created_at_ms, header_json, durable_seq, fact_prefix_sha256,
-                 control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
-             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
+                 control_seq, coordinates_key, last_activity_ms)
+             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?2)",
             params![
                 header.session_id().as_str(),
                 sqlite_u64("session creation timestamp", header.created_at_ms())?,
                 references.header(header)?,
                 hex::encode(EMPTY_FACT_PREFIX_DIGEST),
-                hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                 super::activity::coordinates_key(header.coordinates())?,
             ],
         )

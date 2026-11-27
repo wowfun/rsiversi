@@ -354,8 +354,8 @@ async fn metadata_reads_do_not_attach_and_preserve_visibility_and_failures() {
 #[tokio::test]
 async fn metadata_parent_address_requires_visible_direct_parent() {
     use rsi_agent_session_protocol::{
-        AgentPath, EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin, ForkPoint,
-        ForkTurnSelection, HistoryOrigin, TurnId,
+        AgentPath, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin, ForkPoint, ForkTurnSelection,
+        HistoryOrigin, TurnId,
     };
     let parent = metadata_header("parent");
     let child = metadata_header("child")
@@ -368,7 +368,6 @@ async fn metadata_parent_address_requires_visible_direct_parent() {
                 resolved_terminal_seq: 0,
                 terminal_prefix_sha256: hex::encode(EMPTY_FACT_PREFIX_DIGEST),
                 resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             }

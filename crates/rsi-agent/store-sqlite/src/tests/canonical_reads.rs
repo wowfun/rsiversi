@@ -18,15 +18,15 @@ async fn damaged_store(sql: &str) -> (tempfile::TempDir, SqliteStore, SessionId)
 }
 
 #[tokio::test]
-async fn metadata_reads_ignore_stream_digests_but_execution_and_audit_reject_damage() {
+async fn metadata_reads_use_the_header_while_execution_and_audit_check_streams() {
     for (sql, label) in [
         (
             "UPDATE sessions SET fact_prefix_sha256 = 'bad'",
             "Fact-prefix digest",
         ),
         (
-            "UPDATE sessions SET control_prefix_sha256 = 'bad'",
-            "control-prefix digest",
+            "UPDATE agent_controls SET fact_seq = 3 WHERE seq = 1",
+            "control Fact anchors",
         ),
     ] {
         let (root, store, id) = damaged_store(sql).await;

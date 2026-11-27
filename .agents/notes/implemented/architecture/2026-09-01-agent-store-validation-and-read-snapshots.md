@@ -89,9 +89,9 @@ keeps one body-selection query. It still requires decoding the control envelope,
 so reduced bytes alone are not a claim of reduced read CPU or device RAM.
 
 Activation lineage is derived from immutable Headers at control admission and
-offline audit. A matching control digest and activation index cannot substitute
-for that independent relationship check. First access also checks the shape of
-the control-prefix digest, its canonical value, and the active index's parent against the Header.
+offline audit. Control replay verifies sequence continuity and terminal markers. First access checks
+the active index's parent against the Header. The durable parent identity and terminal
+marker locate the selected control interval even when later controls are appended.
 
 ## Consequences
 

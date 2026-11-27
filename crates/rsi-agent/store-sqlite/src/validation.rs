@@ -481,13 +481,11 @@ pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionI
                FROM turns AS turn
                WHERE turn.session_id = ?1 AND (
                     (turn.terminal_seq IS NULL AND (turn.terminal_prefix_sha256 IS NOT NULL
-                        OR turn.terminal_control_seq IS NOT NULL OR turn.terminal_control_prefix_sha256 IS NOT NULL))
+                        OR turn.terminal_control_seq IS NOT NULL))
                     OR (turn.terminal_seq IS NOT NULL AND
                         (turn.terminal_prefix_sha256 IS NULL
                          OR length(turn.terminal_prefix_sha256) != 64
-                         OR turn.terminal_control_seq IS NULL
-                         OR turn.terminal_control_prefix_sha256 IS NULL
-                         OR length(turn.terminal_control_prefix_sha256) != 64))
+                         OR turn.terminal_control_seq IS NULL))
                     OR
                     NOT EXISTS (
                       SELECT 1 FROM facts AS accepted
@@ -1484,7 +1482,6 @@ fn validate_agent_indexes_observed(
     let mut decoded = 0_u64;
     let mut previous_anchor = 0;
     let mut activity = rsi_agent_store_protocol::ActivityProjection::default();
-    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
     let mut terminals = 0_u64;
     let mut queue_receipts = 0_usize;
     let mut last_settled_control_seq = 0;
@@ -1568,9 +1565,7 @@ fn validate_agent_indexes_observed(
             super::feedback::validate_change(connection, selected, change, decoded - 1, anchor)
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         }
-        digest = advance_control_prefix_digest(digest, &record)
-            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        if validate_terminal_control(connection, selected, &record, digest)? {
+        if validate_terminal_control(connection, selected, &record)? {
             terminals += 1;
         }
         if rsi_agent_store_protocol::needs_program_graph(record.body()) {
@@ -1625,12 +1620,12 @@ fn validate_agent_indexes_observed(
             "session control watermark differs from its contiguous control stream".into(),
         ));
     }
-    let (indexed_terminals, indexed_settlement, indexed_digest, indexed_pause) = connection
+    let (indexed_terminals, indexed_settlement, indexed_pause) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND terminal_seq IS NOT NULL),
-                last_settled_control_seq, control_prefix_sha256, inbox_paused FROM sessions WHERE session_id = ?1",
+                last_settled_control_seq, inbox_paused FROM sessions WHERE session_id = ?1",
             [selected.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, bounded_text(row, 2, 64)?, row.get::<_, bool>(3)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, bool>(2)?)),
         )
         .map_err(sql_error)?;
     if indexed_pause != inbox_paused {
@@ -1641,11 +1636,6 @@ fn validate_agent_indexes_observed(
     if directory_control_seq != session.working_directory.as_ref().map(|change| change.seq) {
         return Err(StoreError::Corrupt(
             "working-directory position differs from canonical controls".into(),
-        ));
-    }
-    if digest != decode_sha256("control-prefix digest", &indexed_digest)? {
-        return Err(StoreError::Corrupt(
-            "control-prefix digest differs from the canonical control stream".into(),
         ));
     }
     if last_settled_control_seq != decode_u64("last settlement sequence", indexed_settlement)? {
@@ -1678,7 +1668,6 @@ fn validate_terminal_control(
     connection: &Connection,
     session_id: &SessionId,
     record: &AgentControlRecord,
-    digest: [u8; 32],
 ) -> Result<bool> {
     let AgentControlRecordBody::TurnBoundaryRecorded {
         turn_id,
@@ -1687,13 +1676,19 @@ fn validate_terminal_control(
     else {
         return Ok(false);
     };
-    let matches = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1 AND turn_id = ?2
-            AND terminal_seq = ?3 AND terminal_control_seq = ?4 AND terminal_control_prefix_sha256 = ?5)",
-        params![session_id.as_str(), turn_id.as_str(), sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?,
-            sqlite_u64("terminal control sequence", record.seq())?, hex::encode(digest)],
-        |row| row.get::<_, bool>(0),
-    ).map_err(sql_error)?;
+    let matches = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id = ?1 AND turn_id = ?2
+            AND terminal_seq = ?3 AND terminal_control_seq = ?4)",
+            params![
+                session_id.as_str(),
+                turn_id.as_str(),
+                sqlite_u64("terminal Fact sequence", *terminal_fact_seq)?,
+                sqlite_u64("terminal control sequence", record.seq())?
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(sql_error)?;
     if !matches {
         return Err(StoreError::Corrupt(
             "terminal index differs from the canonical Fact/control boundary".into(),

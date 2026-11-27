@@ -165,7 +165,7 @@ impl RequestToolSource for Source {
         Ok(RequestToolCatalog {
             middleware: None,
             generation: "prepared-input".into(),
-            receipt_source: None,
+
             registrations: std::collections::BTreeMap::default(),
             runtime: self.catalogs.begin_stage().unwrap().seal().unwrap(),
             instructions: String::new(),

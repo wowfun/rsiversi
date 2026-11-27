@@ -1,10 +1,10 @@
 # rsi-agent-store-sqlite
 
 Atomic Session appends check retirement once in the writer transaction. One
-indexed Session read supplies both expected-sequence comparisons and the two
-prefix digests. A newly admitted Header starts with the empty stream digests.
+indexed Session read supplies both expected-sequence comparisons and the
+Fact-prefix digest. A newly admitted Header starts with empty stream positions.
 For ordinary Facts and controls, the Store uses one canonical JSON encoding
-for the row, its reference coverage digest and the next Session prefix digest.
+for the row and its reference coverage digest. An appended Fact also advances the Fact prefix.
 For mailbox claims stored as acceptance references, coverage binds the shorter
 stored record, while the Session prefix binds the full logical Fact.
 
@@ -12,8 +12,8 @@ Live summary and access reads select the Header and check retirement in the
 same indexed statement. An access batch reuses that statement inside one
 snapshot and keeps each selected Header's decode result in its own slot.
 Header reads and recent-session lists use the stored watermarks without
-reading either stream's prefix digest. Session validation checks the Fact
-digest format and compares the control digest with the replayed controls.
+reading the Fact-prefix digest. Session validation checks that digest's format and
+compares control positions and terminal markers with the replayed controls.
 Offline verification also compares the Fact digest with the replayed Facts.
 
 Domain reads batch the distinct canonical control positions in one bounded SQL
@@ -52,7 +52,7 @@ in the canonical control. Reading a Session with a change fetches its path by
 the control primary key in the same snapshot. Cold validation checks the pointer
 against control replay.
 
-The Store uses Header format 47 with separate history provenance and Agent
+The Store uses Header format 48 with separate history provenance and Agent
 execution ownership. A mailbox row retains routing, lifecycle and acceptance
 coordinates, never a second message body. Body reads join the indexed acceptance
 to its canonical control in the same query and bound that control before allocating
@@ -361,17 +361,17 @@ as described by the validation failure contract below. Cold validation
 still runs before any indexed execution/history read. Kernel prepares a proof
 before admitting payload memory; a plain canonical page is not that proof.
 Every canonical terminal Fact must have the matching non-NULL terminal index
-Fact and control sequences and prefix digests. The final control of each
+Fact and control sequences and the Fact-prefix digest. The final control of each
 terminal commit is its exact `TurnBoundaryRecorded` marker. Missing terminal metadata is corruption in both
 online indexed reads and offline verification; it never describes an open Turn.
 The lazy
 check does not decode every Fact JSON body, but its watermark count and
 turn-membership queries cost O(that session's history) on an uncached access.
-It streams, decodes and hashes each canonical Agent control once. That same
+It streams and decodes each canonical Agent control once. That same
 ordered pass checks row/record sequence agreement, the exact control watermark,
 and nondecreasing Fact anchors within the durable Fact watermark; it does not
 prescan the control stream for counts or anchors. It checks the
-stored final control-prefix digest and terminal control prefixes and feeds separate
+terminal control marker against its indexed Turn and Fact sequence and feeds separate
 mailbox, ready, active-activation and bounded domain-head projections. Domain
 version/request membership and exact canonical update positions are verified in
 that same pass. Domain indexes retain positions and derived capacity metadata;

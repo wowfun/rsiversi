@@ -159,7 +159,7 @@ async fn request_guidance_is_bounded_replaced_and_removed_without_changing_the_p
     let captured = |text: String| rsi_agent_composition_protocol::RequestToolCatalog {
         middleware: None,
         generation: "application".into(),
-        receipt_source: None,
+
         registrations: std::collections::BTreeMap::new(),
         runtime: Arc::new(EmptyTools::default()),
         instructions: text,

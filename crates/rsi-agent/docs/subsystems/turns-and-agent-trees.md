@@ -164,8 +164,7 @@ those exact facts are currently exposed only after request construction. Replay
 therefore cannot authorize prefix elision or cross-session forwarding until the
 AI seam gains an exact provider-I/O-free route preflight.
 `none`, `all`, and a positive completed-turn count are explicit selections;
-the current unbalanced Turn is never inherited. The Store indexes terminal
-prefix digests. A cold replay revalidates the immutable boundary once at its
+the current unbalanced Turn is never inherited. The Store indexes the terminal Fact digest and control position. A cold replay revalidates the immutable boundary once at its
 first cursor, then pages the sealed interval without repeating a full-prefix
 selection query for every page.
 

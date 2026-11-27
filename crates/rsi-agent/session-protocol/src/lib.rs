@@ -130,7 +130,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 47;
+pub const SESSION_FORMAT_VERSION: u32 = 48;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -153,10 +153,7 @@ pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAXIMUM_FACTS_PER_READ: usize = 512;
 /// Empty predecessor for the canonical durable Fact-prefix digest chain.
 pub const EMPTY_FACT_PREFIX_DIGEST: [u8; 32] = [0; 32];
-/// Empty predecessor for the canonical Agent-control digest chain.
-pub const EMPTY_CONTROL_PREFIX_DIGEST: [u8; 32] = [0; 32];
 const FACT_PREFIX_DOMAIN: &[u8] = b"rsi-agent-context-fact-prefix-v2\0";
-const CONTROL_PREFIX_DOMAIN: &[u8] = b"rsi-agent-control-prefix-v1\0";
 /// Maximum queued messages retained for one durable session.
 pub const MAXIMUM_PENDING_AGENT_MESSAGES: usize = 64;
 /// Maximum ordered content blocks retained by one Agent message.
@@ -3347,22 +3344,6 @@ pub fn fact_prefix_sha256<'a>(facts: impl IntoIterator<Item = &'a SessionFact>) 
     Ok(hex::encode(digest))
 }
 
-/// Advances the canonical digest chain by one validated Agent-control record.
-pub fn advance_control_prefix_digest(
-    previous: [u8; 32],
-    record: &AgentControlRecord,
-) -> Result<[u8; 32]> {
-    hash_record(prefix_hasher(CONTROL_PREFIX_DOMAIN, previous), record)
-}
-
-/// Returns the canonical JSON to persist and the prefix digest that includes those bytes.
-pub fn encode_control_with_prefix_digest(
-    previous: [u8; 32],
-    record: &AgentControlRecord,
-) -> Result<(String, [u8; 32])> {
-    encode_record_with_prefix(prefix_hasher(CONTROL_PREFIX_DOMAIN, previous), record)
-}
-
 /// Returns canonical logical Fact JSON and the prefix that includes it.
 pub fn encode_fact_with_prefix_digest(
     previous: [u8; 32],
@@ -3379,17 +3360,6 @@ fn encode_record_with_prefix(
         serde_json::to_string(record).map_err(|error| SessionError::Encoding(error.to_string()))?;
     let digest = digest.chain_update(json.as_bytes()).finalize();
     Ok((json, digest.into()))
-}
-
-/// Computes lowercase SHA-256 for one exact Agent-control prefix.
-pub fn control_prefix_sha256<'a>(
-    records: impl IntoIterator<Item = &'a AgentControlRecord>,
-) -> Result<String> {
-    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
-    for record in records {
-        digest = advance_control_prefix_digest(digest, record)?;
-    }
-    Ok(hex::encode(digest))
 }
 
 fn compact_json_len(value: &(impl Serialize + ?Sized)) -> Result<usize> {

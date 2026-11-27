@@ -75,7 +75,7 @@ fn application_bindings_retain_only_selected_unambiguous_identities() {
             }),
             application: Some(ApplicationToolView::Ready {
                 generation: "worker".into(),
-                receipt_source: Some("market".into()),
+
                 tools: vec![ApplicationToolBinding {
                     name: "read".into(),
                     registration: "occurrence".into(),
@@ -293,7 +293,6 @@ fn redirected_plugin_children_keep_the_creation_directory_across_nested_delegati
                 resolved_terminal_seq: 0,
                 terminal_prefix_sha256: "0".repeat(64),
                 resolved_terminal_control_seq: 0,
-                terminal_control_prefix_sha256: "0".repeat(64),
                 requested_turns: ForkTurnSelection::None,
                 effective_turns: 0,
             }
@@ -382,7 +381,6 @@ fn protection_is_bounded_immutable_and_part_of_header_identity() {
             resolved_terminal_seq: 0,
             terminal_prefix_sha256: "0".repeat(64),
             resolved_terminal_control_seq: 0,
-            terminal_control_prefix_sha256: "0".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
         }
@@ -1146,7 +1144,6 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
             resolved_terminal_seq: 0,
             terminal_prefix_sha256: "0".repeat(64),
             resolved_terminal_control_seq: 0,
-            terminal_control_prefix_sha256: "0".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
         }
@@ -1177,7 +1174,6 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
             resolved_terminal_seq: 7,
             terminal_prefix_sha256: "b".repeat(64),
             resolved_terminal_control_seq: 1,
-            terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 2,
         }
@@ -1191,10 +1187,7 @@ fn fork_selection_and_lineage_are_exact_and_tamper_evident() {
     assert_eq!(child.format_version(), SESSION_FORMAT_VERSION);
     assert_eq!(child.history_origin().unwrap().resolved_terminal_seq, 7);
     assert_independent_fork(&child);
-    for (field, value) in [
-        ("resolved_terminal_control_seq", json!(0)),
-        ("terminal_control_prefix_sha256", json!("bad-digest")),
-    ] {
+    for (field, value) in [("resolved_terminal_control_seq", json!(0))] {
         let mut encoded = serde_json::to_value(&child).unwrap();
         encoded["fork_origin"]["origin"]["history"][field] = value;
         assert!(
@@ -1223,7 +1216,6 @@ fn fork_lineage_rejects_nonempty_intervals_with_zero_effective_turns() {
             resolved_terminal_seq: 7,
             terminal_prefix_sha256: "11".repeat(32),
             resolved_terminal_control_seq: 1,
-            terminal_control_prefix_sha256: "c".repeat(64),
             requested_turns: ForkTurnSelection::All,
             effective_turns: 0,
         }
@@ -1320,17 +1312,6 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
     .unwrap();
     validate_control_sequence(0, &[first.clone(), second.clone()]).unwrap();
     assert!(validate_control_sequence(0, std::slice::from_ref(&second)).is_err());
-    assert_ne!(
-        control_prefix_sha256([&first]).unwrap(),
-        control_prefix_sha256([&first, &second]).unwrap()
-    );
-    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
-    for record in [&first, &second] {
-        let (json, next) = encode_control_with_prefix_digest(digest, record).unwrap();
-        assert_eq!(json, serde_json::to_string(record).unwrap());
-        assert_eq!(next, advance_control_prefix_digest(digest, record).unwrap());
-        digest = next;
-    }
 
     let with_options = AgentMessage {
         options: MessageOptions {

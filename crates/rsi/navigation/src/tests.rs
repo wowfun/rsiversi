@@ -48,9 +48,6 @@ async fn archive_membership_follows_subagent_ancestors_and_stops_at_independent_
         resolved_terminal_seq: 0,
         terminal_prefix_sha256: hex::encode(rsi_agent_session_protocol::EMPTY_FACT_PREFIX_DIGEST),
         resolved_terminal_control_seq: 0,
-        terminal_control_prefix_sha256: hex::encode(
-            rsi_agent_session_protocol::EMPTY_CONTROL_PREFIX_DIGEST,
-        ),
         requested_turns: ForkTurnSelection::None,
         effective_turns: 0,
     };

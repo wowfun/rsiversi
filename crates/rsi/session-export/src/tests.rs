@@ -561,7 +561,6 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
             resolved_terminal_seq: boundary.resolved_terminal_seq,
             terminal_prefix_sha256: boundary.terminal_prefix_sha256,
             resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: ForkTurnSelection::All,
             effective_turns: boundary.effective_turns,
         }
@@ -642,7 +641,6 @@ async fn inherits_frozen_ancestor_intervals_only_for_full_selections() {
                 resolved_terminal_seq: boundary.resolved_terminal_seq,
                 terminal_prefix_sha256: boundary.terminal_prefix_sha256,
                 resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             }
             .into(),
             root_session_id: parent.session_id().clone(),
@@ -729,7 +727,6 @@ async fn inherited_last_request_does_not_replay_before_the_selected_interval() {
             resolved_terminal_seq: boundary.resolved_terminal_seq,
             terminal_prefix_sha256: boundary.terminal_prefix_sha256,
             resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-            terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256,
             requested_turns: selection,
             effective_turns: boundary.effective_turns,
         }

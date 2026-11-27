@@ -38,8 +38,6 @@ pub use application_catalog::{
     ApplicationCatalog, ApplicationCatalogMetadata, ApplicationCatalogProvider,
 };
 mod application_connection;
-mod application_receipts;
-pub use application_receipts::application_tool_receipt_directory;
 pub mod application_services;
 pub use application_connection::{
     ApplicationDiagnostics, BASE_APPLICATION_PLUGINS, base_application_catalog,

@@ -21,7 +21,7 @@ Durable format verification uses the actual serialization representation of
 The serialization-mode JSON schema is structural evidence, not a substitute for
 constructor validation. Custom serializers describe their emitted wire value;
 opaque JSON remains explicitly opaque. Retained writer bytes additionally guard
-field order and the exact Fact/control prefix digest inputs. The
+field order and the exact Fact-prefix digest inputs. The
 [Store corpus](../store-sqlite/README.md) owns retained database replay and
 unsupported-version refusal. A format bump retains the previous corpus; a
 same-version change may add cases but must not refresh existing evidence.
@@ -162,12 +162,10 @@ application registrations and native result owners. The captured runtime owns
 the schemas used for execution; `ModelIntent` request evidence owns their durable
 inspection representation and may reference an earlier identical section.
 `StepPrepared` does not persist a second schema catalog. When request evidence is
-unavailable, schema inspection is unavailable; registration routing and cold
-outcome recovery still use the complete captured identities. An unavailable selected
-source records its diagnostic. Absence denotes no selected application.
-`ToolIntent.identity.owner_id` binds an application call to the captured row.
-Sources with durable outcomes also record their stable receipt source on the
-ready view. An absent source carries no authority to look up an external result.
+unavailable, schema inspection is unavailable. The captured identities bind registration
+routing. An unavailable selected source records its diagnostic. Absence denotes no
+selected application. The captured owner binds the application call to its Tool intent.
+The committed Tool result supplies its outcome on restart.
 
 Tool context messages originate in a ToolResult or in the ToolRejected Fact
 of a model call whose policy returned deferred messages. A refusal with no
@@ -274,7 +272,7 @@ These policy defaults do not admit any earlier Header format.
 
 Historical inheritance and execution ownership are distinct. A history origin
 binds one source Header, a `before_turn` or `through_turn` boundary, the selected
-completed local Turns, and exact Fact/control prefix digests. Agent spawn adds
+completed local Turns, and the exact terminal control position and Fact-prefix digest. Agent spawn adds
 tree membership and a live creator's execution owner; a manual fork has historical
 origin only and starts an independent execution root. History links retain their
 source Session without becoming parent/child control authority. Full traversal is
@@ -410,7 +408,7 @@ canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
 Kernel service; serialized identities alone confer no authority. Only Header
-format 47 is accepted; all other formats are unsupported. Header protection is
+format 48 is accepted; all other formats are unsupported. Header protection is
 part of this format's immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
@@ -494,12 +492,12 @@ resource scope still derive from the parent.
 
 Fork lineage records the parent Header fingerprint, tree path, invoking Turn,
 resolved balanced completed-turn interval, and exact terminal Fact/control
-sequences and prefix digests. The [Store contract](../store-protocol/README.md)
+sequences and the Fact-prefix digest. The [Store contract](../store-protocol/README.md)
 owns their atomic correlation. Fork
 seeds retain provider replay events. The child has a new Session identity and
 never mutates or truncates its parent's log. An effective-turn count of zero is
-valid only for the exact empty interval whose Fact/control cursors and prefix
-digests are all empty; every
+valid only for the empty interval with zero Fact/control cursors and the empty
+Fact-prefix digest. Every
 nonempty resolved interval retains at least one complete Turn.
 
 Every header carries one required `AgentPresetId`. Its lowercase

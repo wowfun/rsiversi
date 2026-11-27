@@ -196,7 +196,7 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
         )
         .await
         .unwrap();
-    for field in 0..7 {
+    for field in 0..6 {
         let mut origin = ForkOrigin {
             parent: rsi_agent_session_protocol::HistoryOrigin {
                 parent_session_id: parent.session_id().clone(),
@@ -208,7 +208,6 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
                 resolved_terminal_seq: boundary.resolved_terminal_seq,
                 terminal_prefix_sha256: boundary.terminal_prefix_sha256.clone(),
                 resolved_terminal_control_seq: boundary.resolved_terminal_control_seq,
-                terminal_control_prefix_sha256: boundary.terminal_control_prefix_sha256.clone(),
                 requested_turns: ForkTurnSelection::All,
                 effective_turns: boundary.effective_turns,
             }
@@ -226,7 +225,6 @@ async fn producer_rejects_each_changed_inherited_binding_before_emitting_start()
             2 => history.resolved_terminal_seq += 1,
             3 => history.terminal_prefix_sha256 = "b".repeat(64),
             4 => history.resolved_terminal_control_seq += 1,
-            5 => history.terminal_control_prefix_sha256 = "b".repeat(64),
             _ => history.effective_turns += 1,
         }
         let child = parent

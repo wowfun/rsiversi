@@ -1553,7 +1553,7 @@ impl BaseStack {
                     "rsi.agent.kernel",
                     "kernel",
                     UpdateMode::Replayable,
-                    Arc::new(KernelFactory::default()),
+                    Arc::new(KernelFactory),
                 ),
                 Value::Null,
             )
@@ -1658,7 +1658,7 @@ impl BaseStack {
                     "rsi.agent.kernel",
                     "kernel-restarted",
                     UpdateMode::Replayable,
-                    Arc::new(KernelFactory::default()),
+                    Arc::new(KernelFactory),
                 ),
                 Value::Null,
             )

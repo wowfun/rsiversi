@@ -68,7 +68,6 @@ async fn captured_intervals_preserve_distinct_parent_and_child_metadata() {
                     resolved_terminal_seq: cut.resolved_terminal_seq,
                     terminal_prefix_sha256: cut.terminal_prefix_sha256,
                     resolved_terminal_control_seq: cut.resolved_terminal_control_seq,
-                    terminal_control_prefix_sha256: cut.terminal_control_prefix_sha256,
                     requested_turns: turns,
                     effective_turns: cut.effective_turns,
                 },

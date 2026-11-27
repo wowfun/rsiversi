@@ -20,7 +20,7 @@ fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>
             }),
             application: Some(ApplicationToolView::Ready {
                 generation: "old-worker".into(),
-                receipt_source: Some("market".into()),
+
                 tools: vec![ApplicationToolBinding {
                     name: "read".into(),
                     owner: "tool-owner".into(),
@@ -79,20 +79,21 @@ fn application_crash_facts(turn: &TurnId, started: bool) -> Vec<Arc<SessionFact>
     .collect()
 }
 
-#[derive(Debug)]
-struct Receipts(AtomicUsize);
-#[async_trait]
-impl rsi_agent_kernel::ApplicationReceiptReader for Receipts {
-    async fn read(
-        &self,
-        receipt: rsi_agent_kernel::ApplicationReceipt,
-    ) -> rsi_tools_protocol::Result<Option<rsi_tools_protocol::ToolResult>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(receipt.source, "market");
-        assert_eq!(receipt.registration, "exact-registration");
-        assert_eq!(receipt.effect.as_str(), "effect");
-        assert_eq!(receipt.identity.call_id(), "call");
-        Ok((receipt.session.as_str() == "settled").then(|| {
+#[tokio::test]
+async fn cold_application_recovery_uses_the_committed_result_and_never_reexecutes() {
+    let store = Arc::new(MemoryStore::new());
+    let turn = TurnId::new("turn").unwrap();
+    for session in ["settled", "orphan", "never-started"] {
+        let mut facts = application_crash_facts(&turn, session != "never-started");
+        if session == "settled" {
+            let SessionFactBody::ToolStarted {
+                effect_id,
+                identity,
+                ..
+            } = facts.last().unwrap().body()
+            else {
+                unreachable!()
+            };
             let mut result = rsi_tools_protocol::ToolResult::new(
                 serde_json::json!("original result"),
                 vec![],
@@ -100,21 +101,27 @@ impl rsi_agent_kernel::ApplicationReceiptReader for Receipts {
             )
             .unwrap();
             result.concludes_turn = true;
-            result
-        }))
-    }
-}
-#[tokio::test]
-async fn cold_application_receipt_repairs_only_a_started_bound_result_and_never_reopens_the_turn() {
-    let store = Arc::new(MemoryStore::new());
-    let turn = TurnId::new("turn").unwrap();
-    for session in ["settled", "orphan", "never-started"] {
+            facts.push(Arc::new(
+                SessionFact::new(
+                    facts.last().unwrap().seq() + 1,
+                    1,
+                    SessionFactBody::ToolResult {
+                        turn_id: turn.clone(),
+                        effect_id: effect_id.clone(),
+                        identity: identity.clone(),
+                        result,
+                        conclusion: None,
+                    },
+                )
+                .unwrap(),
+            ));
+        }
         store
             .append(AppendBatch {
                 session_id: SessionId::new(session).unwrap(),
                 expected_seq: 0,
                 header: Some(header(session)),
-                facts: application_crash_facts(&turn, session != "never-started"),
+                facts,
             })
             .await
             .unwrap();
@@ -145,14 +152,13 @@ async fn cold_application_receipt_repairs_only_a_started_bound_result_and_never_
         )
         .await
         .unwrap();
-    let receipts = Arc::new(Receipts(AtomicUsize::new(0)));
     let kernel = root
         .apply(
             ResolvedFactory::linked(
                 "fixture.kernel",
                 "kernel",
                 UpdateMode::Replayable,
-                Arc::new(KernelFactory::with_application_receipts(receipts.clone())),
+                Arc::new(KernelFactory),
             ),
             Value::Null,
         )
@@ -164,7 +170,6 @@ async fn cold_application_receipt_repairs_only_a_started_bound_result_and_never_
             .is_some(),
         "{status:?}"
     );
-    assert_eq!(receipts.0.load(Ordering::SeqCst), 2);
     for session in ["settled", "orphan", "never-started"] {
         let page = store
             .read_facts(
@@ -753,7 +758,7 @@ async fn ordinary_factory_waits_for_store_and_withdraws_all_turn_contracts() {
                 "rsi.agent.kernel",
                 "kernel",
                 UpdateMode::Replayable,
-                Arc::new(KernelFactory::default()),
+                Arc::new(KernelFactory),
             ),
             Value::Null,
         )

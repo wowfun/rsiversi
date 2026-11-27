@@ -1,19 +1,19 @@
 use super::{
     AgentControlRecord, AgentControlRecordBody, AppendBatch, AppendCommit, Arc, AtomicAgentCommit,
     AtomicAgentCommitResult, AtomicSessionAppend, BTreeMap, BTreeSet, CasObjectRef, Digest,
-    EMPTY_CONTROL_PREFIX_DIGEST, EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection,
-    MAXIMUM_STORE_CAS_BYTES, MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState,
-    MemoryStore, MemoryTurnBoundary, MessageId, MessageTarget, Ordering, Result, SessionFact,
-    SessionHeader, SessionId, SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation,
-    StoreAgentChild, StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox,
-    StoreAgentMailboxSummary, StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus,
-    StoreAgentSubtreeSnapshot, StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage,
-    StoreFactTurnRole, StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
+    EMPTY_FACT_PREFIX_DIGEST, ForkTurnSelection, MAXIMUM_STORE_CAS_BYTES,
+    MAXIMUM_STORE_MAILBOX_PAGE_BYTES, MemorySession, MemoryState, MemoryStore, MemoryTurnBoundary,
+    MessageId, MessageTarget, Ordering, Result, SessionFact, SessionHeader, SessionId,
+    SessionStore, Sha256, StoreActivationPhase, StoreActiveActivation, StoreAgentChild,
+    StoreAgentChildPage, StoreAgentDescendantStatus, StoreAgentMailbox, StoreAgentMailboxSummary,
+    StoreAgentMessage, StoreAgentMessageState, StoreAgentSessionStatus, StoreAgentSubtreeSnapshot,
+    StoreBackwardFactPage, StoreControlPage, StoreError, StoreFactPage, StoreFactTurnRole,
+    StoreForkBoundary, StoreOpenTurn, StoreOpenTurnPage, StoreReadyMessage,
     StoreReadyMessageCursor, StoreReadyMessagePage, StoreReadyRootPage, StoreRecentSession,
     StoreRecentSessionCursor, StoreRecentSessionPage, StoreSessionPage, StoreSessionWatermarks,
     StoreTurnBoundary, StoreTurnFactPage, StoreWaitingActivationPage, StoredContextCheckpoint,
-    TurnId, WriteContextCheckpoint, advance_control_prefix_digest, advance_fact_prefix_digest,
-    async_trait, validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
+    TurnId, WriteContextCheckpoint, advance_fact_prefix_digest, async_trait,
+    validate_message_claim_fact, validate_read_limit, validate_session_read_limit,
 };
 use rsi_agent_session_protocol::AgentMessageSource;
 use rsi_agent_session_protocol::SessionFactBody;
@@ -29,7 +29,6 @@ impl MemorySession {
             working_directory: None,
             checkpoint: None,
             fact_prefix_digest: EMPTY_FACT_PREFIX_DIGEST,
-            control_prefix_digest: EMPTY_CONTROL_PREFIX_DIGEST,
             facts: Vec::new(),
             turns: BTreeMap::new(),
             controls: Vec::new(),
@@ -1441,24 +1440,22 @@ impl SessionStore for MemoryStore {
                     })
             },
         )?;
-        let (resolved_terminal_control_seq, terminal_control_prefix_sha256) =
-            selected.last().map_or_else(
-                || Ok((0, hex::encode(EMPTY_CONTROL_PREFIX_DIGEST))),
-                |(_, _, turn_id)| {
-                    session
-                        .turns
-                        .get(*turn_id)
-                        .and_then(|turn| turn.terminal_control.clone())
-                        .ok_or_else(|| {
-                            StoreError::Corrupt(
-                                "completed Turn has no terminal control boundary".into(),
-                            )
-                        })
-                },
-            )?;
+        let resolved_terminal_control_seq = selected.last().map_or_else(
+            || Ok(0),
+            |(_, _, turn_id)| {
+                session
+                    .turns
+                    .get(*turn_id)
+                    .and_then(|turn| turn.terminal_control_seq)
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "completed Turn has no terminal control boundary".into(),
+                        )
+                    })
+            },
+        )?;
         Ok(StoreForkBoundary {
             resolved_terminal_control_seq,
-            terminal_control_prefix_sha256,
             resolved_after_seq,
             resolved_terminal_seq,
             terminal_prefix_sha256,
@@ -2475,14 +2472,6 @@ fn apply_atomic_memory_append(
             session.fact_prefix_digest,
         )?;
         let model_coordinates = index_model_coordinates(&session.model_coordinates, &append.facts)?;
-        let control_digest =
-            append
-                .controls
-                .iter()
-                .try_fold(session.control_prefix_digest, |digest, record| {
-                    advance_control_prefix_digest(digest, record)
-                        .map_err(|error| StoreError::Invalid(error.to_string()))
-                })?;
         session.last_activity_ms = session.last_activity_ms.max(activity);
         session.model_coordinates.extend(model_coordinates);
         session.facts.extend(append.facts);
@@ -2493,7 +2482,6 @@ fn apply_atomic_memory_append(
             session.facts.last().map_or(0, |fact| fact.seq()),
             append.controls.len(),
         ));
-        session.control_prefix_digest = control_digest;
     } else {
         let header = append
             .header
@@ -2507,14 +2495,6 @@ fn apply_atomic_memory_append(
             EMPTY_FACT_PREFIX_DIGEST,
         )?;
         let model_coordinates = index_model_coordinates(&BTreeSet::new(), &append.facts)?;
-        let control_digest =
-            append
-                .controls
-                .iter()
-                .try_fold(EMPTY_CONTROL_PREFIX_DIGEST, |digest, record| {
-                    advance_control_prefix_digest(digest, record)
-                        .map_err(|error| StoreError::Invalid(error.to_string()))
-                })?;
         state
             .recent_sessions
             .insert((header.created_at_ms(), session_id.clone()));
@@ -2535,7 +2515,6 @@ fn apply_atomic_memory_append(
                 turns,
                 fact_prefix_digest: fact_digest,
                 controls: append.controls.clone(),
-                control_prefix_digest: control_digest,
                 ..MemorySession::blank(header)
             },
         );
@@ -2618,14 +2597,14 @@ fn apply_atomic_memory_append(
             .turns
             .get_mut(turn_id)
             .ok_or_else(|| StoreError::Corrupt("terminal marker lost its Turn".into()))?;
-        if boundary.terminal_seq != Some(*terminal_fact_seq) || boundary.terminal_control.is_some()
+        if boundary.terminal_seq != Some(*terminal_fact_seq)
+            || boundary.terminal_control_seq.is_some()
         {
             return Err(StoreError::Corrupt(
                 "terminal marker differs from its Fact".into(),
             ));
         }
-        boundary.terminal_control =
-            Some((record.seq(), hex::encode(session.control_prefix_digest)));
+        boundary.terminal_control_seq = Some(record.seq());
     }
     let result = StoreSessionWatermarks {
         session_id: session_id.clone(),
@@ -3441,7 +3420,7 @@ fn index_appended_turns(
                         accepted_seq: fact.seq(),
                         terminal_seq: None,
                         terminal_prefix_sha256: None,
-                        terminal_control: None,
+                        terminal_control_seq: None,
                     },
                 );
             }

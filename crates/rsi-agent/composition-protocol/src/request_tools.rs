@@ -18,8 +18,6 @@ use tokio_util::sync::CancellationToken;
 pub struct RequestToolCatalog {
     /// Exact process incarnation.
     pub generation: String,
-    /// Stable source of read-only recovery receipts, if supplied.
-    pub receipt_source: Option<String>,
     /// Name to registration binding in that incarnation.
     pub registrations: BTreeMap<String, String>,
     /// Supplemental runtime backed by the captured view.
@@ -240,7 +238,6 @@ impl AgentCompositionPin {
         let names: Vec<_> = bindings.iter().map(|b| b.name.clone()).collect();
         let view = ApplicationToolView::Ready {
             generation: catalog.generation,
-            receipt_source: catalog.receipt_source,
             tools: bindings,
         };
         view.validate(&names)

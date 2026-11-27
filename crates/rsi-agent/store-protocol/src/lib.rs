@@ -89,7 +89,7 @@ pub fn validate_feedback_append(
 }
 
 /// Exact `SQLite` and in-memory Store schema version.
-pub const AGENT_STORE_SCHEMA_VERSION: u32 = 60;
+pub const AGENT_STORE_SCHEMA_VERSION: u32 = 61;
 /// Maximum Facts in one atomic append.
 pub const MAXIMUM_STORE_BATCH_FACTS: usize = 512;
 /// Maximum encoded bytes in one atomic append.
@@ -1702,8 +1702,6 @@ pub struct StoreForkBoundary {
     pub terminal_prefix_sha256: String,
     /// Exact canonical control horizon recorded with the selected terminal, or zero.
     pub resolved_terminal_control_seq: u64,
-    /// Canonical control-prefix digest at that horizon.
-    pub terminal_control_prefix_sha256: String,
     /// Completed turns selected by the request.
     pub effective_turns: u64,
 }

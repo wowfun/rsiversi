@@ -174,7 +174,7 @@ impl Fixture {
                 "fixture.composition",
                 AgentCompositionFactory::new(presets, contributions, ScopeRoot::new(16).unwrap()),
             ),
-            linked("fixture.kernel", rsi_agent_kernel::KernelFactory::default()),
+            linked("fixture.kernel", rsi_agent_kernel::KernelFactory),
         ] {
             runtime
                 .root()

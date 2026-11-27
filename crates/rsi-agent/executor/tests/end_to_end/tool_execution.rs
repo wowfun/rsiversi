@@ -120,7 +120,7 @@ impl rsi_agent_composition_protocol::RequestToolSource for RequestEcho {
             callbacks: self.callbacks.clone(),
             instructions: format!("APPLICATION_SYSTEM_{capture}"),
             generation: "process-generation".into(),
-            receipt_source: None,
+
             registrations,
             runtime,
         })

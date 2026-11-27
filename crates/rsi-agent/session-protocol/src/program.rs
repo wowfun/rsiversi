@@ -179,7 +179,6 @@ pub struct ProgramForkBoundary {
     pub resolved_terminal_seq: u64,
     pub terminal_prefix_sha256: String,
     pub resolved_terminal_control_seq: u64,
-    pub terminal_control_prefix_sha256: String,
     pub effective_turns: u64,
 }
 impl ProgramForkBoundary {
@@ -187,18 +186,12 @@ impl ProgramForkBoundary {
     pub fn validate(&self) -> Result<()> {
         self.requested_turns.validate()?;
         validate_sha256("program fork Fact prefix", &self.terminal_prefix_sha256)?;
-        validate_sha256(
-            "program fork control prefix",
-            &self.terminal_control_prefix_sha256,
-        )?;
         let empty = self.effective_turns == 0;
         if empty != (self.resolved_after_seq == 0 && self.resolved_terminal_seq == 0)
             || empty != (self.resolved_terminal_control_seq == 0)
             || (!empty && self.resolved_after_seq >= self.resolved_terminal_seq)
             || (matches!(self.requested_turns, ForkTurnSelection::None) && !empty)
-            || (empty
-                && (self.terminal_prefix_sha256 != ZERO_SHA256
-                    || self.terminal_control_prefix_sha256 != ZERO_SHA256))
+            || (empty && self.terminal_prefix_sha256 != ZERO_SHA256)
         {
             return Err(invalid("program fork horizon is inconsistent"));
         }

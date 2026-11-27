@@ -2,11 +2,11 @@
 
 use rsi_agent_session_protocol::{
     AgentControlRecord, AgentControlRecordBody, AgentMessage, AgentMessageContent,
-    AgentMessageSource, AgentPath, AgentPresetId, EMPTY_CONTROL_PREFIX_DIGEST,
-    EMPTY_FACT_PREFIX_DIGEST, ForkOrigin, ForkTurnSelection, FrozenAgentSettings,
-    MAXIMUM_DURABLE_AGENT_TREE_NODES, MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_SESSION_FACT_BYTES,
-    MAXIMUM_SESSION_HEADER_BYTES, MessageDiscardReason, MessageId, MessageOptions, MessageTarget,
-    SessionFact, SessionFactBody, SessionHeader, SessionId, TurnId,
+    AgentMessageSource, AgentPath, AgentPresetId, EMPTY_FACT_PREFIX_DIGEST, ForkOrigin,
+    ForkTurnSelection, FrozenAgentSettings, MAXIMUM_DURABLE_AGENT_TREE_NODES,
+    MAXIMUM_PENDING_AGENT_MESSAGES, MAXIMUM_SESSION_FACT_BYTES, MAXIMUM_SESSION_HEADER_BYTES,
+    MessageDiscardReason, MessageId, MessageOptions, MessageTarget, SessionFact, SessionFactBody,
+    SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_store_protocol::{
     AppendBatch, AtomicAgentCommit, AtomicSessionAppend, MAXIMUM_STORE_MAILBOX_PAGE_BYTES,
@@ -82,16 +82,6 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
             Some("UPDATE turns SET terminal_control_seq = NULL"),
         ),
         (
-            "terminal-control-digest-null",
-            true,
-            Some("UPDATE turns SET terminal_control_prefix_sha256 = NULL"),
-        ),
-        (
-            "terminal-control-digest-wrong",
-            true,
-            Some("UPDATE turns SET terminal_control_prefix_sha256 = printf('%064d', 0)"),
-        ),
-        (
             "terminal-control-seq-wrong",
             true,
             Some("UPDATE turns SET terminal_control_seq = 2"),
@@ -99,9 +89,7 @@ async fn cold_terminal_index_validation_rejects_missing_and_mismatched_metadata(
         (
             "marker-missing",
             true,
-            Some(
-                "DELETE FROM agent_controls; UPDATE sessions SET control_seq = 0, control_prefix_sha256 = printf('%064d', 0)",
-            ),
+            Some("DELETE FROM agent_controls; UPDATE sessions SET control_seq = 0"),
         ),
         (
             "marker-turn-wrong",
@@ -318,14 +306,13 @@ fn insert_agent_node_without_admission(database: &Path, header: &SessionHeader) 
         .execute(
             "INSERT INTO sessions
                  (session_id, created_at_ms, header_json, durable_seq,
-                  fact_prefix_sha256, control_seq, control_prefix_sha256, coordinates_key, last_activity_ms)
-             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?2)",
+                  fact_prefix_sha256, control_seq, coordinates_key, last_activity_ms)
+             VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?2)",
             rusqlite::params![
                 session_id.as_str(),
                 i64::try_from(header.created_at_ms()).unwrap(),
                 serde_json::to_string(header).unwrap(),
                 hex::encode(EMPTY_FACT_PREFIX_DIGEST),
-                hex::encode(EMPTY_CONTROL_PREFIX_DIGEST),
                 serde_json::to_string(header.coordinates()).unwrap(),
             ],
         )
@@ -472,7 +459,6 @@ async fn durable_agent_tree_accepts_exactly_its_declared_node_bound() {
                         resolved_terminal_seq: 0,
                         terminal_prefix_sha256: "0".repeat(64),
                         resolved_terminal_control_seq: 0,
-                        terminal_control_prefix_sha256: "0".repeat(64),
                         requested_turns: ForkTurnSelection::None,
                         effective_turns: 0,
                     }
@@ -1808,7 +1794,7 @@ fn store_tightens_owned_directories_before_opening_durable_files() {
 
 #[tokio::test]
 async fn verification_derives_activation_lineage_from_the_immutable_header() {
-    use rsi_agent_session_protocol::{ActivationId, advance_control_prefix_digest};
+    use rsi_agent_session_protocol::ActivationId;
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
     let session_id = SessionId::new("lineage-root").unwrap();
@@ -1849,14 +1835,6 @@ async fn verification_derives_activation_lineage_from_the_immutable_header() {
         .execute(
             "UPDATE agent_controls SET control_payload = ?1",
             [serde_json::to_string(&corrupted).unwrap()],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE sessions SET control_prefix_sha256 = ?1",
-            [hex::encode(
-                advance_control_prefix_digest(EMPTY_CONTROL_PREFIX_DIGEST, &corrupted).unwrap(),
-            )],
         )
         .unwrap();
     drop(connection);
@@ -2548,7 +2526,10 @@ async fn activity_metadata_avoids_corrupt_history_and_offline_audit_detects_proj
         )
         .await
         .unwrap();
-    let damaged = page.sessions.iter().find(|row| row.session_id.as_str() == "activity-a")
+    let damaged = page
+        .sessions
+        .iter()
+        .find(|row| row.session_id.as_str() == "activity-a")
         .expect("activity metadata includes the Session whose history is corrupt");
     assert!(
         store
