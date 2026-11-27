@@ -195,18 +195,32 @@ max_output_reserve_tokens = 16384
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            while !self
-                .run(&["host", "status"])
-                .stdout
-                .starts_with(b"running\t")
-            {
-                assert!(child.try_wait().unwrap().is_none());
+        let owner = self
+            .temporary
+            .path()
+            .join("state/rsiversi/session-host/owner.json");
+        let pid = child.id().unwrap();
+        tokio::time::timeout(rsi::PRODUCT_TRANSITION_TIMEOUT, async {
+            loop {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "Host exited during startup"
+                );
+                match std::fs::read(&owner) {
+                    Ok(bytes) => {
+                        let published: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        if published["pid"] == pid {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("read foreground Host ownership: {error}"),
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
-        .unwrap();
+        .expect("foreground Host did not publish its ready listener");
         child
     }
 
