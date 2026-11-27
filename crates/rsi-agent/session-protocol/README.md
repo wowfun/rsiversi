@@ -219,6 +219,8 @@ still checks terminal grammar, including failed and incomplete evidence.
 
 The version-1 compact attempt stream contains unsigned minimal LEB128 time gaps,
 a byte tag, an index for delta tags, a minimal LEB128 payload length and payload.
+An event header fits in 26 bytes, including ten each for the time gap and
+payload length, five for the 32-bit index and one for the tag.
 Tag 0 carries canonical normalized event JSON; tags 1/2/3 carry UTF-8 text,
 reasoning or Tool-argument deltas. Canonical padded base64 blocks split the raw
 stream at 147,453 bytes; only the final block may be shorter. The event reader

@@ -390,8 +390,14 @@ impl ModelAttemptBuilder {
         event
             .validate()
             .map_err(|error| invalid(error.to_string()))?;
-        let mut header = Vec::with_capacity(32);
-        put_varint(elapsed_ms - self.elapsed_ms, &mut header);
+        // Two u64 varints, one u32 varint and one tag.
+        let mut header = [0; 26];
+        let mut header_len = 0;
+        let mut put = |byte| {
+            header[header_len] = byte;
+            header_len += 1;
+        };
+        put_varint(elapsed_ms - self.elapsed_ms, &mut put);
         let value: std::borrow::Cow<'_, [u8]> = match event {
             LanguageEvent::ContentDelta { index, delta } => {
                 let (tag, value) = match delta {
@@ -399,18 +405,19 @@ impl ModelAttemptBuilder {
                     ContentDelta::Reasoning(text) => (2, text),
                     ContentDelta::ToolArguments(text) => (3, text),
                 };
-                header.push(tag);
-                put_varint(u64::from(*index), &mut header);
+                put(tag);
+                put_varint(u64::from(*index), &mut put);
                 std::borrow::Cow::Borrowed(value.as_bytes())
             }
             event => {
-                header.push(0);
+                put(0);
                 std::borrow::Cow::Owned(
                     serde_json::to_vec(event).map_err(|error| invalid(error.to_string()))?,
                 )
             }
         };
-        put_varint(value.len() as u64, &mut header);
+        put_varint(value.len() as u64, put);
+        let header = &header[..header_len];
         let raw_bytes = self
             .raw_bytes
             .checked_add(header.len())
@@ -430,7 +437,7 @@ impl ModelAttemptBuilder {
                 actual: encoded,
             });
         }
-        for mut remaining in [header.as_slice(), value.as_ref()] {
+        for mut remaining in [header, value.as_ref()] {
             while !remaining.is_empty() {
                 let take = remaining.len().min(RAW_CHUNK_BYTES - self.pending.len());
                 self.pending.extend_from_slice(&remaining[..take]);
@@ -494,11 +501,11 @@ fn is_terminal(event: &LanguageEvent) -> bool {
         LanguageEvent::Finished { .. } | LanguageEvent::Failed { .. }
     )
 }
-fn put_varint(mut value: u64, output: &mut Vec<u8>) {
+fn put_varint(mut value: u64, mut put: impl FnMut(u8)) {
     loop {
         let byte = (value & 0x7f) as u8;
         value >>= 7;
-        output.push(byte | if value == 0 { 0 } else { 0x80 });
+        put(byte | if value == 0 { 0 } else { 0x80 });
         if value == 0 {
             break;
         }
@@ -837,7 +844,7 @@ mod tests {
         ] {
             let payload = serde_json::to_vec(&event).unwrap();
             bytes.extend([0, 0]);
-            put_varint(payload.len() as u64, &mut bytes);
+            put_varint(payload.len() as u64, |byte| bytes.push(byte));
             bytes.extend(payload);
         }
         assert!(
@@ -1127,7 +1134,7 @@ mod tests {
             .unwrap();
         builder
             .push(
-                1_048_578,
+                u64::MAX,
                 &LanguageEvent::Finished {
                     reason: FinishReason::Stop,
                     replay: None,
@@ -1153,7 +1160,9 @@ mod tests {
                 )
             );
         }
-        assert_eq!(events.count(), 2);
+        assert_eq!(events.next().unwrap().unwrap().0, 1_048_577);
+        assert_eq!(events.next().unwrap().unwrap().0, u64::MAX);
+        assert!(events.next().is_none());
     }
 
     #[test]
