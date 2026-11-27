@@ -3360,11 +3360,24 @@ pub fn encode_control_with_prefix_digest(
     previous: [u8; 32],
     record: &AgentControlRecord,
 ) -> Result<(String, [u8; 32])> {
+    encode_record_with_prefix(prefix_hasher(CONTROL_PREFIX_DOMAIN, previous), record)
+}
+
+/// Returns canonical logical Fact JSON and the prefix that includes it.
+pub fn encode_fact_with_prefix_digest(
+    previous: [u8; 32],
+    fact: &SessionFact,
+) -> Result<(String, [u8; 32])> {
+    encode_record_with_prefix(prefix_hasher(FACT_PREFIX_DOMAIN, previous), fact)
+}
+
+fn encode_record_with_prefix(
+    digest: Sha256,
+    record: &impl Serialize,
+) -> Result<(String, [u8; 32])> {
     let json =
         serde_json::to_string(record).map_err(|error| SessionError::Encoding(error.to_string()))?;
-    let digest = prefix_hasher(CONTROL_PREFIX_DOMAIN, previous)
-        .chain_update(json.as_bytes())
-        .finalize();
+    let digest = digest.chain_update(json.as_bytes()).finalize();
     Ok((json, digest.into()))
 }
 

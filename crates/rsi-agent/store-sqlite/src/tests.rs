@@ -1091,20 +1091,9 @@ async fn reader_observes_complete_snapshots_across_an_uncommitted_writer() {
             header: None,
             facts: (vec![test_fact(2)]).into_iter().map(Into::into).collect(),
         };
-        admit_append(
-            &transaction,
-            &batch,
-            &reference_index::Writer::new(&transaction, &batch.session_id).unwrap(),
-        )
-        .unwrap();
-        insert_fact(
-            &transaction,
-            &batch.session_id,
-            &batch.facts[0],
-            &reference_index::Writer::new(&transaction, &batch.session_id).unwrap(),
-        )
-        .unwrap();
-        advance_watermark(&transaction, &batch).unwrap();
+        let references = reference_index::Writer::new(&transaction, &batch.session_id).unwrap();
+        admit_append(&transaction, &batch, &references).unwrap();
+        append_facts(&transaction, &batch, &references).unwrap();
         entered_tx.send(()).unwrap();
         release_rx.recv().unwrap();
         transaction.commit().unwrap();

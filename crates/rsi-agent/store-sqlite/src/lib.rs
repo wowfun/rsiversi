@@ -1177,11 +1177,11 @@ impl SqliteStore {
 
 #[macro_use]
 mod fact_storage;
-mod record_codec;
 mod activity;
 mod feedback;
 mod maintenance;
 mod offline_maintenance;
+mod record_codec;
 mod reference_index;
 mod reference_validation;
 pub use offline_maintenance::CompactReceipt;
@@ -1214,8 +1214,8 @@ use text::{bounded_text, optional_text};
 mod validation;
 
 use append::{
-    admit_append, advance_watermark, apply_atomic_sqlite_append, decode_indexed_message,
-    decode_ready_message, indexed_message_row, insert_fact, message_target_name,
+    admit_append, append_facts, apply_atomic_sqlite_append, decode_indexed_message,
+    decode_ready_message, indexed_message_row, message_target_name,
     validate_sqlite_activation_guards, validate_sqlite_quiescence_guard,
 };
 use cas::{

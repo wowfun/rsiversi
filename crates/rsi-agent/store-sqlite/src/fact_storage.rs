@@ -120,12 +120,8 @@ enum ClaimAcceptance {
     MessageAccepted { seq: u64, message: AgentMessage },
 }
 
-pub(super) fn encode(
-    fact: &SessionFact,
-    acceptance: Option<u64>,
-    references: &super::reference_index::Writer<'_>,
-) -> Result<EncodedFact> {
-    let json = if let Some(accepted_control_seq) = acceptance {
+pub(super) fn claim_json(fact: &SessionFact, acceptance: Option<u64>) -> Result<String> {
+    if let Some(accepted_control_seq) = acceptance {
         let SessionFactBody::InputMessageClaimed {
             turn_id, step_id, ..
         } = fact.body()
@@ -134,8 +130,8 @@ pub(super) fn encode(
                 "only mailbox claims can reference acceptance".into(),
             ));
         };
-        references.fact_encoding(
-            fact,
+        super::encode_json(
+            "fact",
             &ReferencedFact::InputMessageClaimed {
                 seq: fact.seq(),
                 timestamp_ms: fact.timestamp_ms(),
@@ -145,8 +141,15 @@ pub(super) fn encode(
             },
         )
     } else {
-        references.fact(fact)
-    }?;
+        super::encode_json("fact", fact)
+    }
+}
+
+pub(super) fn pack(
+    fact: &SessionFact,
+    acceptance: Option<u64>,
+    json: String,
+) -> Result<EncodedFact> {
     if json.len() >= 256
         && acceptance.is_none()
         && !matches!(fact.body(), SessionFactBody::ManualCompaction { .. })

@@ -3,8 +3,10 @@
 Atomic Session appends check retirement once in the writer transaction. One
 indexed Session read supplies both expected-sequence comparisons and the two
 prefix digests. A newly admitted Header starts with the empty stream digests.
-For each appended control, the Store uses one canonical JSON encoding for the
-row, its reference coverage digest and the next Session prefix digest.
+For ordinary Facts and controls, the Store uses one canonical JSON encoding
+for the row, its reference coverage digest and the next Session prefix digest.
+For mailbox claims stored as acceptance references, coverage binds the shorter
+stored record, while the Session prefix binds the full logical Fact.
 
 Live summary and access reads select the Header and check retirement in the
 same indexed statement. An access batch reuses that statement inside one

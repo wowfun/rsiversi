@@ -22,6 +22,22 @@ fn cancellation_fact_preserves_hook_text_and_native_diagnostics() {
 }
 
 #[test]
+fn persisted_fact_json_matches_the_streamed_prefix_at_every_position() {
+    let mut prefix = EMPTY_FACT_PREFIX_DIGEST;
+    for (seq, text) in [(1, "换行\n\""), (2, "🙂")] {
+        let fact: SessionFact = serde_json::from_value(json!({
+            "type":"cancel_requested", "seq":seq, "timestamp_ms":1,
+            "turn_id":"turn", "reason":{"kind":"hook","reason":text}
+        }))
+        .unwrap();
+        let (json, next) = encode_fact_with_prefix_digest(prefix, &fact).unwrap();
+        assert_eq!(json, serde_json::to_string(&fact).unwrap());
+        assert_eq!(next, advance_fact_prefix_digest(prefix, &fact).unwrap());
+        prefix = next;
+    }
+}
+
+#[test]
 fn automatic_compaction_installation_references_an_earlier_settlement() {
     let fact = SessionFact::new(
         11,

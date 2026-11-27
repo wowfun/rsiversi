@@ -171,27 +171,33 @@ pub(super) fn apply_atomic_sqlite_append(
                 (&materialized, Some(acceptance))
             }
         };
-        if let Some(acceptance) = acceptance {
-            insert_fact_row(
+        fact_digest = if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
+            // Inline claims wait for control admission to resolve their acceptance.
+            if acceptance.is_some() {
+                insert_fact_row(
+                    transaction,
+                    &append.session_id,
+                    fact,
+                    &references,
+                    acceptance,
+                    super::fact_storage::claim_json(fact, acceptance)?,
+                )?;
+            }
+            update_turn_index(transaction, &append.session_id, fact)?;
+            advance_fact_prefix_digest(fact_digest, fact)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?
+        } else {
+            insert_fact(
                 transaction,
                 &append.session_id,
                 fact,
                 &references,
-                Some(acceptance),
-            )?;
-            update_turn_index(transaction, &append.session_id, fact)?;
-        } else if matches!(fact.body(), SessionFactBody::InputMessageClaimed { .. }) {
-            // Claims are encoded only after their original typed bodies pass
-            // control admission. Other Fact-dependent controls can use the index.
-            update_turn_index(transaction, &append.session_id, fact)?;
-        } else {
-            insert_fact(transaction, &append.session_id, fact, &references)?;
-        }
+                fact_digest,
+            )?
+        };
         if let Some(domain_facts) = &mut domain_facts {
             domain_facts.push(fact)?;
         }
-        fact_digest = advance_fact_prefix_digest(fact_digest, fact)
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
         if let SessionFactBody::TurnTerminal { turn_id, .. } = fact.body() {
             let changed = transaction
                 .execute(
@@ -304,6 +310,7 @@ pub(super) fn apply_atomic_sqlite_append(
                 fact,
                 &references,
                 acceptance,
+                super::fact_storage::claim_json(fact, acceptance)?,
             )?;
         }
     }
@@ -1365,12 +1372,13 @@ fn model_coordinate_lookup_uses_the_unique_expression_index() {
     );
 }
 
-pub(super) fn insert_fact(
+fn insert_fact(
     transaction: &Transaction<'_>,
     session_id: &SessionId,
     fact: &SessionFact,
     references: &super::reference_index::Writer<'_>,
-) -> Result<()> {
+    prefix: [u8; 32],
+) -> Result<[u8; 32]> {
     if let SessionFactBody::ManualCompaction {
         command_id,
         effect_id,
@@ -1395,8 +1403,11 @@ pub(super) fn insert_fact(
             ));
         }
     }
-    insert_fact_row(transaction, session_id, fact, references, None)?;
-    update_turn_index(transaction, session_id, fact)
+    let (json, next) = rsi_agent_session_protocol::encode_fact_with_prefix_digest(prefix, fact)
+        .map_err(|error| StoreError::Invalid(error.to_string()))?;
+    insert_fact_row(transaction, session_id, fact, references, None, json)?;
+    update_turn_index(transaction, session_id, fact)?;
+    Ok(next)
 }
 
 fn insert_fact_row(
@@ -1405,8 +1416,10 @@ fn insert_fact_row(
     fact: &SessionFact,
     references: &super::reference_index::Writer<'_>,
     acceptance: Option<u64>,
+    json: String,
 ) -> Result<()> {
-    let encoded = super::fact_storage::encode(fact, acceptance, references)?;
+    references.fact(fact, &json)?;
+    let encoded = super::fact_storage::pack(fact, acceptance, json)?;
     let logical_bytes = (acceptance.is_some() || encoded.frame.is_some())
         .then(|| i64::try_from(fact.encoded_len()).expect("bounded Fact length"));
     let inserted = transaction
@@ -1488,7 +1501,11 @@ pub(super) fn update_turn_index(
     Err(StoreError::Corrupt(role.rejected_message().into()))
 }
 
-pub(super) fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBatch) -> Result<u64> {
+pub(super) fn append_facts(
+    transaction: &Transaction<'_>,
+    batch: &AppendBatch,
+    references: &super::reference_index::Writer<'_>,
+) -> Result<u64> {
     let durable_seq = batch
         .facts
         .last()
@@ -1503,8 +1520,13 @@ pub(super) fn advance_watermark(transaction: &Transaction<'_>, batch: &AppendBat
         .map_err(sql_error)?;
     let mut fact_prefix_digest = decode_sha256("Fact-prefix digest", &previous)?;
     for fact in &batch.facts {
-        fact_prefix_digest = advance_fact_prefix_digest(fact_prefix_digest, fact)
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        fact_prefix_digest = insert_fact(
+            transaction,
+            &batch.session_id,
+            fact,
+            references,
+            fact_prefix_digest,
+        )?;
     }
     let changed = transaction
         .execute(

@@ -1,8 +1,7 @@
 use super::{
     AgentControlRecord, Connection, Digest, MAXIMUM_STORE_CONTROL_PAGE_BYTES, OptionalExtension,
-    Result, Serialize, SessionFact, SessionHeader, SessionId, Sha256, StoreError, bounded_text,
-    cas_ownership, decode_u64, maintenance, params, read_session_header_row, sql_error, sqlite_u64,
-    validation,
+    Result, SessionFact, SessionHeader, SessionId, Sha256, StoreError, bounded_text, cas_ownership,
+    decode_u64, maintenance, params, read_session_header_row, sql_error, sqlite_u64, validation,
 };
 use rsi_agent_session_protocol::{DurableReference, ReferenceCollector};
 use rsi_agent_store_protocol::{control_references, fact_references, header_references};
@@ -81,26 +80,17 @@ impl<'a> Writer<'a> {
         available(connection, id)?;
         Ok(Self { connection, id })
     }
-    fn encode(
-        &self,
-        stream: &str,
-        seq: u64,
-        value: &impl Serialize,
-        refs: Result<ReferenceCollector>,
-    ) -> Result<String> {
-        let encoded = super::encode_json(stream, value)?;
+    pub(super) fn header(&self, header: &SessionHeader) -> Result<String> {
+        let encoded = super::encode_json("header", header)?;
         write(
             self.connection,
             self.id,
-            stream,
-            seq,
+            "header",
+            0,
             &digest(&encoded),
-            refs,
+            header_references(header),
         )?;
         Ok(encoded)
-    }
-    pub(super) fn header(&self, header: &SessionHeader) -> Result<String> {
-        self.encode("header", 0, header, header_references(header))
     }
     /// A preset ID carries no durable edge. Preserve every other Header field and edge.
     pub(super) fn changed_preset(&self, previous: &str, header: &SessionHeader) -> Result<String> {
@@ -116,15 +106,15 @@ impl<'a> Writer<'a> {
         }
         Ok(encoded)
     }
-    pub(super) fn fact(&self, fact: &SessionFact) -> Result<String> {
-        self.encode("fact", fact.seq(), fact, fact_references(fact))
-    }
-    pub(super) fn fact_encoding(
-        &self,
-        fact: &SessionFact,
-        physical: &impl Serialize,
-    ) -> Result<String> {
-        self.encode("fact", fact.seq(), physical, fact_references(fact))
+    pub(super) fn fact(&self, fact: &SessionFact, json: &str) -> Result<()> {
+        write(
+            self.connection,
+            self.id,
+            "fact",
+            fact.seq(),
+            &digest(json),
+            fact_references(fact),
+        )
     }
     pub(super) fn control(&self, control: &AgentControlRecord, json: &str) -> Result<()> {
         write(

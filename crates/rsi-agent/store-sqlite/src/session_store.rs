@@ -368,10 +368,7 @@ impl SessionStore for SqliteStore {
                     .map_err(sql_error)?;
                 let references = reference_index::Writer::new(&transaction, &batch.session_id)?;
                 admit_append(&transaction, &batch, &references)?;
-                for fact in &batch.facts {
-                    insert_fact(&transaction, &batch.session_id, fact, &references)?;
-                }
-                let durable_seq = advance_watermark(&transaction, &batch)?;
+                let durable_seq = append_facts(&transaction, &batch, &references)?;
                 super::activity::advance_activity(
                     &transaction,
                     &batch.session_id,
