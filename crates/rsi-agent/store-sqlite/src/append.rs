@@ -7,9 +7,9 @@ use super::{
     OptionalExtension, Result, SessionFact, SessionFactBody, SessionHeader, SessionId, StepId,
     StoreAgentMessage, StoreAgentMessageState, StoreAgentSubtreeSnapshot, StoreError,
     StoreFactTurnRole, StoreReadyMessage, StoreSessionWatermarks, Transaction, TurnId,
-    advance_control_prefix_digest, advance_fact_prefix_digest, decode_projected_json,
-    decode_sha256, decode_u64, encode_json, fact_index_kind, params, read_session_header_row,
-    sql_error, sqlite_u64, validate_message_claim_fact,
+    advance_fact_prefix_digest, decode_projected_json, decode_sha256, decode_u64, encode_json,
+    fact_index_kind, params, read_session_header_row, sql_error, sqlite_u64,
+    validate_message_claim_fact,
 };
 
 pub(super) fn validate_sqlite_activation_guards(
@@ -254,6 +254,10 @@ pub(super) fn apply_atomic_sqlite_append(
                 &append.controls[index + 2],
             )?;
         }
+        let (json, next_digest) =
+            rsi_agent_session_protocol::encode_control_with_prefix_digest(control_digest, record)
+                .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        references.control(record, &json)?;
         if let Some(claim) = (ControlIndexer {
             transaction,
             session_id: &append.session_id,
@@ -263,12 +267,11 @@ pub(super) fn apply_atomic_sqlite_append(
             after_fact_seq: durable_fact_seq,
             record,
         })
-        .insert(&references)?
+        .insert(&json)?
         {
             claimed_acceptances.push(claim);
         }
-        control_digest = advance_control_prefix_digest(control_digest, record)
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        control_digest = next_digest;
         if let AgentControlRecordBody::TurnBoundaryRecorded {
             turn_id,
             terminal_fact_seq,
@@ -371,13 +374,9 @@ struct ControlIndexer<'a, 'connection> {
 
 impl ControlIndexer<'_, '_> {
     #[allow(clippy::too_many_lines)] // One transaction projects the closed set of control records into mechanical indexes.
-    fn insert(
-        &self,
-        references: &super::reference_index::Writer<'_>,
-    ) -> Result<Option<(u64, u64)>> {
-        let json = references.control(self.record)?;
+    fn insert(&self, json: &str) -> Result<Option<(u64, u64)>> {
         let frame = if json.len() >= 1024 && super::record_codec::direct_acceptance(self.record) {
-            Some(super::record_codec::compress(&json)?).filter(|bytes| bytes.len() + 8 < json.len())
+            Some(super::record_codec::compress(json)?).filter(|bytes| bytes.len() + 8 < json.len())
         } else {
             None
         };

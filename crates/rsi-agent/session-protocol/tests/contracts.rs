@@ -1292,6 +1292,13 @@ fn control_records_bound_message_authority_and_form_a_digest_chain() {
         control_prefix_sha256([&first]).unwrap(),
         control_prefix_sha256([&first, &second]).unwrap()
     );
+    let mut digest = EMPTY_CONTROL_PREFIX_DIGEST;
+    for record in [&first, &second] {
+        let (json, next) = encode_control_with_prefix_digest(digest, record).unwrap();
+        assert_eq!(json, serde_json::to_string(record).unwrap());
+        assert_eq!(next, advance_control_prefix_digest(digest, record).unwrap());
+        digest = next;
+    }
 
     let with_options = AgentMessage {
         options: MessageOptions {

@@ -3298,24 +3298,16 @@ impl SessionFact {
 
 /// Advances the canonical digest chain by one validated Fact.
 pub fn advance_fact_prefix_digest(previous: [u8; 32], fact: &SessionFact) -> Result<[u8; 32]> {
-    struct DigestWriter<'a>(&'a mut Sha256);
-
-    impl std::io::Write for DigestWriter<'_> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     fact.validate()?;
-    let mut digest = Sha256::new();
-    digest.update(FACT_PREFIX_DOMAIN);
-    digest.update(previous);
-    serde_json::to_writer(DigestWriter(&mut digest), fact)
+    hash_record(prefix_hasher(FACT_PREFIX_DOMAIN, previous), fact)
+}
+
+fn prefix_hasher(domain: &[u8], previous: [u8; 32]) -> Sha256 {
+    Sha256::new().chain_update(domain).chain_update(previous)
+}
+
+fn hash_record(mut digest: Sha256, record: &impl Serialize) -> Result<[u8; 32]> {
+    serde_json::to_writer(&mut digest, record)
         .map_err(|error| SessionError::Encoding(error.to_string()))?;
     Ok(digest.finalize().into())
 }
@@ -3334,25 +3326,20 @@ pub fn advance_control_prefix_digest(
     previous: [u8; 32],
     record: &AgentControlRecord,
 ) -> Result<[u8; 32]> {
-    struct DigestWriter<'a>(&'a mut Sha256);
+    hash_record(prefix_hasher(CONTROL_PREFIX_DOMAIN, previous), record)
+}
 
-    impl std::io::Write for DigestWriter<'_> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut digest = Sha256::new();
-    digest.update(CONTROL_PREFIX_DOMAIN);
-    digest.update(previous);
-    serde_json::to_writer(DigestWriter(&mut digest), record)
-        .map_err(|error| SessionError::Encoding(error.to_string()))?;
-    Ok(digest.finalize().into())
+/// Returns the canonical JSON to persist and the prefix digest that includes those bytes.
+pub fn encode_control_with_prefix_digest(
+    previous: [u8; 32],
+    record: &AgentControlRecord,
+) -> Result<(String, [u8; 32])> {
+    let json =
+        serde_json::to_string(record).map_err(|error| SessionError::Encoding(error.to_string()))?;
+    let digest = prefix_hasher(CONTROL_PREFIX_DOMAIN, previous)
+        .chain_update(json.as_bytes())
+        .finalize();
+    Ok((json, digest.into()))
 }
 
 /// Computes lowercase SHA-256 for one exact Agent-control prefix.

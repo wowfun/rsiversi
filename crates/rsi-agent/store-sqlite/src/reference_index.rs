@@ -126,11 +126,13 @@ impl<'a> Writer<'a> {
     ) -> Result<String> {
         self.encode("fact", fact.seq(), physical, fact_references(fact))
     }
-    pub(super) fn control(&self, control: &AgentControlRecord) -> Result<String> {
-        self.encode(
+    pub(super) fn control(&self, control: &AgentControlRecord, json: &str) -> Result<()> {
+        write(
+            self.connection,
+            self.id,
             "control",
             control.seq(),
-            control,
+            &digest(json),
             control_references(control),
         )
     }
