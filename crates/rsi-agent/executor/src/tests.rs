@@ -401,6 +401,14 @@ impl TurnExecution for CheckpointFixture {
         })))
     }
 
+    async fn read_context_checkpoint(
+        &self,
+        _session: &SessionId,
+        _reservation: rsi_api_protocol::ByteAdmission,
+    ) -> rsi_agent_turn_protocol::Result<Option<ContextCheckpoint>> {
+        Ok(self.writes.lock().unwrap().last().cloned())
+    }
+
     async fn write_context_checkpoint(
         &self,
         _claim: &TurnClaim,
@@ -1078,25 +1086,39 @@ async fn checkpoint_writer_drains_a_coalesced_request_after_close() {
         rsi_agent_context::ContextBudget::default(),
     );
     scheduler.schedule(request.clone());
-    scheduler.schedule(request);
-    let checkpoint_task = tokio::spawn(run_checkpoint_writer(turns, Arc::clone(&scheduler)));
+    scheduler.schedule(request.clone());
+    let checkpoint_task =
+        tokio::spawn(run_checkpoint_writer(turns.clone(), Arc::clone(&scheduler)));
     scheduler.close();
     tokio::time::timeout(Duration::from_secs(1), checkpoint_task)
         .await
         .expect("checkpoint writer did not drain the admitted request")
         .unwrap();
 
+    checkpoint::save_checkpoint(&turns, &request).await.unwrap();
+    assert_eq!(
+        fixture.writes.lock().unwrap().len(),
+        1,
+        "unchanged checkpoint was rewritten"
+    );
+    fixture.writes.lock().unwrap()[0].fact_prefix_sha256 = "0".repeat(64);
+    checkpoint::save_checkpoint(&turns, &request).await.unwrap();
     let writes = fixture.writes.lock().unwrap();
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0].through_seq, 3);
-    let mut restored = ModelContextState::open(
+    assert_eq!(
+        writes.len(),
+        2,
+        "invalid checkpoint at the same position must be rebuilt"
+    );
+    let repaired = writes.last().unwrap();
+    assert_eq!(repaired.through_seq, 3);
+    let empty = ModelContextState::open(
         context_pin().context_builder(),
         claim.header().clone(),
         ContextLimits::default(),
         rsi_agent_context::ContextBudget::default(),
     )
     .unwrap();
-    restored.restore(&writes[0].bytes).unwrap();
+    let mut restored = repaired.restore_for(&empty).unwrap().unwrap();
     assert_eq!(restored.position().through_seq, 3);
     let has_queued_input = |state: &mut ModelContextState| {
         serde_json::to_string(

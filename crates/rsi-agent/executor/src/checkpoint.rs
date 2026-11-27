@@ -291,21 +291,21 @@ async fn rebuild_context_checkpoint(
         request.budget.clone(),
     )
     .map_err(|error| context_outcome(&error))?;
-    let mut cursor = 0;
-    let mut restored_checkpoint = false;
     let checkpoint = read_checkpoint(turns, request.claim.session_id(), &request.budget)
         .await
         .map_err(|error| turn_outcome(&error))?;
-    if let Some(checkpoint) = checkpoint
+    let cached_through = if let Some(checkpoint) = checkpoint
         && let Some(restored) = checkpoint
             .restore_for(&fold)
             .map_err(|error| context_outcome(&error))?
     {
         fold = restored;
-        cursor = checkpoint.through_seq;
-        restored_checkpoint = true;
-    }
-    if !restored_checkpoint
+        checkpoint.through_seq
+    } else {
+        0
+    };
+    let mut cursor = cached_through;
+    if cursor == 0
         && request.claim.header().history_origin().is_some()
         && !seed_checkpoint(turns, request, &mut fold).await?
     {
@@ -326,6 +326,9 @@ async fn rebuild_context_checkpoint(
             if page.through_seq != cursor {
                 return Err(CheckpointFailure::Invalid);
             }
+            if cached_through != 0 && cursor == cached_through {
+                return Ok(None);
+            }
             break;
         }
         fold.ingest(ContextPage::Canonical(&page.facts))
@@ -333,14 +336,11 @@ async fn rebuild_context_checkpoint(
         cursor = page.through_seq;
     }
 
+    let position = fold.position();
     Ok(Some(ContextCheckpoint {
-        header_fingerprint: request
-            .claim
-            .header()
-            .fingerprint()
-            .map_err(|_| CheckpointFailure::Invalid)?,
-        through_seq: fold.position().through_seq,
-        fact_prefix_sha256: fold.position().fact_prefix_sha256(),
+        header_fingerprint: fold.header_fingerprint().to_owned(),
+        through_seq: position.through_seq,
+        fact_prefix_sha256: position.fact_prefix_sha256(),
         bytes: fold.checkpoint().map_err(|error| context_outcome(&error))?,
     }))
 }

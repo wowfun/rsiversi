@@ -406,7 +406,8 @@ turn driver submits a bounded checkpoint request. A single owned background
 writer coalesces the latest request per Session while preserving FIFO across
 Sessions, incrementally rebuilds from the last
 valid cache, encodes queued-turn state, and performs the optional Store write
-outside the turn-critical path. Cache read, validation, rebuild, and write
+outside the turn-critical path. A request that restores a cache already at the
+durable end finishes without encoding or writing it again. Cache read, validation, rebuild, and write
 failures fall back to canonical Fact replay. Restore also falls back when the
 checkpoint reaches the claimed turn's acceptance sequence, preserving the
 Kernel's filtered claim horizon. The scheduler retains at most 256 pending
