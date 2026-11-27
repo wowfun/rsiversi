@@ -194,7 +194,11 @@ pub struct StepInputDecision(Decision, #[serde(skip)] usize);
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Decision {
-    Enter { messages: Vec<PreparedInput> },
+    Enter {
+        messages: Vec<PreparedInput>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        starts_request_series: bool,
+    },
     Reject {},
 }
 
@@ -204,11 +208,39 @@ impl StepInputDecision {
     /// Membership belongs to the captured execution boundary, not this structural
     /// decoder. Repeated presentation does not consume an input receipt twice.
     pub fn enter(messages: Vec<PreparedInput>) -> Result<Self> {
+        Self::enter_with_series(messages, false)
+    }
+
+    /// Declares whether the first request admitted by this preparation starts a new series.
+    pub fn enter_with_series(
+        messages: Vec<PreparedInput>,
+        starts_request_series: bool,
+    ) -> Result<Self> {
         let bytes = crate::bounded_compact_json_len(&messages, MAXIMUM_PREPARED_INPUT_BYTES)?;
+        let series_bytes = if starts_request_series {
+            r#","starts_request_series":true"#.len()
+        } else {
+            0
+        };
         Ok(Self(
-            Decision::Enter { messages },
-            bytes + r#"{"kind":"enter","messages":}"#.len(),
+            Decision::Enter {
+                messages,
+                starts_request_series,
+            },
+            bytes + r#"{"kind":"enter","messages":}"#.len() + series_bytes,
         ))
+    }
+
+    /// Whether the first attempt begins a new request series.
+    #[must_use]
+    pub const fn starts_request_series(&self) -> bool {
+        matches!(
+            self.0,
+            Decision::Enter {
+                starts_request_series: true,
+                ..
+            }
+        )
     }
 
     /// Rejects preparation without authorizing a provider request.
@@ -227,7 +259,7 @@ impl StepInputDecision {
     #[must_use]
     pub fn messages(&self) -> Option<&[PreparedInput]> {
         match &self.0 {
-            Decision::Enter { messages } => Some(messages),
+            Decision::Enter { messages, .. } => Some(messages),
             Decision::Reject {} => None,
         }
     }
@@ -249,7 +281,7 @@ impl StepInputDecision {
     #[must_use]
     pub fn into_messages(self) -> Option<Vec<PreparedInput>> {
         match self.0 {
-            Decision::Enter { messages } => Some(messages),
+            Decision::Enter { messages, .. } => Some(messages),
             Decision::Reject {} => None,
         }
     }
@@ -274,7 +306,11 @@ impl<'de> Deserialize<'de> for StepInputDecision {
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         match Decision::deserialize(deserializer)? {
-            Decision::Enter { messages } => Self::enter(messages).map_err(serde::de::Error::custom),
+            Decision::Enter {
+                messages,
+                starts_request_series,
+            } => Self::enter_with_series(messages, starts_request_series)
+                .map_err(serde::de::Error::custom),
             Decision::Reject {} => Ok(Self::reject()),
         }
     }

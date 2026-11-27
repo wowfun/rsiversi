@@ -147,6 +147,9 @@ async fn prepare_final_inputs(
                     .map_err(|error| failed("input.failed", bounded(&error.to_string()))),
         };
     }
+    let starts_request_series = previous
+        .as_ref()
+        .is_some_and(StepInputDecision::starts_request_series);
     let mut messages = if let Some(previous) = previous {
         if context.contributed.is_empty() || previous.messages().is_some_and(<[_]>::is_empty) {
             return Ok(previous);
@@ -168,7 +171,7 @@ async fn prepare_final_inputs(
             claim: InputClaimRef::preceding(offset + context.trailing_facts).map_err(fatal)?,
         });
     }
-    StepInputDecision::enter(messages).map_err(fatal)
+    StepInputDecision::enter_with_series(messages, starts_request_series).map_err(fatal)
 }
 
 impl Driver {

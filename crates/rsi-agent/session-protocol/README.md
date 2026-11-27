@@ -106,6 +106,11 @@ not arbitrary historical Facts. Reusing a coordinate in the output does not clai
 or consume its mailbox receipt twice. Unchanged messages retain coordinates only,
 avoiding another copy of accepted text or attachments.
 
+An entered decision can declare `starts_request_series: true` for its first
+model attempt. Ordinary steps continue the current series. Retrying a request
+does not repeat the declaration. Adding native context to an admitted decision
+preserves it. A rejected decision has no request boundary.
+
 Prepared messages preserve their original presentation identity and metadata;
 these are not execution authority. Empty blocks and empty message content are
 valid preparation results even though fresh ingress requires meaningful input.

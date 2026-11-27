@@ -116,6 +116,23 @@ fn reject_empty_enter_and_empty_message_are_distinct() {
 }
 
 #[test]
+fn an_entered_step_can_declare_a_request_series_with_no_copy_of_the_input() {
+    let wire = json!({"kind":"enter","messages":[],"starts_request_series":true});
+    let decision: StepInputDecision = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&decision).unwrap(), wire);
+    assert_eq!(
+        decision.encoded_len(),
+        serde_json::to_vec(&decision).unwrap().len()
+    );
+    assert!(
+        serde_json::from_value::<StepInputDecision>(
+            json!({"kind":"reject","starts_request_series":true})
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn unchanged_input_serializes_only_its_coordinate() {
     let decision = StepInputDecision::enter(vec![PreparedInput::Claimed {
         claim: InputClaimRef::new(u64::MAX, u32::MAX).unwrap(),

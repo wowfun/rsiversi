@@ -290,7 +290,8 @@ impl rsi_agent_composition_protocol::BeforeStepContributor for Preset {
             )
             .unwrap();
             (
-                StepInputDecision::enter(vec![PreparedInput::Added { message }]).unwrap(),
+                StepInputDecision::enter_with_series(vec![PreparedInput::Added { message }], true)
+                    .unwrap(),
                 vec![rsi_agent_composition_protocol::ContributionInput::context(
                     "mixed native context",
                 )],
@@ -317,6 +318,43 @@ async fn preset_rejection_precedes_application_input_and_provider_dispatch() {
 #[tokio::test]
 async fn application_composes_preset_edit_and_same_batch_context_once_across_retry() {
     exercise(Decision::Mixed, TurnOutcome::Completed, 2).await;
+}
+
+#[tokio::test]
+async fn native_context_preserves_the_preset_series_declaration_across_provider_retry() {
+    let stack = BaseStack::activate().await;
+    let preset = install_preset(&stack, Decision::Mixed).await;
+    let provider = retrying_provider(&stack);
+    let language = stack
+        .activate_language("test.language", provider.clone())
+        .await;
+    let executor = stack.activate_executor("executor-series").await;
+    let (submitted, outcome) = stack.submit_and_wait("begin series").await;
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let page = stack
+        .store
+        .read_facts(
+            &submitted.session_id,
+            0,
+            64,
+            rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES,
+        )
+        .await
+        .unwrap();
+    let mut decisions = page.facts.iter().filter_map(|fact| match fact.body() {
+        SessionFactBody::StepInputsPrepared { decision, .. } => Some(decision),
+        _ => None,
+    });
+    let decision = decisions.next().unwrap();
+    assert!(decision.starts_request_series());
+    assert!(matches!(
+        decision.messages().unwrap(),
+        [PreparedInput::Added { .. }, PreparedInput::Claimed { .. }]
+    ));
+    assert!(decisions.next().is_none());
+    assert!(preset.dispose().await.is_clean());
+    stack.dispose(language, executor).await;
 }
 
 async fn install_preset(stack: &BaseStack, decision: Decision) -> FiberHandle {
