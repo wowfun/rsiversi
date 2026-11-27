@@ -14,7 +14,9 @@ DeepSeek request. Both protocols use the same acceptance boundary. A field
 provider can inspect the serialized model request, its optional Session ID
 and auxiliary purpose. HTTP 2xx confirms the contribution before any SSE
 frame is read. A rejected or interrupted send leaves the prefix eligible for
-the next call. Session logs and field values stay outside the canonical
+the next call. Cancelling after headers releases a pending plugin callback.
+The accepted HTTP status is preserved and the response stream observes cancellation.
+Session logs and field values stay outside the canonical
 Language request and its persisted model evidence.
 
 The declared effort ID `off` disables thinking. Chat serializes it as

@@ -141,15 +141,21 @@ impl HttpTransport for Transport {
         };
         let prepared = fields.prepare(origin, base.clone(), &stop).await?;
         let outgoing = extend(request, base, prepared.fields)?;
-        let response = self.inner.execute(outgoing, stop).await?;
+        let response = self.inner.execute(outgoing, stop.clone()).await?;
         if (200..300).contains(&response.status)
             && let Some(receipt) = prepared.receipt
-            && let Err(error) = receipt.accept().await
         {
-            eprintln!(
-                "DeepSeek request field acknowledgement failed: {}",
-                error.code()
-            );
+            let accepted = tokio::select! {
+                biased;
+                result = receipt.accept() => result,
+                () = stop.cancelled() => return Ok(response),
+            };
+            if let Err(error) = accepted {
+                eprintln!(
+                    "DeepSeek request field acknowledgement failed: {}",
+                    error.code()
+                );
+            }
         }
         Ok(response)
     }

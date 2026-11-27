@@ -86,6 +86,7 @@ struct Contributor {
     enabled: AtomicBool,
     collide: AtomicBool,
     confirmed: Arc<AtomicUsize>,
+    stall_acceptance: bool,
 }
 
 #[derive(Debug)]
@@ -133,17 +134,26 @@ impl FieldPreparation for Contributor {
             )
             .unwrap()
             .into(),
-            receipt: Some(Box::new(Receipt(self.confirmed.clone()))),
+            receipt: Some(Box::new(Receipt {
+                confirmed: self.confirmed.clone(),
+                stall: self.stall_acceptance,
+            })),
         })
     }
 }
 
 #[derive(Debug)]
-struct Receipt(Arc<AtomicUsize>);
+struct Receipt {
+    confirmed: Arc<AtomicUsize>,
+    stall: bool,
+}
 #[async_trait]
 impl AcceptedFields for Receipt {
     async fn accept(self: Box<Self>) -> Result<(), TransportError> {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        if self.stall {
+            std::future::pending::<()>().await;
+        }
+        self.confirmed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -171,6 +181,54 @@ impl HttpTransport for Wire {
             body: Box::pin(stream::empty()),
         })
     }
+}
+
+#[tokio::test]
+async fn cancellation_releases_a_pending_field_receipt_after_http_acceptance() {
+    use futures_util::{FutureExt, poll};
+
+    let runtime = Runtime::default();
+    let contributor = Arc::new(Contributor {
+        enabled: AtomicBool::new(true),
+        stall_acceptance: true,
+        ..Contributor::default()
+    });
+    let _source = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "fields",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(Source(contributor.clone())),
+            ),
+            ConfigValue::Null,
+        )
+        .await
+        .unwrap();
+    let wire = Arc::new(Wire::default());
+    let transport = Transport {
+        inner: wire.clone(),
+        context: runtime.root(),
+    };
+    let request = HttpRequest::new("POST".parse().unwrap(), "http://localhost/responses")
+        .unwrap()
+        .body(Bytes::from_static(br#"{"input":[]}"#));
+    let origin = LanguageCallOrigin {
+        session_id: Some("s".into()),
+        ..LanguageCallOrigin::default()
+    };
+    let stop = CancellationToken::new();
+    let mut send = Box::pin(transport.execute_language(request, &origin, stop.clone()));
+    assert!(poll!(&mut send).is_pending());
+    assert_eq!(wire.0.lock().unwrap().len(), 1);
+    stop.cancel();
+    let response = send
+        .now_or_never()
+        .expect("cancellation must release the pending receipt")
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(contributor.confirmed.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
