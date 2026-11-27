@@ -2,7 +2,7 @@ use super::*;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_diagnostic() {
+async fn foreground_host_executor_reload_retains_listener_and_closes_quietly() {
     let fixture = CliFixture::new("http://127.0.0.1:1");
     let mut child = fixture.serve_host().await;
     for maximum in [3, 2] {
@@ -16,23 +16,10 @@ async fn foreground_host_executor_reload_retains_listener_and_emits_one_final_di
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{stderr}");
-    let finals: Vec<_> = stderr
-        .lines()
-        .filter(|line| line.starts_with("Service Host diagnostics final=true"))
-        .collect();
-    assert_eq!(finals.len(), 1, "{stderr}");
-    for line in finals {
-        let _accepted: u64 = line
-            .split_whitespace()
-            .find_map(|field| field.strip_prefix("accepted_connections="))
-            .unwrap()
-            .parse()
-            .unwrap();
-        // Final diagnostics report the delta since the periodic tick. A healthy
-        // connection can already belong to an earlier, unlogged zero-anomaly tick.
-        assert!(!line.contains("accept_errors="), "{line}");
-        assert!(!line.contains("connection_task_panics="), "{line}");
-    }
+    assert!(
+        !stderr.contains("Service Host diagnostics final="),
+        "{stderr}"
+    );
     assert!(
         !stderr.contains(r#""event":"executor_checkpoint""#),
         "{stderr}"

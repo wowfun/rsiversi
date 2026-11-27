@@ -1,5 +1,5 @@
 #[cfg(any(target_os = "linux", windows))]
-use super::host_cli::format_service_host_diagnostics;
+use super::host_cli::write_service_host_anomalies;
 #[cfg(target_os = "linux")]
 use super::host_cli::{DaemonControlEvent, next_daemon_control_event, stop_reload_task};
 use super::*;
@@ -116,23 +116,24 @@ async fn daemon_join_failure_drains_reload_diagnostics_and_presets_before_return
 
 #[cfg(any(target_os = "linux", windows))]
 #[test]
-fn service_host_diagnostics_include_activity_and_nonzero_anomalies() {
-    let formatted = format_service_host_diagnostics(
-        ServiceHostDiagnosticsSnapshot {
-            accepted_connections: 2,
-            api: rsi_api_http::HttpDiagnosticsSnapshot {
-                rejected_requests: 1,
-                ..Default::default()
-            },
-            ..ServiceHostDiagnosticsSnapshot::default()
-        },
-        true,
-    );
-
-    assert_eq!(
-        formatted,
-        "Service Host diagnostics final=true accepted_connections=2 api_rejected_requests=1"
-    );
+fn service_host_diagnostics_write_only_intervals_with_anomalies() {
+    let mut output = Vec::new();
+    let mut delta = ServiceHostDiagnosticsSnapshot {
+        accepted_connections: 2,
+        ..Default::default()
+    };
+    for final_delta in [false, true] {
+        write_service_host_anomalies(&mut output, delta, final_delta);
+        assert!(output.is_empty());
+    }
+    delta.api.rejected_requests = 1;
+    for final_delta in [false, true] {
+        write_service_host_anomalies(&mut output, delta, final_delta);
+        assert_eq!(output, format!(
+            "Service Host diagnostics final={final_delta} accepted_connections=2 api_rejected_requests=1\n"
+        ).as_bytes());
+        output.clear();
+    }
 }
 
 fn parse(arguments: &[&str]) -> rsi::Result<Parse> {

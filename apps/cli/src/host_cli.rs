@@ -352,33 +352,35 @@ pub(super) async fn log_service_host_diagnostics(
                     continue;
                 }
                 let delta = diagnostics.snapshot().saturating_delta_since(previous);
-                let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, true));
+                write_service_host_anomalies(std::io::stderr(), delta, true);
                 diagnostics = generations.borrow_and_update().clone();
                 previous = ServiceHostDiagnosticsSnapshot::default();
             }
             () = stop.cancelled() => {
                 let delta = diagnostics.snapshot().saturating_delta_since(previous);
-                let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, true));
+                write_service_host_anomalies(std::io::stderr(), delta, true);
                 return;
             }
             _ = interval.tick() => {
                 let current = diagnostics.snapshot();
                 let delta = current.saturating_delta_since(previous);
                 previous = current;
-                if delta.has_anomaly() {
-                    let _ = writeln!(std::io::stderr(), "{}", format_service_host_diagnostics(delta, false));
-                }
+                write_service_host_anomalies(std::io::stderr(), delta, false);
             }
         }
     }
 }
 
 #[cfg(any(target_os = "linux", windows))]
-pub(super) fn format_service_host_diagnostics(
+pub(super) fn write_service_host_anomalies(
+    mut output: impl Write,
     delta: ServiceHostDiagnosticsSnapshot,
     final_delta: bool,
-) -> String {
+) {
     use std::fmt::Write as _;
+    if !delta.has_anomaly() {
+        return;
+    }
     let mut line = format!(
         "Service Host diagnostics final={final_delta} accepted_connections={}",
         delta.accepted_connections
@@ -400,7 +402,8 @@ pub(super) fn format_service_host_diagnostics(
             let _ = write!(line, " {name}={count}");
         }
     }
-    line
+    line.push('\n');
+    let _ = output.write_all(line.as_bytes());
 }
 
 #[cfg(any(target_os = "linux", windows))]

@@ -130,8 +130,9 @@ The diagnostic handle combines native socket acceptance, peer identity,
 connection capacity, service/task failure and forced-drain counters with the
 shared [HTTP diagnostics](../../rsi-api/http/README.md). Each owner maintains its
 own monotonic, saturating counters without retaining payloads. The standard
-daemon emits nonzero anomaly deltas and a final delta to its owner log. Each
-record includes the accepted connection count. Omitted anomaly counters are zero.
+daemon writes a diagnostic to its owner log when an interval contains an
+anomaly, including the final interval at reload or shutdown. Each record includes
+the accepted connection count for that interval. Omitted anomaly counters are zero.
 
 `ApprovalBrokerFactory` owns the standard Host's one waiting approval answerer,
 its answerer registration, and the injected Session approval control. Pending
