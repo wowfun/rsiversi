@@ -186,50 +186,156 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
 }
 fn present(reply: Reply) -> UiView {
     let mut elements = vec![home()];
-    match reply{
-        Reply::Summaries{epoch,items,next,capacity_limited}=>{
-            if capacity_limited { elements.push(text("Workspace review history is full. New execution intervals are not being recorded; Agent work continues. Existing summaries remain available.")); }
+    match reply {
+        Reply::Summaries { items, next } => {
             if !items.is_empty() {
                 elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
-            } else if !capacity_limited {
-                elements.push(text("No workspace changes recorded."));
+            } else {
+                elements.push(text("No workspace changes to review."));
             }
-            for item in items{
-                let expired=item.epoch!=epoch;
-                let state=match(item.phase,expired){(Phase::Pending,true)=>"Interrupted; diff expired",(Phase::Pending,false)=>"Pending; work or capture not settled",(Phase::Complete,false)=>"Complete",(Phase::Complete,true)=>"Complete; diff expired",(Phase::Partial,false)=>"Partial",(Phase::Partial,true)=>"Partial; diff expired"};
+            for item in items {
+                let state = match item.phase {
+                    Phase::Pending => "Pending; work or capture not settled",
+                    Phase::Complete => "Complete",
+                    Phase::Partial => "Partial",
+                };
                 let value = match item.finished_ms {
                     Some(end) => format!(
-                        "{state} · {} files · +{} / −{} lines · {} → {end} ms",
-                        item.changed_files, item.added_lines, item.removed_lines, item.started_ms,
+                        "{state} · {} {} · +{} / −{} lines · {} → {end} ms",
+                        item.changed_files,
+                        if item.changed_files == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        },
+                        item.added_lines,
+                        item.removed_lines,
+                        item.started_ms,
                     ),
                     None => state.to_owned(),
                 };
-                elements.push(UiElement::Field { label: format!("Interval {}", item.id), value });
-                if !item.omissions.is_empty(){elements.push(text(format!("Coverage omissions: {}",item.omissions.iter().map(|o|format!("{:?}: {}",o.kind,o.count)).collect::<Vec<_>>().join(", "))));}
-                if !expired && item.changed_files > 0 && item.phase != Phase::Pending {
-                    elements.push(button("Open interval files", Operation::Files { id: item.id, offset: 0 }));
+                elements.push(UiElement::Field {
+                    label: format!("Interval {}", item.id),
+                    value,
+                });
+                if !item.omissions.is_empty() {
+                    elements.push(text(format!(
+                        "Coverage omissions: {}",
+                        item.omissions
+                            .iter()
+                            .map(|o| format!("{:?}: {}", o.kind, o.count))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                if item.changed_files > 0 && item.phase != Phase::Pending {
+                    elements.push(button(
+                        "Open interval files",
+                        Operation::Files {
+                            id: item.id,
+                            offset: 0,
+                        },
+                    ));
                 }
             }
-            if let Some(after)=next{elements.push(button("More intervals",Operation::List{after:Some(after)}));}
-        }
-        Reply::Files{id,offset,files,has_more}=>{
-            elements.push(text(format!("Interval {id}. Changes occurred in this interval; concurrent edits may be included.")));
-            let shown=files.iter().take(16).scan(0usize, |bytes, file| {*bytes += 2*file.path.len()+file.previous_path.as_ref().map_or(0,String::len)+512; Some(*bytes)}).take_while(|bytes| *bytes <= 16*1024).count();
-            if files.is_empty(){elements.push(text("No comparable text changes in this interval."));}
-            for file in files.iter().take(shown){
-                elements.push(UiElement::Field{label:file.path.clone(),value:format!("+{} / −{}{}",file.added,file.removed,file.previous_path.as_ref().map(|p|format!(" · renamed from {p}")).unwrap_or_default())});
-                elements.push(button("Open file diff",Operation::Diff{id:id.clone(),path:file.path.clone(),offset:0}));
+            if let Some(after) = next {
+                elements.push(button(
+                    "More intervals",
+                    Operation::List { after: Some(after) },
+                ));
             }
-            if has_more||shown<files.len(){elements.push(button("More changed files",Operation::Files{id,offset:offset+shown}));}
         }
-        Reply::Diff{id,path,offset,has_more,text:content,..}=>{
-            let mut end=content.len().min(12*1024);while !content.is_char_boundary(end){end-=1;}
-            elements.push(button("Back to interval files",Operation::Files{id:id.clone(),offset:0}));
-            elements.push(UiElement::Field{label:"File diff".into(),value:path.clone()});
-            elements.push(UiElement::Code{text:content[..end].into()});
-            if has_more||end<content.len(){elements.push(button("Continue diff",Operation::Diff{id,path,offset:offset+end}));}
+        Reply::Files {
+            id,
+            offset,
+            files,
+            has_more,
+        } => {
+            elements.push(text(format!("Interval {id}. Changes occurred in this interval; concurrent edits may be included.")));
+            let shown = files
+                .iter()
+                .take(16)
+                .scan(0usize, |bytes, file| {
+                    *bytes += 2 * file.path.len()
+                        + file.previous_path.as_ref().map_or(0, String::len)
+                        + 512;
+                    Some(*bytes)
+                })
+                .take_while(|bytes| *bytes <= 16 * 1024)
+                .count();
+            if files.is_empty() {
+                elements.push(text("No comparable text changes in this interval."));
+            }
+            for file in files.iter().take(shown) {
+                elements.push(UiElement::Field {
+                    label: file.path.clone(),
+                    value: format!(
+                        "+{} / −{}{}",
+                        file.added,
+                        file.removed,
+                        file.previous_path
+                            .as_ref()
+                            .map(|p| format!(" · renamed from {p}"))
+                            .unwrap_or_default()
+                    ),
+                });
+                elements.push(button(
+                    "Open file diff",
+                    Operation::Diff {
+                        id: id.clone(),
+                        path: file.path.clone(),
+                        offset: 0,
+                    },
+                ));
+            }
+            if has_more || shown < files.len() {
+                elements.push(button(
+                    "More changed files",
+                    Operation::Files {
+                        id,
+                        offset: offset + shown,
+                    },
+                ));
+            }
         }
-        Reply::Expired{..}=>elements.push(text("Diff expired. The durable summary remains available; comparison content ended with its runtime or was evicted by the scratch limit.")),
+        Reply::Diff {
+            id,
+            path,
+            offset,
+            has_more,
+            text: content,
+            ..
+        } => {
+            let mut end = content.len().min(12 * 1024);
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            elements.push(button(
+                "Back to interval files",
+                Operation::Files {
+                    id: id.clone(),
+                    offset: 0,
+                },
+            ));
+            elements.push(UiElement::Field {
+                label: "File diff".into(),
+                value: path.clone(),
+            });
+            elements.push(UiElement::Code {
+                text: content[..end].into(),
+            });
+            if has_more || end < content.len() {
+                elements.push(button(
+                    "Continue diff",
+                    Operation::Diff {
+                        id,
+                        path,
+                        offset: offset + end,
+                    },
+                ));
+            }
+        }
+        Reply::Expired { .. } => elements.push(text("This comparison has expired.")),
     }
     view(elements)
 }
@@ -239,40 +345,27 @@ mod tests {
     use super::*;
     use rsi_workspace_review_api::FileChange;
     #[test]
-    fn capacity_is_visible_even_without_summaries_for_the_selected_session() {
+    fn empty_panel_reports_no_changes() {
         let result = present(Reply::Summaries {
-            epoch: "a".repeat(32),
             items: vec![],
             next: None,
-            capacity_limited: true,
         });
-        assert!(result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("New execution intervals are not being recorded"))));
-        assert!(!result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text == "No workspace changes recorded.")));
+        assert!(result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text == "No workspace changes to review.")));
     }
     #[test]
     fn review_rows_show_only_observed_counts_and_available_actions() {
-        let epoch = "a".repeat(32);
-        for (phase, expired, files, expected, opens) in [
+        for (phase, files, expected, opens) in [
             (
                 Phase::Pending,
-                false,
                 0,
                 "Pending; work or capture not settled",
                 false,
             ),
-            (Phase::Pending, true, 0, "Interrupted; diff expired", false),
-            (Phase::Complete, false, 0, "Complete · 0 files", false),
-            (
-                Phase::Complete,
-                true,
-                2,
-                "Complete; diff expired · 2 files",
-                false,
-            ),
-            (Phase::Partial, false, 2, "Partial · 2 files", true),
+            (Phase::Complete, 1, "Complete · 1 file", true),
+            (Phase::Partial, 2, "Partial · 2 files", true),
         ] {
             let item = serde_json::from_value(serde_json::json!({
-                "id": "1".repeat(32), "epoch": epoch, "scope": {
+                "id": "1".repeat(32), "scope": {
                     "workspace": "2".repeat(64), "conversation": {"kind":"native","id":"source"}
                 },
                 "turn":"turn", "execution":"1", "accepted_seq":"1", "live_seq":"3",
@@ -280,14 +373,8 @@ mod tests {
                 "phase":phase, "changed_files":files, "added_lines":0, "removed_lines":0, "omissions":[]
             })).unwrap();
             let result = present(Reply::Summaries {
-                epoch: if expired {
-                    "b".repeat(32)
-                } else {
-                    epoch.clone()
-                },
                 items: vec![item],
                 next: None,
-                capacity_limited: false,
             });
             let value = result
                 .elements
@@ -371,10 +458,9 @@ mod tests {
         let result = present(Reply::Expired { id: "a".repeat(32) });
         result.validate().unwrap();
         assert!(
-            result
-                .elements
-                .iter()
-                .any(|e| matches!(e,UiElement::Text{text} if text.starts_with("Diff expired")))
+            result.elements.iter().any(
+                |e| matches!(e,UiElement::Text{text} if text == "This comparison has expired.")
+            )
         );
     }
 }

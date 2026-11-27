@@ -25,8 +25,8 @@ mod controlled_work;
 mod execution_observer;
 pub use controlled_work::{ControlledWork, ControlledWorkReporter, ControlledWorkStatus};
 pub use execution_observer::{
-    ExecutionInterval, ExecutionObservationAdmission, ExecutionObservationEnd,
-    ExecutionObservationStart, ExecutionObserver, ExecutionObserverContract,
+    ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
+    ExecutionObserverContract,
 };
 mod initial_input;
 pub use initial_input::{InitialTurnInput, initial_turn_input};
@@ -924,6 +924,10 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         Err(TurnError::Invalid(
             "plugin child creation is unavailable".into(),
         ))
+    }
+    /// Appends a changed-Turn marker after a trusted observer finds a file change.
+    async fn record_workspace_changes(&self, _session: &SessionId, _turn: &TurnId) -> Result<()> {
+        Err(TurnError::ExecutionUnavailable)
     }
     /// Serializes operator feedback for one finalized local assistant message.
     async fn change_message_feedback(

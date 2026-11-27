@@ -422,6 +422,10 @@ transport receipts or create another durable receipt store.
 
 ## Execution records
 
+`WorkspaceChangesRecorded` identifies a Turn with observed workspace changes.
+The Session control log retains the Turn ID. File lists, counts and patches
+belong to the live comparison owner.
+
 Each ModelIntent freezes its full purpose. Each ModelEvent repeats only the
 small Conversation/ContextCompaction kind, which Kernel checks against the
 intent. Partial history pages therefore identify internal summary output even

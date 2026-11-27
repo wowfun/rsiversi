@@ -17,7 +17,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
     clippy::too_many_lines,
     reason = "one public workflow retains exact source identities through mutation, retirement and cold recovery"
 )]
-async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_but_expires_diffs_after_restart()
+async fn workspace_review_api_waits_for_real_shell_work_and_retains_only_the_changed_turn_after_restart()
  {
     let gate = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let command = format!(
@@ -245,18 +245,35 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
     daemon.shutdown().await;
     let daemon = DaemonFixture::new(&fixture).await;
     let client = Client::new(daemon.connection.api_client());
-    let Reply::Summaries { epoch, items, .. } = client
+    let Reply::Summaries { items, .. } = client
         .call(Request::List { scope, after: None })
         .await
         .unwrap()
     else {
         panic!("summaries")
     };
-    assert_eq!(items, vec![summary]);
-    assert_ne!(epoch, items[0].epoch);
+    assert!(items.is_empty());
     assert!(
         matches!(client.call(diff_request).await.unwrap(),Reply::Expired{id:expired} if expired==id)
     );
+    let handle = daemon
+        .connection
+        .session_service()
+        .attach(&SessionId::new("review-source").unwrap())
+        .await
+        .unwrap();
+    let mut history = handle.observe(ObservationCursor::default()).await.unwrap();
+    let changed_turn = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(update) = history.next().await {
+            if let SessionObservation::Control { record, .. } = update.unwrap()
+                && let rsi_agent_session_protocol::AgentControlRecordBody::WorkspaceChangesRecorded { turn_id } = record.body() {
+                return turn_id.clone();
+            }
+        }
+        panic!("session history ended without the workspace marker")
+    }).await.unwrap();
+    assert_eq!(Some(changed_turn), summary.turn);
+    drop((history, handle));
     drop(client);
     daemon.shutdown().await;
     server.abort();

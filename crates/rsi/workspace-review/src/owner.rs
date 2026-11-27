@@ -4,14 +4,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use rsi_agent_turn_protocol::{
-    ControlledWorkStatus, ExecutionInterval, ExecutionObservationAdmission,
-    ExecutionObservationEnd, ExecutionObservationStart, ExecutionObserver,
+    ControlledWorkStatus, ExecutionInterval, ExecutionObservationEnd, ExecutionObservationStart,
+    ExecutionObserver, TurnService,
 };
 use rsi_api_protocol::{ApiError, Result};
 use rsi_execution::{ExecutionLease, ExecutionLocation, ExecutionOperation};
 use rsi_meta::Execution;
-use rsi_storage_domain::Domain;
-use rsi_storage_domain::storage_error;
 use rsi_workspace_review_api::{
     ConversationIdentity, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
 };
@@ -66,11 +64,10 @@ struct State {
 /// Ordinary product owner for non-authoritative interval evidence.
 #[derive(Debug)]
 pub struct WorkspaceReview {
-    domain: Domain,
+    turns: Arc<dyn TurnService>,
     root: Root,
     git: Git,
     execution: Execution,
-    epoch: String,
     state: Mutex<State>,
     workers: Arc<Semaphore>,
     reads: Arc<Semaphore>,
@@ -105,17 +102,12 @@ impl ExecutionObserver for Observer {
         &self,
         start: ExecutionObservationStart,
         cancellation: CancellationToken,
-    ) -> std::result::Result<ExecutionObservationAdmission, String> {
+    ) -> std::result::Result<Arc<dyn ExecutionInterval>, String> {
         if cancellation.is_cancelled() {
             return Err("workspace observation admission cancelled".into());
         }
-        self.0
-            .admit(start)
-            .map(|v| match v {
-                Some(interval) => ExecutionObservationAdmission::Interval(Arc::new(interval)),
-                None => ExecutionObservationAdmission::OmittedCapacity,
-            })
-            .map_err(|e| e.to_string())
+        let interval = self.0.admit(start).map_err(|error| error.to_string())?;
+        Ok(Arc::new(interval))
     }
 }
 fn omission(rows: &mut Vec<Omission>, kind: OmissionKind, count: u32) {
@@ -128,49 +120,28 @@ fn omission(rows: &mut Vec<Omission>, kind: OmissionKind, count: u32) {
 }
 impl WorkspaceReview {
     pub(super) fn open(
-        domain: Domain,
+        turns: Arc<dyn TurnService>,
         root: Root,
         git: Git,
         execution: Execution,
-    ) -> Result<Arc<Self>> {
+    ) -> Arc<Self> {
         let tasks = git.tasks.clone();
-        let mut entries = BTreeMap::new();
-        for (key, summary) in domain
-            .table::<Summary>("summaries")
-            .and_then(|table| table.snapshot())
-            .map_err(storage_error)?
-            .entries()
-        {
-            summary.validate()?;
-            if key != summary.id {
-                return Err(invalid("review summary key mismatch"));
-            }
-            entries.insert(
-                key.to_owned(),
-                Entry {
-                    summary: (*summary).clone(),
-                    status: EntryStatus::Finished,
-                    runtime: None,
-                },
-            );
-        }
-        Ok(Arc::new(Self {
-            domain,
+        Arc::new(Self {
+            turns,
             root,
             git,
             execution,
-            epoch: id()?,
             state: Mutex::new(State {
                 closed: false,
-                entries,
+                entries: BTreeMap::new(),
             }),
             workers: Arc::new(Semaphore::new(2)),
             reads: Arc::new(Semaphore::new(2)),
             stop: CancellationToken::new(),
             tasks,
-        }))
+        })
     }
-    fn admit(self: &Arc<Self>, start: ExecutionObservationStart) -> Result<Option<Interval>> {
+    fn admit(self: &Arc<Self>, start: ExecutionObservationStart) -> Result<Interval> {
         let admission = match &start.execution {
             Some(execution)
                 if execution.binding().location() == start.header.coordinates().location() =>
@@ -184,13 +155,9 @@ impl WorkspaceReview {
             None if *start.header.coordinates().location() == ExecutionLocation::Local => None,
             _ => return Err(ApiError::Unauthorized),
         };
-        self.domain.ensure_available().map_err(storage_error)?;
         let mut state = self.state.lock().expect("review admission");
         if state.closed {
             return Err(ApiError::ShuttingDown);
-        }
-        if state.entries.len() >= 8192 {
-            return Ok(None);
         }
         let id = id()?;
         if state.entries.contains_key(&id) {
@@ -205,7 +172,6 @@ impl WorkspaceReview {
         };
         let summary = Summary {
             id: id.clone(),
-            epoch: self.epoch.clone(),
             scope,
             turn: Some(start.turn),
             execution: start.claim.to_string(),
@@ -227,7 +193,7 @@ impl WorkspaceReview {
                 runtime: None,
             },
         );
-        Ok(Some(Interval {
+        Ok(Interval {
             owner: self.clone(),
             id,
             workspace,
@@ -237,25 +203,23 @@ impl WorkspaceReview {
                 admission,
                 ..IntervalState::default()
             })),
-        }))
+        })
     }
     fn take_oldest_scratch(&self) -> Option<Scratch> {
         let mut state = self.state.lock().expect("review scratch eviction");
-        let entry = state
+        let id = state
             .entries
-            .values_mut()
-            .filter(|entry| {
+            .iter()
+            .filter(|(_, entry)| {
                 entry
                     .runtime
                     .as_ref()
                     .is_some_and(|changes| Arc::strong_count(changes) == 1)
             })
-            .min_by(|a, b| {
-                let a = &a.summary.started_ms;
-                let b = &b.summary.started_ms;
-                a.len().cmp(&b.len()).then_with(|| a.cmp(b))
-            })?;
-        Arc::into_inner(entry.runtime.take()?).map(|changes| changes.scratch)
+            .min_by_key(|(_, entry)| (entry.summary.started_ms.len(), &entry.summary.started_ms))
+            .map(|(id, _)| id.clone())?;
+        let entry = state.entries.remove(&id)?;
+        Arc::into_inner(entry.runtime?).map(|changes| changes.scratch)
     }
     /// Returns finite evidence after the product adapter has authorized the exact scope.
     ///
@@ -267,7 +231,6 @@ impl WorkspaceReview {
         admission: ExecutionOperation,
         cancellation: CancellationToken,
     ) -> Result<Reply> {
-        self.domain.ensure_available().map_err(storage_error)?;
         request.validate()?;
         let stop = self.stop.child_token();
         let _guard = stop.clone().drop_guard();
@@ -299,7 +262,6 @@ impl WorkspaceReview {
         reason = "closed read variants share one authorization and admission boundary"
     )]
     async fn read_inner(&self, request: &Request, stop: &CancellationToken) -> Result<Reply> {
-        self.domain.ensure_available().map_err(storage_error)?;
         if stop.is_cancelled() {
             return Err(ApiError::ShuttingDown);
         }
@@ -328,12 +290,7 @@ impl WorkspaceReview {
             } else {
                 None
             };
-            return Ok(Reply::Summaries {
-                epoch: self.epoch.clone(),
-                capacity_limited: state.entries.len() >= 8192,
-                items,
-                next,
-            });
+            return Ok(Reply::Summaries { items, next });
         }
         let (id, scope) = match request {
             Request::Files { id, scope, .. } | Request::Diff { id, scope, .. } => (id, scope),
@@ -341,14 +298,16 @@ impl WorkspaceReview {
         };
         let runtime = {
             let state = self.state.lock().expect("review interval");
-            let entry = state.entries.get(id).ok_or(ApiError::Unavailable)?;
-            if &entry.summary.scope != scope {
-                return Err(invalid("review source mismatch"));
+            match state.entries.get(id) {
+                Some(entry) if &entry.summary.scope != scope => {
+                    return Err(invalid("review source mismatch"));
+                }
+                Some(entry) if entry.status != EntryStatus::Finished => {
+                    return Err(ApiError::Unavailable);
+                }
+                Some(entry) => entry.runtime.clone(),
+                None => None,
             }
-            if entry.status != EntryStatus::Finished {
-                return Err(ApiError::Unavailable);
-            }
-            entry.runtime.clone()
         };
         let Some(runtime) = runtime else {
             return Ok(Reply::Expired { id: id.clone() });
@@ -437,26 +396,11 @@ impl WorkspaceReview {
             self.tasks.close();
         }
         self.tasks.wait().await;
-        {
-            let mut state = self.state.lock().expect("review cleanup");
-            for entry in state.entries.values_mut() {
-                entry.runtime.take();
-            }
-        }
+        self.state.lock().expect("review cleanup").entries.clear();
         self.tasks.wait().await;
-        self.domain.close().await;
     }
 }
 impl Interval {
-    async fn persist(&self, summary: Summary) -> Result<()> {
-        self.owner
-            .domain
-            .table::<Summary>("summaries")
-            .map_err(storage_error)?
-            .put(&self.id, summary)
-            .await
-            .map_err(storage_error)
-    }
     async fn capture_permit(
         &self,
         stop: &CancellationToken,
@@ -571,31 +515,39 @@ impl Interval {
                 .remove(&self.id);
             return;
         };
-        let mut summary = self.owner.state.lock().expect("review end").entries[&self.id]
-            .summary
-            .clone();
-        summary.finished_ms = Some(now());
-        summary.omissions = std::mem::take(&mut inner.omissions);
-        summary.phase = if summary.omissions.is_empty() {
-            Phase::Complete
-        } else {
-            Phase::Partial
-        };
-        summary.changed_files =
-            u32::try_from(changes.comparison.files.len()).expect("bounded changed files");
-        for file in &changes.comparison.files {
-            summary.added_lines = summary.added_lines.saturating_add(file.added);
-            summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
-        }
-        let stored = self.persist(summary.clone()).await;
-        let mut state = self.owner.state.lock().expect("review publication");
-        if stored.is_ok() {
+        let (session, turn) = {
+            let mut state = self.owner.state.lock().expect("review publication");
             let entry = state.entries.get_mut(&self.id).expect("admitted review");
+            let summary = &mut entry.summary;
+            summary.finished_ms = Some(now());
+            summary.omissions = std::mem::take(&mut inner.omissions);
+            summary.phase = if summary.omissions.is_empty() {
+                Phase::Complete
+            } else {
+                Phase::Partial
+            };
+            summary.changed_files =
+                u32::try_from(changes.comparison.files.len()).expect("bounded changed files");
+            for file in &changes.comparison.files {
+                summary.added_lines = summary.added_lines.saturating_add(file.added);
+                summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
+            }
             entry.status = EntryStatus::Finished;
-            entry.summary = summary;
             entry.runtime = Some(changes);
-        } else {
-            state.entries.remove(&self.id);
+            let (ConversationIdentity::Native(session), Some(turn)) =
+                (&summary.scope.conversation, &summary.turn)
+            else {
+                unreachable!("execution intervals belong to a native turn")
+            };
+            (session.clone(), turn.clone())
+        };
+        if let Err(error) = self
+            .owner
+            .turns
+            .record_workspace_changes(&session, &turn)
+            .await
+        {
+            eprintln!("Could not record workspace changes for {session}/{turn}: {error}");
         }
     }
     async fn retained(&self, operation: Stage, cancellation: CancellationToken) {

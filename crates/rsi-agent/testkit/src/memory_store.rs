@@ -2957,6 +2957,7 @@ fn apply_message_updates(
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
@@ -3249,6 +3250,7 @@ fn apply_activation_updates(
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
@@ -3363,6 +3365,7 @@ fn apply_ready_updates(
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused

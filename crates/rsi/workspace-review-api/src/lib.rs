@@ -1,4 +1,4 @@
-//! Bounded interval evidence with durable summaries and runtime-only diffs.
+//! Bounded summaries and diffs of live workspace comparisons.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::missing_errors_doc)]
@@ -70,15 +70,13 @@ pub struct Omission {
     /// Number of known excluded paths or stages, at least one.
     pub count: u32,
 }
-/// Durable summary; diff files are never embedded here.
+/// Live comparison metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
 pub struct Summary {
     /// Opaque lowercase-hex interval ID.
     pub id: String,
-    /// Opaque owning runtime epoch.
-    pub epoch: String,
     /// Independently authorized source.
     pub scope: Scope,
     /// Native Turn, or None for a standalone observed prompt.
@@ -105,10 +103,9 @@ pub struct Summary {
     pub omissions: Vec<Omission>,
 }
 impl Summary {
-    /// Validate a durable or wire record before publication.
+    /// Validate a decoded comparison summary.
     pub fn validate(&self) -> Result<()> {
         identity(&self.id)?;
-        identity(&self.epoch)?;
         for value in [
             &self.execution,
             &self.accepted_seq,
@@ -166,7 +163,7 @@ impl FileChange {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    /// Page durable summaries by stable ID.
+    /// Page available comparisons by interval ID.
     List {
         /// Current source.
         scope: Scope,
@@ -245,12 +242,8 @@ impl Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
-    /// Durable summaries independent of scratch availability.
+    /// Reviews available in the running Host.
     Summaries {
-        /// New interval evidence is omitted because durable summary retention is full.
-        capacity_limited: bool,
-        /// Current owner epoch for immediate expired/interrupted presentation.
-        epoch: String,
         /// Bounded records.
         items: Vec<Summary>,
         /// Last returned ID when more exist.
@@ -282,7 +275,7 @@ pub enum Reply {
         /// At most 64 KiB of text.
         text: String,
     },
-    /// Summary remains durable, but comparison content is unavailable.
+    /// The requested comparison has expired.
     Expired {
         /// Exact interval.
         id: String,
@@ -367,13 +360,7 @@ impl Client {
 /// Validates owner or remote response before it enters a UI.
 pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
     match (request, reply) {
-        (
-            Request::List { scope, after },
-            Reply::Summaries {
-                epoch, items, next, ..
-            },
-        ) => {
-            identity(epoch)?;
+        (Request::List { scope, after }, Reply::Summaries { items, next }) => {
             if items.len() > 32 {
                 return Err(invalid("too many interval summaries"));
             }

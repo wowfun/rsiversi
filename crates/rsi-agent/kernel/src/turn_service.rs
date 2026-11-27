@@ -5,6 +5,42 @@ use rsi_agent_session_protocol::{
 };
 
 impl AgentKernel {
+    async fn append_session_control(
+        &self,
+        admission: SubmissionAdmissionLease,
+        cut: rsi_agent_store_protocol::StoreSessionWatermarks,
+        body: AgentControlRecordBody,
+    ) -> TurnResult<std::num::NonZeroU64> {
+        let seq = cut
+            .durable_control_seq
+            .checked_add(1)
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or(TurnError::Capacity)?;
+        let record = AgentControlRecord::new(seq.get(), self.inner.clock.now_ms().max(1), body)
+            .map_err(|error| TurnError::Invalid(error.to_string()))?;
+        let kernel = self.clone();
+        self.owned_commit(async move {
+            let _admission = admission;
+            kernel
+                .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
+                    sessions: vec![AtomicSessionAppend {
+                        session_id: cut.session_id,
+                        expected_fact_seq: cut.durable_fact_seq,
+                        expected_control_seq: cut.durable_control_seq,
+                        header: None,
+                        facts: vec![],
+                        controls: vec![record],
+                    }],
+                    required_active_activations: vec![],
+                    quiescent_descendants_of: None,
+                })
+                .await?
+                .map_err(turn_store_error)?;
+            Ok(seq)
+        })
+        .await
+    }
+
     pub(super) async fn current_permission(
         &self,
         header: &SessionHeader,
@@ -215,6 +251,25 @@ impl TurnService for AgentKernel {
         })
         .await
     }
+    async fn record_workspace_changes(&self, id: &SessionId, turn: &TurnId) -> TurnResult<()> {
+        let admission = self.inner.submission_admission.acquire(id).await?;
+        let cut = self
+            .inner
+            .store
+            .read_watermarks(id)
+            .await
+            .map_err(turn_store_error)?;
+        self.append_session_control(
+            admission,
+            cut,
+            AgentControlRecordBody::WorkspaceChangesRecorded {
+                turn_id: turn.clone(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn change_message_feedback(
         &self,
         id: &SessionId,
@@ -246,44 +301,17 @@ impl TurnService for AgentKernel {
             FeedbackDecision::Unchanged => return Ok(MessageFeedbackOutcome::Saved { current }),
             FeedbackDecision::Append => {}
         }
-        let cut = snapshot.watermarks;
-        let seq = cut
-            .durable_control_seq
-            .checked_add(1)
-            .and_then(std::num::NonZeroU64::new)
-            .ok_or(TurnError::Capacity)?;
-        let current = change.value.clone().map(|value| SavedMessageFeedback {
-            version: seq,
-            value,
-        });
-        let record = AgentControlRecord::new(
-            seq.get(),
-            self.inner.clock.now_ms().max(1),
-            AgentControlRecordBody::MessageFeedbackChanged { change },
-        )
-        .map_err(|e| TurnError::Invalid(e.to_string()))?;
-        let append = AtomicSessionAppend {
-            session_id: cut.session_id,
-            expected_fact_seq: cut.durable_fact_seq,
-            expected_control_seq: cut.durable_control_seq,
-            header: None,
-            facts: vec![],
-            controls: vec![record],
-        };
-        let kernel = self.clone();
-        self.owned_commit(async move {
-            let _admission = admission;
-            kernel
-                .commit_agent_with_flush_conflict_retry(AtomicAgentCommit {
-                    sessions: vec![append],
-                    required_active_activations: vec![],
-                    quiescent_descendants_of: None,
-                })
-                .await?
-                .map_err(turn_store_error)?;
-            Ok(MessageFeedbackOutcome::Saved { current })
+        let value = change.value.clone();
+        let version = self
+            .append_session_control(
+                admission,
+                snapshot.watermarks,
+                AgentControlRecordBody::MessageFeedbackChanged { change },
+            )
+            .await?;
+        Ok(MessageFeedbackOutcome::Saved {
+            current: value.map(|value| SavedMessageFeedback { version, value }),
         })
-        .await
     }
 
     async fn begin_maintenance(

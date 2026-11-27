@@ -786,6 +786,7 @@ impl MailboxProjection {
             | AgentControlRecordBody::DomainStateCommitted { .. }
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
@@ -1100,6 +1101,7 @@ impl ActivationProjection {
             | AgentControlRecordBody::MessageSuccessor { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramRun { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused
@@ -1406,6 +1408,7 @@ impl ReadyProjection {
             | AgentControlRecordBody::ProgramRun { .. }
             | AgentControlRecordBody::QueueMutationRecorded { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused

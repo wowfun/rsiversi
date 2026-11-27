@@ -1,10 +1,10 @@
 use crate::{WorkspaceReview, git::Git, owner::Observer, scratch_root::Root};
 use async_trait::async_trait;
+use rsi_agent_turn_protocol::TurnServiceContract;
 use rsi_api_protocol::{ApiError, ApiRegistrarContract, ApiRegistration, json_handler};
 use rsi_meta::{
     ActivationPlan, ConfigValue, LocalContract, MetaError, PluginFactory, PreparedActivation,
 };
-use rsi_storage_domain::{DomainFacilityContract, DomainSpec, Schema};
 use rsi_workspace_review_api::{ConversationIdentity, Request};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -19,7 +19,7 @@ impl LocalContract for WorkspaceReviewContract {
     const KEY: &'static str = "rsi.workspace-review";
     type Service = WorkspaceReview;
 }
-/// Product plugin for isolated Git captures and durable summaries.
+/// Product plugin for isolated Git captures and changed-Turn markers.
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceReviewFactory;
 #[derive(Deserialize)]
@@ -36,30 +36,13 @@ impl PluginFactory for WorkspaceReviewFactory {
             return Err(meta("review scratch and Git executable must be absolute"));
         }
         Ok(PreparedActivation::new(config.clone())
-            .requiring_local::<DomainFacilityContract>()
+            .requiring_local::<TurnServiceContract>()
             .requiring_local::<rsi_process::ProcessContract>()
             .requiring_local::<rsi_sandbox::SandboxContract>()
             .requiring_local::<rsi_files_protocol::FilesContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
         let input: Config = serde_json::from_value(plan.config().as_ref().clone()).map_err(meta)?;
-        let domain = plan
-            .local::<DomainFacilityContract>()?
-            .open(
-                DomainSpec {
-                    id: "rsi.workspace-review".into(),
-                    backend: "base".into(),
-                    version: crate::STORAGE_VERSION,
-                    maximum_records: 8192,
-                    maximum_bytes: 64 * 1024 * 1024,
-                    ..DomainSpec::default()
-                },
-                Schema::default()
-                    .table::<rsi_workspace_review_api::Summary>("summaries")
-                    .map_err(meta)?,
-            )
-            .await
-            .map_err(meta)?;
         let root = Root::open(input.directory).await.map_err(meta)?;
         let git = Git {
             process: plan.local::<rsi_process::ProcessContract>()?,
@@ -70,12 +53,11 @@ impl PluginFactory for WorkspaceReviewFactory {
             tasks: TaskTracker::new(),
         };
         let owner = WorkspaceReview::open(
-            domain,
+            plan.local::<TurnServiceContract>()?,
             root,
             git,
             plan.context().runtime().execution().clone(),
-        )
-        .map_err(meta)?;
+        );
         let observer: Arc<dyn rsi_agent_turn_protocol::ExecutionObserver> =
             Arc::new(Observer(owner.clone()));
         let observation = plan

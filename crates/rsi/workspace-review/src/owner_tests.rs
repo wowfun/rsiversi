@@ -2,183 +2,48 @@ use super::*;
 use rsi_agent_session_protocol::{
     AgentPresetId, FrozenAgentSettings, SessionHeader, SessionId, TurnId,
 };
+use rsi_agent_session_protocol::{CancelReason, TurnOutcome};
+use rsi_agent_turn_protocol::{
+    CancelResult, PreparedResumeSession, Result as TurnResult, SubmitImage, SubmitTurn,
+    SubmittedTurn, TurnObservation,
+};
 use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
-use rsi_storage::StorageError;
-use rsi_storage_domain::DomainSpec;
-use std::sync::atomic::{AtomicBool, Ordering};
-#[derive(Debug)]
-struct Storage {
-    spec: DomainSpec,
-    rows: Mutex<BTreeMap<String, serde_json::Value>>,
-    fail: AtomicBool,
-    fenced: AtomicBool,
-}
-impl Storage {
-    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
-        if self.fenced.load(Ordering::Acquire) {
-            Err(StorageError::RecoveryRequired)
-        } else {
-            Ok(())
-        }
-    }
-    fn snapshot(&self) -> std::result::Result<BTreeMap<String, serde_json::Value>, StorageError> {
-        self.ensure_available()?;
-        Ok(self.rows.lock().unwrap().clone())
-    }
-    async fn open(self: &Arc<Self>, runtime: &Runtime) -> Domain {
-        if runtime
-            .root()
-            .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
-            .is_none()
-        {
-            for (name, factory) in [
-                (
-                    "storage",
-                    Arc::new(rsi_storage::StorageFactory) as Arc<dyn rsi_meta::PluginFactory>,
-                ),
-                ("domains", Arc::new(rsi_storage_domain::DomainFactory)),
-            ] {
-                runtime
-                    .root()
-                    .apply(
-                        ResolvedFactory::linked(name, "test", UpdateMode::Replayable, factory),
-                        serde_json::Value::Null,
-                    )
-                    .await
-                    .unwrap();
-            }
-        }
-        let route = format!("review-{:p}", Arc::as_ptr(self));
-        if runtime
-            .root()
-            .lookup_local::<rsi_storage::StorageHubContract>()
-            .unwrap()
-            .resolve(&route)
-            .is_err()
-        {
-            let factory =
-                rsi_storage_testkit::BackendFactory::new(&route, Arc::new(Backend(self.clone())));
-            let fiber = runtime
-                .root()
-                .apply(
-                    ResolvedFactory::linked(
-                        route.as_str(),
-                        "test",
-                        UpdateMode::Replayable,
-                        Arc::new(factory),
-                    ),
-                    serde_json::Value::Null,
-                )
-                .await
-                .unwrap();
-            assert_eq!(fiber.snapshot().state, rsi_meta::FiberState::Active);
-        }
-        let mut spec = self.spec.clone();
-        spec.backend = route;
-        runtime
-            .root()
-            .lookup_local::<rsi_storage_domain::DomainFacilityContract>()
-            .unwrap()
-            .open(
-                spec,
-                rsi_storage_domain::Schema::default()
-                    .table::<Summary>("summaries")
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-}
-#[derive(Debug)]
-struct Backend(Arc<Storage>);
-#[derive(Debug)]
-struct Unit(Arc<Storage>, rsi_storage::UnitDescriptor);
+use std::sync::atomic::Ordering;
+
+#[derive(Default, Debug)]
+struct Markers(Mutex<Vec<(SessionId, TurnId)>>);
 #[async_trait]
-impl rsi_storage::KvBackend for Backend {
-    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
-        self.0.ensure_available()
+impl TurnService for Markers {
+    async fn record_workspace_changes(&self, session: &SessionId, turn: &TurnId) -> TurnResult<()> {
+        self.0.lock().unwrap().push((session.clone(), turn.clone()));
+        Ok(())
     }
-    fn capabilities(&self, _: rsi_storage::Layout) -> rsi_storage::Capabilities {
-        rsi_storage::Capabilities {
-            atomic_batch: true,
-            backup_record: false,
-        }
+    async fn prepare_resume(&self, _: &SessionId) -> TurnResult<PreparedResumeSession> {
+        unreachable!()
     }
-    async fn open(
+    async fn submit(&self, _: SubmitTurn) -> TurnResult<SubmittedTurn> {
+        unreachable!()
+    }
+    async fn submit_image(&self, _: SubmitImage) -> TurnResult<SubmittedTurn> {
+        unreachable!()
+    }
+    async fn cancel(
         &self,
-        descriptor: rsi_storage::UnitDescriptor,
-    ) -> std::result::Result<rsi_storage::OpenedUnit, StorageError> {
-        self.ensure_available()?;
-        descriptor.admit_version(self.0.spec.version)?;
-        let records = self
-            .0
-            .rows
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(key, value)| {
-                (
-                    rsi_storage::Address::record("summaries", key).unwrap(),
-                    rsi_storage::EncodedValue::encode(value).unwrap(),
-                )
-            })
-            .collect();
-        Ok(rsi_storage::OpenedUnit {
-            snapshot: rsi_storage::UnitSnapshot {
-                version: Some(self.0.spec.version),
-                records,
-                recoveries: vec![],
-            },
-            unit: Arc::new(Unit(self.0.clone(), descriptor)),
-        })
+        _: &SessionId,
+        _: &TurnId,
+        _: Option<CancelReason>,
+    ) -> TurnResult<CancelResult> {
+        unreachable!()
     }
-}
-#[async_trait]
-impl rsi_storage::KvUnit for Unit {
-    fn descriptor(&self) -> &rsi_storage::UnitDescriptor {
-        &self.1
+    async fn observe(&self, _: &SessionId, _: u64) -> TurnResult<TurnObservation> {
+        unreachable!()
     }
-    fn ensure_available(&self) -> std::result::Result<(), StorageError> {
-        self.0.ensure_available()
+    async fn outcome(&self, _: &SessionId, _: &TurnId) -> TurnResult<Option<TurnOutcome>> {
+        unreachable!()
     }
-    async fn write(
-        &self,
-        changes: Vec<rsi_storage::Mutation>,
-    ) -> std::result::Result<(), StorageError> {
-        self.ensure_available()?;
-        for change in changes {
-            assert_eq!(change.address.table(), "summaries");
-            let value = change.value.expect("review never deletes summaries");
-            self.0
-                .rows
-                .lock()
-                .unwrap()
-                .insert(change.address.key().into(), value.decode()?);
-        }
-        if self.0.fail.load(Ordering::SeqCst) {
-            self.0.fenced.store(true, Ordering::Release);
-            Err(StorageError::OutcomeUnknown(
-                "acknowledgement lost after write".into(),
-            ))
-        } else {
-            Ok(())
-        }
+    async fn session_header(&self, _: &SessionId) -> TurnResult<SessionHeader> {
+        unreachable!()
     }
-}
-fn storage() -> Arc<Storage> {
-    Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::new(BTreeMap::new()),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    })
 }
 async fn install_process(runtime: &Runtime) -> rsi_meta::FiberHandle {
     runtime
@@ -195,7 +60,7 @@ async fn install_process(runtime: &Runtime) -> rsi_meta::FiberHandle {
         .await
         .unwrap()
 }
-async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<WorkspaceReview> {
+async fn owner(runtime: &Runtime, path: PathBuf, markers: Arc<Markers>) -> Arc<WorkspaceReview> {
     let git = Git {
         process: runtime
             .root()
@@ -208,12 +73,11 @@ async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<Wo
         tasks: TaskTracker::new(),
     };
     WorkspaceReview::open(
-        domain.open(runtime).await,
+        markers,
         Root::open(path).await.unwrap(),
         git,
         runtime.execution().clone(),
     )
-    .unwrap()
 }
 fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
     session_start(path, recovered, "review-source")
@@ -252,7 +116,7 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let owner = owner(&runtime, temporary.path().join("scratch"), storage()).await;
+    let owner = owner(&runtime, temporary.path().join("scratch"), Arc::default()).await;
     let mut intervals = Vec::new();
     let stop = CancellationToken::new();
     for i in 0..9 {
@@ -269,7 +133,6 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
         std::fs::write(workspace.join("note.txt"), "before\n").unwrap();
         let interval = owner
             .admit(session_start(&workspace, false, &session))
-            .unwrap()
             .unwrap();
         interval.begin(stop.clone()).await;
         intervals.push(interval);
@@ -316,7 +179,6 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
         .unwrap();
     let next = owner
         .admit(session_start(&intervals[0].workspace, false, "next"))
-        .unwrap()
         .unwrap();
     next.begin(stop.clone()).await;
     assert!(
@@ -333,7 +195,7 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
     {
         let state = owner.state.lock().unwrap();
         assert!(state.entries[&intervals[0].id].runtime.is_some());
-        assert!(state.entries[&intervals[1].id].runtime.is_none());
+        assert!(!state.entries.contains_key(&intervals[1].id));
         assert!(
             intervals[2..]
                 .iter()
@@ -348,251 +210,13 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
 }
 
 #[tokio::test]
-async fn full_durable_history_is_preserved_and_reports_omission_after_restart() {
-    let temporary = tempfile::tempdir().unwrap();
-    let runtime = Runtime::default();
-    let process = install_process(&runtime).await;
-    let domain = storage();
-    let path = temporary.path().join("scratch");
-    let initial = owner(&runtime, path.clone(), domain.clone()).await;
-    let interval = initial
-        .admit(start(temporary.path(), false))
-        .unwrap()
-        .unwrap();
-    let mut template = initial.state.lock().unwrap().entries[&interval.id]
-        .summary
-        .clone();
-    template.phase = Phase::Complete;
-    template.changed_files = 1;
-    template.finished_ms = Some(template.started_ms.clone());
-    initial.close().await;
-    drop(interval);
-    drop(initial);
-    seed_history(&domain, &mut template);
-    let original = domain.rows.lock().unwrap().clone();
-    for _ in 0..2 {
-        let current = owner(&runtime, path.clone(), domain.clone()).await;
-        assert!(matches!(
-            Observer(current.clone())
-                .observe(start(temporary.path(), false), CancellationToken::new())
-                .await
-                .unwrap(),
-            ExecutionObservationAdmission::OmittedCapacity
-        ));
-        let denied = start(temporary.path(), false);
-        // Backend recovery remains a hard refusal even when history is full.
-        domain.fenced.store(true, Ordering::Release);
-        assert!(
-            Observer(current.clone())
-                .observe(denied, CancellationToken::new())
-                .await
-                .is_err()
-        );
-        domain.fenced.store(false, Ordering::Release);
-        let mut after = None;
-        let mut count = 0;
-        loop {
-            let Reply::Summaries {
-                items,
-                next,
-                capacity_limited,
-                ..
-            } = current
-                .read(
-                    Request::List {
-                        scope: template.scope.clone(),
-                        after,
-                    },
-                    ExecutionOperation::new(()),
-                    CancellationToken::new(),
-                )
-                .await
-                .unwrap()
-            else {
-                panic!("expected summaries")
-            };
-            assert!(capacity_limited);
-            count += items.len();
-            after = next;
-            if after.is_none() {
-                break;
-            }
-        }
-        assert_eq!(count, 8192);
-        assert_eq!(*domain.rows.lock().unwrap(), original);
-        current.close().await;
-        drop(current);
-    }
-    assert!(process.dispose().await.is_clean());
-    assert!(runtime.shutdown().await.is_clean());
-}
-
-fn seed_history(domain: &Storage, template: &mut Summary) {
-    let mut rows = domain.rows.lock().unwrap();
-    for index in 0..8192 {
-        template.id = format!("{index:032x}");
-        rows.insert(
-            template.id.clone(),
-            serde_json::to_value(&*template).unwrap(),
-        );
-    }
-}
-
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one causal failure, teardown and recovery sequence"
-)]
-async fn lost_storage_ack_recovers_only_the_observed_change_after_restart() {
-    let temporary = tempfile::tempdir().unwrap();
-    let runtime = Runtime::default();
-    let process = install_process(&runtime).await;
-    let domain = storage();
-    domain.fail.store(true, Ordering::Release);
-    let workspace = temporary.path().join("workspace");
-    assert!(
-        std::process::Command::new("/usr/bin/git")
-            .args(["init", "--quiet"])
-            .arg(&workspace)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let path = temporary.path().join("scratch");
-    let first = owner(&runtime, path.clone(), domain.clone()).await;
-    let interval = first.admit(start(&workspace, true)).unwrap().unwrap();
-    let id = interval.id.clone();
-    interval.begin(CancellationToken::new()).await;
-    assert!(domain.snapshot().unwrap().is_empty());
-    interval.first_tool(CancellationToken::new()).await;
-    assert!(domain.snapshot().unwrap().is_empty());
-    std::fs::write(workspace.join("actual.txt"), "added\n").unwrap();
-    interval
-        .end(
-            ExecutionObservationEnd {
-                begin_completed: true,
-                controlled_work: ControlledWorkStatus::Unsettled,
-            },
-            CancellationToken::new(),
-        )
-        .await;
-    assert_eq!(
-        domain.rows.lock().unwrap().len(),
-        1,
-        "test storage wrote before losing its acknowledgement"
-    );
-    let summary: Summary =
-        serde_json::from_value(domain.rows.lock().unwrap()[&id].clone()).unwrap();
-    assert_eq!((summary.phase, summary.changed_files), (Phase::Partial, 1));
-    for reason in [
-        OmissionKind::RecoveredWithoutBaseline,
-        OmissionKind::Unsettled,
-    ] {
-        assert!(summary.omissions.iter().any(|row| row.kind == reason));
-    }
-    let request = Request::List {
-        scope: summary.scope.clone(),
-        after: None,
-    };
-    assert!(matches!(
-        first
-            .read(
-                request.clone(),
-                ExecutionOperation::new(()),
-                CancellationToken::new()
-            )
-            .await,
-        Err(ApiError::Unavailable)
-    ));
-    assert!(matches!(
-        first.admit(start(temporary.path(), false)),
-        Err(ApiError::Unavailable)
-    ));
-    first.close().await;
-    drop(interval);
-    drop(first);
-    let recovered_domain = Arc::new(Storage {
-        spec: domain.spec.clone(),
-        rows: Mutex::new(domain.rows.lock().unwrap().clone()),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
-    let second = owner(&runtime, path, recovered_domain.clone()).await;
-    let Reply::Summaries { epoch, items, .. } = second
-        .read(
-            request,
-            ExecutionOperation::new(()),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("summaries")
-    };
-    assert_eq!(items, vec![summary.clone()]);
-    assert_ne!(epoch, summary.epoch);
-    assert!(matches!(
-        second
-            .read(
-                Request::Files {
-                    scope: summary.scope,
-                    id,
-                    offset: 0
-                },
-                ExecutionOperation::new(()),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap(),
-        Reply::Expired { .. }
-    ));
-    let recovered = second
-        .admit(start(temporary.path(), true))
-        .unwrap()
-        .unwrap();
-    recovered.begin(CancellationToken::new()).await;
-    recovered.first_tool(CancellationToken::new()).await;
-    assert_eq!(
-        std::fs::read_dir(&second.root.path).unwrap().count(),
-        1,
-        "a non-Git baseline needs only the scratch owner's lock file"
-    );
-    recovered
-        .end(
-            ExecutionObservationEnd {
-                begin_completed: true,
-                controlled_work: ControlledWorkStatus::Unsettled,
-            },
-            CancellationToken::new(),
-        )
-        .await;
-    assert!(
-        !second
-            .state
-            .lock()
-            .unwrap()
-            .entries
-            .contains_key(&recovered.id)
-    );
-    assert_eq!(recovered_domain.snapshot().unwrap().len(), 1);
-    second.close().await;
-    drop(recovered);
-    drop(second);
-    assert!(process.dispose().await.is_clean());
-    assert!(runtime.shutdown().await.is_clean());
-}
-
-#[tokio::test]
 async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let domain = storage();
-    let owner = owner(&runtime, temporary.path().join("scratch"), domain).await;
-    let interval = owner
-        .admit(start(temporary.path(), false))
-        .unwrap()
-        .unwrap();
+    let markers = Arc::new(Markers::default());
+    let owner = owner(&runtime, temporary.path().join("scratch"), markers).await;
+    let interval = owner.admit(start(temporary.path(), false)).unwrap();
     let scope = owner.state.lock().unwrap().entries[&interval.id]
         .summary
         .scope
@@ -652,9 +276,9 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     );
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let domain = storage();
-    let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
-    let interval = owner.admit(start(&workspace, false)).unwrap().unwrap();
+    let markers = Arc::new(Markers::default());
+    let owner = owner(&runtime, temporary.path().join("scratch"), markers.clone()).await;
+    let interval = owner.admit(start(&workspace, false)).unwrap();
     let held = owner.workers.clone().acquire_many_owned(2).await.unwrap();
     let baseline = tokio::spawn({
         let interval = interval.clone();
@@ -673,7 +297,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     );
     drop(held);
     baseline.await.unwrap();
-    assert!(domain.snapshot().unwrap().is_empty());
+    assert!(markers.0.lock().unwrap().is_empty());
     let scope = owner.state.lock().unwrap().entries[&interval.id]
         .summary
         .scope
@@ -684,7 +308,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         Reply::Summaries { items, .. } if items.is_empty()
     ));
     interval.first_tool(CancellationToken::new()).await;
-    assert!(domain.snapshot().unwrap().is_empty());
+    assert!(markers.0.lock().unwrap().is_empty());
     assert!(matches!(
         owner.read_inner(&request, &CancellationToken::new()).await.unwrap(),
         Reply::Summaries { items, .. } if items.len() == 1 && items[0].phase == Phase::Pending
@@ -760,7 +384,6 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     drop(interval);
     let unchanged = owner
         .admit(session_start(&workspace, false, "read-only"))
-        .unwrap()
         .unwrap();
     let stop = CancellationToken::new();
     unchanged.begin(stop.clone()).await;
@@ -787,7 +410,13 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
             .entries
             .contains_key(&unchanged.id)
     );
-    assert_eq!(domain.snapshot().unwrap().len(), 1);
+    assert_eq!(
+        *markers.0.lock().unwrap(),
+        vec![(
+            SessionId::new("review-source").unwrap(),
+            TurnId::new("turn").unwrap()
+        )]
+    );
     drop(unchanged);
     owner.close().await;
     drop(owner);
@@ -800,24 +429,9 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::default(),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
-    let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
-    let interval = owner
-        .admit(start(temporary.path(), false))
-        .unwrap()
-        .unwrap();
+    let markers = Arc::new(Markers::default());
+    let owner = owner(&runtime, temporary.path().join("scratch"), markers.clone()).await;
+    let interval = owner.admit(start(temporary.path(), false)).unwrap();
     interval
         .end(
             ExecutionObservationEnd {
@@ -827,7 +441,7 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
             CancellationToken::new(),
         )
         .await;
-    assert!(domain.snapshot().unwrap().is_empty());
+    assert!(markers.0.lock().unwrap().is_empty());
     interval.begin(CancellationToken::new()).await;
     interval.first_tool(CancellationToken::new()).await;
     assert!(
@@ -839,7 +453,7 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
             .contains_key(&interval.id),
         "late begin must not consume a resident slot again"
     );
-    assert!(domain.snapshot().unwrap().is_empty());
+    assert!(markers.0.lock().unwrap().is_empty());
     assert!(interval.state.lock().await.before.is_none());
     owner.close().await;
     drop(interval);
@@ -857,20 +471,8 @@ async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::default(),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
-    let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
+    let markers = Arc::new(Markers::default());
+    let owner = owner(&runtime, temporary.path().join("scratch"), markers.clone()).await;
     let location = ExecutionLocation::Ssh {
         target: rsi_execution::ExecutionTargetId::parse("b".repeat(32)).unwrap(),
     };
@@ -903,14 +505,13 @@ async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_
         owner.admit(remote.clone()),
         Err(ApiError::Unauthorized)
     ));
-    assert!(domain.rows.lock().unwrap().is_empty());
+    assert!(markers.0.lock().unwrap().is_empty());
     assert!(owner.state.lock().unwrap().entries.is_empty());
     assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
     gate.revoked.store(false, Ordering::SeqCst);
     let interval = owner
         .admit(remote)
-        .expect("admission performs no source I/O")
-        .unwrap();
+        .expect("admission performs no source I/O");
     assert_eq!(gate.active.load(Ordering::SeqCst), 1);
     let retained = interval.clone();
     drop(interval);

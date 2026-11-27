@@ -19,13 +19,11 @@ rsi-api-protocol = { path = "../../rsi-api/protocol" }
 rsi-files-protocol = { path = "../../rsi-files/protocol" }
 rsi-process = { path = "../../rsi-process/core" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
-rsi-storage-domain = { path = "../../rsi-storage/domain" }
 rsi-meta = { path = "../../rsi-meta/core" }
 rsi-workspace-protocol = { path = "../../rsi-workspace/protocol" }
 rsi-workspace-review-api = { path = "../workspace-review-api" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -33,11 +31,6 @@ tokio-util.workspace = true
 rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rustix.workspace = true
 [dev-dependencies]
-rsi-persistence-testkit = { path = "../../tools/rsi-persistence-testkit" }
-schemars.workspace = true
-rsi-storage-testkit = { path = "../../rsi-storage/testkit" }
-rsi-storage = { path = "../../rsi-storage/core" }
-rsi-agent-testkit = { path = "../../rsi-agent/testkit" }
 rsi-ai-protocol = { path = "../../rsi-ai/protocol" }
 rsi-process-local = { path = "../../rsi-process/local" }
 rsi-sandbox-local = { path = "../../rsi-sandbox/local" }

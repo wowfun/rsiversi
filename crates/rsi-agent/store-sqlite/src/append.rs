@@ -407,6 +407,7 @@ impl ControlIndexer<'_, '_> {
                 }
                 Ok(())
             }
+            AgentControlRecordBody::WorkspaceChangesRecorded { .. } => Ok(()),
             AgentControlRecordBody::MessageFeedbackChanged { change } => super::feedback::validate_change(
                 self.transaction, self.session_id, change, self.record.seq() - 1, self.after_fact_seq
             ),

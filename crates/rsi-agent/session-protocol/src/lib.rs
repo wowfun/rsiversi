@@ -130,7 +130,7 @@ pub use resource::{
 };
 
 /// Exact durable format accepted by this pre-release implementation.
-pub const SESSION_FORMAT_VERSION: u32 = 48;
+pub const SESSION_FORMAT_VERSION: u32 = 49;
 /// Maximum bytes in one session, turn, effect, profile, or error-code identity.
 pub const MAXIMUM_AGENT_IDENTIFIER_BYTES: usize = 256;
 /// Maximum bytes in one Agent preset directory-segment identity.
@@ -1129,6 +1129,8 @@ pub enum AgentControlRecordBody {
         parent_session_id: SessionId,
         maximum_bytes: u64,
     },
+    /// A workspace comparison found changed files during this Turn.
+    WorkspaceChangesRecorded { turn_id: TurnId },
 }
 
 impl AgentControlRecordBody {
@@ -1248,7 +1250,8 @@ impl AgentControlRecordBody {
                 )))
             }
             Self::WorkingDirectoryChanged { cwd } => validate_canonical_path(cwd),
-            Self::MessageFeedbackChanged { .. }
+            Self::WorkspaceChangesRecorded { .. }
+            | Self::MessageFeedbackChanged { .. }
             | Self::InboxPaused
             | Self::InboxResumed
             | Self::MessageClaimed { .. }

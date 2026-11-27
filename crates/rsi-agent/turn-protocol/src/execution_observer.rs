@@ -46,15 +46,6 @@ pub trait ExecutionInterval: fmt::Debug + Send + Sync + 'static {
 }
 
 /// Explicit composition seam for non-authoritative effect-interval evidence.
-#[derive(Debug)]
-pub enum ExecutionObservationAdmission {
-    /// An interval whose baseline must be awaited before effects.
-    Interval(Arc<dyn ExecutionInterval>),
-    /// Evidence retention is full; report the omission and continue without capture.
-    OmittedCapacity,
-}
-
-/// Explicit composition seam for non-authoritative effect-interval evidence.
 #[async_trait]
 pub trait ExecutionObserver: fmt::Debug + Send + Sync + 'static {
     /// Admit before entering effect owners. No claim mutation authority is transferred.
@@ -62,7 +53,7 @@ pub trait ExecutionObserver: fmt::Debug + Send + Sync + 'static {
         &self,
         start: ExecutionObservationStart,
         cancellation: CancellationToken,
-    ) -> Result<ExecutionObservationAdmission, String>;
+    ) -> Result<Arc<dyn ExecutionInterval>, String>;
 }
 
 /// Nominal Local dependency enabled explicitly by the Executor configuration.

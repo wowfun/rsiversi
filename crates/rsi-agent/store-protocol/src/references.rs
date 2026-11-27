@@ -159,6 +159,7 @@ pub fn native_control_references(record: &AgentControlRecord) -> Result<Referenc
             | AgentControlRecordBody::WaitParked { .. }
             | AgentControlRecordBody::WaitResumed { .. }
             | AgentControlRecordBody::ProgramCompletionReserved { .. }
+            | AgentControlRecordBody::WorkspaceChangesRecorded { .. }
             | AgentControlRecordBody::MessageFeedbackChanged { .. }
             | AgentControlRecordBody::WorkingDirectoryChanged { .. }
             | AgentControlRecordBody::InboxPaused

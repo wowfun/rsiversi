@@ -107,11 +107,9 @@ Tool caller authority retains the producing Step's optional Tool subset along
 with its model selection. A Program dispatcher may narrow that set further;
 later Steps cannot widen an already issued caller's authority.
 
-An optional execution observer returns either an admitted interval or an explicit
-evidence-capacity omission. The Executor reports an omitted claim before driving
-it without capture. Errors, cancellation and admission deadlines still prevent
-effect entry. The observation owner exposes its persistent capacity state; an
-omission is never evidence of an empty or complete comparison.
+An optional execution observer admits a capture interval before effects. Errors,
+cancellation and admission deadlines prevent effect entry. The trusted review
+owner can record a changed Turn in an existing Session after comparison.
 
 `open_model_attempt` opens the exact claim's Session stream synchronously before
 dispatch. The Kernel owns its clock. Dropping the lease allows that Session to

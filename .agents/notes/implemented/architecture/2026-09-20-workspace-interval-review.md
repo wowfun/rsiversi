@@ -12,9 +12,8 @@ would also attribute preexisting dirty changes to the current execution.
 
 The optional Executor observer orders: admit, await begin, drive, join bounded
 controlled-work settlement, await end. Git and evidence reside in an ordinary product
-plugin, with private index/object storage and source-owner authorization. Persist
-bounded summaries separately from Agent Facts and retain diff data only for the
-owning runtime epoch. See the [owner contract](../../../../crates/rsi/workspace-review/README.md).
+plugin, with private index/object storage and source-owner authorization. Append one Turn marker to the Session when a comparison finds changed files.
+The capture owner holds the comparison and its summary together. See the [owner contract](../../../../crates/rsi/workspace-review/README.md).
 
 ## Alternatives considered
 
@@ -28,8 +27,8 @@ tree and contradict the requested in-place implementation workflow.
 Prove that effects await begin and that end follows finalizers and retained Tools,
 including cancelled delayed writers. Exercise existing dirt, additions, deletion,
 renames, concurrent unrelated changes, quotas, source isolation and restart. Hash
-user Git metadata before and after and demonstrate readable old summaries with
-explicitly expired diffs. Verify terminal, browser and native Linux desktop paths.
+user Git metadata before and after and demonstrate the surviving Session marker and released
+comparison. Verify terminal, browser and native Linux desktop paths.
 
 ## Consequences
 
@@ -52,12 +51,8 @@ between reading bytes and reopening a different inode for its mode. DSH
 and private snapshot patterns, but its direct Node filesystem scratch operations
 do not establish RSI remote-source authority.
 
-Durable summary saturation produces an explicit observation omission rather than
-terminating unrelated Agent work. DSH's `workspace-changes/src/recorder.ts`
-serializes capture before tools, catches capture failures in `enqueue`, and keeps
-comparisons only until Session disposal. We reuse its non-authoritative failure
-boundary, while preserving RSI's already durable summaries and source grants.
-The list reports saturation after restart and the Executor logs each omitted
-claim. These logs do not promise durable per-claim omission history. Automatic
-archive would require a separate durable paging and recovery protocol; silent
-eviction or increasing the summary bound would not solve the lifetime mismatch.
+DSH's workspace recorder appends `workspace/changes` with the turn number.
+Its summary and file routes require the live recorder. A second durable summary
+would retain counts after the files they describe have expired and would need
+separate startup, capacity and purge handling. Keeping the marker with its
+Session lets the standard Session lifecycle release it.
