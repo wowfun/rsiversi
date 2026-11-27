@@ -745,11 +745,7 @@ mod bootstrap_tests {
             let server = HttpServer::new(
                 execution,
                 listener,
-                Policy {
-                    origin: "http://127.0.0.1".into(),
-                    authority: "127.0.0.1".into(),
-                    secure: tls.is_some(),
-                },
+                Policy::new("127.0.0.1", tls.is_some()),
                 tls,
                 HttpServices {
                     dispatch: registry.clone(),

@@ -132,11 +132,7 @@ async fn verify() {
         endpoint,
         epoch,
         access: Access::Remote {
-            policy: Policy {
-                origin: "http://127.0.0.1".into(),
-                authority: "127.0.0.1".into(),
-                secure: false,
-            },
+            policy: Policy::new("127.0.0.1", false),
             authentication: Arc::new(Auth),
         },
         execution,

@@ -94,18 +94,19 @@ operations through the [shared OperationCall path codec](../protocol/README.md).
 The API v2 path carries protocol name/version, operation domain/name/version and
 call shape. Domain plugins own all business
 DTOs. Native clients use a bearer token; browser login transfers that token into
-an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. Its name
-includes the hash of the validated authority, isolating listeners on separate
-ports of the same host. Its path is `/` so authenticated application routes
-receive the same credential. Native API cookie calls
+an HttpOnly, SameSite=Strict cookie, with Secure enabled under TLS. The listener
+hashes its validated authority once to name the cookie. Listeners on separate
+ports of the same host use distinct names. Its path is `/` so authenticated
+application routes receive the same credential. Native API cookie calls
 require the exact configured Origin and `X-Rsi-Csrf: 1`. Every request checks the
 exact configured Host; foreign Origin, query parameters, conflicting credentials,
 duplicate security headers and unsupported methods are rejected before dispatch.
 Durable credentials never appear in URLs, diagnostics or serialized configuration.
 
 `X-Rsi-Expected-Device`, when present, must be one canonical DeviceId matching
-the authenticated caller before dispatch. It narrows a connection; it never
-authenticates a request or supplies Local origin. Cookie logout requires this pin
+the authenticated caller before dispatch. Login checks this pin against the
+same authentication result used to issue the cookie. The pin only narrows
+the authenticated connection. Cookie logout requires this pin
 and checks it before clearing a present device cookie; an absent cookie is an
 idempotent success even without a pin.
 This prevents an old connection from using or clearing another device's cookie.
@@ -280,10 +281,8 @@ socket is alive. Revocation and process retirement invalidate the handle.
 The connection deadline bounds opening the private socket. Once forwarded,
 an installation can take as long as its application operation permits. Device
 revocation and application retirement still terminate the wait.
-The HTTP-only, SameSite=Strict device cookie uses path `/` and a name
-derived from the validated public authority. Independent local listeners
-on the same hostname use separate cookies. The native forwarder strips
-all cookies before sending a request to an application process.
+The native forwarder strips all cookies before sending a request to an
+application process.
 An application request may retain bounded process-local resources by key. An
 explicit release or retirement of its exact upstream request drops those
 resources. Resource release does not grant authority to invoke an operation.

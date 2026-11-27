@@ -14,12 +14,7 @@ impl LoopbackBrowserOrigin {
             tls: None,
             allow_loopback_http: true,
         };
-        config.validate()?;
-        let uri: http::Uri = config
-            .public_origin
-            .parse()
-            .map_err(|_| ApiError::Invalid("invalid loopback origin".into()))?;
-        if uri.authority().and_then(http::uri::Authority::port_u16) == Some(0) {
+        if config.validated_authority()?.port_u16() == Some(0) {
             return Err(ApiError::Invalid(
                 "frontend origin requires a bound port".into(),
             ));
@@ -61,14 +56,20 @@ pub(crate) struct Policy {
     pub origin: String,
     pub authority: String,
     pub secure: bool,
+    pub cookie_name: String,
 }
 impl HttpConfig {
     /// Validates the trust boundary before opening a socket or TLS file.
     pub fn validate(&self) -> Result<()> {
-        self.policy().map(|_| ())
+        self.validated_authority().map(|_| ())
     }
 
     pub(crate) fn policy(&self) -> Result<Policy> {
+        let authority = self.validated_authority()?;
+        Ok(Policy::new(authority.as_str(), self.tls.is_some()))
+    }
+
+    fn validated_authority(&self) -> Result<http::uri::Authority> {
         if self.public_origin.len() > 2048 {
             return Err(ApiError::Invalid("public origin is too long".into()));
         }
@@ -116,11 +117,7 @@ impl HttpConfig {
                 "HTTP requires explicit loopback development configuration".into(),
             ));
         }
-        Ok(Policy {
-            origin: format!("{}://{authority}", if secure { "https" } else { "http" }),
-            authority: authority.as_str().into(),
-            secure,
-        })
+        Ok(authority.clone())
     }
 }
 
@@ -137,6 +134,19 @@ pub(crate) fn one<'a>(headers: &'a http::HeaderMap, name: &str) -> Result<Option
 }
 
 impl Policy {
+    pub(crate) fn new(authority: &str, secure: bool) -> Self {
+        use sha2::{Digest, Sha256};
+        Self {
+            origin: format!("{}://{authority}", if secure { "https" } else { "http" }),
+            authority: authority.into(),
+            secure,
+            cookie_name: format!(
+                "rsi-device-{}",
+                hex::encode(Sha256::digest(authority.as_bytes()))
+            ),
+        }
+    }
+
     pub fn fence(
         &self,
         headers: &http::HeaderMap,

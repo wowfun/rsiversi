@@ -245,37 +245,34 @@ impl Access {
             return Err(ApiError::Invalid("cookie operations have no body".into()));
         }
         let expected = expected_device(headers)?;
+        let login = path.ends_with("/login");
         let cookie_present = device_cookie(headers, policy)?.is_some();
-        if path.ends_with("/logout") && cookie_present && expected.is_none() {
+        if !login && cookie_present && expected.is_none() {
             return Err(ApiError::Unauthorized);
         }
-        if let Some(expected) = expected
-            && (cookie_present || one(headers, "authorization")?.is_some())
-            && self.authenticate_device(headers)?.id != expected
+        if login || expected.is_some() && (cookie_present || headers.contains_key("authorization"))
         {
-            return Err(ApiError::Unauthorized);
+            let device = self.authenticate_device(headers)?;
+            if expected.is_some_and(|expected| expected != device.id) {
+                return Err(ApiError::Unauthorized);
+            }
         }
-        let value = if path.ends_with("/login") {
-            self.authenticate_device(headers)?;
+        let value = if login {
             let bearer = one(headers, "authorization")?
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .ok_or(ApiError::Unauthorized)?;
             device_cookie_value(bearer, policy)?
-                .to_str()
-                .map_err(|_| ApiError::Unauthorized)?
-                .to_owned()
         } else {
             format!(
                 "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
-                cookie_name(policy),
+                policy.cookie_name,
                 if policy.secure { "; Secure" } else { "" }
             )
+            .parse()
+            .map_err(|_| ApiError::Unauthorized)?
         };
         let mut response = Response::new(full(Bytes::from_static(b"{}")));
-        response.headers_mut().insert(
-            "set-cookie",
-            value.parse().map_err(|_| ApiError::Unauthorized)?,
-        );
+        response.headers_mut().insert("set-cookie", value);
         Ok(response)
     }
 }
@@ -304,12 +301,11 @@ fn device_cookie<'a>(
     headers: &'a http::HeaderMap,
     policy: &crate::policy::Policy,
 ) -> Result<Option<&'a str>> {
-    let name = cookie_name(policy);
     let mut cookie = None;
     if let Some(cookies) = one(headers, "cookie")? {
         for part in cookies.split(';') {
             if let Some((key, value)) = part.trim().split_once('=')
-                && key == name
+                && key == policy.cookie_name
                 && cookie.replace(value).is_some()
             {
                 return Err(ApiError::Unauthorized);
@@ -319,17 +315,10 @@ fn device_cookie<'a>(
     Ok(cookie)
 }
 
-fn cookie_name(policy: &crate::policy::Policy) -> String {
-    use sha2::Digest as _;
-    format!(
-        "rsi-device-{}",
-        hex::encode(sha2::Sha256::digest(policy.authority.as_bytes()))
-    )
-}
 fn device_cookie_value(token: &str, policy: &crate::policy::Policy) -> Result<http::HeaderValue> {
     format!(
         "{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{}",
-        cookie_name(policy),
+        policy.cookie_name,
         if policy.secure { "; Secure" } else { "" }
     )
     .parse()

@@ -47,6 +47,10 @@ async fn login_cookies_cover_application_paths_and_are_scoped_to_authority() {
             .post(format!("{}/api/v2/login", listener.origin))
             .header("origin", &listener.origin)
             .header("x-rsi-csrf", "1")
+            .header(
+                "x-rsi-expected-device",
+                DeviceId::from_bytes([1; 16]).as_str(),
+            )
             .bearer_auth(TOKEN)
             .send()
             .await
@@ -58,7 +62,16 @@ async fn login_cookies_cover_application_paths_and_are_scoped_to_authority() {
             .to_str()
             .unwrap();
         assert!(value.contains("; Path=/; HttpOnly; SameSite=Strict;"));
-        saved.push(value.split(';').next().unwrap().to_owned());
+        let issued = value.split(';').next().unwrap();
+        assert_eq!(issued, browser_cookie(&listener.origin, TOKEN));
+        assert_eq!(
+            listener
+                .authentication
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        saved.push(issued.to_owned());
     }
     assert_ne!(saved[0], saved[1]);
     let request = Harness::client()
@@ -79,9 +92,12 @@ mod browser_stream;
 struct Authentication {
     first: CancellationToken,
     second: CancellationToken,
+    calls: std::sync::atomic::AtomicUsize,
 }
 impl DeviceAuthentication for Authentication {
     fn authenticate(&self, token: &SecretValue) -> Result<AuthenticatedDevice> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (id, revoked) = match token.expose_secret() {
             TOKEN => (DeviceId::from_bytes([1; 16]), &self.first),
             SECOND_TOKEN => (DeviceId::from_bytes([2; 16]), &self.second),
@@ -262,6 +278,17 @@ async fn expected_device_is_checked_before_domain_dispatch_and_cookie_removal() 
             .unwrap();
         assert_eq!(response.status(), status);
         response.bytes().await.unwrap();
+        let response = Harness::client()
+            .post(format!("{}/api/v2/login", harness.origin))
+            .header("origin", &harness.origin)
+            .header("x-rsi-csrf", "1")
+            .header("x-rsi-expected-device", identity.as_str())
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers().contains_key("set-cookie"), status == 200);
         let response = Harness::client()
             .post(format!("{}/api/v2/logout", harness.origin))
             .header("origin", &harness.origin)
