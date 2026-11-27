@@ -137,6 +137,11 @@ impl Dir {
         }
         Ok(bytes)
     }
+    pub fn remove_file(&self, name: &str) -> Result<()> {
+        self.directory.remove_child(Path::new(name))?;
+        self.directory.sync_all()?;
+        Ok(())
+    }
     pub fn write(&self, name: &str, bytes: &[u8], replace: bool) -> Result<()> {
         let mut random = [0; 16];
         getrandom::fill(&mut random).map_err(|e| invalid(e.to_string()))?;

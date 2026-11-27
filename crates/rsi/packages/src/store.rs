@@ -266,6 +266,9 @@ impl PackageStore {
         self.resolution_unlocked()
     }
     fn write_resolution(&self, resolution: &Resolution) -> Result<()> {
+        if resolution.packages.is_empty() && resolution.trust.is_empty() {
+            return self.root.remove_file("resolution.json");
+        }
         self.root.write(
             "resolution.json",
             &serde_json::to_vec(resolution).map_err(|e| invalid(e.to_string()))?,
@@ -283,13 +286,7 @@ impl PackageStore {
         let _writer = self.root.lock("writer.lock", false)?;
         let mut resolution = self.resolution_unlocked()?;
         let verified = signed.verify(key, authority, now, resolution.trust.get(authority))?;
-        resolution
-            .trust
-            .insert(authority.to_owned(), verified.receipt().clone());
-        if resolution.trust.len() > 32 {
-            return Err(invalid("repository capacity"));
-        }
-        self.write_resolution(&resolution)?;
+        self.admit_repository_receipts(&mut resolution, std::slice::from_ref(&verified))?;
         Ok(verified)
     }
     /// Publishes all sources and their exact closure in one resolution transaction.
@@ -307,14 +304,18 @@ impl PackageStore {
         resolution: &mut Resolution,
         repositories: &[VerifiedRepository],
     ) -> Result<()> {
+        let mut changed = false;
         for repository in repositories {
             let receipt = repository.receipt();
-            if let Some(previous) = resolution.trust.get(&receipt.repository)
-                && (previous.sequence > receipt.sequence
-                    || (previous.sequence == receipt.sequence && previous.digest != receipt.digest))
-            {
-                return Err(Error::Trust("rollback during publication".into()));
+            if let Some(previous) = resolution.trust.get(&receipt.repository) {
+                if previous == receipt {
+                    continue;
+                }
+                if previous.sequence >= receipt.sequence {
+                    return Err(Error::Trust("rollback during publication".into()));
+                }
             }
+            changed = true;
             resolution
                 .trust
                 .insert(receipt.repository.clone(), receipt.clone());
@@ -322,7 +323,7 @@ impl PackageStore {
         if resolution.trust.len() > 32 {
             return Err(invalid("repository capacity"));
         }
-        if !repositories.is_empty() {
+        if changed {
             self.write_resolution(resolution)?;
         }
         Ok(())
@@ -344,7 +345,13 @@ impl PackageStore {
         self.admit_repository_receipts(&mut resolution, repositories)?;
         let candidates =
             Self::admit_sources(sources, repositories, interfaces, target, &resolution)?;
+        let mut changed = false;
         for (name, (digest, _, source)) in &candidates {
+            if resolution.packages.get(name).is_some_and(|selected| {
+                &selected.digest == digest && selected.provenance == source.provenance
+            }) {
+                continue;
+            }
             resolution.packages.insert(
                 name.clone(),
                 Selection {
@@ -352,6 +359,7 @@ impl PackageStore {
                     provenance: source.provenance.clone(),
                 },
             );
+            changed = true;
         }
         if resolution.packages.len() > MAX_PACKAGES {
             return Err(invalid("selected package capacity"));
@@ -370,7 +378,9 @@ impl PackageStore {
         }
         validate_closure(&resolution, &manifests)?;
         self.publish_objects(&candidates, check, || {
-            self.write_resolution(&resolution)?;
+            if changed {
+                self.write_resolution(&resolution)?;
+            }
             Ok(resolution)
         })
     }
@@ -922,11 +932,7 @@ impl PackageStore {
             }
         }
         self.validate_resolution(&resolution)?;
-        self.root.write(
-            "resolution.json",
-            &serde_json::to_vec(&resolution).map_err(|e| invalid(e.to_string()))?,
-            true,
-        )?;
+        self.write_resolution(&resolution)?;
         Ok(resolution)
     }
     /// Reclaims unselected, unleased generations and abandoned installation stages.

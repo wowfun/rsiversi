@@ -5,6 +5,17 @@ use std::collections::BTreeMap;
 mod support;
 use support::temporary_root;
 
+fn mark_resolution(path: &std::path::Path) -> std::time::SystemTime {
+    let checkpoint = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(checkpoint)
+        .unwrap();
+    checkpoint
+}
+
 fn source(root: &std::path::Path, name: &str, bytes: &[u8]) -> InstallSource {
     let directory = root.join(format!("input-{name}-{}", bytes.len()));
     std::fs::create_dir_all(&directory).unwrap();
@@ -189,6 +200,13 @@ fn reselection_reuses_a_verified_object_and_repairs_a_damaged_unleased_one() {
     let install = || store.install(std::slice::from_ref(&first), &[], &[], "portable");
     let installed = install().unwrap();
     let digest = &installed.packages["app"].digest;
+    let resolution = path.join("resolution.json");
+    let checkpoint = mark_resolution(&resolution);
+    assert_eq!(&install().unwrap().packages["app"].digest, digest);
+    assert_eq!(
+        std::fs::metadata(resolution).unwrap().modified().unwrap(),
+        checkpoint
+    );
     let content = path
         .join("objects")
         .join(digest)
@@ -290,6 +308,13 @@ fn profiles_retain_independent_versions_and_their_dependencies_through_restart_a
     let mut expected = vec![second, second_runtime];
     expected.sort();
     assert_eq!(reclaimed, expected);
+    drop(store);
+    let store = PackageStore::open(&path).unwrap();
+    assert!(store.resolution().unwrap().packages.is_empty());
+    assert!(store.profile_roots("two").unwrap().is_empty());
+    for document in ["resolution.json", "profile-roots.json"] {
+        assert!(!path.join(document).try_exists().unwrap(), "{document}");
+    }
 }
 
 #[test]
@@ -747,6 +772,8 @@ fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_
     let verified = store
         .accept_repository(&sign(2), &public, "fixture", 150)
         .unwrap();
+    let resolution = root.path().join("packages/resolution.json");
+    let checkpoint = mark_resolution(&resolution);
     input.provenance = Provenance::Signed {
         repository: "fixture".into(),
         sequence: 2,
@@ -765,6 +792,10 @@ fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_
         .accept_repository(&sign(2), &public, "fixture", 150)
         .unwrap();
     let mut other = source(root.path(), "web", b"unauthorized");
+    assert_eq!(
+        std::fs::metadata(&resolution).unwrap().modified().unwrap(),
+        checkpoint
+    );
     other.provenance = Provenance::Signed {
         repository: "fixture".into(),
         sequence: 2,
@@ -779,6 +810,13 @@ fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_
         .accept_repository(&sign(2), &public, "fixture", 150)
         .unwrap();
     let mut input = source(root.path(), "web", b"first");
+    assert_eq!(
+        std::fs::metadata(&resolution).unwrap().modified().unwrap(),
+        checkpoint
+    );
+    store
+        .install(std::slice::from_ref(&input), &[], &[], "windows-x86_64")
+        .unwrap();
     input.provenance = Provenance::Signed {
         repository: "fixture".into(),
         sequence: 2,
@@ -787,7 +825,15 @@ fn signed_admission_requires_verified_manifest_and_retains_failed_download_high_
     store
         .install(&[input], &[verified], &[], "windows-x86_64")
         .unwrap();
+    assert!(matches!(
+        store.resolution().unwrap().packages["web"].provenance,
+        Provenance::Signed { sequence: 2, .. }
+    ));
     assert_eq!(store.acquire("web").unwrap().manifest().name, "web");
+    store.uninstall(&["web".into()]).unwrap();
+    drop(store);
+    let reopened = PackageStore::open(&root.path().join("packages")).unwrap();
+    assert_eq!(reopened.resolution().unwrap().trust["fixture"].sequence, 2);
 }
 
 #[cfg(unix)]

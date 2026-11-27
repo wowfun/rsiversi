@@ -72,6 +72,9 @@ Only those staged PackageStore manifests may enter ordinary atomic admission;
 importers cannot publish resolution selections or grant signed provenance.
 Profiles select activation. The resolution lock records installed names, exact
 manifest digests and dependency closures; it contains no enabled flag.
+The Store removes the resolution file when the last package is uninstalled
+and there are no repository trust receipts.
+Reselecting the same digest and provenance retains the existing resolution file.
 
 A format-2 manifest declares its target, every source file's relative path, length and SHA-256,
 exact dependencies, named exports and required interface descriptors. Paths are
@@ -95,7 +98,8 @@ expiry times and target manifest hashes. Verification precedes downloads;
 expired metadata, an older sequence, or different bytes at the same sequence
 are rejected. Accepting verified metadata immediately persists its high-water
 receipt, including when subsequent download or publication fails. Retrying the
-same signed payload is allowed. Only an opaque verified repository can authorize
+same signed payload verifies it again and leaves the stored receipt in place.
+Only an opaque verified repository can authorize
 signed installation; each manifest must match its name, target and digest in that
 repository. Durable receipts describe history and cannot authorize new content.
 Explicit local files are recorded with local provenance and never acquire an
@@ -111,7 +115,7 @@ authority. Additions must already be selected, retained by another profile,
 or held by the Store's process leases. Collection retains the transitive
 closure of every profile's roots.
 The Host Store bounds the number of profiles and roots per profile to its
-package count limit. An empty set removes the profile's reservation.
+package count limit. Releasing the last reservation removes the profile roots file.
 Candidate admission publishes immutable objects and acquires process closure
 leases under the same Store writer lock and producer fence. It changes neither
 the CLI selection nor persistent profile roots. The returned owner holds every

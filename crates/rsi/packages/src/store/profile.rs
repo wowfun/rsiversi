@@ -132,15 +132,9 @@ impl PackageStore {
                     .map(|(digest, name)| (digest.clone(), name.clone()))
                     .collect(),
             )?;
-        }
-        self.write_profile(document, profile, next)
-    }
-    fn write_profile(&self, mut document: Document, profile: &str, next: &Roots) -> Result<()> {
-        validate(next)?;
-        if next.is_empty() {
-            document.profiles.remove(profile);
-        } else {
             document.profiles.insert(profile.to_owned(), next.clone());
+        } else if document.profiles.is_empty() {
+            return self.root.remove_file(DOCUMENT);
         }
         if document.profiles.len() > MAX_PACKAGES {
             return Err(invalid("profile capacity"));
