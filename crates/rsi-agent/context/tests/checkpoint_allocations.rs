@@ -1,13 +1,14 @@
-//! Isolated full-builder allocation and exact-byte comparison at the audited base and current tree.
+//! Full-builder allocation bounds and cold recovery of the retained model request.
 #![expect(
     unsafe_code,
     reason = "isolated allocation regression delegates all memory operations to System"
 )]
-use rsi_agent_context::{ContextLimits, ContextPage, DefaultContextBuilder, ModelContextState};
+use rsi_agent_context::{
+    ContextLimits, ContextPage, DefaultContextBuilder, ModelContextState, PlannedCompaction,
+};
 use rsi_agent_session_protocol::*;
 use rsi_ai_protocol::ModelRef;
 use rsi_sandbox::SandboxMode;
-use sha2::{Digest, Sha256};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{
@@ -78,7 +79,7 @@ fn full_builder_preserves_projected_messages_without_a_third_full_copy() {
     .unwrap();
     let mut state = ModelContextState::open(
         Arc::new(DefaultContextBuilder::default()),
-        header,
+        header.clone(),
         ContextLimits::new(1024, 32 * 1024 * 1024).unwrap(),
         rsi_agent_context::ContextBudget::default(),
     )
@@ -144,23 +145,35 @@ fn full_builder_preserves_projected_messages_without_a_third_full_copy() {
     let bytes = state.checkpoint().unwrap();
     let additional = PEAK.load(Ordering::Relaxed) - before;
     println!(
-        "{{\"checkpoint_bytes\":{},\"peak_additional_bytes\":{},\"sha256\":\"{}\"}}",
-        bytes.len(),
-        additional,
-        hex::encode(Sha256::digest(&bytes))
-    );
-    println!(
-        "checkpoint_header={}",
-        serde_json::to_string(state.header()).unwrap()
+        "{{\"checkpoint_bytes\":{},\"peak_additional_bytes\":{additional}}}",
+        bytes.len()
     );
     assert_checkpoint_contract(&bytes);
     assert!(
         additional < 3 * bytes.len(),
         "full builder retained an avoidable complete checkpoint: {additional}"
     );
-    state.restore(&bytes).unwrap();
-    assert_planning_allocations(&state, bytes.len());
-    assert_installation_allocations(&mut state);
+    let expected = summary_plan(&state);
+    let position = state.position();
+    drop(state);
+    let mut restored = ModelContextState::open(
+        Arc::new(DefaultContextBuilder::default()),
+        header,
+        ContextLimits::new(1024, 32 * 1024 * 1024).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    restored.restore(&bytes).unwrap();
+    assert_eq!(restored.position(), position);
+    let actual = assert_planning_allocations(&restored, bytes.len());
+    assert_eq!(actual.plan, expected.plan);
+    assert!(
+        actual.request == expected.request,
+        "cold recovery changed the summary request"
+    );
+    drop(actual);
+    drop(expected);
+    assert_installation_allocations(&mut restored);
 }
 
 fn assert_checkpoint_contract(bytes: &[u8]) {
@@ -171,10 +184,9 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
     let metadata: serde_json::Value =
         serde_json::from_slice(&bytes[prefix + 4..prefix + 4 + metadata_len]).unwrap();
     assert_eq!(metadata["builder"]["semantic_version"], "2.18.0");
-    println!("checkpoint_metadata={metadata}");
     let payload = &bytes[prefix + 4 + metadata_len..];
     let decoded: serde_json::Value = serde_json::from_slice(payload).unwrap();
-    assert_eq!(decoded["version"], 24);
+    assert_eq!(decoded["version"], 25);
     assert!(decoded.get("omitted_turns").is_none());
     assert!(decoded["semantic"].is_object());
     assert!(decoded["semantic"].get("last_region").is_none());
@@ -183,16 +195,11 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
         serde_json::json!({"mode":"append_to_header", "sections":[]})
     );
     assert_eq!(decoded["turns"].as_array().unwrap().len(), 24);
-    assert!(
-        decoded["turns"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|turn| turn["batches"].as_object().unwrap().is_empty())
-    );
+    let expected_text = "payload-界\"".repeat(65536);
     for (index, turn) in decoded["turns"].as_array().unwrap().iter().enumerate() {
         assert!(turn.get("runtime_context").is_none());
-        assert!(turn["claimed"].as_array().unwrap().is_empty());
+        assert!(turn.get("claimed").is_none());
+        assert!(turn.get("batches").is_none());
         assert!(
             turn.get("context_input_times").is_none(),
             "empty timing metadata is not stored"
@@ -200,14 +207,10 @@ fn assert_checkpoint_contract(bytes: &[u8]) {
         let key: (String, String) = serde_json::from_str(turn["id"].as_str().unwrap()).unwrap();
         assert_eq!(key, ("checkpoint-probe".into(), format!("turn-{index}")));
         assert!(
-            turn["messages"][0]["content"][0]["content"]["text"] == "payload-界\"".repeat(65536),
+            turn["messages"][0]["content"][0]["content"]["text"] == expected_text,
             "retained message changed"
         );
     }
-    assert_eq!(
-        hex::encode(Sha256::digest(bytes)),
-        "054e25bbc89ce650963dd411ef7962e73e4ec3a934458940b479aee006946f6e"
-    );
 }
 
 fn assert_preparation_allocations(state: &ModelContextState) {
@@ -240,11 +243,8 @@ fn assert_preparation_allocations(state: &ModelContextState) {
     );
 }
 
-fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usize) {
-    let before = LIVE.load(Ordering::Relaxed);
-    let allocated_before = ALLOCATED.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let planned = state
+fn summary_plan(state: &ModelContextState) -> PlannedCompaction {
+    state
         .plan_compaction(
             &rsi_ai_protocol::LanguageRequestOptions::default(),
             &ModelRef::new("fixture", "model").unwrap(),
@@ -253,7 +253,17 @@ fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usiz
             false,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+}
+
+fn assert_planning_allocations(
+    state: &ModelContextState,
+    checkpoint_bytes: usize,
+) -> PlannedCompaction {
+    let before = LIVE.load(Ordering::Relaxed);
+    let allocated_before = ALLOCATED.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let planned = summary_plan(state);
     let additional = PEAK.load(Ordering::Relaxed) - before;
     let allocated = ALLOCATED.load(Ordering::Relaxed) - allocated_before;
     println!(
@@ -264,6 +274,7 @@ fn assert_planning_allocations(state: &ModelContextState, checkpoint_bytes: usiz
         allocated < 3 * checkpoint_bytes,
         "planning repeatedly copied retained history: {allocated}"
     );
+    planned
 }
 
 fn assert_installation_allocations(state: &mut ModelContextState) {
@@ -287,16 +298,7 @@ fn assert_installation_allocations(state: &mut ModelContextState) {
             require_approval: false,
         },
     );
-    let planned = state
-        .plan_compaction(
-            &rsi_ai_protocol::LanguageRequestOptions::default(),
-            &ModelRef::new("fixture", "model").unwrap(),
-            &profile(),
-            Some(CompactionTrigger::ProviderContextLimit),
-            false,
-        )
-        .unwrap()
-        .unwrap();
+    let planned = summary_plan(state);
     ingest(
         state,
         SessionFactBody::ModelIntent {

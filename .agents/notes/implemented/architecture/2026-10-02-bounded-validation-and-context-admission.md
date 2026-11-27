@@ -65,6 +65,6 @@ a typed capacity failure. Eviction or replay would require a separate policy.
 
 Cancellation, proof publication after read commit, worker-held checkpoint credit,
 shared parked-session pressure, immutable request copies, and byte-buffer slices
-have isolated behavior tests. The checkpoint wire digest and allocation golden
-remain unchanged. Incremental validation and fairness for a valid active scan
-remain separate work: an owned reusable scan has no total deadline or timeslice.
+have isolated behavior tests. The checkpoint allocation test compares the
+request and cursor recovered by a fresh builder with those from replay.
+An owned reusable scan has no total deadline or timeslice.

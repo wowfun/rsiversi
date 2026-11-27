@@ -33,7 +33,9 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Builder 2.18.0 binds
+unprepared claims separately from entered model history. A turn with no pending
+claims or tool batches omits the corresponding fields. The v25 fold also reads
+v24 checkpoints whose empty collections were explicit. Builder 2.18.0 binds
 explicit prompt ownership and retained runtime-context positions.
 
 Each retained Turn records the last entered PluginContext Fact timestamp per
@@ -110,8 +112,8 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.18.0, Session format 48, the v24 fold
-and the v7 envelope.
+The allocation test checks the v7 envelope, restored projection and peak bytes
+while checkpointing a 24-turn history.
 
 The single deep module for prompt projection, incremental model context, and
 deterministic compaction. It consumes validated session Facts and emits bounded

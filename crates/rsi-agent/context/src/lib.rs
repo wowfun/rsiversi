@@ -55,7 +55,7 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 24;
+const CONTEXT_CHECKPOINT_VERSION: u32 = 25;
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -194,7 +194,7 @@ struct ActiveAssembler {
     assembler: LanguageAssembler,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextCheckpointPayload {
     step_prompt: rsi_agent_session_protocol::StepPrompt,
@@ -207,17 +207,18 @@ struct ContextCheckpointPayload {
     semantic: compaction::SemanticState,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointTurn {
     id: TurnKey,
-    #[serde(skip_serializing_if = "Option::is_none")]
     runtime_context: Option<usize>,
     #[serde(default)]
     context_input_times: BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
+    #[serde(default)]
     claimed: Vec<SessionFact>,
     messages: Vec<Message>,
     terminal: bool,
+    #[serde(default)]
     batches: outcomes::Batches,
 }
 
@@ -243,9 +244,11 @@ struct CheckpointTurnRef<'a> {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     context_input_times:
         &'a BTreeMap<rsi_agent_session_protocol::ContributionId, std::num::NonZeroU64>,
+    #[serde(skip_serializing_if = "<[SessionFact]>::is_empty")]
     claimed: &'a [SessionFact],
     messages: &'a [Message],
     terminal: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     batches: &'a outcomes::Batches,
 }
 
@@ -648,7 +651,7 @@ impl ContextFold {
             "checkpoint Fact-prefix digest",
             &checkpoint.fact_prefix_sha256,
         )?;
-        if checkpoint.version != CONTEXT_CHECKPOINT_VERSION
+        if !matches!(checkpoint.version, 24 | CONTEXT_CHECKPOINT_VERSION)
             || checkpoint.through_seq == 0
             || checkpoint.retention_limits != limits
             || checkpoint.header_fingerprint

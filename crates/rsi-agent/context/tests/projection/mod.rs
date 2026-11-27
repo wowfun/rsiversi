@@ -1430,6 +1430,28 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
     );
 
     let mut stale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    stale["version"] = 24.into();
+    for turn in stale["turns"].as_array_mut().unwrap() {
+        turn.as_object_mut()
+            .unwrap()
+            .entry("claimed")
+            .or_insert_with(|| serde_json::json!([]));
+        turn.as_object_mut()
+            .unwrap()
+            .entry("batches")
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    let previous = ContextFold::from_checkpoint(
+        header("system"),
+        limits,
+        &serde_json::to_vec(&stale).unwrap(),
+        rsi_agent_context::ContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        previous.project(limits).unwrap(),
+        complete.project(limits).unwrap()
+    );
     stale["version"] = 23.into();
     assert!(
         ContextFold::from_checkpoint(

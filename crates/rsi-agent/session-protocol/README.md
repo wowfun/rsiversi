@@ -407,9 +407,9 @@ command digest. Earlier inputs remain held. This single publication is the
 canonical receipt after disconnect or restart.
 Command controls contain no execution Facts and cannot claim a Turn's free
 mutation lane. Their consumers obtain Session authority through the owning
-Kernel service; serialized identities alone confer no authority. Only Header
-format 48 is accepted; all other formats are unsupported. Header protection is
-part of this format's immutable shape. The
+Kernel service; serialized identities alone confer no authority. Header decoding
+requires the current [Session format](src/lib.rs). Header protection is part
+of its immutable shape. The
 [SQLite contract](../store-sqlite/README.md) owns the exact database version;
 earlier authoritative formats are rejected without rewriting their files.
 
