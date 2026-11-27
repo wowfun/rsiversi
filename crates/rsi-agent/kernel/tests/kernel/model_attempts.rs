@@ -3,30 +3,6 @@ use rsi_agent_session_protocol::{ModelAttemptBuilder, ModelAttemptLog, ModelEven
 use rsi_agent_store_protocol::MAXIMUM_STORE_FACT_PAGE_BYTES as FACT_PAGE_BYTES;
 use rsi_agent_turn_protocol::ModelLiveStatus;
 
-#[test]
-fn live_model_reservations_allow_host_growth_but_reject_fractional_attempts() {
-    for bytes in [64 * 1024 * 1024, 256 * 1024 * 1024, 512 * 1024 * 1024] {
-        assert!(
-            KernelLimits {
-                maximum_live_model_bytes: bytes,
-                ..KernelLimits::default()
-            }
-            .validate()
-            .is_ok()
-        );
-    }
-    for bytes in [0, 1, 65 * 1024 * 1024] {
-        assert!(
-            KernelLimits {
-                maximum_live_model_bytes: bytes,
-                ..KernelLimits::default()
-            }
-            .validate()
-            .is_err()
-        );
-    }
-}
-
 pub(super) fn source_bodies(turn: &TurnId) -> Vec<SessionFactBody> {
     let effect = EffectId::new("cut").unwrap();
     vec![
@@ -114,44 +90,45 @@ async fn model_identity_is_per_turn_and_rejected_before_live_publication() {
 }
 
 #[tokio::test]
-async fn host_can_admit_more_than_four_simultaneous_model_attempts() {
-    let kernel = AgentKernel::recover_with_clock_and_limits(
-        Arc::new(MemoryStore::new()),
-        composition(),
-        Arc::new(FixedClock),
-        KernelLimits {
-            maximum_live_model_bytes: 512 * 1024 * 1024,
-            ..KernelLimits::default()
-        },
-    )
-    .await
-    .unwrap();
+async fn nine_active_sessions_can_publish_model_streams_independently() {
+    let kernel = kernel(Arc::new(MemoryStore::new())).await;
     let workers = kernel.start_workers();
     let worker = kernel.register("worker".into()).unwrap();
     let mut active = Vec::new();
-    for index in 0..6 {
+    for index in 0..9 {
         submit(&kernel, &format!("model-{index}"), "work").await;
         let claim = kernel
             .claim("worker", CancellationToken::new())
             .await
             .unwrap()
             .unwrap();
-        let lease = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            kernel.reserve_model_attempt(
+        let lease = kernel
+            .open_model_attempt(
                 &claim,
                 EffectId::new("attempt").unwrap(),
                 ModelEventPurpose::Conversation,
-                CancellationToken::new(),
-            ),
-        )
-        .await
-        .expect("configured reservations admit all six without waiting")
-        .unwrap();
+            )
+            .unwrap();
         active.push((claim, lease));
     }
     for (claim, lease) in active {
+        let mut stream = kernel.observe_models(claim.session_id()).await.unwrap();
         drop(lease);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().as_ref().status,
+            ModelLiveStatus::Abandoned
+        );
+        let next = kernel
+            .open_model_attempt(
+                &claim,
+                EffectId::new("next").unwrap(),
+                ModelEventPurpose::Conversation,
+            )
+            .unwrap();
+        let latest = stream.next().await.unwrap().unwrap();
+        assert_eq!(latest.as_ref().effect_id.as_str(), "next");
+        assert_eq!(latest.as_ref().status, ModelLiveStatus::Streaming);
+        drop(next);
         kernel
             .cancel(claim.session_id(), claim.turn_id(), None)
             .await
@@ -283,13 +260,7 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
     let effect = EffectId::new("cut").unwrap();
     let mut stream = kernel.observe_models(claim.session_id()).await.unwrap();
     let mut live = kernel
-        .reserve_model_attempt(
-            &claim,
-            effect.clone(),
-            ModelEventPurpose::Conversation,
-            CancellationToken::new(),
-        )
-        .await
+        .open_model_attempt(&claim, effect.clone(), ModelEventPurpose::Conversation)
         .unwrap();
     assert!(live.started().is_err());
     assert!(
@@ -298,13 +269,7 @@ async fn settlement_and_live_commit_require_exact_started_identity_and_durable_s
     );
     assert!(
         kernel
-            .reserve_model_attempt(
-                &claim,
-                effect.clone(),
-                ModelEventPurpose::Conversation,
-                CancellationToken::new()
-            )
-            .await
+            .open_model_attempt(&claim, effect.clone(), ModelEventPurpose::Conversation)
             .is_err()
     );
     let mut bodies = source_bodies(claim.turn_id());
@@ -493,13 +458,7 @@ async fn receipts_reject_other_claims_effects_purposes_and_retired_executors() {
             .unwrap();
         tool_origin::prepare_claimed_inputs(&kernel, &claim).await;
         let mut live = kernel
-            .reserve_model_attempt(
-                &claim,
-                EffectId::new(effect).unwrap(),
-                purpose,
-                CancellationToken::new(),
-            )
-            .await
+            .open_model_attempt(&claim, EffectId::new(effect).unwrap(), purpose)
             .unwrap();
         let mut bodies = source_bodies(claim.turn_id());
         let settlement = bodies.pop().unwrap();
@@ -548,110 +507,6 @@ async fn receipts_reject_other_claims_effects_purposes_and_retired_executors() {
         drop(live);
         kernel.shutdown(workers).await.unwrap();
     }
-}
-
-#[tokio::test(start_paused = true)]
-async fn live_pool_reserves_before_dispatch_and_has_cancellable_bounded_admission() {
-    let store = Arc::new(MemoryStore::new());
-    let kernel = AgentKernel::recover_with_clock_and_limits(
-        store.clone(),
-        composition(),
-        Arc::new(FixedClock),
-        KernelLimits {
-            maximum_live_model_bytes: 64 * 1024 * 1024,
-            ..KernelLimits::default()
-        },
-    )
-    .await
-    .unwrap();
-    let workers = kernel.start_workers();
-    let worker = kernel.register("worker".into()).unwrap();
-    submit(&kernel, "first", "work").await;
-    let first = kernel
-        .claim("worker", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    submit(&kernel, "second", "work").await;
-    let second = kernel
-        .claim("worker", CancellationToken::new())
-        .await
-        .unwrap()
-        .unwrap();
-    let effect = EffectId::new("attempt").unwrap();
-    let live = kernel
-        .reserve_model_attempt(
-            &first,
-            effect.clone(),
-            ModelEventPurpose::Conversation,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let cancellation = CancellationToken::new();
-    let mut waiting = Box::pin(kernel.reserve_model_attempt(
-        &second,
-        effect.clone(),
-        ModelEventPurpose::Conversation,
-        cancellation.clone(),
-    ));
-    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
-    cancellation.cancel();
-    assert!(matches!(waiting.await, Err(TurnError::Cancelled)));
-    let before = tokio::time::Instant::now();
-    assert!(matches!(
-        kernel
-            .reserve_model_attempt(
-                &second,
-                effect.clone(),
-                ModelEventPurpose::Conversation,
-                CancellationToken::new()
-            )
-            .await,
-        Err(TurnError::Capacity)
-    ));
-    assert_eq!(
-        tokio::time::Instant::now() - before,
-        std::time::Duration::from_mins(1)
-    );
-    assert_eq!(
-        store
-            .read_facts(second.session_id(), 0, 10, FACT_PAGE_BYTES)
-            .await
-            .unwrap()
-            .facts
-            .len(),
-        1
-    );
-    drop(live);
-    let replacement = kernel
-        .reserve_model_attempt(
-            &second,
-            effect.clone(),
-            ModelEventPurpose::Conversation,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    drop(replacement);
-    kernel
-        .cancel(first.session_id(), first.turn_id(), None)
-        .await
-        .unwrap();
-    kernel
-        .cancel(second.session_id(), second.turn_id(), None)
-        .await
-        .unwrap();
-    kernel
-        .finish_turn(&first, &TurnOutcome::Cancelled)
-        .await
-        .unwrap();
-    kernel
-        .finish_turn(&second, &TurnOutcome::Cancelled)
-        .await
-        .unwrap();
-    drop(worker);
-    kernel.shutdown(workers).await.unwrap();
 }
 
 #[tokio::test]

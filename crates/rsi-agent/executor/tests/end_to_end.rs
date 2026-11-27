@@ -205,12 +205,11 @@ impl TurnExecution for FailingClaimFixture {
     ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::HumanWait>> {
         unreachable!("this fixture never waits for a human")
     }
-    async fn reserve_model_attempt(
+    fn open_model_attempt(
         &self,
         _claim: &TurnClaim,
         _effect_id: rsi_agent_session_protocol::EffectId,
         _purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        _cancellation: CancellationToken,
     ) -> rsi_agent_turn_protocol::Result<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
         unreachable!("this fixture never drives a claimed turn")
     }

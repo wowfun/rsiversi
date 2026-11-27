@@ -45,7 +45,7 @@ impl ModelLiveSnapshot {
 }
 /// Coalesced model stream; slow readers resynchronize to a complete immutable prefix.
 pub type ModelLiveStream = Pin<Box<dyn Stream<Item = Result<ObservedModel>> + Send + 'static>>;
-/// Kernel admission retained throughout accumulation, validation and settlement.
+/// Exclusive publisher for one Session's model attempt through settlement.
 pub trait ModelAttemptLease: fmt::Debug + Send {
     /// Activates the clock after the exact `ModelStarted` has been committed.
     fn started(&mut self) -> Result<()>;

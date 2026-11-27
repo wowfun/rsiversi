@@ -218,14 +218,13 @@ impl TurnExecution for AgentKernel {
             .claim_issuer
             .set_working_directory(claim, effective)
     }
-    async fn reserve_model_attempt(
+    fn open_model_attempt(
         &self,
         claim: &TurnClaim,
         effect_id: EffectId,
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        cancellation: CancellationToken,
     ) -> TurnResult<Box<dyn rsi_agent_turn_protocol::ModelAttemptLease>> {
-        model_live::reserve(self, claim, effect_id, purpose, cancellation).await
+        model_live::open(self, claim, effect_id, purpose)
     }
 
     fn publish_controlled_work(

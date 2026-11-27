@@ -113,9 +113,9 @@ it without capture. Errors, cancellation and admission deadlines still prevent
 effect entry. The observation owner exposes its persistent capacity state; an
 omission is never evidence of an empty or complete comparison.
 
-`reserve_model_attempt` admits a 64 MiB live working set before dispatch. The
-Kernel owns its cancellation-aware 60-second wait, exact claim identity and clock.
-The lease publishes immutable compact prefixes and releases capacity on drop.
+`open_model_attempt` opens the exact claim's Session stream synchronously before
+dispatch. The Kernel owns its clock. Dropping the lease allows that Session to
+open its next stream. The lease publishes immutable compact prefixes.
 `observe_models` is a separate coalescing stream: revisions are local to an effect,
 never durable cursors. Each delivered snapshot retains observation byte credits;
 slow readers receive the latest complete prefix. Snapshot pages are at most

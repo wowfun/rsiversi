@@ -927,25 +927,16 @@ impl Driver {
             AttemptSlot::First => (next_effect_id().map_err(fatal)?, Some(0)),
             AttemptSlot::Final => (next_effect_id().map_err(fatal)?, None),
         };
-        let reservation_cancel = combine_cancellation(cancellation, stop);
+        if stop.is_cancelled() {
+            return Err(DriveFailure::Stopped);
+        }
+        if cancellation.is_cancelled() {
+            return Err(DriveFailure::Turn(TurnOutcome::Cancelled));
+        }
         let mut live = self
             .turns
-            .reserve_model_attempt(
-                claim,
-                effect_id.clone(),
-                purpose.event_purpose(),
-                reservation_cancel.token(),
-            )
-            .await
-            .map_err(|error| {
-                if stop.is_cancelled() {
-                    DriveFailure::Stopped
-                } else if cancellation.is_cancelled() {
-                    DriveFailure::Turn(TurnOutcome::Cancelled)
-                } else {
-                    failed("model_output.admission", error.to_string())
-                }
-            })?;
+            .open_model_attempt(claim, effect_id.clone(), purpose.event_purpose())
+            .map_err(|error| failed("model_output.admission", error.to_string()))?;
         let mut evidence = capture.finish(&snapshot)?;
         self.evidence
             .lock()

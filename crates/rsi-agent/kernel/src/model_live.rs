@@ -1,35 +1,34 @@
-//! Kernel-owned live working sets and coalescing snapshot channels.
+//! Session-owned live model streams and coalescing snapshot channels.
 use super::*;
 use rsi_agent_session_protocol::{ModelAttemptPrefix, ModelEventPurpose};
 use rsi_agent_turn_protocol::{
     ModelAttemptLease, ModelLiveSnapshot, ModelLiveStatus, ModelLiveStream,
 };
 
-pub(super) const ATTEMPT_BYTES: usize = 64 * 1024 * 1024;
-type Channel = watch::Sender<Option<Arc<ModelLiveSnapshot>>>;
+use std::sync::atomic::AtomicBool;
+
+struct Channel {
+    snapshots: watch::Sender<Option<Arc<ModelLiveSnapshot>>>,
+    publishing: AtomicBool,
+}
+#[derive(Default)]
 pub(super) struct Models {
-    permits: Arc<Semaphore>,
     channels: Mutex<BTreeMap<SessionId, Weak<Channel>>>,
-    active: Mutex<BTreeSet<SessionId>>,
 }
 impl Models {
-    pub(super) fn new(bytes: usize) -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(bytes / ATTEMPT_BYTES)),
-            channels: Mutex::default(),
-            active: Mutex::default(),
-        }
-    }
     fn channel(&self, session: &SessionId) -> Arc<Channel> {
         let mut channels = self
             .channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        channels.retain(|_, channel| channel.strong_count() > 0);
         if let Some(channel) = channels.get(session).and_then(Weak::upgrade) {
             return channel;
         }
-        let channel = Arc::new(watch::channel(None).0);
+        channels.retain(|_, channel| channel.strong_count() > 0);
+        let channel = Arc::new(Channel {
+            snapshots: watch::Sender::new(None),
+            publishing: AtomicBool::new(false),
+        });
         channels.insert(session.clone(), Arc::downgrade(&channel));
         channel
     }
@@ -42,7 +41,6 @@ struct Lease {
     began: Option<u64>,
     elapsed: std::sync::atomic::AtomicU64,
     committed: bool,
-    _permit: OwnedSemaphorePermit,
 }
 impl fmt::Debug for Lease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,6 +57,7 @@ impl Lease {
             .checked_add(1)
             .ok_or_else(|| TurnError::Invariant("live model revision overflow".into()))?;
         self.channel
+            .snapshots
             .send_replace(Some(Arc::new(self.snapshot.clone())));
         Ok(())
     }
@@ -162,40 +161,20 @@ impl Drop for Lease {
             self.snapshot.prefix = ModelAttemptPrefix::default();
             let _ = self.announce();
         }
-        self.inner
-            .model_live
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(self.claim.session_id());
+        self.channel.publishing.store(false, Ordering::Release);
     }
 }
-pub(super) async fn reserve(
+pub(super) fn open(
     kernel: &AgentKernel,
     claim: &TurnClaim,
     effect_id: EffectId,
     purpose: ModelEventPurpose,
-    cancellation: CancellationToken,
 ) -> TurnResult<Box<dyn ModelAttemptLease>> {
     kernel.validate_claim(&lock_state(&kernel.inner), claim)?;
-    let permit = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(TurnError::Cancelled),
-        result = tokio::time::timeout(Duration::from_mins(1), kernel.inner.model_live.permits.clone().acquire_owned()) =>
-            result.map_err(|_| TurnError::Capacity)?.map_err(|_| TurnError::ShuttingDown)?,
-    };
-    kernel.validate_claim(&lock_state(&kernel.inner), claim)?;
     let channel = kernel.inner.model_live.channel(claim.session_id());
-    if !kernel
-        .inner
-        .model_live
-        .active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(claim.session_id().clone())
-    {
+    if channel.publishing.swap(true, Ordering::AcqRel) {
         return Err(TurnError::Invalid(
-            "Session already owns a live model reservation".into(),
+            "Session already has a live model attempt".into(),
         ));
     }
     let mut lease = Lease {
@@ -214,7 +193,6 @@ pub(super) async fn reserve(
         began: None,
         elapsed: std::sync::atomic::AtomicU64::new(0),
         committed: false,
-        _permit: permit,
     };
     lease.announce()?;
     Ok(Box::new(lease))
@@ -225,7 +203,7 @@ pub(super) fn observe(
 ) -> TurnResult<ModelLiveStream> {
     let lease = ObserverLease::acquire(inner, ObserverKind::Session)?;
     let channel = inner.model_live.channel(session);
-    let receiver = channel.subscribe();
+    let receiver = channel.snapshots.subscribe();
     let state = (Arc::downgrade(inner), channel, receiver, lease, true);
     Ok(stream::unfold(
         state,

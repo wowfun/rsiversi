@@ -142,7 +142,7 @@ impl AgentKernel {
         let kernel = Self {
             inner: Arc::new(KernelInner {
                 event_context,
-                model_live: model_live::Models::new(limits.maximum_live_model_bytes),
+                model_live: model_live::Models::default(),
                 program_bytes: rsi_api_protocol::ByteBudget::default(),
                 execution_messages: execution_admission::Messages::default(),
                 tasks: TaskTracker::new(),

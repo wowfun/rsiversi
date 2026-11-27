@@ -1761,13 +1761,12 @@ pub trait TurnExecution: fmt::Debug + Send + Sync + 'static {
         let _ = claim;
         Ok(None)
     }
-    /// Reserves one bounded attempt before its dispatch, cancelled with this stage.
-    async fn reserve_model_attempt(
+    /// Opens the claim's single live Session stream before model dispatch.
+    fn open_model_attempt(
         &self,
         claim: &TurnClaim,
         effect_id: EffectId,
         purpose: rsi_agent_session_protocol::ModelEventPurpose,
-        cancellation: CancellationToken,
     ) -> Result<Box<dyn ModelAttemptLease>>;
 
     /// Publishes one exact claim's read-only controlled-work observation.

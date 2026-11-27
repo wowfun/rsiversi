@@ -162,14 +162,11 @@ retirement and shutdown independently interrupt the wait and retain owned cleanu
 Continuation peer walks use the Session prefix of the ordered registry and prune
 expired entries in that prefix.
 
-Live language attempts use a Kernel-owned logical reservation pool, defaulting
-to 256 MiB. `maximum_live_model_bytes` accepts positive multiples of 64 MiB and
-may be raised by the host; division by 64 MiB gives the admitted concurrency
-(four by default). Each attempt
-reserves 64 MiB before dispatch, waiting at most 60 seconds with cancellation.
-The reservation covers compact evidence, the assembler, bounded indexes and
-serialization scratch; it is not an RSS guarantee. Immutable blocks are shared
-by snapshots. Store, Context and observer payload credits remain independent.
+The Executor's active-turn setting governs concurrent foreground model requests.
+Each claimed Session can open one live language attempt immediately. Its lease
+owns that Session's stream until dropped. Evidence accumulates within the
+Session protocol's per-attempt bound, and snapshots share immutable blocks.
+Store, Context and observer payload credits remain independent.
 Transient notifications carry Session, Turn, effect and revision separately
 from durable cursors. Snapshot pages are at most 256 KiB and bind one revision;
 slow consumers resynchronize instead of stalling execution. Settlement is
