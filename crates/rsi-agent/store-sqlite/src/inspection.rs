@@ -531,7 +531,7 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> validation::CanonicalObser
     fn checkpoint(&mut self) -> Result<()> {
         self.checkpoint()
     }
-    fn control(&mut self, session: &SessionId, record: &AgentControlRecord, _: &str) -> Result<()> {
+    fn control(&mut self, session: &SessionId, record: &AgentControlRecord) -> Result<()> {
         self.references(
             session,
             CasInspectionStream::Control,
@@ -539,7 +539,7 @@ impl<V: FnMut(CasInspectionEvent) -> ControlFlow<()>> validation::CanonicalObser
             &rsi_agent_store_protocol::control_references(record)?,
         )
     }
-    fn fact(&mut self, session: &SessionId, fact: &SessionFact, _: &str) -> Result<()> {
+    fn fact(&mut self, session: &SessionId, fact: &SessionFact) -> Result<()> {
         self.references(
             session,
             CasInspectionStream::Fact,

@@ -40,7 +40,6 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
         let count = reference_index::rebuild(&transaction)?;
-        reference_index::validate_all(&transaction)?;
         transaction.commit().map_err(sql_error)?;
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")

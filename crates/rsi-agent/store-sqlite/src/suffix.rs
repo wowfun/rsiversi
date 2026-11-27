@@ -55,7 +55,7 @@ impl SqliteStore {
                     let row = rows.next().map_err(sql_error)?.ok_or_else(|| StoreError::Corrupt("missing admitted suffix Fact".into()))?;
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let fact = super::fact_storage::decode(row)?.0;
+                    let fact = super::fact_storage::decode(row)?;
                     if fact.encoded_len() != length || fact.seq() != decode_u64("suffix Fact", seq)? {
                         return Err(StoreError::Corrupt("noncanonical suffix Fact".into()));
                     }

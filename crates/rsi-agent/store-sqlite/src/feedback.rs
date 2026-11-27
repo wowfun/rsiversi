@@ -26,7 +26,7 @@ pub(super) fn read(
          ORDER BY seq DESC LIMIT 1",
         params![session.as_str(), message_seq, sqlite_u64("feedback cursor", through)?,
                 i64::try_from(MAXIMUM_SESSION_FACT_BYTES).expect("bounded control length")],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?)),
+        |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?)),
     ).optional().map_err(sql_error)?;
     let Some((length, json, seq)) = encoded else {
         return Ok(None);

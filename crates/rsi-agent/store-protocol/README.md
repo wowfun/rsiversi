@@ -141,7 +141,7 @@ exclusive database compaction are separate operations with separate receipts.
 Canonical reference indexes derive only from decoded Headers, controls, Facts and
 canonical Domain reference sets. No plugin codec is needed. Missing, extra or
 changed index edges are corruption, never proof of absence. All writes maintain
-coverage and edges in their canonical transaction and cannot
+the edges in their canonical transaction and cannot
 reference a retiring Session or deleting CAS object.
 
 Model intent, start and settlement coordinates are unique by Session/Turn/effect/role

@@ -412,7 +412,7 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
                 &format!("{table}.seq")
             };
             format!(
-                "({length}) + COALESCE((SELECT SUM(length(CAST(session_id AS BLOB))+length(stream)+length(target_kind)+length(CAST(target_id AS BLOB))) FROM reference_edges e WHERE e.session_id={table}.session_id AND e.stream='{stream}' AND e.seq={seq}),0) + COALESCE((SELECT length(CAST(session_id AS BLOB))+length(stream)+length(sha256) FROM reference_records r WHERE r.session_id={table}.session_id AND r.stream='{stream}' AND r.seq={seq}),0)"
+                "({length}) + COALESCE((SELECT SUM(length(CAST(session_id AS BLOB))+length(stream)+length(target_kind)+length(CAST(target_id AS BLOB))) FROM reference_edges e WHERE e.session_id={table}.session_id AND e.stream='{stream}' AND e.seq={seq}),0)"
             )
         } else {
             length
@@ -467,8 +467,14 @@ fn delete_batch(transaction: &Transaction<'_>, operation: &str) -> Result<(i64, 
                 match key {
                     DeletionKey::Row(rowid) => {
                         if let Some(stream) = stream {
-                            verify_selected(transaction, table, stream, rowid, &session, seq)?;
-                            reference_index::remove(transaction, &session, stream, seq)?;
+                            let expected =
+                                verify_selected(transaction, table, stream, rowid, &session, seq)?;
+                            let removed = transaction.prepare_cached("DELETE FROM reference_edges WHERE session_id=?1 AND stream=?2 AND seq=?3").map_err(sql_error)?.execute(params![session, stream, seq]).map_err(sql_error)?;
+                            if removed as u64 != expected {
+                                return Err(StoreError::Corrupt(
+                                    "extra reference edges on the selected record".into(),
+                                ));
+                            }
                         }
                         delete.execute([rowid]).map_err(sql_error)?;
                     }
@@ -528,35 +534,37 @@ fn payload_expression(connection: &Connection, table: &str) -> Result<String> {
 // Keys come only from the schema-owned stage query, never from external SQL.
 fn verify_selected(
     transaction: &Transaction<'_>,
-
     table: &str,
     stream: &str,
     rowid: i64,
     session: &str,
     seq: i64,
-) -> Result<()> {
+) -> Result<u64> {
+    let id = SessionId::new(session).map_err(|error| StoreError::Corrupt(error.to_string()))?;
     if stream == "fact" {
-        let id = SessionId::new(session).map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        return super::fact_storage::read_with(transaction, &id, seq, |fact, encoded| {
-            reference_index::verify_fact(transaction, &id, &fact, encoded)
-        });
+        let fact = super::fact_storage::read_indexed_fact(transaction, &id, seq)?;
+        return reference_index::verify_fact(transaction, &id, &fact);
     }
     let (column, maximum) = match stream {
         "header" => (
             "length(CAST(header_json AS BLOB)),header_json",
             rsi_agent_session_protocol::MAXIMUM_SESSION_HEADER_BYTES,
         ),
-        _ => ("control_bytes,control_payload", super::MAXIMUM_STORE_CONTROL_PAGE_BYTES),
+        _ => (
+            "control_bytes,control_payload",
+            super::MAXIMUM_STORE_CONTROL_PAGE_BYTES,
+        ),
     };
-    let encoded = transaction
-        .query_row(
-            &format!("SELECT {column} FROM {table} WHERE rowid=?1"),
-            [rowid],
-            |row| super::record_codec::payload(row, 0, maximum).map(std::borrow::Cow::into_owned),
-        )
+    let mut statement = transaction
+        .prepare_cached(&format!("SELECT {column} FROM {table} WHERE rowid=?1"))
         .map_err(sql_error)?;
-    let id = SessionId::new(session).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-    reference_index::verify_encoded(
+    let mut rows = statement.query([rowid]).map_err(sql_error)?;
+    let row = rows
+        .next()
+        .map_err(sql_error)?
+        .ok_or_else(|| StoreError::Corrupt("missing selected reference source".into()))?;
+    let encoded = super::record_codec::payload(row, 0, maximum).map_err(sql_error)?;
+    let edges = reference_index::verify_encoded(
         transaction,
         &id,
         stream,
@@ -564,12 +572,12 @@ fn verify_selected(
         &encoded,
     )?;
     if stream == "header" {
-        let extra: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reference_records WHERE session_id=?1 AND (stream!='header' OR seq!=0)) OR EXISTS(SELECT 1 FROM reference_edges WHERE session_id=?1 AND (stream!='header' OR seq!=0))", [session], |row| row.get(0)).map_err(sql_error)?;
+        let extra: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reference_edges WHERE session_id=?1 AND (stream!='header' OR seq!=0))", [session], |row| row.get(0)).map_err(sql_error)?;
         if extra {
             return Err(StoreError::Corrupt(
                 "extra retiring reference coverage".into(),
             ));
         }
     }
-    Ok(())
+    Ok(edges)
 }

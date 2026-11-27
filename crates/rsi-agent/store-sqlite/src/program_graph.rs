@@ -90,7 +90,7 @@ impl ProgramGraphRead for Graph<'_> {
             "Program counterpart",
             (
                 row.get(0).map_err(sql_error)?,
-                row.get(1).map_err(sql_error)?,
+                super::text::optional_borrowed_text(row, 1, MAXIMUM_SESSION_FACT_BYTES).map_err(sql_error)?,
             ),
             MAXIMUM_SESSION_FACT_BYTES,
         )?;

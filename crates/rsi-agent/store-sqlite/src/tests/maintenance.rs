@@ -2,6 +2,8 @@ use super::*;
 use rsi_agent_session_protocol::TurnOutcome;
 use rsi_agent_store_protocol::{PurgeRequest, PurgeTarget, StoreMaintenance};
 
+const EXTRA_EDGE: &str = "INSERT INTO reference_edges(session_id,stream,seq,target_kind,target_id,target_bytes) VALUES(?1,?2,?3,'session','invented',0)";
+
 #[tokio::test]
 async fn refused_maintenance_preserves_sessions_and_cas() {
     let root = private_tempdir();
@@ -313,34 +315,27 @@ async fn garbage_collection_disposes_corrupt_unreferenced_bytes() {
 }
 
 #[tokio::test]
-async fn coverage_authenticates_stored_json_bytes_including_whitespace() {
-    for (table, column) in [
-        ("sessions", "header_json"),
-        ("facts", "fact_json"),
-        ("agent_controls", "control_payload"),
-    ] {
-        let root = private_tempdir();
-        let store = SqliteStore::open(root.path()).unwrap();
-        let request = seed(&store, "encoded-coverage", 1).await;
-        let changed = {
-            let mut slot = store.inner.connections.writer.lock().unwrap();
-            let connection = slot.as_mut().unwrap();
-            connection.execute(&format!("UPDATE {table} SET {column}={column} || ' ' WHERE session_id='encoded-coverage'"), []).unwrap()
-        };
-        // This seed has no controls; Fact and Header bytes exercise the source contract.
-        if table != "agent_controls" {
-            assert!(changed > 0);
-        }
-        if changed > 0 {
-            assert!(
-                matches!(
-                    store.preview_purge(&request).await,
-                    Err(StoreError::Corrupt(_))
-                ),
-                "{table}"
-            );
-        }
+async fn empty_reference_sets_allocate_no_rows_and_ignore_equivalent_header_encoding() {
+    let root = private_tempdir();
+    let store = SqliteStore::open(root.path()).unwrap();
+    let request = seed(&store, "edge-free", 3).await;
+    {
+        let slot = store.inner.connections.writer.lock().unwrap();
+        let connection = slot.as_ref().unwrap();
+        let count: u32 = connection
+            .query_row("SELECT COUNT(*) FROM reference_edges", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(connection.execute("UPDATE sessions SET header_json=header_json || ' ' WHERE session_id='edge-free'", []).unwrap(), 1);
     }
+    assert!(
+        store
+            .preview_purge(&request)
+            .await
+            .unwrap()
+            .blockers
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -353,7 +348,7 @@ async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
         let result: Result<()> = store
             .with_writer(|connection| {
                 let tx = connection.transaction().map_err(sql_error)?;
-                tx.execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
+                tx.execute(EXTRA_EDGE, params!["rollback-proof", "header", 0])
                     .map_err(sql_error)?;
                 Err(StoreError::Invalid("rollback after statements".into()))
             })
@@ -365,7 +360,7 @@ async fn rolled_back_writes_preserve_coverage_but_committed_errors_do_not() {
     let result: Result<()> = store
         .with_writer(|connection| {
             connection
-                .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
+                .execute(EXTRA_EDGE, params!["rollback-proof", "header", 0])
                 .map_err(sql_error)?;
             Err(StoreError::Io("acknowledgement lost".into()))
         })
@@ -389,7 +384,7 @@ async fn proof_stamp_cannot_skip_an_external_commit_between_entry_observations()
         reference_validation::check_cached(&store.inner, connection).unwrap();
         let external = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
         external
-            .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
+            .execute(EXTRA_EDGE, params!["stamp-gap", "header", 0])
             .unwrap();
         let _newer_observation =
             reference_validation::Stamp::read(&store.inner, connection).unwrap();
@@ -417,10 +412,7 @@ async fn reference_audit_is_not_reused_after_reopen_or_external_database_changes
     let external = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
     assert_eq!(
         external
-            .execute(
-                "UPDATE reference_records SET sha256=?1 WHERE session_id='external-change' AND stream='header'",
-                [[0xaa_u8; 32]],
-            )
+            .execute(EXTRA_EDGE, params!["external-change", "header", 0],)
             .unwrap(),
         1
     );
@@ -464,7 +456,16 @@ async fn reference_audit_is_shared_across_gc_and_strict_appends_but_not_untracke
     seed(&store, "typed-append", 1).await;
     assert!(store.preview_cas_gc(256).await.unwrap().is_empty());
     assert_eq!(store.inner.reference_audits.load(Ordering::Relaxed), 1);
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='typed-append' AND stream='header'", [[0xaa_u8; 32]]).unwrap();
+    store
+        .inner
+        .connections
+        .writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .execute(EXTRA_EDGE, params!["typed-append", "header", 0])
+        .unwrap();
     assert!(matches!(
         store.preview_cas_gc(256).await,
         Err(StoreError::Corrupt(_))
@@ -980,10 +981,7 @@ async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_aft
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute(
-            "UPDATE reference_records SET sha256=zeroblob(32) WHERE session_id='unrelated-gc'",
-            [],
-        )
+        .execute(EXTRA_EDGE, params!["unrelated-gc", "header", 0])
         .unwrap();
     assert!(matches!(
         store.preview_cas_gc(8).await,
@@ -1008,7 +1006,7 @@ async fn interrupted_cas_deletion_rejects_readers_and_publishers_and_resumes_aft
     );
 }
 #[tokio::test]
-async fn interrupted_purge_revalidates_surviving_canonical_reference_records() {
+async fn interrupted_purge_revalidates_surviving_reference_edges() {
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "retiring-corruption", 160).await;
@@ -1018,7 +1016,16 @@ async fn interrupted_purge_revalidates_surviving_canonical_reference_records() {
         .await
         .unwrap();
     assert!(!receipt.complete);
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("UPDATE reference_records SET sha256=?1 WHERE session_id='retiring-corruption' AND stream='header'",[[0xaa_u8; 32]]).unwrap();
+    store
+        .inner
+        .connections
+        .writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .execute(EXTRA_EDGE, params!["retiring-corruption", "header", 0])
+        .unwrap();
     assert!(matches!(
         store.purge_batch(request.operation_id.as_str()).await,
         Err(StoreError::Corrupt(_))
@@ -1050,7 +1057,7 @@ async fn reference_rebuild_and_compact_are_explicit_and_exclusive() {
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute("UPDATE reference_records SET sha256=zeroblob(32)", [])
+        .execute(EXTRA_EDGE, params!["rebuild", "header", 0])
         .unwrap();
     assert!(matches!(
         store.preview_purge(&request).await,
@@ -1220,6 +1227,25 @@ async fn mixed_program_references_validate_rebuild_and_preserve_cas_roots() {
     assert!(store.preview_purge(&request).await.unwrap().blockers.iter().any(|blocker| matches!(blocker, rsi_agent_store_protocol::PurgeBlocker::Busy { session_id } if session_id == &id)));
     drop(store);
     SqliteStore::verify(root.path()).unwrap();
+    {
+        let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
+        assert!(
+            connection
+                .execute("DELETE FROM reference_edges WHERE target_kind='cas'", [])
+                .unwrap()
+                > 0
+        );
+    }
+    assert!(matches!(
+        SqliteStore::verify(root.path()),
+        Err(StoreError::Corrupt(_))
+    ));
+    let store = SqliteStore::open(root.path()).unwrap();
+    assert!(matches!(
+        store.preview_cas_gc(256).await,
+        Err(StoreError::Corrupt(_))
+    ));
+    drop(store);
     assert!(SqliteStore::rebuild_reference_index(root.path()).unwrap() > 0);
     let store = SqliteStore::open(root.path()).unwrap();
     assert!(store.preview_cas_gc(256).await.unwrap().is_empty());
@@ -1274,7 +1300,16 @@ async fn purge_batches_do_not_replay_unrelated_history_and_reject_extra_retiring
         before,
         "no live-history replay on a retiring batch"
     );
-    store.inner.connections.writer.lock().unwrap().as_ref().unwrap().execute("INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES('selected','fact',999,?1)", [[0xaa_u8; 32]]).unwrap();
+    store
+        .inner
+        .connections
+        .writer
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .execute(EXTRA_EDGE, params!["selected", "fact", 999])
+        .unwrap();
     assert!(matches!(
         store.purge_batch(request.operation_id.as_str()).await,
         Err(StoreError::Corrupt(_))
@@ -1294,20 +1329,6 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
     let root = private_tempdir();
     let store = SqliteStore::open(root.path()).unwrap();
     let request = seed(&store, "bounded-verification", 600).await;
-    let header_digest: [u8; 32] = store
-        .inner
-        .connections
-        .writer
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .query_row(
-            "SELECT sha256 FROM reference_records WHERE stream='header'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
     store
         .inner
         .connections
@@ -1316,10 +1337,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute(
-            "UPDATE reference_records SET sha256=zeroblob(32) WHERE stream='header'",
-            [],
-        )
+        .execute(EXTRA_EDGE, params!["bounded-verification", "header", 0])
         .unwrap();
     assert!(matches!(
         store.begin_purge(request.clone()).await,
@@ -1334,8 +1352,8 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
         .as_ref()
         .unwrap()
         .execute(
-            "UPDATE reference_records SET sha256=?1 WHERE stream='header'",
-            [header_digest],
+            "DELETE FROM reference_edges WHERE session_id='bounded-verification' AND stream='header' AND target_id='invented'",
+            [],
         )
         .unwrap();
     store.begin_purge(request.clone()).await.unwrap().unwrap();
@@ -1347,10 +1365,7 @@ async fn batches_defer_unselected_corruption_and_failed_barriers_preserve_sessio
         .unwrap()
         .as_ref()
         .unwrap()
-        .execute(
-            "UPDATE reference_records SET sha256=?1 WHERE stream='fact' AND seq=1200",
-            [[0xaa_u8; 32]],
-        )
+        .execute(EXTRA_EDGE, params!["bounded-verification", "fact", 1200])
         .unwrap();
     // Only the selected rows may be decoded; later corruption fails its own batch.
     let mut previous = store
@@ -1513,30 +1528,6 @@ async fn batch_rejects_tombstone_receipt_disagreement_before_mutation() {
     );
 }
 
-#[tokio::test]
-async fn append_coverage_hashes_exact_persisted_header_fact_and_control_bytes() {
-    let root = private_tempdir();
-    let store = SqliteStore::open(root.path()).unwrap();
-    seed(&store, "exact-coverage", 3).await;
-    let mut slot = store.inner.connections.writer.lock().unwrap();
-    let connection = slot.as_mut().unwrap();
-    for (table, stream, column, seq) in [
-        ("sessions", "header", "header_json", "0"),
-        ("facts", "fact", "fact_json", "c.seq"),
-        ("agent_controls", "control", "control_json", "c.seq"),
-    ] {
-        let mut statement = connection.prepare(&format!("SELECT c.{column},r.sha256 FROM {table} c JOIN reference_records r ON c.session_id=r.session_id AND r.stream='{stream}' AND r.seq={seq}")).unwrap();
-        let mut rows = statement.query([]).unwrap();
-        let mut count = 0;
-        while let Some(row) = rows.next().unwrap() {
-            let encoded: String = row.get(0).unwrap();
-            let digest: [u8; 32] = row.get(1).unwrap();
-            assert_eq!(digest[..], Sha256::digest(encoded.as_bytes())[..]);
-            count += 1;
-        }
-        assert!(count > 0);
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it() {
     let root = private_tempdir();
@@ -1579,7 +1570,7 @@ async fn cold_audit_queues_a_concurrent_writer_and_publishes_before_releasing_it
             store
                 .with_writer(|connection| {
                     connection
-                        .execute("UPDATE reference_records SET sha256=sha256", [])
+                        .execute("UPDATE sessions SET last_activity_ms=last_activity_ms", [])
                         .map_err(sql_error)?;
                     Ok(())
                 })
@@ -1646,7 +1637,7 @@ async fn first_purge_admission_does_not_release_the_writer_after_cold_audit() {
             store
                 .with_writer(|connection| {
                     connection
-                        .execute("UPDATE reference_records SET sha256=sha256", [])
+                        .execute("UPDATE sessions SET last_activity_ms=last_activity_ms", [])
                         .map_err(sql_error)?;
                     Ok(())
                 })

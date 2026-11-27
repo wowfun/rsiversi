@@ -254,7 +254,7 @@ pub(super) fn apply_atomic_sqlite_append(
             )?;
         }
         let json = encode_json("control record", record)?;
-        references.control(record, &json)?;
+        references.control(record)?;
         if let Some(claim) = (ControlIndexer {
             transaction,
             session_id: &append.session_id,
@@ -1412,7 +1412,7 @@ fn insert_fact_row(
     acceptance: Option<u64>,
     json: String,
 ) -> Result<()> {
-    references.fact(fact, &json)?;
+    references.fact(fact)?;
     let encoded = super::fact_storage::pack(fact, acceptance, json)?;
     let logical_bytes = (acceptance.is_some() || encoded.frame.is_some())
         .then(|| i64::try_from(fact.encoded_len()).expect("bounded Fact length"));

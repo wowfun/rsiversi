@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 // The acceptance coordinate column avoids parsing unrelated (possibly large)
 // Fact JSON to decide whether a join is needed. The JSON reference remains the
-// canonical, hashed record; decoding checks the relational projection against it.
+// canonical record; decoding checks the relational projection against it.
 macro_rules! fact_rows {
     ($maximum:literal, $tail:literal) => {
         concat!(
@@ -41,15 +41,6 @@ pub(super) fn read_indexed_fact(
     session_id: &SessionId,
     sequence: i64,
 ) -> Result<SessionFact> {
-    read_with(connection, session_id, sequence, |fact, _| Ok(fact))
-}
-
-pub(super) fn read_with<T>(
-    connection: &Connection,
-    session_id: &SessionId,
-    sequence: i64,
-    visit: impl FnOnce(SessionFact, &str) -> Result<T>,
-) -> Result<T> {
     let mut statement = connection
         .prepare_cached(fact_rows!("?3", "WHERE f.session_id=?1 AND f.seq=?2"))
         .map_err(sql_error)?;
@@ -64,8 +55,7 @@ pub(super) fn read_with<T>(
         .next()
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::Corrupt("absent canonical Fact".into()))?;
-    let (fact, encoded) = decode(row)?;
-    visit(fact, &encoded)
+    decode(row)
 }
 
 // Only language model coordinates index the body of an ordinary Fact.
@@ -184,7 +174,7 @@ fn decode_frame(
     row: &rusqlite::Row<'_>,
     length: usize,
     index: Option<&str>,
-) -> Result<(SessionFact, String)> {
+) -> Result<SessionFact> {
     let frame = row
         .get_ref(12)
         .map_err(sql_error)?
@@ -192,7 +182,7 @@ fn decode_frame(
         .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
     let json = super::record_codec::expand(frame, length)
         .map_err(|error| StoreError::Corrupt(format!("invalid Fact frame: {error}")))?;
-    let (fact, encoded): (SessionFact, _) = super::cas::decode_projected_json_with_source(
+    let fact: SessionFact = super::cas::decode_projected_json(
         "session Fact",
         (
             i64::try_from(length).expect("bounded Fact length"),
@@ -205,12 +195,11 @@ fn decode_frame(
             "Fact frame differs from its indexed coordinates".into(),
         ));
     }
-    Ok((fact, encoded))
+    Ok(fact)
 }
 
 /// Called only after the caller admits this row's logical bytes into its budget.
-/// Plain rows borrow their JSON for coverage hashing. Compressed rows retain its expansion.
-pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow<'a, str>)> {
+pub(super) fn decode(row: &rusqlite::Row<'_>) -> Result<SessionFact> {
     let length = logical_len(row)?;
     let physical = (
         row.get::<_, i64>(1).map_err(sql_error)?,
@@ -218,8 +207,8 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
             .map_err(sql_error)?,
     );
     let acceptance = row.get::<_, Option<i64>>(3).map_err(sql_error)?;
-    let (fact, encoded) = if let Some(acceptance) = acceptance {
-        let (record, encoded): (ReferencedFact, _) = super::cas::decode_projected_json_with_source(
+    let fact = if let Some(acceptance) = acceptance {
+        let record: ReferencedFact = super::cas::decode_projected_json(
             "referenced Fact",
             physical,
             MAXIMUM_SESSION_FACT_BYTES,
@@ -239,7 +228,7 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
         let ClaimAcceptance::MessageAccepted {
             seq: control_seq,
             message,
-        } = super::cas::decode_projected_json_with_source(
+        } = super::cas::decode_projected_json(
             "claim acceptance",
             (
                 row.get::<_, i64>(4).map_err(sql_error)?,
@@ -247,15 +236,14 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
                     .map_err(sql_error)?,
             ),
             MAXIMUM_SESSION_FACT_BYTES,
-        )?
-        .0;
+        )?;
         if control_seq != accepted_control_seq {
             return Err(StoreError::Corrupt(
                 "claim acceptance sequence differs".into(),
             ));
         }
         let (source, content) = message.into_claimed_parts();
-        let fact = SessionFact::new(
+        SessionFact::new(
             seq,
             timestamp_ms,
             SessionFactBody::InputMessageClaimed {
@@ -265,18 +253,11 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
                 content,
             },
         )
-        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        (fact, Cow::Borrowed(encoded))
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?
     } else if row.get::<_, bool>(11).map_err(sql_error)? {
-        let (fact, encoded) = decode_frame(row, length, physical.1)?;
-        (fact, Cow::Owned(encoded))
+        decode_frame(row, length, physical.1)?
     } else {
-        super::cas::decode_projected_json_with_source(
-            "session Fact",
-            physical,
-            MAXIMUM_SESSION_FACT_BYTES,
-        )
-        .map(|(fact, encoded)| (fact, Cow::Borrowed(encoded)))?
+        super::cas::decode_projected_json("session Fact", physical, MAXIMUM_SESSION_FACT_BYTES)?
     };
     if fact.encoded_len() != length
         || fact.seq() != decode_u64("Fact sequence", row.get(6).map_err(sql_error)?)?
@@ -291,7 +272,7 @@ pub(super) fn decode<'a>(row: &'a rusqlite::Row<'_>) -> Result<(SessionFact, Cow
             "indexed Fact differs from its stored projection".into(),
         ));
     }
-    Ok((fact, encoded))
+    Ok(fact)
 }
 
 #[cfg(test)]
@@ -299,7 +280,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn physical_fact_text_borrows_the_current_sqlite_row() {
+    fn decoded_fact_outlives_the_current_sqlite_row() {
         let expected = SessionFact::new(
             1,
             10,
@@ -316,13 +297,7 @@ mod tests {
                 "SELECT length(CAST(?1 AS BLOB)), length(CAST(?1 AS BLOB)), ?1,
                         NULL, 0, NULL, 1, 'turn', 'event', 'session', NULL AS intent_purpose, 0, NULL",
                 [&json],
-                |row| {
-                    let raw = row.get_ref(2)?.as_str().unwrap();
-                    let (fact, encoded) = decode(row).unwrap();
-                    assert_eq!(encoded.as_ptr(), raw.as_ptr(), "do not copy physical JSON");
-                    assert_eq!(encoded, json);
-                    Ok(fact)
-                },
+                |row| Ok(decode(row).unwrap()),
             )
             .unwrap();
         drop(db);

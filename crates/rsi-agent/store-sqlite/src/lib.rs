@@ -80,7 +80,7 @@ const MAXIMUM_ORPHANED_CAS_STAGING_FILES: usize = 64;
 const VALIDATED_SESSION_CACHE_CAPACITY: usize = 256;
 const FORK_BOUNDARY_CACHE_CAPACITY: usize = 256;
 const MAXIMUM_INDEXED_MESSAGE_STATE_BYTES: usize = 4 * 1024;
-const EXPECTED_TABLES: [(&str, &str); 24] = [
+const EXPECTED_TABLES: [(&str, &str); 23] = [
     ("domain_removals", "CREATE TABLE domain_removals (
         session_id TEXT NOT NULL,
         domain_id TEXT NOT NULL,
@@ -103,8 +103,7 @@ const EXPECTED_TABLES: [(&str, &str); 24] = [
         FOREIGN KEY (session_id, control_seq) REFERENCES agent_controls(session_id, seq) ON DELETE RESTRICT
     ) STRICT"),
     ("cas_deletions", "CREATE TABLE cas_deletions (operation_id TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL, byte_len INTEGER NOT NULL CHECK (byte_len > 0), generation INTEGER NOT NULL CHECK (generation > 0), state TEXT NOT NULL CHECK (state IN ('deleting', 'deleted')), UNIQUE (sha256, generation)) STRICT"),
-    ("reference_records", "CREATE TABLE reference_records (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header', 'fact', 'control')), seq INTEGER NOT NULL CHECK (seq >= 0), sha256 BLOB NOT NULL CHECK(length(sha256)=32), PRIMARY KEY (session_id, stream, seq)) STRICT, WITHOUT ROWID"),
-    ("reference_edges", "CREATE TABLE reference_edges (session_id TEXT NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL, target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'cas')), target_id TEXT NOT NULL, target_bytes INTEGER NOT NULL CHECK (target_bytes >= 0), PRIMARY KEY (session_id, stream, seq, target_kind, target_id), FOREIGN KEY (session_id, stream, seq) REFERENCES reference_records(session_id, stream, seq) ON DELETE RESTRICT) STRICT"),
+    ("reference_edges", "CREATE TABLE reference_edges (session_id TEXT NOT NULL, stream TEXT NOT NULL CHECK (stream IN ('header','fact','control')), seq INTEGER NOT NULL CHECK(seq >= 0), target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'cas')), target_id TEXT NOT NULL, target_bytes INTEGER NOT NULL CHECK (target_bytes >= 0), PRIMARY KEY (session_id, stream, seq, target_kind DESC, target_id)) STRICT, WITHOUT ROWID"),
     ("purge_operations", "CREATE TABLE purge_operations (operation_id TEXT PRIMARY KEY NOT NULL, request_json TEXT NOT NULL, locations_json TEXT NOT NULL, locations_sha256 TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1)), deleted_records INTEGER NOT NULL CHECK (deleted_records >= 0), deleted_payload_bytes INTEGER NOT NULL CHECK (deleted_payload_bytes >= 0)) STRICT"),
     ("session_tombstones", "CREATE TABLE session_tombstones (session_id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL REFERENCES purge_operations(operation_id) ON DELETE RESTRICT, state TEXT NOT NULL CHECK (state IN ('retiring', 'purged'))) STRICT"),
     ("program_runs", "CREATE TABLE program_runs (
@@ -916,9 +915,7 @@ impl SqliteStore {
     pub fn verify(root: impl AsRef<Path>) -> Result<()> {
         let offline = filesystem::open_offline_store(root.as_ref())?;
         offline_maintenance::require_settled(&offline.connection)?;
-        validate_database(&offline.connection)?;
-        reference_index::validate_retiring(&offline.connection)?;
-        Ok(())
+        reference_index::verify_database(&offline.connection)
     }
 
     async fn with_database<T, F>(

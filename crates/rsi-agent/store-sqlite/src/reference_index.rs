@@ -1,7 +1,7 @@
 use super::{
-    AgentControlRecord, Connection, Digest, MAXIMUM_STORE_CONTROL_PAGE_BYTES, OptionalExtension,
-    Result, SessionFact, SessionHeader, SessionId, Sha256, StoreError, bounded_text, cas_ownership,
-    decode_u64, maintenance, params, read_session_header_row, sql_error, sqlite_u64, validation,
+    AgentControlRecord, Connection, MAXIMUM_STORE_CONTROL_PAGE_BYTES, OptionalExtension, Result,
+    SessionFact, SessionHeader, SessionId, StoreError, bounded_text, cas_ownership, decode_u64,
+    maintenance, params, read_session_header_row, sql_error, sqlite_u64, validation,
 };
 use rsi_agent_session_protocol::{DurableReference, ReferenceCollector};
 use rsi_agent_store_protocol::{control_references, fact_references, header_references};
@@ -20,29 +20,14 @@ pub(super) fn available(connection: &Connection, id: &SessionId) -> Result<()> {
         Ok(())
     }
 }
-fn digest(encoded: &str) -> [u8; 32] {
-    Sha256::digest(encoded.as_bytes()).into()
-}
 fn write(
     connection: &Connection,
     id: &SessionId,
     stream: &str,
     seq: u64,
-    hash: &[u8; 32],
     refs: Result<ReferenceCollector>,
 ) -> Result<()> {
     let refs = refs?;
-    connection
-        .execute(
-            "INSERT INTO reference_records(session_id,stream,seq,sha256) VALUES(?1,?2,?3,?4)",
-            params![
-                id.as_str(),
-                stream,
-                sqlite_u64("reference sequence", seq)?,
-                hash
-            ],
-        )
-        .map_err(sql_error)?;
     for edge in refs.iter() {
         let (kind, target, bytes) = match edge {
             DurableReference::Session(target) => {
@@ -70,7 +55,7 @@ fn write(
     }
     Ok(())
 }
-/// Transaction-local projection writer; the returned JSON is the canonical INSERT payload.
+/// Writes the edges of canonical records in their owning transaction.
 pub(super) struct Writer<'a> {
     connection: &'a Connection,
     id: &'a SessionId,
@@ -87,42 +72,25 @@ impl<'a> Writer<'a> {
             self.id,
             "header",
             0,
-            &digest(&encoded),
             header_references(header),
         )?;
         Ok(encoded)
     }
-    /// A preset ID carries no durable edge. Preserve every other Header field and edge.
-    pub(super) fn changed_preset(&self, previous: &str, header: &SessionHeader) -> Result<String> {
-        let encoded = super::encode_json("header", header)?;
-        let updated = self.connection.execute(
-            "UPDATE reference_records SET sha256=?2 WHERE session_id=?1 AND stream='header' AND seq=0 AND sha256=?3",
-            params![self.id.as_str(), digest(&encoded), digest(previous)],
-        ).map_err(sql_error)?;
-        if updated != 1 {
-            return Err(StoreError::Corrupt(
-                "blank Header reference digest disagrees".into(),
-            ));
-        }
-        Ok(encoded)
-    }
-    pub(super) fn fact(&self, fact: &SessionFact, json: &str) -> Result<()> {
+    pub(super) fn fact(&self, fact: &SessionFact) -> Result<()> {
         write(
             self.connection,
             self.id,
             "fact",
             fact.seq(),
-            &digest(json),
             fact_references(fact),
         )
     }
-    pub(super) fn control(&self, control: &AgentControlRecord, json: &str) -> Result<()> {
+    pub(super) fn control(&self, control: &AgentControlRecord) -> Result<()> {
         write(
             self.connection,
             self.id,
             "control",
             control.seq(),
-            &digest(json),
             control_references(control),
         )
     }
@@ -132,34 +100,19 @@ fn verify(
     id: &SessionId,
     stream: &str,
     seq: u64,
-    hash: &[u8; 32],
     refs: &ReferenceCollector,
-) -> Result<()> {
-    let row = connection
-        .query_row(
-            "SELECT CASE length(sha256) WHEN 32 THEN sha256=?4 ELSE 0 END
-             FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
-            params![
-                id.as_str(),
-                stream,
-                sqlite_u64("reference sequence", seq)?,
-                hash
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()
-        .map_err(sql_error)?;
-    let Some(matches) = row else {
-        return Err(StoreError::Corrupt(
-            "missing canonical reference coverage".into(),
-        ));
-    };
-    if !matches {
-        return Err(StoreError::Corrupt(
-            "reference coverage digest differs from canonical record".into(),
-        ));
+) -> Result<u64> {
+    let mut expected = refs.iter().peekable();
+    if expected.peek().is_none() {
+        return Ok(0);
     }
-    let mut statement = connection.prepare("SELECT target_kind,target_id,target_bytes FROM reference_edges WHERE session_id=?1 AND stream=?2 AND seq=?3 ORDER BY target_kind,target_id").map_err(sql_error)?;
+    // The key orders Session edges before CAS, matching DurableReference.
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT target_kind,target_id,target_bytes FROM reference_edges
+         WHERE session_id=?1 AND stream=?2 AND seq=?3 ORDER BY target_kind DESC,target_id",
+        )
+        .map_err(sql_error)?;
     let mut rows = statement
         .query(params![
             id.as_str(),
@@ -167,63 +120,61 @@ fn verify(
             sqlite_u64("reference sequence", seq)?
         ])
         .map_err(sql_error)?;
-    let mut observed = ReferenceCollector::default();
-    while let Some(row) = rows.next().map_err(sql_error)? {
-        let kind = bounded_text(row, 0, 7).map_err(sql_error)?;
-        let target = bounded_text(row, 1, 256).map_err(sql_error)?;
-        let bytes = decode_u64("reference bytes", row.get(2).map_err(sql_error)?)?;
-        match kind.as_str() {
-            "session" if bytes == 0 => observed
-                .session(&SessionId::new(target).map_err(|e| StoreError::Corrupt(e.to_string()))?)
-                .map_err(StoreError::Corrupt)?,
-            "cas" => observed.cas(&target, bytes).map_err(StoreError::Corrupt)?,
-            _ => {
-                return Err(StoreError::Corrupt(
-                    "invalid reference edge kind or length".into(),
-                ));
-            }
+    let mut count = 0;
+    for reference in expected {
+        let (kind, target, bytes) = match reference {
+            DurableReference::Session(target) => ("session", target.as_str(), 0),
+            DurableReference::Cas { sha256, byte_len } => ("cas", sha256.as_str(), *byte_len),
+        };
+        let row = rows
+            .next()
+            .map_err(sql_error)?
+            .ok_or_else(|| StoreError::Corrupt("missing canonical reference edge".into()))?;
+        if super::text::borrowed_text(row, 0, 7).map_err(sql_error)? != kind
+            || super::text::borrowed_text(row, 1, 256).map_err(sql_error)? != target
+            || decode_u64("reference bytes", row.get(2).map_err(sql_error)?)? != bytes
+        {
+            return Err(StoreError::Corrupt(
+                "canonical reference edge differs from its source".into(),
+            ));
         }
+        count += 1;
     }
-    if !refs.iter().eq(observed.iter()) {
-        return Err(StoreError::Corrupt(
-            "canonical reference edges differ from their typed source".into(),
-        ));
-    }
-    Ok(())
+    Ok(count)
 }
 struct Observer<'a> {
     connection: &'a Connection,
-
-    records: u64,
+    edges: u64,
 }
 impl validation::CanonicalObserver for Observer<'_> {
-    fn fact(&mut self, id: &SessionId, fact: &SessionFact, encoded: &str) -> Result<()> {
-        verify(
+    fn header(&mut self, header: &SessionHeader) -> Result<()> {
+        self.edges += verify(
+            self.connection,
+            header.session_id(),
+            "header",
+            0,
+            &header_references(header)?,
+        )?;
+        Ok(())
+    }
+    fn fact(&mut self, id: &SessionId, fact: &SessionFact) -> Result<()> {
+        self.edges += verify(
             self.connection,
             id,
             "fact",
             fact.seq(),
-            &digest(encoded),
             &fact_references(fact)?,
         )?;
-        self.records += 1;
         Ok(())
     }
-    fn control(
-        &mut self,
-        id: &SessionId,
-        control: &AgentControlRecord,
-        encoded: &str,
-    ) -> Result<()> {
-        verify(
+    fn control(&mut self, id: &SessionId, control: &AgentControlRecord) -> Result<()> {
+        self.edges += verify(
             self.connection,
             id,
             "control",
             control.seq(),
-            &digest(encoded),
             &control_references(control)?,
         )?;
-        self.records += 1;
         Ok(())
     }
 }
@@ -232,75 +183,48 @@ pub(super) fn validate_all(connection: &Connection) -> Result<()> {
     let mut rows = statement.query([]).map_err(sql_error)?;
     let mut observer = Observer {
         connection,
-
-        records: 0,
+        edges: 0,
     };
     while let Some(row) = rows.next().map_err(sql_error)? {
         let id = SessionId::new(bounded_text(row, 0, 256).map_err(sql_error)?)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-        let (row, encoded) = validation::read_session_header_source(connection, &id)?;
-        verify(
-            connection,
-            &id,
-            "header",
-            0,
-            &digest(&encoded),
-            &header_references(&row.header)?,
-        )?;
-        observer.records += 1;
         validation::validate_session_observed(connection, &id, &mut observer)?;
         validation::validate_canonical_fact_prefix(connection, &id, &mut observer)?;
     }
-    observer.records += validate_retiring(connection)?;
-    let indexed = connection
-        .query_row("SELECT COUNT(*) FROM reference_records", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(sql_error)?;
-    if decode_u64("reference record count", indexed)? != observer.records {
-        return Err(StoreError::Corrupt(
-            "extra canonical reference coverage".into(),
-        ));
-    }
-    let orphans = connection.query_row("SELECT EXISTS(SELECT 1 FROM reference_edges e LEFT JOIN reference_records r ON (e.session_id,e.stream,e.seq)=(r.session_id,r.stream,r.seq) WHERE r.session_id IS NULL)", [], |row| row.get::<_,bool>(0)).map_err(sql_error)?;
-    if orphans {
-        return Err(StoreError::Corrupt("orphaned reference edge".into()));
-    }
-    Ok(())
-}
-pub(super) fn remove(connection: &Connection, id: &str, stream: &str, seq: i64) -> Result<()> {
-    connection
-        .execute(
-            "DELETE FROM reference_edges WHERE session_id=?1 AND stream=?2 AND seq=?3",
-            params![id, stream, seq],
-        )
-        .map_err(sql_error)?;
-    connection
-        .execute(
-            "DELETE FROM reference_records WHERE session_id=?1 AND stream=?2 AND seq=?3",
-            params![id, stream, seq],
-        )
-        .map_err(sql_error)?;
-    Ok(())
+    observer.finish()
 }
 
-// A retired prefix is intentionally incomplete. Authenticate each surviving
-// canonical record and its exact projection without pretending it is replayable.
-pub(super) fn validate_retiring(connection: &Connection) -> Result<u64> {
-    validate_retiring_operation(connection, None)
-}
-pub(super) fn validate_retiring_operation(
-    connection: &Connection,
-
-    operation: Option<&str>,
-) -> Result<u64> {
-    validate_retirement_bindings(connection, operation)?;
-    if let Some(operation) = operation
-        && maintenance::operation_request(connection, operation)?.is_none()
-    {
-        return Err(StoreError::NotFound(operation.into()));
+impl Observer<'_> {
+    fn finish(self) -> Result<()> {
+        let connection = self.connection;
+        let expected = self.edges + validate_retiring(connection)?;
+        let indexed = connection
+            .query_row("SELECT COUNT(*) FROM reference_edges", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(sql_error)?;
+        if decode_u64("reference edge count", indexed)? != expected {
+            return Err(StoreError::Corrupt(
+                "reference edges without a canonical source".into(),
+            ));
+        }
+        Ok(())
     }
-    let mut records = 0;
+}
+
+pub(super) fn verify_database(connection: &Connection) -> Result<()> {
+    let mut observer = Observer {
+        connection,
+        edges: 0,
+    };
+    validation::validate_database_observed(connection, &mut observer)?;
+    observer.finish()
+}
+
+// A partially retired history still owns all edges of each surviving record.
+fn validate_retiring(connection: &Connection) -> Result<u64> {
+    validate_retirement_bindings(connection, None)?;
+    let mut edges = 0;
     for (table, stream, column, seq, maximum) in [
         (
             "sessions",
@@ -317,8 +241,8 @@ pub(super) fn validate_retiring_operation(
             MAXIMUM_STORE_CONTROL_PAGE_BYTES,
         ),
     ] {
-        let mut statement = connection.prepare(&format!("SELECT session_id,{seq},{column} FROM {table} WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE state='retiring' AND (?1 IS NULL OR operation_id=?1)) ORDER BY session_id,2")).map_err(sql_error)?;
-        let mut rows = statement.query([operation]).map_err(sql_error)?;
+        let mut statement = connection.prepare(&format!("SELECT session_id,{seq},{column} FROM {table} WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE state='retiring') ORDER BY session_id,2")).map_err(sql_error)?;
+        let mut rows = statement.query([]).map_err(sql_error)?;
         while let Some(row) = rows.next().map_err(sql_error)? {
             let id = SessionId::new(bounded_text(row, 0, 256).map_err(sql_error)?)
                 .map_err(|e| StoreError::Corrupt(e.to_string()))?;
@@ -327,55 +251,33 @@ pub(super) fn validate_retiring_operation(
                 row.get(1).map_err(sql_error)?,
             )?;
             let encoded = super::record_codec::payload(row, 2, maximum).map_err(sql_error)?;
-            verify_encoded(connection, &id, stream, seq, &encoded)?;
-            records += 1;
+            edges += verify_encoded(connection, &id, stream, seq, &encoded)?;
         }
     }
     {
-        let mut statement = connection.prepare(fact_rows!("?2", "WHERE f.session_id IN (SELECT session_id FROM session_tombstones WHERE state='retiring' AND (?1 IS NULL OR operation_id=?1)) ORDER BY f.session_id,f.seq")).map_err(sql_error)?;
+        let mut statement = connection.prepare(fact_rows!("?1", "WHERE f.session_id IN (SELECT session_id FROM session_tombstones WHERE state='retiring') ORDER BY f.session_id,f.seq")).map_err(sql_error)?;
         let mut rows = statement
             .query(params![
-                operation,
                 i64::try_from(super::MAXIMUM_SESSION_FACT_BYTES).expect("bounded Fact length")
             ])
             .map_err(sql_error)?;
         while let Some(row) = rows.next().map_err(sql_error)? {
             let id = SessionId::new(bounded_text(row, 9, 256).map_err(sql_error)?)
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            let (fact, encoded) = super::fact_storage::decode(row)?;
-            verify_fact(connection, &id, &fact, &encoded)?;
-            records += 1;
+            let fact = super::fact_storage::decode(row)?;
+            edges += verify_fact(connection, &id, &fact)?;
         }
     }
-    let invalid = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_tombstones t JOIN purge_operations p USING(operation_id) WHERE (t.state='purged') != (p.complete=1)) OR EXISTS(SELECT 1 FROM session_tombstones t JOIN sessions s USING(session_id) WHERE t.state='purged')",[],|row| row.get::<_,bool>(0)).map_err(sql_error)?;
-    if invalid {
-        return Err(StoreError::Corrupt(
-            "retirement receipt state differs".into(),
-        ));
-    }
-    let indexed: i64 = connection.query_row("SELECT COUNT(*) FROM reference_records WHERE session_id IN (SELECT session_id FROM session_tombstones WHERE (?1 IS NULL OR operation_id=?1))", [operation], |row| row.get(0)).map_err(sql_error)?;
-    if decode_u64("retiring reference count", indexed)? != records {
-        return Err(StoreError::Corrupt(
-            "extra retiring reference coverage".into(),
-        ));
-    }
-    let orphans: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM reference_edges e LEFT JOIN reference_records r ON (e.session_id,e.stream,e.seq)=(r.session_id,r.stream,r.seq) WHERE r.session_id IS NULL AND e.session_id IN (SELECT session_id FROM session_tombstones WHERE (?1 IS NULL OR operation_id=?1)))", [operation], |row| row.get(0)).map_err(sql_error)?;
-    if orphans {
-        return Err(StoreError::Corrupt(
-            "orphan retiring reference edges".into(),
-        ));
-    }
-    Ok(records)
+    Ok(edges)
 }
 
 pub(super) fn verify_encoded(
     connection: &Connection,
-
     id: &SessionId,
     stream: &str,
     seq: u64,
     encoded: &str,
-) -> Result<()> {
+) -> Result<u64> {
     let refs = if stream == "header" {
         let value: SessionHeader =
             serde_json::from_str(encoded).map_err(|e| StoreError::Corrupt(e.to_string()))?;
@@ -390,55 +292,50 @@ pub(super) fn verify_encoded(
         }
         control_references(&value)?
     };
-    verify(connection, id, stream, seq, &digest(encoded), &refs)
+    verify(connection, id, stream, seq, &refs)
 }
 
 pub(super) fn verify_fact(
     connection: &Connection,
     id: &SessionId,
     fact: &SessionFact,
-    encoded: &str,
-) -> Result<()> {
-    verify(
-        connection,
-        id,
-        "fact",
-        fact.seq(),
-        &digest(encoded),
-        &fact_references(fact)?,
-    )
+) -> Result<u64> {
+    verify(connection, id, "fact", fact.seq(), &fact_references(fact)?)
 }
 
 struct Rebuilder<'a> {
     connection: &'a Connection,
-
     records: u64,
 }
 impl validation::CanonicalObserver for Rebuilder<'_> {
-    fn fact(&mut self, id: &SessionId, fact: &SessionFact, encoded: &str) -> Result<()> {
+    fn header(&mut self, header: &SessionHeader) -> Result<()> {
+        write(
+            self.connection,
+            header.session_id(),
+            "header",
+            0,
+            header_references(header),
+        )?;
+        self.records += 1;
+        Ok(())
+    }
+    fn fact(&mut self, id: &SessionId, fact: &SessionFact) -> Result<()> {
         write(
             self.connection,
             id,
             "fact",
             fact.seq(),
-            &digest(encoded),
             fact_references(fact),
         )?;
         self.records += 1;
         Ok(())
     }
-    fn control(
-        &mut self,
-        id: &SessionId,
-        control: &AgentControlRecord,
-        encoded: &str,
-    ) -> Result<()> {
+    fn control(&mut self, id: &SessionId, control: &AgentControlRecord) -> Result<()> {
         write(
             self.connection,
             id,
             "control",
             control.seq(),
-            &digest(encoded),
             control_references(control),
         )?;
         self.records += 1;
@@ -446,15 +343,12 @@ impl validation::CanonicalObserver for Rebuilder<'_> {
     }
 }
 pub(super) fn rebuild(connection: &Connection) -> Result<u64> {
+    validate_retirement_bindings(connection, None)?;
     connection
         .execute("DELETE FROM reference_edges", [])
         .map_err(sql_error)?;
-    connection
-        .execute("DELETE FROM reference_records", [])
-        .map_err(sql_error)?;
     let mut rebuilder = Rebuilder {
         connection,
-
         records: 0,
     };
     let mut cursor = None;
@@ -464,16 +358,6 @@ pub(super) fn rebuild(connection: &Connection) -> Result<u64> {
             break;
         }
         for id in &ids {
-            let (row, encoded) = validation::read_session_header_source(connection, id)?;
-            write(
-                connection,
-                id,
-                "header",
-                0,
-                &digest(&encoded),
-                header_references(&row.header),
-            )?;
-            rebuilder.records += 1;
             validation::validate_session_observed(connection, id, &mut rebuilder)?;
             validation::validate_canonical_fact_prefix(connection, id, &mut rebuilder)?;
         }

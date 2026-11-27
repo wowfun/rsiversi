@@ -126,8 +126,7 @@ the rows it just inserted.
 All Fact readers share this reconstruction, including cold recovery, selected
 forks and application history. Indexed logical lengths preserve read budgets;
 bounded physical projections govern allocation. Prefix fingerprints remain
-logical while reference coverage hashes the stored bytes and retains logical
-edges. Fact retirement precedes acceptance retirement. The current Store schema rejects earlier
+logical, and the reference index retains logical edges. Fact retirement precedes acceptance retirement. The current Store schema rejects earlier
 physical encodings without touching them; this pre-release compatibility choice
 avoids a migration branch, but migration remains technically possible.
 

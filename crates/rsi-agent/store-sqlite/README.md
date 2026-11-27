@@ -3,10 +3,9 @@
 Atomic Session appends check retirement once in the writer transaction. One
 indexed Session read supplies both expected-sequence comparisons and the
 Fact-prefix digest. A newly admitted Header starts with empty stream positions.
-For ordinary Facts and controls, the Store uses one canonical JSON encoding
-for the row and its reference coverage digest. An appended Fact also advances the Fact prefix.
-For mailbox claims stored as acceptance references, coverage binds the shorter
-stored record, while the Session prefix binds the full logical Fact.
+An appended Fact advances the prefix using its full logical value, including
+mailbox claims stored as acceptance references. The same transaction indexes
+only the durable references declared by the typed Header, Fact or control.
 
 Live summary and access reads select the Header and check retirement in the
 same indexed statement. An access batch reuses that statement inside one
@@ -44,8 +43,7 @@ checksummed zstd frame when the frame plus its SQL index projection is smaller
 than the canonical JSON. Uncompressed rows are read directly from SQLite. Model-effect coordinates
 remain queryable without expanding frames. Standalone command records and
 mailbox acceptance references keep their indexed JSON representation. Page
-admission uses the original logical size before decompression. Coverage digests,
-replay and inspection use the exact original bytes. Purge counts the stored bytes.
+admission uses the original logical size before decompression. Replay and inspection use the original bytes. Purge counts the stored bytes.
 
 Each Session row points to its latest working-directory control. The path lives
 in the canonical control. Reading a Session with a change fetches its path by
@@ -78,7 +76,7 @@ remain inline.
 
 The control payload column holds canonical JSON text or a checksummed zstd
 frame. Large human and application message acceptances use the frame when it
-reduces the stored row. Read limits and reference coverage use the original UTF-8 bytes. Mailbox
+reduces the stored row. Read limits use the original UTF-8 size. Mailbox
 selection still reads the indexed source and delivery coordinates. Command
 acceptances retain their searchable invocation identity in plain JSON.
 
@@ -92,13 +90,14 @@ Fact does not construct and count a second complete control value. Logical byte 
 window and suffix admission, and cold validation checks their indexed lengths
 against reconstructed Facts. Physical JSON lengths are bounded before allocation.
 Page and single-Fact reads borrow bounded physical JSON and indexed text from
-the current SQLite row through validation and coverage hashing. The returned
+the current SQLite row through validation. The returned
 logical Fact owns its decoded contents. Pooled connections reuse the prepared
 SQL for single-Fact, forward, reverse, per-Turn and suffix reads. Each call
 binds its own Session, coordinates and byte limit.
-Prefix fingerprints remain logical. Reference coverage stores the 32 SHA-256
-bytes of each physical record in the primary tree keyed by Session, stream and
-sequence. Verification compares this digest and the logical reference edges.
+Verification compares the stored outgoing edges with the references declared by
+each typed record and checks that every indexed edge has a canonical source.
+Offline verification checks those edges during its existing canonical scan.
+Offline rebuild writes the edges in one transaction after read-only preflight.
 The activation lookup indexes only controls carrying an activation identity.
 Purge removes Facts before their
 accepted controls. Unsupported schemas are rejected during
@@ -134,10 +133,9 @@ The batch retains those proofs through the query independently of cache eviction
 without acquiring multiple bounded pin leases that could exhaust its own permits.
 
 Session maintenance persists operation receipts and retirement tombstones outside
-Session-owned rows. Reference coverage is per canonical record and includes its
-content digest; a source snapshot must agree with this projection before deletion.
-Append serializes each canonical record once for persistence and reference coverage;
-the coverage digest hashes those exact inserted JSON bytes.
+Session-owned rows. An outgoing reference stores its source position, target
+identity and, for CAS objects, its byte length. Records with no references
+occupy no space in the reference index.
 Maintenance retains a bounded, checksummed execution-location projection for purge
 recovery instead of complete Header copies. It is collected during the same
 admission read as the immutable selection; protected Headers are never admitted.
@@ -159,8 +157,8 @@ contention remains a pre-admission refusal. Domain snapshots carry their canonic
 reference sets; maintenance and reference rebuilding need no executable plugin.
 Subsequent batches authenticate that operation's immutable binding and only the
 canonical records selected for deletion, in the same bounded writer transaction.
-Each record must match its digest and exact reference coverage before removal;
-extra coverage must be absent before deleting its Session Header. Corruption in a
+Removal requires the exact outgoing edges for each record. The last Header
+delete also checks for any leftover edges from that Session. Corruption in a
 later batch prevents that batch, without undoing earlier completed batches.
 Transactional append rejects new references to tombstoned Sessions. Batches do not
 replay unrelated or unselected surviving history.

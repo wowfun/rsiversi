@@ -61,7 +61,7 @@ impl SqliteStore {
         let session_id = session_id.clone();
         self.with_reader_named(StoreOperation::Header, move |connection| {
             let mut statement = validation::live_headers(connection)?;
-            validation::read_selected_header(&mut statement, &session_id).map(|(row, _)| row)
+            validation::read_selected_header(&mut statement, &session_id)
         })
         .await
     }
@@ -102,23 +102,22 @@ impl SessionStore for SqliteStore {
                 .map_err(sql_error)?;
             let id = header.session_id();
             let references = reference_index::Writer::new(&tx, id)?;
-            let saved = match validation::read_session_header_source(&tx, id) {
+            let saved = match validation::read_session_summary(&tx, id) {
                 Ok(record) => Some(record),
                 Err(StoreError::NotFound(_)) => None,
                 Err(error) => return Err(error),
             };
             match BlankWrite::compare(
-                saved.as_ref().map(|(row, _)| (&row.header, row.is_blank())),
+                saved.as_ref().map(|row| (&row.header, row.is_blank())),
                 &header,
                 previous_preset.as_ref(),
             )? {
                 BlankWrite::Insert => append::insert_session(&tx, &header, &references)?,
                 BlankWrite::Keep => {}
                 BlankWrite::SelectPreset => {
-                    let (_, previous) = saved.expect("a preset change matched a stored Header");
                     tx.execute(
                         "UPDATE sessions SET header_json=?2 WHERE session_id=?1",
-                        params![id.as_str(), references.changed_preset(&previous, &header)?],
+                        params![id.as_str(), super::encode_json("header", &header)?],
                     )
                     .map_err(sql_error)?;
                 }
@@ -502,7 +501,7 @@ impl SessionStore for SqliteStore {
             let result = sessions
                 .iter()
                 .map(|id| {
-                    validation::read_selected_header(&mut statement, id).map(|(row, _)| {
+                    validation::read_selected_header(&mut statement, id).map(|row| {
                         rsi_agent_store_protocol::StoreSessionAccess::at(
                             &row.header,
                             row.durable_fact_seq,
@@ -746,7 +745,7 @@ impl SessionStore for SqliteStore {
                         }
                         #[cfg(any(test, feature = "test-support"))]
                         materializations.fetch_add(1, Ordering::Relaxed);
-                        let fact = super::fact_storage::decode(row)?.0;
+                        let fact = super::fact_storage::decode(row)?;
                         encoded_bytes = projected;
                         facts.push(fact);
                     }
@@ -863,7 +862,7 @@ impl SessionStore for SqliteStore {
                 if !admit_page_record(projected, maximum_bytes, records.is_empty())? {
                     break;
                 }
-                let (record, _): (AgentControlRecord, _) = super::cas::decode_projected_json_with_source(
+                let record: AgentControlRecord = super::cas::decode_projected_json(
                     "Agent control record",
                     (
                         i64::try_from(encoded_len)
@@ -975,7 +974,7 @@ impl SessionStore for SqliteStore {
                     }
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, Ordering::Relaxed);
-                    let fact = super::fact_storage::decode(row)?.0;
+                    let fact = super::fact_storage::decode(row)?;
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -1081,7 +1080,7 @@ impl SessionStore for SqliteStore {
                     }
                     #[cfg(any(test, feature = "test-support"))]
                     materializations.fetch_add(1, Ordering::Relaxed);
-                    let fact = super::fact_storage::decode(row)?.0;
+                    let fact = super::fact_storage::decode(row)?;
                     encoded_bytes = projected;
                     facts.push(fact);
                 }
@@ -2856,7 +2855,7 @@ pub(super) fn read_agent_subtree(
                 "execution owner",
                 (
                     row.get(11).map_err(sql_error)?,
-                    row.get(12).map_err(sql_error)?,
+                    super::text::optional_borrowed_text(row, 12, super::MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES).map_err(sql_error)?,
                 ),
                 super::MAXIMUM_INDEXED_EXECUTION_OWNER_BYTES,
             )?,

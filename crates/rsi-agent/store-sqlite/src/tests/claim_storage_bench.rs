@@ -22,11 +22,6 @@ async fn compare_referenced_and_inline_claim_storage() {
             let db = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
             let encoded = serde_json::to_string(&expected[2]).unwrap();
             db.execute("UPDATE facts SET fact_json=?1, acceptance_control_seq=NULL, logical_bytes=NULL WHERE seq=3", [&encoded]).unwrap();
-            db.execute(
-                "UPDATE reference_records SET sha256=?1 WHERE stream='fact' AND seq=3",
-                [&Sha256::digest(encoded.as_bytes())[..]],
-            )
-            .unwrap();
         }
         SqliteStore::verify(root.path()).unwrap();
         SqliteStore::compact(root.path()).unwrap();

@@ -1,13 +1,16 @@
 use super::*;
 
 pub(super) trait CanonicalObserver {
+    fn header(&mut self, _: &SessionHeader) -> Result<()> {
+        Ok(())
+    }
     fn checkpoint(&mut self) -> Result<()> {
         Ok(())
     }
-    fn control(&mut self, _: &SessionId, _: &AgentControlRecord, _: &str) -> Result<()> {
+    fn control(&mut self, _: &SessionId, _: &AgentControlRecord) -> Result<()> {
         Ok(())
     }
-    fn fact(&mut self, _: &SessionId, _: &SessionFact, _: &str) -> Result<()> {
+    fn fact(&mut self, _: &SessionId, _: &SessionFact) -> Result<()> {
         Ok(())
     }
 }
@@ -161,8 +164,9 @@ pub(super) fn validate_session_observed(
     session_id: &SessionId,
     observer: &mut impl CanonicalObserver,
 ) -> Result<ControlReplaySummary> {
-    let (session, _) = read_session_header_source(connection, session_id)?;
+    let session = read_session_summary(connection, session_id)?;
     let header = &session.header;
+    observer.header(header)?;
     let durable_seq = session.durable_fact_seq;
     rsi_agent_store_protocol::validate_program_header(
         &super::program_graph::Graph(connection),
@@ -341,14 +345,13 @@ pub(super) fn read_session_header_row(
     connection: &Connection,
     session_id: &SessionId,
 ) -> Result<(SessionHeader, u64)> {
-    read_session_header_source(connection, session_id)
-        .map(|(row, _)| (row.header, row.durable_fact_seq))
+    read_session_summary(connection, session_id).map(|row| (row.header, row.durable_fact_seq))
 }
 
-pub(super) fn read_session_header_source(
+pub(super) fn read_session_summary(
     connection: &Connection,
     session_id: &SessionId,
-) -> Result<(StoreRecentSession, String)> {
+) -> Result<StoreRecentSession> {
     let mut statement = connection
         .prepare(&format!(
             "SELECT {} FROM sessions WHERE session_id = ?1",
@@ -372,7 +375,7 @@ pub(super) fn live_headers(connection: &Connection) -> Result<rusqlite::CachedSt
 pub(super) fn read_selected_header(
     statement: &mut rusqlite::Statement<'_>,
     session_id: &SessionId,
-) -> Result<(StoreRecentSession, String)> {
+) -> Result<StoreRecentSession> {
     #[cfg(test)]
     HEADER_READS.set(HEADER_READS.get() + 1);
     let row = statement
@@ -380,20 +383,13 @@ pub(super) fn read_selected_header(
         .optional()
         .map_err(sql_error)?
         .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
-    decode_header_source(session_id, row)
+    decode_header_projection(session_id, row)
 }
 
 pub(super) fn decode_header_projection(
     session_id: &SessionId,
     row: HeaderRow,
 ) -> Result<StoreRecentSession> {
-    decode_header_source(session_id, row).map(|(row, _)| row)
-}
-
-fn decode_header_source(
-    session_id: &SessionId,
-    row: HeaderRow,
-) -> Result<(StoreRecentSession, String)> {
     let HeaderRow {
         directory_control_seq,
         working_directory,
@@ -409,7 +405,7 @@ fn decode_header_source(
     let control_seq = decode_u64("durable control sequence", control_seq)?;
     let directory_control_seq = decode_u64("directory change", directory_control_seq)?;
     let last_activity_ms = decode_u64("activity timestamp", last_activity_ms)?;
-    let (header, encoded): (SessionHeader, _) = super::cas::decode_projected_json_with_source(
+    let header: SessionHeader = super::cas::decode_projected_json(
         "session header",
         (header_encoded_len, header_json),
         MAXIMUM_SESSION_HEADER_BYTES,
@@ -438,25 +434,22 @@ fn decode_header_source(
             "Session coordinate or activity projection differs from its Header".into(),
         ));
     }
-    Ok((
-        StoreRecentSession {
-            working_directory: working_directory
-                .map(|cwd| {
-                    rsi_agent_store_protocol::WorkingDirectoryChange::new(
-                        &header,
-                        directory_control_seq,
-                        cwd,
-                    )
-                })
-                .transpose()
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-            header,
-            last_activity_ms,
-            durable_fact_seq: durable_seq,
-            durable_control_seq: control_seq,
-        },
-        encoded,
-    ))
+    Ok(StoreRecentSession {
+        working_directory: working_directory
+            .map(|cwd| {
+                rsi_agent_store_protocol::WorkingDirectoryChange::new(
+                    &header,
+                    directory_control_seq,
+                    cwd,
+                )
+            })
+            .transpose()
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+        header,
+        last_activity_ms,
+        durable_fact_seq: durable_seq,
+        durable_control_seq: control_seq,
+    })
 }
 
 pub(super) fn validate_turn_index(connection: &Connection, session_id: &SessionId) -> Result<()> {
@@ -1216,7 +1209,7 @@ pub(super) fn validate_canonical_fact_prefix(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let (fact, encoded) = super::fact_storage::decode(row)?;
+        let fact = super::fact_storage::decode(row)?;
         if fact.seq() != next_sequence {
             return Err(StoreError::Corrupt(
                 "session Fact sequence differs from its contiguous durable row".into(),
@@ -1249,7 +1242,7 @@ pub(super) fn validate_canonical_fact_prefix(
             }
             _ => None,
         };
-        observer.fact(session_id, &fact, &encoded)?;
+        observer.fact(session_id, &fact)?;
         activity.observe_fact(&fact);
         digest = advance_fact_prefix_digest(digest, &fact).map_err(|error| {
             StoreError::Corrupt(format!("stored session Fact is invalid: {error}"))
@@ -1503,16 +1496,15 @@ fn validate_agent_indexes_observed(
         .map_err(sql_error)?;
     while let Some(row) = rows.next().map_err(sql_error)? {
         observer.checkpoint()?;
-        let (record, encoded): (AgentControlRecord, _) =
-            super::cas::decode_projected_json_with_source(
-                "Agent control record",
-                (
-                    row.get(0).map_err(sql_error)?,
-                    super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES)
-                        .map_err(sql_error)?,
-                ),
-                MAXIMUM_SESSION_FACT_BYTES,
-            )?;
+        let record: AgentControlRecord = super::cas::decode_projected_json(
+            "Agent control record",
+            (
+                row.get(0).map_err(sql_error)?,
+                super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES)
+                    .map_err(sql_error)?,
+            ),
+            MAXIMUM_SESSION_FACT_BYTES,
+        )?;
         if row.get::<_, bool>(4).map_err(sql_error)?
             && !super::record_codec::direct_acceptance(&record)
         {
@@ -1521,7 +1513,7 @@ fn validate_agent_indexes_observed(
             ));
         }
         decoded += 1;
-        observer.control(selected, &record, &encoded)?;
+        observer.control(selected, &record)?;
         activity.observe_control(&record);
         match record.body() {
             AgentControlRecordBody::InboxPaused => inbox_paused = true,

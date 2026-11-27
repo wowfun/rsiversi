@@ -277,7 +277,7 @@ impl SqliteStore {
                         "program control",
                         (
                             row.get(2).map_err(sql_error)?,
-                            row.get(3).map_err(sql_error)?,
+                            super::text::optional_borrowed_text(row, 3, MAXIMUM_SESSION_FACT_BYTES).map_err(sql_error)?,
                         ),
                         MAXIMUM_SESSION_FACT_BYTES,
                     )?;
