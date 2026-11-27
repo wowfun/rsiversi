@@ -180,6 +180,21 @@ fn storage() -> Arc<Storage> {
         fenced: AtomicBool::new(false),
     })
 }
+async fn install_process(runtime: &Runtime) -> rsi_meta::FiberHandle {
+    runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "process",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_process_local::ProcessLocalFactory),
+            ),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap()
+}
 async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<WorkspaceReview> {
     let git = Git {
         process: runtime
@@ -236,19 +251,7 @@ fn session_start(
 async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let owner = owner(&runtime, temporary.path().join("scratch"), storage()).await;
     let mut intervals = Vec::new();
     let stop = CancellationToken::new();
@@ -348,19 +351,7 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
 async fn full_durable_history_is_preserved_and_reports_omission_after_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = storage();
     let path = temporary.path().join("scratch");
     let initial = owner(&runtime, path.clone(), domain.clone()).await;
@@ -454,19 +445,7 @@ fn seed_history(domain: &Storage, template: &mut Summary) {
 async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_is_expired() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = Arc::new(Storage {
         spec: DomainSpec {
             id: "review".into(),
@@ -611,19 +590,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
 async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = storage();
     let owner = owner(&runtime, temporary.path().join("scratch"), domain).await;
     let interval = owner
@@ -688,19 +655,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
             .success()
     );
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = storage();
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
     let interval = owner.admit(start(&workspace, false)).unwrap().unwrap();
@@ -816,19 +771,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
 async fn late_begin_cannot_resurrect_a_finished_interval() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = Arc::new(Storage {
         spec: DomainSpec {
             id: "review".into(),
@@ -885,19 +828,7 @@ mod metadata;
 async fn observation_rejects_missing_wrong_or_revoked_execution_before_state_or_io() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
-    let process = runtime
-        .root()
-        .apply(
-            ResolvedFactory::linked(
-                "process",
-                "test",
-                UpdateMode::Replayable,
-                Arc::new(rsi_process_local::ProcessLocalFactory),
-            ),
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
+    let process = install_process(&runtime).await;
     let domain = Arc::new(Storage {
         spec: DomainSpec {
             id: "review".into(),

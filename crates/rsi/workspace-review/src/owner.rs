@@ -611,7 +611,7 @@ impl Interval {
             let _ = self.persist(summary).await;
         }
     }
-    async fn retained(&self, stage: Stage, cancellation: CancellationToken) {
+    async fn retained(&self, operation: Stage, cancellation: CancellationToken) {
         let stop = self.owner.stop.child_token();
         let _guard = stop.clone().drop_guard();
         let worker_stop = stop.clone();
@@ -621,7 +621,7 @@ impl Interval {
             if state.closed {
                 return;
             }
-            if matches!(stage, Stage::FirstTool) {
+            if matches!(operation, Stage::FirstTool) {
                 let Some(entry) = state.entries.get_mut(&self.id) else {
                     return;
                 };
@@ -633,7 +633,7 @@ impl Interval {
             self.owner
                 .execution
                 .spawn(self.owner.tasks.track_future(async move {
-                    match stage {
+                    match operation {
                         Stage::Begin => interval.begin_work(&worker_stop).await,
                         Stage::FirstTool => interval.persist_pending().await,
                         Stage::End(evidence) => interval.end_work(evidence, &worker_stop).await,
