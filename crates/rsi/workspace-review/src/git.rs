@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) type Result<T> = std::result::Result<T, OmissionKind>;
 const FILE_BYTES: usize = 4 * 1024 * 1024;
 const CAPTURE_BYTES: usize = 128 * 1024 * 1024;
-const INTERVAL_SCRATCH: u32 = 512 * 1024 * 1024;
+const INTERVAL_SCRATCH: usize = 512 * 1024 * 1024;
 /// Fixed Git environment required by workspace inventory on every execution target.
 /// Target policy supplies its own HOME and PATH separately.
 pub const SOURCE_GIT_ENVIRONMENT: &[(&str, &str)] = &[
@@ -41,31 +41,59 @@ pub(super) struct Git {
 pub(super) struct Scratch {
     pub directory: Option<tempfile::TempDir>,
     pub tasks: tokio_util::task::TaskTracker,
-    pub permits: Vec<OwnedSemaphorePermit>,
-    pub charged: u32,
+    permit: Option<OwnedSemaphorePermit>,
 }
 impl Scratch {
     pub fn path(&self) -> &Path {
         self.directory.as_ref().expect("live scratch").path()
     }
-    fn reserve(&mut self, quota: &Arc<Semaphore>, bytes: usize) -> Result<()> {
+    async fn reserve(
+        &mut self,
+        quota: &Arc<Semaphore>,
+        bytes: usize,
+        reclaim: &(dyn Fn() -> Option<Scratch> + Sync),
+        stop: &CancellationToken,
+    ) -> Result<()> {
         // Git loose-object overhead, index/tree names and compression expansion are
         // charged conservatively, before feeding any original bytes to Git.
-        let bytes = u32::try_from(bytes).map_err(|_| OmissionKind::Limit)?;
-        if self
-            .charged
-            .checked_add(bytes)
-            .is_none_or(|n| n > INTERVAL_SCRATCH)
-        {
+        let charged = self
+            .permit
+            .as_ref()
+            .map_or(0, OwnedSemaphorePermit::num_permits);
+        if bytes > INTERVAL_SCRATCH - charged {
             return Err(OmissionKind::Capacity);
         }
-        let permit = quota
-            .clone()
-            .try_acquire_many_owned(bytes)
-            .map_err(|_| OmissionKind::Capacity)?;
-        self.charged += bytes;
-        self.permits.push(permit);
+        let count = u32::try_from(bytes).expect("bounded interval reservation");
+        let permit = loop {
+            if let Ok(permit) = quota.clone().try_acquire_many_owned(count) {
+                break permit;
+            }
+            if stop.is_cancelled() {
+                return Err(OmissionKind::Deadline);
+            }
+            let mut expired = reclaim().ok_or(OmissionKind::Capacity)?;
+            if let Some(deletion) = expired.remove_directory() {
+                tokio::select! {
+                    () = stop.cancelled() => return Err(OmissionKind::Deadline),
+                    result = deletion => result.map_err(|_| OmissionKind::Unreadable)?,
+                }
+            }
+        };
+        if let Some(existing) = &mut self.permit {
+            existing.merge(permit);
+        } else {
+            self.permit = Some(permit);
+        }
         Ok(())
+    }
+
+    fn remove_directory(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let directory = self.directory.take()?;
+        let permit = self.permit.take();
+        Some(self.tasks.spawn_blocking(move || {
+            drop(directory);
+            drop(permit);
+        }))
     }
 }
 #[derive(Debug, Default)]
@@ -248,13 +276,19 @@ impl Git {
         Scratch {
             directory: None,
             tasks: self.tasks.clone(),
-            permits: vec![],
-            charged: 0,
+            permit: None,
         }
     }
-    pub async fn initialize(&self, base: &Path, stop: &CancellationToken) -> Result<Scratch> {
+    pub async fn initialize(
+        &self,
+        base: &Path,
+        stop: &CancellationToken,
+        reclaim: &(dyn Fn() -> Option<Scratch> + Sync),
+    ) -> Result<Scratch> {
         let mut scratch = self.scratch();
-        scratch.reserve(&self.quota, 4 * 1024 * 1024)?;
+        scratch
+            .reserve(&self.quota, 4 * 1024 * 1024, reclaim, stop)
+            .await?;
         scratch.directory = Some(
             crate::scratch_root::interval_directory(base).map_err(|_| OmissionKind::Capacity)?,
         );
@@ -280,6 +314,7 @@ impl Git {
         scratch: &mut Scratch,
         stop: &CancellationToken,
         execution: Option<&ExecutionLease>,
+        reclaim: &(dyn Fn() -> Option<Scratch> + Sync),
     ) -> Result<Capture> {
         let mut capture = Capture::default();
         let listing = match self.source_listing(workspace, execution, stop).await {
@@ -312,48 +347,42 @@ impl Git {
             retained += path.len();
             names.insert(path.to_owned());
         }
-        let caller = FilesCaller::default();
+        if names.is_empty() {
+            return Ok(capture);
+        }
         let request = WorkspaceReadRequest {
             mode: SandboxMode::ReadOnly,
             cwd: workspace.to_owned(),
             workspace: workspace.to_owned(),
         };
-        let scope = match execution {
+        let files = match execution {
             Some(execution) => execution
                 .workspace_read(request)
                 .await
-                .map_err(|_| OmissionKind::Unreadable),
+                .and_then(|_| execution.files())
+                .ok(),
             None => self
                 .sandbox
                 .workspace_read(request)
                 .await
-                .map_err(|_| OmissionKind::Unreadable),
+                .ok()
+                .map(|_| self.files.clone()),
         };
-        let Ok(files) = execution.map_or_else(|| Ok(self.files.clone()), ExecutionLease::files)
-        else {
+        let Some(files) = files else {
             capture.omit(OmissionKind::Unreadable);
             capture.listed_complete = false;
             return Ok(capture);
         };
+        if scratch.directory.is_none() {
+            *scratch = self.initialize(base, stop, reclaim).await?;
+        }
+        let caller = FilesCaller::default();
         let _caller = CallerLease {
             files: files.clone(),
             caller: caller.clone(),
         };
-        if scope.is_err() {
-            capture.listed_complete = false;
-            capture.omit(OmissionKind::Unreadable);
-            return Ok(capture);
-        }
-        if !names.is_empty() && scratch.directory.is_none() {
-            *scratch = self.initialize(base, stop).await?;
-        }
-        let binding = FilesBinding::new(
-            caller.clone(),
-            "workspace-review",
-            "1",
-            workspace.to_owned(),
-        )
-        .expect("trusted canonical workspace");
+        let binding = FilesBinding::new(caller, "workspace-review", "1", workspace.to_owned())
+            .expect("trusted canonical workspace");
         let mut bytes = 0;
         let mut batch = Vec::new();
         let mut batch_bytes = 0;
@@ -396,10 +425,14 @@ impl Git {
                 if data.contains(&0) || std::str::from_utf8(&data).is_err() {
                     return Err(OmissionKind::Binary);
                 }
-                scratch.reserve(
-                    &self.quota,
-                    length.saturating_mul(2) + 4096 + path.len() * 128,
-                )?;
+                scratch
+                    .reserve(
+                        &self.quota,
+                        length.saturating_mul(2) + 4096 + path.len() * 128,
+                        reclaim,
+                        stop,
+                    )
+                    .await?;
                 Ok((data, mode))
             }
             .await;
@@ -570,7 +603,9 @@ impl Git {
             .files
             .keys()
             .chain(after.files.keys())
-            .filter(|p| before.known(p) && after.known(p) && before.files.get(*p) != after.files.get(*p))
+            .filter(|p| {
+                before.known(p) && after.known(p) && before.files.get(*p) != after.files.get(*p)
+            })
             .cloned()
             .collect();
         if included.is_empty() {
@@ -701,14 +736,7 @@ fn numstat(bytes: &[u8]) -> Result<Vec<FileChange>> {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let Some(directory) = self.directory.take() else {
-            return;
-        };
-        let permits = std::mem::take(&mut self.permits);
-        self.tasks.spawn_blocking(move || {
-            drop(directory);
-            drop(permits);
-        });
+        self.remove_directory();
     }
 }
 

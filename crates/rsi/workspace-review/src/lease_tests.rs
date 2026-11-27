@@ -76,6 +76,7 @@ struct Backend {
     process: Arc<dyn Process>,
     files: Arc<TargetFiles>,
     resolved: AtomicUsize,
+    workspace_reads: AtomicUsize,
 }
 #[async_trait]
 impl ExecutionBackend for Backend {
@@ -140,6 +141,7 @@ impl ExecutionBackend for Backend {
         &self,
         request: WorkspaceReadRequest,
     ) -> rsi_process::Result<WorkspaceReadScope> {
+        self.workspace_reads.fetch_add(1, Ordering::SeqCst);
         Ok(WorkspaceReadScope::new(request, SandboxGeneration::default()).unwrap())
     }
     fn files(&self) -> Arc<dyn Files> {
@@ -172,8 +174,6 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     std::fs::create_dir(&workspace).unwrap();
     crate::tests::command(&workspace, &["init", "--quiet"]);
     let path = workspace.join("run.sh");
-    std::fs::write(&path, "before\n").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let runtime = rsi_meta::Runtime::default();
     let process_owner = runtime
         .root()
@@ -197,6 +197,7 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
         process: process.clone(),
         files: files.clone(),
         resolved: AtomicUsize::new(0),
+        workspace_reads: AtomicUsize::new(0),
     });
     let gate = Arc::new(Gate::default());
     let execution = ExecutionProvider::new(
@@ -225,16 +226,23 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
         .await
         .unwrap();
     let stop = CancellationToken::new();
-    let mut scratch = git.initialize(&root.path, &stop).await.unwrap();
+    let mut scratch = git.scratch();
+    let empty = git.capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution), &|| None).await.unwrap();
+    assert!(empty.listed_complete && empty.files.is_empty() && empty.omissions.is_empty());
+    assert!(scratch.directory.is_none());
+    assert_eq!(backend.workspace_reads.load(Ordering::SeqCst), 0);
+    std::fs::write(&path, "before\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let before = git
-        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution), &|| None)
         .await.unwrap();
     assert!(before.omissions.is_empty());
     assert_eq!(before.files["run.sh"].1, 0o100_644);
+    assert_eq!(backend.workspace_reads.load(Ordering::SeqCst), 1);
     std::fs::write(&path, "after\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let after = git
-        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution), &|| None)
         .await.unwrap();
     assert_eq!(after.files["run.sh"].1, 0o100_755);
     let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap().unwrap();
@@ -246,7 +254,7 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     assert!(diff.contains("old mode 100644") && diff.contains("new mode 100755"));
     files.unavailable.store(true, Ordering::SeqCst);
     let unreadable = git
-        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution), &|| None)
         .await.unwrap();
     assert!(
         unreadable
@@ -263,7 +271,7 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     let resolved = backend.resolved.load(Ordering::SeqCst);
     gate.0.store(true, Ordering::SeqCst);
     let disconnected = git
-        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution), &|| None)
         .await.unwrap();
     assert!(!disconnected.listed_complete);
     assert!(!disconnected.omissions.is_empty());

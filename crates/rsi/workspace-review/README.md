@@ -27,7 +27,7 @@ its admitted operation through completion, including independently retained
 capture tasks. Each new capture
 rechecks that lease; reconnect cannot replace its provider. Both captures list the
 source before reserving space for a private Git repository. An empty inventory
-is a valid baseline for files added later in the interval. Failed listings retain
+is a valid baseline for files added later and needs no file reader. Failed listings retain
 their omission reason. The source is a bounded
 repo bundle of validated relative names, versioned bytes and executable flags.
 No target Git objects, refs, config or index are imported into Local scratch. Existing dirty bytes are part of the baseline. Git executes only through
@@ -47,10 +47,14 @@ Interval completion fences late baseline tasks: a finished interval cannot becom
 active again or acquire new scratch.
 
 One capture admits at most 10,000 paths, 1 MiB of path names, 4 MiB per file and
-128 MiB of original bytes. There are two retained capture workers. The at-most-eight admitted intervals
-wait for those workers within their cancellation deadline; API reads use a
-separate two-slot pool and cannot consume baseline capture capacity. Each interval has at most 512 MiB of private scratch; the owner admits at
-most eight intervals retaining scratch and 1 GiB total scratch reservation.
+128 MiB of original bytes. Concurrent sessions keep independent baselines and
+share two capture workers. They wait for a worker within their capture deadline.
+API reads use a separate two-slot pool. Each interval can reserve up to 512 MiB
+of private scratch within a shared 1 GiB budget. When a reservation needs space,
+the oldest completed comparison with no readers releases its scratch first.
+Current baselines and in-flight reads retain their files. If the available
+scratch cannot cover a capture, its review reports the omission and execution
+continues. Starting a chat consumes no completed comparison by itself.
 Capture stages expire after 30 seconds and preserve omission reasons. Drops and
 retirement cancel subsequent steps and drain admitted Process/Files/storage work.
 

@@ -206,36 +206,6 @@ impl WorkspaceReview {
         if state.entries.len() >= 8192 {
             return Ok(None);
         }
-        if state
-            .entries
-            .values()
-            .filter(|e| e.status != EntryStatus::Finished)
-            .count()
-            >= 8
-        {
-            return Err(ApiError::Capacity);
-        }
-        // Retire oldest finished runtime material while preserving its durable summary.
-        while state
-            .entries
-            .values()
-            .filter(|e| e.runtime.is_some() || e.status != EntryStatus::Finished)
-            .count()
-            >= 8
-        {
-            let oldest = state
-                .entries
-                .iter()
-                .filter(|(_, e)| e.status == EntryStatus::Finished && e.runtime.is_some())
-                .min_by_key(|(_, e)| {
-                    rsi_workspace_review_api::decimal(&e.summary.started_ms).unwrap_or(0)
-                })
-                .map(|(id, _)| id.clone());
-            let Some(oldest) = oldest else {
-                break;
-            };
-            state.entries.get_mut(&oldest).unwrap().runtime.take();
-        }
         let id = id()?;
         if state.entries.contains_key(&id) {
             return Err(ApiError::Capacity);
@@ -263,7 +233,6 @@ impl WorkspaceReview {
             removed_lines: 0,
             omissions: vec![],
         };
-        summary.validate()?;
         state.entries.insert(
             id.clone(),
             Entry {
@@ -283,6 +252,20 @@ impl WorkspaceReview {
                 ..IntervalState::default()
             })),
         }))
+    }
+    fn take_oldest_scratch(&self) -> Option<Scratch> {
+        let mut state = self.state.lock().expect("review scratch eviction");
+        let entry = state.entries.values_mut()
+            .filter(|entry| matches!(&entry.runtime, Some(Ready::Changes(changes)) if Arc::strong_count(changes) == 1))
+            .min_by(|a, b| {
+                let a = &a.summary.started_ms;
+                let b = &b.summary.started_ms;
+                a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+            })?;
+        let Ready::Changes(changes) = entry.runtime.take()? else {
+            return None;
+        };
+        Arc::into_inner(changes).map(|changes| changes.scratch)
     }
     /// Returns finite evidence after the product adapter has authorized the exact scope.
     ///
@@ -531,6 +514,7 @@ impl Interval {
                 scratch,
                 stop,
                 self.execution.as_ref(),
+                &|| self.owner.take_oldest_scratch(),
             )
             .await
     }
@@ -567,7 +551,10 @@ impl Interval {
                         for row in &after.omissions {
                             omission(&mut inner.omissions, row.kind, row.count);
                         }
-                        self.owner.git.compare(&scratch, &before, &after, stop).await
+                        self.owner
+                            .git
+                            .compare(&scratch, &before, &after, stop)
+                            .await
                     }
                     .await;
                     match comparison {

@@ -165,6 +165,21 @@ impl rsi_storage::KvUnit for Unit {
         }
     }
 }
+fn storage() -> Arc<Storage> {
+    Arc::new(Storage {
+        spec: DomainSpec {
+            id: "review".into(),
+            backend: "base".into(),
+            version: 2,
+            maximum_records: 8192,
+            maximum_bytes: 64 * 1024 * 1024,
+            ..DomainSpec::default()
+        },
+        rows: Mutex::new(BTreeMap::new()),
+        fail: AtomicBool::new(false),
+        fenced: AtomicBool::new(false),
+    })
+}
 async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<WorkspaceReview> {
     let git = Git {
         process: runtime
@@ -186,9 +201,16 @@ async fn owner(runtime: &Runtime, path: PathBuf, domain: Arc<Storage>) -> Arc<Wo
     .unwrap()
 }
 fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
+    session_start(path, recovered, "review-source")
+}
+fn session_start(
+    path: &std::path::Path,
+    recovered: bool,
+    session: &str,
+) -> ExecutionObservationStart {
     ExecutionObservationStart {
         header: SessionHeader::new_local(
-            SessionId::new("review-source").unwrap(),
+            SessionId::new(session).unwrap(),
             1,
             path.to_str().unwrap(),
             AgentPresetId::new("test").unwrap(),
@@ -211,6 +233,118 @@ fn start(path: &std::path::Path, recovered: bool) -> ExecutionObservationStart {
     }
 }
 #[tokio::test]
+async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runtime = Runtime::default();
+    let process = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "process",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_process_local::ProcessLocalFactory),
+            ),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    let owner = owner(&runtime, temporary.path().join("scratch"), storage()).await;
+    let mut intervals = Vec::new();
+    let stop = CancellationToken::new();
+    for i in 0..9 {
+        let session = format!("review-{i}");
+        let workspace = temporary.path().join(&session);
+        assert!(
+            std::process::Command::new("/usr/bin/git")
+                .args(["init", "--quiet"])
+                .arg(&workspace)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(workspace.join("note.txt"), "before\n").unwrap();
+        let interval = owner
+            .admit(session_start(&workspace, false, &session))
+            .unwrap()
+            .unwrap();
+        interval.begin(stop.clone()).await;
+        intervals.push(interval);
+    }
+    let end = ExecutionObservationEnd {
+        begin_completed: true,
+        controlled_work: ControlledWorkStatus::Settled,
+    };
+    for (i, interval) in intervals.iter().enumerate() {
+        interval.first_tool(stop.clone()).await;
+        std::fs::write(interval.workspace.join("note.txt"), format!("after{i}\n")).unwrap();
+        interval.end(end, stop.clone()).await;
+    }
+    for (i, interval) in intervals.iter().enumerate() {
+        let summary = owner.state.lock().unwrap().entries[&interval.id]
+            .summary
+            .clone();
+        assert_eq!((summary.phase, summary.changed_files), (Phase::Complete, 1));
+        let reply = owner
+            .read_inner(
+                &Request::Diff {
+                    scope: summary.scope,
+                    id: interval.id.clone(),
+                    path: "note.txt".into(),
+                    offset: 0,
+                },
+                &stop,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(reply, Reply::Diff { text, .. } if text.contains("-before\n") && text.contains(&format!("+after{i}\n")))
+        );
+    }
+    // A live reader of the oldest comparison keeps its files even under pressure.
+    let reader = owner.state.lock().unwrap().entries[&intervals[0].id]
+        .runtime
+        .clone()
+        .unwrap();
+    let quota = &owner.git.quota;
+    let held = quota
+        .clone()
+        .try_acquire_many_owned(u32::try_from(quota.available_permits()).unwrap())
+        .unwrap();
+    let next = owner
+        .admit(session_start(&intervals[0].workspace, false, "next"))
+        .unwrap()
+        .unwrap();
+    next.begin(stop.clone()).await;
+    assert!(
+        next.state
+            .lock()
+            .await
+            .before
+            .as_ref()
+            .unwrap()
+            .0
+            .directory
+            .is_some()
+    );
+    {
+        let state = owner.state.lock().unwrap();
+        assert!(state.entries[&intervals[0].id].runtime.is_some());
+        assert!(state.entries[&intervals[1].id].runtime.is_none());
+        assert!(
+            intervals[2..]
+                .iter()
+                .all(|interval| state.entries[&interval.id].runtime.is_some())
+        );
+    }
+    next.end(end, stop).await;
+    drop((reader, held));
+    owner.close().await;
+    assert!(process.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}
+
+#[tokio::test]
 async fn full_durable_history_is_preserved_and_reports_omission_after_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
@@ -227,19 +361,7 @@ async fn full_durable_history_is_preserved_and_reports_omission_after_restart() 
         )
         .await
         .unwrap();
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::new(BTreeMap::new()),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
+    let domain = storage();
     let path = temporary.path().join("scratch");
     let initial = owner(&runtime, path.clone(), domain.clone()).await;
     let interval = initial
@@ -460,7 +582,10 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         .clone();
     assert_eq!(summary.phase, Phase::Partial);
     assert!(
-        summary.omissions.iter().any(|row| row.kind == OmissionKind::NonGit && row.count == 2),
+        summary
+            .omissions
+            .iter()
+            .any(|row| row.kind == OmissionKind::NonGit && row.count == 2),
         "both inventories report the unavailable repository"
     );
     assert!(
@@ -499,19 +624,7 @@ async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
         )
         .await
         .unwrap();
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::new(BTreeMap::new()),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
+    let domain = storage();
     let owner = owner(&runtime, temporary.path().join("scratch"), domain).await;
     let interval = owner
         .admit(start(temporary.path(), false))
@@ -588,19 +701,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         )
         .await
         .unwrap();
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::new(BTreeMap::new()),
-        fail: AtomicBool::new(false),
-        fenced: AtomicBool::new(false),
-    });
+    let domain = storage();
     let owner = owner(&runtime, temporary.path().join("scratch"), domain.clone()).await;
     let interval = owner.admit(start(&workspace, false)).unwrap().unwrap();
     let held = owner.workers.clone().acquire_many_owned(2).await.unwrap();
@@ -655,7 +756,11 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     };
     assert_eq!(summary.phase, Phase::Complete);
     assert_eq!(
-        (summary.changed_files, summary.added_lines, summary.removed_lines),
+        (
+            summary.changed_files,
+            summary.added_lines,
+            summary.removed_lines
+        ),
         (1, 5000, 0)
     );
     let request = |offset| Request::Diff {
@@ -680,7 +785,9 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         panic!("diff")
     };
     assert!(has_more);
-    let Ready::Changes(ready) = ready else { panic!("changed file has captured evidence"); };
+    let Ready::Changes(ready) = ready else {
+        panic!("changed file has captured evidence");
+    };
     let private = ready.scratch.path().join("repository");
     let hidden = ready.scratch.path().join("repository-hidden");
     std::fs::rename(&private, &hidden).unwrap();
@@ -753,7 +860,12 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
     interval.begin(CancellationToken::new()).await;
     interval.first_tool(CancellationToken::new()).await;
     assert!(
-        !owner.state.lock().unwrap().entries.contains_key(&interval.id),
+        !owner
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&interval.id),
         "late begin must not consume a resident slot again"
     );
     assert!(domain.snapshot().unwrap().is_empty());
