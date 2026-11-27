@@ -100,8 +100,7 @@ connection and finite/binary/SSE decoders as the other transports.
 Readiness completes the bounded description and operation-catalog exchanges,
 without creating or attaching a Session.
 
-Executable SHA-256 is diagnostic artifact identity, available through
-`service_host_executable_build`. Transport epoch checks precede negotiation;
+Transport epoch checks precede negotiation;
 owning APIs then compare generated protocol descriptors for the operations a
 client consumes. Independently built executables can attach when their required
 interfaces match. An optional Application catalog does not define home ownership.
@@ -109,11 +108,11 @@ Accepted Service source revisions are republished after Profile convergence
 without changing the home authority, process epoch or existing attachment identity.
 
 The persistent lease, strict owner metadata and detached log live below
-`<state>/session-host/`. Owner metadata schema 3 adds admitted installation provenance to the schema-2
-EndpointId, HostEpoch,
-process start identity, mode, launch key, executable build and the absolute daemon
-endpoint. Unrecorded binaries continue writing schema 2. Schema 1 remains structurally readable for lifecycle control of an
-older process; it cannot supply a current API connection identity. Compatibility
+`<state>/session-host/`. Owner metadata schema 4 records the process start identity and mode, launch key,
+EndpointId, HostEpoch, daemon endpoint and any admitted installation provenance.
+Host readiness requires the selected process and negotiated interfaces.
+The reader accepts the diagnostic build field from older owners while they
+finish serving. Lifecycle v1 reads its own stable subset across upgrades. Compatibility
 checks are separate from structural validation, so a rebuilt lifecycle client
 can still stop an older exact process generation. Linux signals open a pidfd
 and recheck the recorded process-start token before signaling that descriptor.

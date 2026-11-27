@@ -27,6 +27,10 @@ fn embedded_metadata_publishes_replaces_and_releases_its_native_owner() {
         )
         .unwrap();
         lease.publish(&metadata).unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(paths.owner_metadata()).unwrap()).unwrap();
+        assert_eq!(wire["format"], 4);
+        assert!(wire.get("product_build").is_none());
         metadata.home_authority = Some(paths.home_authority().unwrap());
         assert_eq!(paths.read_metadata().unwrap(), Some(metadata));
     }

@@ -6,26 +6,11 @@ use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use thiserror::Error;
 
 /// Service Host wire protocol epoch.
 pub const SERVICE_HOST_PROTOCOL_EPOCH: u32 = 11;
-static SERVICE_HOST_EXECUTABLE_BUILD: LazyLock<Result<String, String>> =
-    LazyLock::new(executable_product_build);
-
-/// Returns diagnostic artifact identity; wire compatibility uses protocol descriptors.
-pub fn service_host_product_build() -> Result<&'static str, ServiceHostError> {
-    service_host_executable_build()
-}
-
-/// Returns the exact running executable artifact identity independently of its build family.
-pub fn service_host_executable_build() -> Result<&'static str, ServiceHostError> {
-    SERVICE_HOST_EXECUTABLE_BUILD
-        .as_ref()
-        .map(String::as_str)
-        .map_err(|error| ServiceHostError::Io(error.clone()))
-}
 
 const OWNER_DIRECTORY: &str = "session-host";
 const OWNER_LOCK_FILE: &str = "owner.lock";
@@ -134,8 +119,9 @@ pub struct HostOwnerMetadata {
     pub installation: Option<InstallationOrigin>,
     /// Exact wire protocol epoch.
     pub protocol_epoch: u32,
-    /// Exact product build identity.
-    pub product_build: String,
+    /// Diagnostic identity read from an earlier live owner.
+    #[serde(default, skip_serializing)]
+    pub product_build: Option<String>,
     /// Random process generation.
     pub host_epoch: HostEpoch,
     /// Persistent deployment identity; absent only in legacy lifecycle metadata.
@@ -159,11 +145,7 @@ impl HostOwnerMetadata {
         #[cfg(not(any(target_os = "linux", windows)))]
         let process_start_token = current_process_start_token();
         let metadata = Self {
-            format: if installation_origin().is_some() {
-                3
-            } else {
-                2
-            },
+            format: 4,
             pid: std::process::id(),
             process_start_token,
             mode,
@@ -172,7 +154,7 @@ impl HostOwnerMetadata {
             service_revision: None,
             installation: installation_origin().cloned(),
             protocol_epoch: SERVICE_HOST_PROTOCOL_EPOCH,
-            product_build: service_host_product_build()?.into(),
+            product_build: None,
             host_epoch,
             endpoint_id: Some(endpoint_id),
             socket_path,
@@ -189,7 +171,7 @@ impl HostOwnerMetadata {
     pub fn validate(&self) -> Result<(), ServiceHostError> {
         if !matches!(
             (self.format, &self.endpoint_id),
-            (1, None) | (2 | 3, Some(_))
+            (1, None) | (2..=4, Some(_))
         ) {
             return Err(ServiceHostError::Invalid(
                 "unsupported Service Host owner metadata format".into(),
@@ -199,9 +181,9 @@ impl HostOwnerMetadata {
         if let Some(origin) = &self.installation {
             origin.validate()?;
         }
-        if (self.format == 3) != self.installation.is_some() {
+        if self.format < 4 && (self.format == 3) != self.installation.is_some() {
             return Err(ServiceHostError::Invalid(
-                "installation provenance requires owner format 3".into(),
+                "installation provenance differs from the earlier owner format".into(),
             ));
         }
         validate_launch_key(&self.launch_key)?;
@@ -216,7 +198,6 @@ impl HostOwnerMetadata {
                 "Service Host protocol epoch must be nonzero".into(),
             ));
         }
-        validate_product_build(&self.product_build)?;
         match (self.mode, &self.socket_path) {
             (HostOwnerMode::Embedded, None) => {}
             (HostOwnerMode::Daemon, Some(path)) => validate_socket_path(path)?,
@@ -233,7 +214,7 @@ impl HostOwnerMetadata {
     /// Required operation descriptors are checked by each client after connecting.
     pub fn is_compatible_with_current(&self) -> Result<bool, ServiceHostError> {
         self.validate()?;
-        Ok(matches!(self.format, 2 | 3) && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH)
+        Ok(matches!(self.format, 2..=4) && self.protocol_epoch == SERVICE_HOST_PROTOCOL_EPOCH)
     }
 }
 
@@ -256,30 +237,6 @@ pub(crate) fn validate_launch_key(value: &str) -> Result<(), ServiceHostError> {
     {
         return Err(ServiceHostError::Invalid(
             "Host launch key must be 64 lower-case hexadecimal bytes".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_product_build(value: &str) -> Result<(), ServiceHostError> {
-    let Some((version, digest)) = value
-        .rsplit_once("+sha256:")
-        .or_else(|| value.rsplit_once("+family-sha256:"))
-    else {
-        return Err(ServiceHostError::Invalid(
-            "Service Host product build has no executable or family digest".into(),
-        ));
-    };
-    if version.is_empty()
-        || version.len() > 128
-        || !version.bytes().all(|byte| byte.is_ascii_graphic())
-        || digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(ServiceHostError::Invalid(
-            "Service Host product build is malformed".into(),
         ));
     }
     Ok(())
@@ -667,12 +624,9 @@ impl HostOwnerLease {
 
     /// Atomically publishes recoverable metadata for this owner generation.
     pub fn publish(&self, metadata: &HostOwnerMetadata) -> Result<(), ServiceHostError> {
-        if !metadata.is_compatible_with_current()?
-            || metadata.product_build != service_host_executable_build()?
-        {
+        if metadata.format != 4 || !metadata.is_compatible_with_current()? {
             return Err(ServiceHostError::Invalid(
-                "cannot publish owner metadata for an incompatible protocol or product build"
-                    .into(),
+                "cannot publish owner metadata for an incompatible protocol or format".into(),
             ));
         }
         let authority = self.paths.home_authority()?;
@@ -1103,30 +1057,6 @@ fn state_root_digest(path: &Path) -> String {
     hex::encode(digest.finalize())
 }
 
-fn executable_product_build() -> Result<String, String> {
-    let executable = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|error| format!("resolve Service Host executable identity: {error}"))?;
-    let mut file = File::open(&executable)
-        .map_err(|error| format!("open Service Host executable identity: {error}"))?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("read Service Host executable identity: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!(
-        "{}+sha256:{}",
-        env!("CARGO_PKG_VERSION"),
-        hex::encode(digest.finalize())
-    ))
-}
-
 #[allow(clippy::needless_pass_by_value)] // Kept as a direct `map_err` adapter.
 pub(crate) fn io_error(error: io::Error) -> ServiceHostError {
     ServiceHostError::Io(error.to_string())
@@ -1163,7 +1093,7 @@ mod origin_tests {
     }
 
     #[test]
-    fn installation_provenance_requires_exactly_schema_three() {
+    fn current_owners_validate_optional_installation_provenance() {
         let root = tempfile::tempdir().unwrap();
         let mut owner = HostOwnerMetadata::current(
             HostOwnerMode::Embedded,
@@ -1173,11 +1103,13 @@ mod origin_tests {
             None,
         )
         .unwrap();
-        assert_eq!(owner.format, 2);
+        assert_eq!(owner.format, 4);
         owner.installation = Some(InstallationOrigin {
             id: "b".repeat(32),
             prefix: root.path().into(),
         });
+        owner.validate().unwrap();
+        owner.format = 2;
         assert!(owner.validate().is_err());
         owner.format = 3;
         owner.validate().unwrap();

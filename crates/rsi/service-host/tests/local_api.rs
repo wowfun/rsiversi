@@ -422,7 +422,6 @@ async fn lifecycle_is_independent_from_product_compatibility_and_fences_the_epoc
             .unwrap()
             .stopping
     );
-    owner.product_build = format!("old+sha256:{}", "f".repeat(64));
     owner.protocol_epoch += 1;
     assert!(!owner.is_compatible_with_current().unwrap());
     let status = request_lifecycle(&owner, LifecycleOperation::Status)

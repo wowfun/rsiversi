@@ -16,7 +16,7 @@ fn durable_owner_socket_validation_matches_the_native_address_boundary() {
         service_revision: None,
         installation: None,
         protocol_epoch: 1,
-        product_build: format!("fixture+sha256:{}", "b".repeat(64)),
+        product_build: None,
         host_epoch: HostEpoch::generate().unwrap(),
         endpoint_id: None,
         socket_path: None,

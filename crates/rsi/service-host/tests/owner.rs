@@ -4,7 +4,7 @@ use rsi_api_protocol::HostEpoch;
 use rsi_host::HostPaths;
 use rsi_service_host::{
     HostOwnerLease, HostOwnerMetadata, HostOwnerMode, HostSignal, ServiceHostError,
-    ServiceHostPaths, owner_process_is_current, service_host_product_build, signal_owner,
+    ServiceHostPaths, owner_process_is_current, signal_owner,
 };
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use tempfile::TempDir;
@@ -26,21 +26,8 @@ fn launch_key() -> String {
     "a".repeat(64)
 }
 
-fn product_build() -> String {
-    service_host_product_build().unwrap().into()
-}
-
 #[test]
-fn artifact_identity_remains_exact_independently_of_compatibility_family() {
-    let identity = rsi_service_host::service_host_executable_build().unwrap();
-    let (version, digest) = identity.split_once("+sha256:").expect("artifact digest");
-    assert_eq!(version, env!("CARGO_PKG_VERSION"));
-    assert_eq!(digest.len(), 64);
-    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-}
-
-#[test]
-fn compatibility_checks_transport_epoch_independently_of_executable_identity() {
+fn owner_publication_omits_the_diagnostic_build_and_negotiates_by_epoch() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);
     let mut metadata = HostOwnerMetadata::current(
@@ -51,13 +38,13 @@ fn compatibility_checks_transport_epoch_independently_of_executable_identity() {
         Some(paths.socket().into()),
     )
     .unwrap();
-    let exact = rsi_service_host::service_host_executable_build().unwrap();
-    assert_eq!(metadata.product_build, exact);
+    let lease = HostOwnerLease::try_acquire(paths.clone()).unwrap();
+    lease.publish(&metadata).unwrap();
+    let wire: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(paths.owner_metadata()).unwrap()).unwrap();
+    assert_eq!(wire["format"], 4);
+    assert!(wire.get("product_build").is_none());
     assert!(metadata.is_compatible_with_current().unwrap());
-    metadata.product_build = format!("independent+sha256:{}", "f".repeat(64));
-    metadata.validate().unwrap();
-    assert!(metadata.is_compatible_with_current().unwrap());
-    metadata.product_build = product_build();
     metadata.protocol_epoch += 1;
     assert!(!metadata.is_compatible_with_current().unwrap());
 }
@@ -166,7 +153,7 @@ fn metadata_is_strict_private_and_removed_only_by_its_generation() {
 }
 
 #[test]
-fn structurally_valid_foreign_build_metadata_remains_readable() {
+fn an_earlier_live_owner_can_still_be_attached_by_negotiated_protocol() {
     let root = TempDir::new().unwrap();
     let paths = paths(&root);
     std::fs::create_dir_all(paths.owner_directory()).unwrap();
@@ -178,15 +165,14 @@ fn structurally_valid_foreign_build_metadata_remains_readable() {
         Some(paths.socket().to_owned()),
     )
     .unwrap();
-    metadata.protocol_epoch += 1;
-    metadata.product_build = format!("9.9.9+sha256:{}", "b".repeat(64));
-    std::fs::write(
-        paths.owner_metadata(),
-        serde_json::to_vec(&metadata).unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(paths.read_metadata().unwrap(), Some(metadata));
+    metadata.format = 2;
+    let mut wire = serde_json::to_value(&metadata).unwrap();
+    let old = format!("9.9.9+sha256:{}", "b".repeat(64));
+    wire["product_build"] = serde_json::json!(old);
+    std::fs::write(paths.owner_metadata(), serde_json::to_vec(&wire).unwrap()).unwrap();
+    let previous = paths.read_metadata().unwrap().unwrap();
+    assert_eq!(previous.product_build.as_ref(), Some(&old));
+    assert!(previous.is_compatible_with_current().unwrap());
 }
 
 #[test]
@@ -295,7 +281,7 @@ fn owner_metadata_rejects_unknown_fields_and_mode_endpoint_mismatch() {
         paths.owner_metadata(),
         format!(
             "{{\"format\":1,\"pid\":1,\"process_start_token\":\"1\",\"mode\":\"embedded\",\"launch_key\":\"{}\",\"protocol_epoch\":1,\"product_build\":\"{}\",\"host_epoch\":\"{}\",\"socket_path\":null,\"extra\":true}}",
-            launch_key(), product_build(), "b".repeat(32)
+            launch_key(), "old", "b".repeat(32)
         ),
     )
     .unwrap();
@@ -348,7 +334,7 @@ fn lifecycle_signal_is_fenced_by_the_exact_process_start_token() {
         service_revision: None,
         installation: None,
         protocol_epoch: 1,
-        product_build: product_build(),
+        product_build: None,
         host_epoch: HostEpoch::generate().unwrap(),
         endpoint_id: None,
         socket_path: Some(std::path::PathBuf::from("/tmp/test.sock")),
@@ -403,7 +389,7 @@ fn daemon_metadata_rejects_a_relative_socket_path() {
         service_revision: None,
         installation: None,
         protocol_epoch: 1,
-        product_build: product_build(),
+        product_build: None,
         host_epoch: HostEpoch::generate().unwrap(),
         endpoint_id: None,
         socket_path: Some(std::path::PathBuf::from("relative.sock")),
@@ -423,7 +409,7 @@ fn a_missing_process_is_not_detected_by_localized_io_error_text() {
         service_revision: None,
         installation: None,
         protocol_epoch: 1,
-        product_build: product_build(),
+        product_build: None,
         host_epoch: HostEpoch::generate().unwrap(),
         endpoint_id: None,
         socket_path: Some(std::path::PathBuf::from("/tmp/test.sock")),
