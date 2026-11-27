@@ -344,6 +344,13 @@ mod tests {
             bytes,
             serde_json::json!({"kind":"inline","text":"system","sha256":part.sha256()})
         );
+        let schema = serde_json::to_value(schemars::schema_for!(EvidencePart)).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&bytes));
+        let mut unknown = bytes.clone();
+        unknown["extra"] = true.into();
+        assert!(!validator.is_valid(&unknown));
+        assert!(serde_json::from_value::<EvidencePart>(unknown).is_err());
         bytes["text"] = "changed".into();
         assert!(serde_json::from_value::<EvidencePart>(bytes).is_err());
         assert_eq!(
