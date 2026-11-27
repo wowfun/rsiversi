@@ -144,22 +144,7 @@ async fn domain_stage_seals_exact_definitions_and_closes_failed_and_withdrawn_ca
     }
     fs::write(&path, source("withdraw = true")).unwrap();
     let withdrawn = service.pin(&id, None).await.unwrap();
-    assert!(
-        withdrawn
-            .domains()
-            .baseline()
-            .iter()
-            .all(|state| state.identity()
-                == &rsi_agent_composition_protocol::ToolOutputCatalog::identity())
-    );
-    assert!(
-        rsi_agent_composition_protocol::ToolOutputCatalog::from_baseline(
-            withdrawn.domains().baseline()
-        )
-        .unwrap()
-        .unwrap()
-        .is_empty()
-    );
+    assert!(withdrawn.domains().baseline().is_empty());
     let stale = factory
         .captured
         .lock()

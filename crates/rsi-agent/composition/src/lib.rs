@@ -526,8 +526,7 @@ impl UnpublishedGeneration {
         let tools = stage
             .seal()
             .map_err(|_| unavailable(preset_id, "Tool catalog sealing failed"))?;
-        let outputs =
-            rsi_agent_composition_protocol::ToolOutputCatalog::new(tools.output_declarations())?;
+        let declarations = tools.output_declarations();
         self.tools = Some(tools);
         let inputs = context
             .lookup_local::<AgentGenerationInputsContract>()
@@ -535,9 +534,13 @@ impl UnpublishedGeneration {
         // Historical declarations remain interpretable, but do not constrain today's Tools.
         let _saved_outputs =
             rsi_agent_composition_protocol::ToolOutputCatalog::from_baseline(inputs.seed.states())?;
-        let _output_lease = {
+        let output_id = rsi_agent_composition_protocol::ToolOutputCatalog::identity();
+        let output_lease = if declarations.is_empty() {
+            None
+        } else {
+            let outputs = rsi_agent_composition_protocol::ToolOutputCatalog::new(declarations)?;
             let definition = rsi_agent_composition_protocol::DomainDefinition::new(
-                rsi_agent_composition_protocol::ToolOutputCatalog::identity(),
+                output_id.clone(),
                 &outputs,
                 rsi_agent_composition_protocol::ToolOutputCatalog::validate,
                 rsi_agent_composition_protocol::DomainReferencePolicy::None,
@@ -547,13 +550,19 @@ impl UnpublishedGeneration {
             })?;
             let (_, lease) =
                 definition.register(self.domain_stage.registrar().as_ref(), &credential)?;
-            lease
+            Some(lease)
         };
-        self.domains = Some(
-            self.domain_stage
-                .seal(inputs.seed.states())
-                .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?,
-        );
+        let domains = self
+            .domain_stage
+            .seal(inputs.seed.states())
+            .map_err(|_| unavailable(preset_id, "Agent domain catalog sealing failed"))?;
+        if output_lease.is_none() && domains.contains(output_id.id()) {
+            return Err(rsi_agent_composition_protocol::DomainError::Duplicate(
+                output_id.id().into(),
+            )
+            .into());
+        }
+        self.domains = Some(domains);
         self.contributions = Some(
             self.contribution_stage
                 .seal()

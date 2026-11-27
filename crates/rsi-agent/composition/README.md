@@ -172,11 +172,13 @@ Pending failures identify the validated Profile instance and failure stage;
 plugin-owned diagnostic text is not copied into that error. A recorded mismatch also prevents sealing if a plugin
 ignores its failed state lookup.
 
-After Tools seal, composition freezes their exact-name output declarations in
-the `rsi.tools.outputs` Domain baseline (codec 1), then seals Domains. That
-registration uses the hidden Scope's ordinary Meta credential and is withdrawn
-with a failed candidate. Historical consumers read this baseline; current Tool
-registries never reinterpret a saved result. Cold recovery validates an existing
+After Tools seal, composition registers their exact-name output declarations
+in the reserved `rsi.tools.outputs` Domain (codec 1) using the hidden Scope's
+Meta credential. Failed candidates release their registrations. A generation
+without declarations omits the Domain from its baseline. Removing the last
+declaration ends its coverage at that generation cut. Historical consumers
+interpret results using the declarations recorded for their generation.
+Cold recovery validates an existing
 catalog encoding and publishes the current declarations for future Tool results.
 Unknown codecs reject recovery; changed declarations or a newly introduced catalog
 do not require a new conversation. History attachment remains independent of

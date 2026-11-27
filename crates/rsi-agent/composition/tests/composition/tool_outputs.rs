@@ -53,8 +53,22 @@ async fn current_outputs_replace_saved_declarations_and_keep_old_pins_readable()
             .same_generation(&current)
     );
     fixture.replace_source(&profile("stable"));
-    assert!(fixture.service.pin(&fixture.id, Some(&saved)).await.is_ok());
-    drop((first, restored, current));
+    let untyped = fixture
+        .service
+        .pin(&fixture.id, Some(&saved))
+        .await
+        .unwrap();
+    assert!(
+        !untyped
+            .domains()
+            .contains(ToolOutputCatalog::identity().id())
+    );
+    assert!(
+        ToolOutputCatalog::from_baseline(untyped.domains().baseline())
+            .unwrap()
+            .is_none()
+    );
+    drop((first, restored, current, untyped));
     fixture.stop().await;
 }
 
