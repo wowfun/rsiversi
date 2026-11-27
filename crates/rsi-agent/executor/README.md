@@ -242,30 +242,13 @@ payload validation and encoding; Executor also compares the resulting position
 with independent Store metadata and enforces the claim's acceptance fence.
 An incompatible cache is optional and triggers replay. There is no default
 builder fallback or independent latest-generation lookup in the executor.
-Checkpoint maintenance records admission, coalescing, capacity, closure, rebuild
-and write outcomes in process-local saturating counters keyed first by phase,
-then by outcome (absent keys mean zero), and the latest record.
-Declined ownership and a write returning false remain declines; storage,
-capacity, invalid context, cancellation and timeout retain distinct categories.
-An evidence-budget refusal is a decline. A successful rebuild and its subsequent
-write have separate phase records, even when the write fails.
-Capacity never initiates raw-history fallback. Recovery records elapsed time,
-canonical/fork page calls, returned facts, their encoded byte lengths and sequence
-lag from the restored checkpoint to the claim horizon (not Turn lag or disk I/O).
-The bounded last-success history retains a Session's last successful write across
-later failures. It is process-generation evidence, not durable health state.
-Queue depth and in-flight fields sample the scheduler at admission or maintenance
-completion (at interruption, the last sample); they are not a live activity gauge.
-Structured stderr summaries are event-triggered at most once per 30 seconds,
-with an immediate transition into degradation. A writer that observed at least
-one checkpoint event emits a final summary on shutdown.
-Scheduling and routine declines do not change health; a successful write or
-recovery rearms the degradation edge. A rebuild alone does not clear a failed
-write. Each line is at
-most 4096 bytes and includes omitted-event counts; it never contains fact bodies,
-prompts or arbitrary error messages. Writes occur outside scheduler/diagnostic
-locks and failures cannot change execution outcomes. A synchronous stderr sink
-can still block; these diagnostics do not promise nonblocking I/O.
+Checkpoint maintenance reports a failed rebuild or write to the Host log with
+the Session ID, phase and error category. A stale claim, a declined write or
+a skipped cache is an ordinary outcome. Successful checkpoints and graceful
+shutdown are silent. Warning output is best-effort and excludes prompts, Fact
+bodies and provider error text. A capacity refusal during foreground recovery
+propagates to the caller without starting a raw-history fallback.
+
 For external effects, the executor follows the
 [complete-prefix ordering contract](../docs/subsystems/turns-and-agent-trees.md),
 including one ordered intent/start publication and durability wait per group

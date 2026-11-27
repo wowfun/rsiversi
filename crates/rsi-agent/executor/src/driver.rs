@@ -304,7 +304,7 @@ impl Driver {
         stop: &CancellationToken,
         fold: &mut ModelContextState,
     ) -> std::result::Result<(), DriveFailure> {
-        let state = self.load_claim(claim, fold).await?;
+        let state = self.load_claim(claim, fold, None).await?;
         match state.ending {
             ScannedEnding::Terminal => return Ok(()),
             ScannedEnding::StructuredResult => {
@@ -2186,7 +2186,7 @@ impl Driver {
     }
 
     pub(super) fn request_checkpoint(&self, claim: &TurnClaim, composition: &AgentCompositionPin) {
-        let _ignored = self.checkpoints.schedule(CheckpointRequest::new(
+        self.checkpoints.schedule(CheckpointRequest::new(
             claim.clone(),
             self.context_limits(),
             composition.clone(),
@@ -2321,7 +2321,7 @@ impl Driver {
                 return Ok(());
             }
         };
-        let loaded = self.load_claim(claim, &mut rebuilt).await;
+        let loaded = self.load_claim(claim, &mut rebuilt, None).await;
         if let Err(error) = loaded {
             return match error {
                 DriveFailure::Turn(TurnOutcome::Failed { ref code, .. })
@@ -2356,28 +2356,6 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
-    ) -> std::result::Result<ScannedTurn, DriveFailure> {
-        let mut operation = self.checkpoints.diagnostics.operation(
-            claim.session_id(),
-            crate::checkpoint_diagnostics::Phase::Recovery,
-        );
-        operation.record.scan.sequence_lag = claim.live_seq();
-        let result = self
-            .load_claim_measured(claim, fold, &mut operation.record.scan, None)
-            .await;
-        operation.record.outcome = if result.is_ok() {
-            crate::checkpoint_diagnostics::Outcome::Ready
-        } else {
-            crate::checkpoint_diagnostics::Outcome::Failed
-        };
-        result
-    }
-
-    pub(super) async fn load_claim_measured(
-        &self,
-        claim: &TurnClaim,
-        fold: &mut ModelContextState,
-        scan: &mut crate::checkpoint_diagnostics::Scan,
         through: Option<u64>,
     ) -> std::result::Result<ScannedTurn, DriveFailure> {
         let mut state = ScannedTurn::default();
@@ -2408,11 +2386,9 @@ impl Driver {
             *fold = restored;
             cursor = checkpoint.through_seq;
             restored_checkpoint = true;
-            scan.checkpoint_seq = cursor;
-            scan.sequence_lag = claim.live_seq().saturating_sub(cursor);
         }
         if !restored_checkpoint {
-            self.load_fork_seed(claim, fold, scan).await?;
+            self.load_fork_seed(claim, fold).await?;
         }
         loop {
             if through == Some(cursor) {
@@ -2432,7 +2408,7 @@ impl Driver {
                 page.facts
                     .truncate(page.facts.partition_point(|fact| fact.seq() <= through));
             }
-            scan.page(false, &page.facts);
+
             if page.through_seq == cursor {
                 return Ok(state);
             }
@@ -2460,7 +2436,6 @@ impl Driver {
         &self,
         claim: &TurnClaim,
         fold: &mut ModelContextState,
-        scan: &mut crate::checkpoint_diagnostics::Scan,
     ) -> std::result::Result<(), DriveFailure> {
         if claim.header().history_origin().is_none() {
             return Ok(());
@@ -2492,7 +2467,7 @@ impl Driver {
                             "forked session has no inherited-history reader",
                         )
                     })?;
-                scan.page(true, &page.facts);
+
                 if page.through_parent_seq <= cursor {
                     return Err(failed(
                         "context.fork_stalled",

@@ -62,14 +62,9 @@ impl ManualCompactor for Driver {
             self.context_budget.clone(),
         )
         .map_err(invalid)?;
-        self.load_claim_measured(
-            &claim,
-            &mut fold,
-            &mut checkpoint_diagnostics::Scan::default(),
-            Some(checkpoint.through_seq),
-        )
-        .await
-        .map_err(drive_error)?;
+        self.load_claim(&claim, &mut fold, Some(checkpoint.through_seq))
+            .await
+            .map_err(drive_error)?;
         if fold.position().through_seq != checkpoint.through_seq {
             return Err(invalid(
                 "plugin checkpoint prefix is beyond the current Session",
@@ -253,14 +248,9 @@ impl ManualCompactor for Driver {
             self.context_budget.clone(),
         )
         .map_err(invalid)?;
-        self.load_claim_measured(
-            &claim,
-            &mut fold,
-            &mut checkpoint_diagnostics::Scan::default(),
-            Some(region.through_seq),
-        )
-        .await
-        .map_err(drive_error)?;
+        self.load_claim(&claim, &mut fold, Some(region.through_seq))
+            .await
+            .map_err(drive_error)?;
         if fold.position().through_seq != region.through_seq {
             return Err(invalid("compaction prefix is beyond the current Session"));
         }

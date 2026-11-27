@@ -5,7 +5,6 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod checkpoint;
-mod checkpoint_diagnostics;
 mod compaction;
 mod controlled_work;
 mod jobs;

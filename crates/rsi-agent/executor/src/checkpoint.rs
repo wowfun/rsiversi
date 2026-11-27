@@ -1,11 +1,11 @@
 //! Fair, bounded scheduling for optional per-Session context checkpoints.
 
-use crate::checkpoint_diagnostics::{Diagnostics, Outcome, Phase, Scan};
 use rsi_agent_composition_protocol::AgentCompositionPin;
 use rsi_agent_context::{ContextLimits, ContextPage, ModelContextState};
 use rsi_agent_session_protocol::SessionId;
 use rsi_agent_turn_protocol::{ContextCheckpoint, TurnClaim, TurnExecution};
 use std::collections::{BTreeMap, VecDeque};
+use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -54,7 +54,6 @@ struct SchedulerState {
 pub(super) struct CheckpointScheduler {
     state: Mutex<SchedulerState>,
     changed: Notify,
-    pub(super) diagnostics: Arc<Diagnostics>,
 }
 
 impl CheckpointScheduler {
@@ -67,56 +66,37 @@ impl CheckpointScheduler {
                 accepting: true,
             }),
             changed: Notify::new(),
-            diagnostics: Arc::new(Diagnostics::default()),
         }
     }
 
-    pub(super) fn schedule(&self, request: CheckpointRequest) -> Outcome {
-        let mut operation = self
-            .diagnostics
-            .operation(request.session_id(), Phase::Schedule);
-        let outcome = self.schedule_inner(request);
-        {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            operation.record.pending_sessions = state.pending.len();
-            operation.record.in_flight = state.in_flight.is_some();
-        }
-        operation.record.outcome = outcome;
-        outcome
-    }
-
-    fn schedule_inner(&self, request: CheckpointRequest) -> Outcome {
+    pub(super) fn schedule(&self, request: CheckpointRequest) {
         let session_id = request.session_id().clone();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.accepting {
-            return Outcome::Closed;
+            return;
         }
         if let Some(pending) = state.pending.get_mut(&session_id) {
             *pending = request;
-            return Outcome::Coalesced;
+            return;
         }
         if state.in_flight.as_ref() == Some(&session_id) {
             state.pending.insert(session_id, request);
-            return Outcome::Coalesced;
+            return;
         }
         let tracked = state
             .pending
             .len()
             .saturating_add(usize::from(state.in_flight.is_some()));
         if tracked >= MAXIMUM_PENDING_SESSIONS {
-            return Outcome::AtCapacity;
+            return;
         }
         state.pending.insert(session_id.clone(), request);
         state.queue.push_back(session_id);
         drop(state);
         self.changed.notify_one();
-        Outcome::Scheduled
     }
 
     pub(super) fn close(&self) {
@@ -184,102 +164,86 @@ pub(super) async fn run_checkpoint_writer(
     turns: Arc<dyn TurnExecution>,
     scheduler: Arc<CheckpointScheduler>,
 ) {
-    struct Summary(Arc<Diagnostics>);
-    impl Drop for Summary {
-        fn drop(&mut self) {
-            self.0.finish();
-        }
-    }
-    let _summary = Summary(scheduler.diagnostics.clone());
     while let Some(request) = scheduler.next().await {
         let in_flight = InFlightCheckpoint {
             scheduler: Arc::clone(&scheduler),
             session_id: request.session_id().clone(),
         };
-        let deadline = tokio::time::Instant::now() + CHECKPOINT_MAINTENANCE_TIMEOUT;
-        let mut operation = scheduler
-            .diagnostics
-            .operation(request.session_id(), Phase::Rebuild);
-        {
-            let state = scheduler
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            operation.record.pending_sessions = state.pending.len();
-            operation.record.in_flight = state.in_flight.is_some();
-        }
-        match tokio::time::timeout_at(
-            deadline,
-            rebuild_context_checkpoint(&turns, &request, &mut operation.record.scan),
-        )
-        .await
-        {
-            Err(_) => operation.record.outcome = Outcome::Timeout,
-            Ok(Err(outcome)) => operation.record.outcome = outcome,
-            Ok(Ok(None)) => operation.record.outcome = Outcome::Declined,
-            Ok(Ok(Some(checkpoint))) => {
-                operation.record.outcome = Outcome::Ready;
-                let mut write = scheduler
-                    .diagnostics
-                    .operation(request.session_id(), Phase::Write);
-                write.record.scan = operation.record.scan.clone();
-                write.record.pending_sessions = operation.record.pending_sessions;
-                write.record.in_flight = operation.record.in_flight;
-                operation = write;
-                let sequence = checkpoint.through_seq;
-                operation.record.outcome = match tokio::time::timeout_at(
-                    deadline,
-                    turns.write_context_checkpoint(&request.claim, checkpoint),
-                )
-                .await
-                {
-                    Err(_) => Outcome::Timeout,
-                    Ok(Err(error)) => turn_outcome(&error),
-                    Ok(Ok(false)) => Outcome::Declined,
-                    Ok(Ok(true)) => {
-                        operation.record.successful_seq = Some(sequence);
-                        Outcome::Ready
-                    }
-                };
-            }
-        }
+        let result = save_checkpoint(&turns, &request).await;
         drop(in_flight);
+        if let Err((phase, failure)) = result
+            && failure != CheckpointFailure::Declined
         {
-            let state = scheduler
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            operation.record.pending_sessions = state.pending.len();
-            operation.record.in_flight = state.in_flight.is_some();
+            let warning = format!(
+                "{}\n",
+                serde_json::json!({
+                    "event": "executor_checkpoint_failed",
+                    "session": request.session_id(),
+                    "phase": phase,
+                    "reason": failure
+                })
+            );
+            let _ = std::io::stderr().lock().write_all(warning.as_bytes());
         }
     }
 }
 
-fn turn_outcome(error: &rsi_agent_turn_protocol::TurnError) -> Outcome {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CheckpointFailure {
+    Declined,
+    Capacity,
+    Storage,
+    Invalid,
+    Cancelled,
+    Timeout,
+}
+
+pub(super) async fn save_checkpoint(
+    turns: &Arc<dyn TurnExecution>,
+    request: &CheckpointRequest,
+) -> Result<(), (&'static str, CheckpointFailure)> {
+    let deadline = tokio::time::Instant::now() + CHECKPOINT_MAINTENANCE_TIMEOUT;
+    let checkpoint = tokio::time::timeout_at(deadline, rebuild_context_checkpoint(turns, request))
+        .await
+        .unwrap_or(Err(CheckpointFailure::Timeout))
+        .map_err(|failure| ("rebuild", failure))?;
+    if let Some(checkpoint) = checkpoint {
+        tokio::time::timeout_at(
+            deadline,
+            turns.write_context_checkpoint(&request.claim, checkpoint),
+        )
+        .await
+        .map_err(|_| ("write", CheckpointFailure::Timeout))?
+        .map_err(|error| ("write", turn_outcome(&error)))?;
+    }
+    Ok(())
+}
+
+fn turn_outcome(error: &rsi_agent_turn_protocol::TurnError) -> CheckpointFailure {
     use rsi_agent_turn_protocol::TurnError;
     match error {
-        TurnError::Capacity => Outcome::Capacity,
-        TurnError::Cancelled => Outcome::Cancelled,
+        TurnError::Capacity => CheckpointFailure::Capacity,
+        TurnError::Cancelled => CheckpointFailure::Cancelled,
         TurnError::StaleClaim | TurnError::ShuttingDown | TurnError::EvidenceBudget => {
-            Outcome::Declined
+            CheckpointFailure::Declined
         }
-        TurnError::Store(_) | TurnError::Flush(_) => Outcome::Storage,
-        _ => Outcome::Invalid,
+        TurnError::Store(_) | TurnError::Flush(_) => CheckpointFailure::Storage,
+        _ => CheckpointFailure::Invalid,
     }
 }
-fn context_outcome(error: &rsi_agent_context::ContextError) -> Outcome {
+fn context_outcome(error: &rsi_agent_context::ContextError) -> CheckpointFailure {
     match error {
-        rsi_agent_context::ContextError::Capacity => Outcome::Capacity,
-        _ => Outcome::Invalid,
+        rsi_agent_context::ContextError::Capacity => CheckpointFailure::Capacity,
+        _ => CheckpointFailure::Invalid,
     }
 }
 
 async fn seed_checkpoint(
     turns: &Arc<dyn TurnExecution>,
     request: &CheckpointRequest,
-    scan: &mut Scan,
     fold: &mut ModelContextState,
-) -> Result<bool, Outcome> {
+) -> Result<bool, CheckpointFailure> {
     let Some(reader) = turns
         .open_checkpoint_fork_history(&request.claim)
         .await
@@ -290,7 +254,7 @@ async fn seed_checkpoint(
     for source in reader.sources() {
         fold.ingest(ContextPage::ForkSource(source))
             .map_err(|error| context_outcome(&error))?;
-        let origin = source.history_origin().ok_or(Outcome::Invalid)?;
+        let origin = source.history_origin().ok_or(CheckpointFailure::Invalid)?;
         let mut parent_cursor = origin.resolved_after_seq;
         while parent_cursor < origin.resolved_terminal_seq {
             let page = reader
@@ -302,9 +266,9 @@ async fn seed_checkpoint(
                 .await
                 .map_err(|error| turn_outcome(&error))?;
             let Some(page) = page else { return Ok(false) };
-            scan.page(true, &page.facts);
+
             if page.through_parent_seq <= parent_cursor {
-                return Err(Outcome::Invalid);
+                return Err(CheckpointFailure::Invalid);
             }
             fold.ingest(ContextPage::ForkSeed(&page.facts))
                 .map_err(|error| context_outcome(&error))?;
@@ -319,8 +283,7 @@ async fn seed_checkpoint(
 async fn rebuild_context_checkpoint(
     turns: &Arc<dyn TurnExecution>,
     request: &CheckpointRequest,
-    scan: &mut Scan,
-) -> Result<Option<ContextCheckpoint>, Outcome> {
+) -> Result<Option<ContextCheckpoint>, CheckpointFailure> {
     let mut fold = ModelContextState::open(
         request.composition.context_builder(),
         request.claim.header().clone(),
@@ -341,11 +304,10 @@ async fn rebuild_context_checkpoint(
         fold = restored;
         cursor = checkpoint.through_seq;
         restored_checkpoint = true;
-        scan.checkpoint_seq = cursor;
     }
     if !restored_checkpoint
         && request.claim.header().history_origin().is_some()
-        && !seed_checkpoint(turns, request, scan, &mut fold).await?
+        && !seed_checkpoint(turns, request, &mut fold).await?
     {
         return Ok(None);
     }
@@ -359,10 +321,10 @@ async fn rebuild_context_checkpoint(
             .await
             .map_err(|error| turn_outcome(&error))?;
         let Some(page) = page else { return Ok(None) };
-        scan.page(false, &page.facts);
+
         if page.through_seq <= cursor {
             if page.through_seq != cursor {
-                return Err(Outcome::Invalid);
+                return Err(CheckpointFailure::Invalid);
             }
             break;
         }
@@ -370,13 +332,13 @@ async fn rebuild_context_checkpoint(
             .map_err(|error| context_outcome(&error))?;
         cursor = page.through_seq;
     }
-    scan.sequence_lag = cursor.saturating_sub(scan.checkpoint_seq);
+
     Ok(Some(ContextCheckpoint {
         header_fingerprint: request
             .claim
             .header()
             .fingerprint()
-            .map_err(|_| Outcome::Invalid)?,
+            .map_err(|_| CheckpointFailure::Invalid)?,
         through_seq: fold.position().through_seq,
         fact_prefix_sha256: fold.position().fact_prefix_sha256(),
         bytes: fold.checkpoint().map_err(|error| context_outcome(&error))?,
@@ -401,7 +363,7 @@ mod tests {
     fn bounded_evidence_refusal_is_a_decline() {
         assert_eq!(
             turn_outcome(&rsi_agent_turn_protocol::TurnError::EvidenceBudget),
-            Outcome::Declined
+            CheckpointFailure::Declined
         );
     }
     use rsi_agent_session_protocol::{AgentPresetId, FrozenAgentSettings, SessionHeader, TurnId};
@@ -447,18 +409,9 @@ mod tests {
     #[tokio::test]
     async fn queued_updates_keep_their_original_fifo_position() {
         let scheduler = CheckpointScheduler::new();
-        assert_eq!(
-            scheduler.schedule(request("session-a", 1)),
-            Outcome::Scheduled
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-b", 1)),
-            Outcome::Scheduled
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-a", 2)),
-            Outcome::Coalesced
-        );
+        scheduler.schedule(request("session-a", 1));
+        scheduler.schedule(request("session-b", 1));
+        scheduler.schedule(request("session-a", 2));
 
         let first = scheduler.next().await.unwrap();
         assert_eq!(first.session_id().as_str(), "session-a");
@@ -471,24 +424,12 @@ mod tests {
     #[tokio::test]
     async fn an_in_flight_update_requeues_once_behind_other_sessions() {
         let scheduler = CheckpointScheduler::new();
-        assert_eq!(
-            scheduler.schedule(request("session-a", 1)),
-            Outcome::Scheduled
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-b", 1)),
-            Outcome::Scheduled
-        );
+        scheduler.schedule(request("session-a", 1));
+        scheduler.schedule(request("session-b", 1));
         let first = scheduler.next().await.unwrap();
         assert_eq!(first.session_id().as_str(), "session-a");
-        assert_eq!(
-            scheduler.schedule(request("session-a", 2)),
-            Outcome::Coalesced
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-a", 3)),
-            Outcome::Coalesced
-        );
+        scheduler.schedule(request("session-a", 2));
+        scheduler.schedule(request("session-a", 3));
         scheduler.finish(first.session_id());
 
         let second = scheduler.next().await.unwrap();
@@ -502,52 +443,36 @@ mod tests {
     #[tokio::test]
     async fn capacity_counts_the_in_flight_key_and_still_accepts_its_update() {
         let scheduler = CheckpointScheduler::new();
-        assert_eq!(
-            scheduler.schedule(request("session-active", 1)),
-            Outcome::Scheduled
-        );
+        scheduler.schedule(request("session-active", 1));
         let active = scheduler.next().await.unwrap();
         for index in 0..MAXIMUM_PENDING_SESSIONS - 1 {
-            assert_eq!(
-                scheduler.schedule(request(&format!("session-{index}"), 1)),
-                Outcome::Scheduled
-            );
+            scheduler.schedule(request(&format!("session-{index}"), 1));
         }
-        assert_eq!(
-            scheduler.schedule(request("session-active", 2)),
-            Outcome::Coalesced
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-over-capacity", 1)),
-            Outcome::AtCapacity
-        );
-        assert_eq!(
-            scheduler
-                .diagnostics
-                .count(Phase::Schedule, Outcome::AtCapacity),
-            1
-        );
+        scheduler.schedule(request("session-active", 2));
+        scheduler.schedule(request("session-over-capacity", 1));
         scheduler.finish(active.session_id());
+        scheduler.close();
+        for index in 0..MAXIMUM_PENDING_SESSIONS - 1 {
+            let queued = scheduler.next().await.unwrap();
+            assert_eq!(queued.session_id().as_str(), format!("session-{index}"));
+            scheduler.finish(queued.session_id());
+        }
+        let update = scheduler.next().await.unwrap();
+        assert_eq!(update.session_id(), active.session_id());
+        assert_eq!(update.claim.turn_id().as_str(), "turn-2");
+        scheduler.finish(update.session_id());
+        assert!(scheduler.next().await.is_none());
     }
 
     #[tokio::test]
     async fn close_drains_admitted_work_and_rejects_later_requests() {
         let scheduler = CheckpointScheduler::new();
-        assert_eq!(
-            scheduler.schedule(request("session-a", 1)),
-            Outcome::Scheduled
-        );
+        scheduler.schedule(request("session-a", 1));
         let active = scheduler.next().await.unwrap();
-        assert_eq!(
-            scheduler.schedule(request("session-b", 1)),
-            Outcome::Scheduled
-        );
-        assert_eq!(
-            scheduler.schedule(request("session-a", 2)),
-            Outcome::Coalesced
-        );
+        scheduler.schedule(request("session-b", 1));
+        scheduler.schedule(request("session-a", 2));
         scheduler.close();
-        assert_eq!(scheduler.schedule(request("session-c", 1)), Outcome::Closed);
+        scheduler.schedule(request("session-c", 1));
         scheduler.finish(active.session_id());
 
         let second = scheduler.next().await.unwrap();
