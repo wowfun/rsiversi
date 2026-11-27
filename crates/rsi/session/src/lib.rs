@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use rsi_agent_composition_protocol::{AgentComposition, AgentSessionDraft};
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, MAXIMUM_FACTS_PER_READ,
-    MessageId, MessageOptions, SessionHeader, SessionId,
+    AgentMessage, AgentMessageContent, AgentMessageSource, AgentPresetId, CancelReason,
+    MAXIMUM_FACTS_PER_READ, MessageId, MessageOptions, SessionHeader, SessionId,
 };
 use rsi_agent_store_protocol::{
     MAXIMUM_SESSIONS_PER_READ, SessionStore, StoreError, StoreRecentSessionCursor,
@@ -2462,7 +2462,11 @@ impl SessionHandle for LocalSessionHandle {
         .await
     }
 
-    async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult> {
+    async fn cancel(
+        &self,
+        target: CancelTarget,
+        reason: Option<CancelReason>,
+    ) -> Result<CancelResult> {
         let _admission = self.admit_mutation()?;
         let _activity = self.begin_activity()?;
         if let CancelTarget::Session { .. } | CancelTarget::Inbox = &target {
@@ -2471,11 +2475,9 @@ impl SessionHandle for LocalSessionHandle {
             let mut state = self.state.lock().await;
             if let HandleState::Fresh(draft) = &mut *state {
                 if let Some(reason) = &reason {
-                    rsi_agent_session_protocol::validate_safe_diagnostic(
-                        "cancellation reason",
-                        reason,
-                    )
-                    .map_err(|error| SessionError::Invalid(error.to_string()))?;
+                    reason
+                        .validate()
+                        .map_err(|error| SessionError::Invalid(error.to_string()))?;
                 }
                 let stopped = if matches!(target, CancelTarget::Session { .. })
                     && let Some(signal) = self.turns.maintenance_cancellation(self.session_id())

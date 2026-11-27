@@ -33,7 +33,7 @@ use crate::{
     projection::Transcript,
     renderer::{Renderer, RendererContract},
 };
-use rsi_agent_session_protocol::{MessageId, SessionId};
+use rsi_agent_session_protocol::{AgentCancelCause, CancelReason, MessageId, SessionId};
 use rsi_agent_turn_protocol::{CancelTarget, ObservationCursor};
 use rsi_application::Surface;
 use rsi_client::{SessionController, SessionControllerContract};
@@ -1318,7 +1318,10 @@ impl GuiApplication {
         let attachment = self.pane(index)?.attachment(generation)?;
         attachment
             .handle
-            .cancel(CancelTarget::Turn(turn_id), Some("GUI Stop".into()))
+            .cancel(
+                CancelTarget::Turn(turn_id),
+                Some(CancelReason::Agent(AgentCancelCause::User)),
+            )
             .await
             .map_err(error)?;
         Ok(())

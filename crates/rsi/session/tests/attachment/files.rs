@@ -30,7 +30,7 @@ impl TurnService for FileTurns {
         &self,
         _: &SessionId,
         _: &TurnId,
-        _: Option<String>,
+        _: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         unreachable!()
     }

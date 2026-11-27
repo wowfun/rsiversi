@@ -15,10 +15,11 @@ impl AgentKernel {
         &self,
         id: &SessionId,
         target: InboxCancel,
-        reason: Option<String>,
+        reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         if let Some(reason) = &reason {
-            rsi_agent_session_protocol::validate_safe_diagnostic("cancellation reason", reason)
+            reason
+                .validate()
                 .map_err(|error| TurnError::Invalid(error.to_string()))?;
         }
         let keep_inbox = matches!(target, InboxCancel::Stop { keep_inbox: true });

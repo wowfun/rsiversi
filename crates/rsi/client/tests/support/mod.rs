@@ -214,7 +214,7 @@ impl SessionHandle for Handle {
     async fn cancel(
         &self,
         target: rsi_agent_turn_protocol::CancelTarget,
-        _: Option<String>,
+        _: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::CancelResult> {
         let Some(case) = &self.message else {
             return missing();

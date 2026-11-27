@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use rsi_agent_session_protocol::{
-    AgentMessage, AgentPresetId, FrozenAgentSettings, MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS,
-    MessageId, SessionFact, SessionHeader, SessionId, TurnId,
+    AgentMessage, AgentPresetId, CancelReason, FrozenAgentSettings,
+    MAXIMUM_AGENT_MESSAGE_CONTENT_BLOCKS, MessageId, SessionFact, SessionHeader, SessionId, TurnId,
 };
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, SessionObservation,
@@ -1017,7 +1017,11 @@ pub trait SessionHandle: fmt::Debug + Send + Sync + 'static {
     /// Accepts one direct Image generation turn and waits for durable acceptance.
     async fn generate_image(&self, request: SubmitDirectImage) -> Result<TurnReceipt>;
     /// Idempotently cancels an unclaimed message or an accepted Turn.
-    async fn cancel(&self, target: CancelTarget, reason: Option<String>) -> Result<CancelResult>;
+    async fn cancel(
+        &self,
+        target: CancelTarget,
+        reason: Option<CancelReason>,
+    ) -> Result<CancelResult>;
     /// Waits for whole-driver quiescence without reserving the next admission.
     async fn wait_idle(&self) -> Result<()> {
         Err(SessionError::NotFound("Session idle waiting".into()))

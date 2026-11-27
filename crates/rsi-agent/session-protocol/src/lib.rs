@@ -2317,6 +2317,49 @@ pub enum EffectKind {
     Tool,
 }
 
+/// Evidence supplied by the caller that first requests Turn cancellation.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CancelReason {
+    /// A native caller's diagnostic without structured origin.
+    Diagnostic(String),
+    /// The Agent's explicit cause.
+    Agent(AgentCancelCause),
+}
+
+/// Origin of a cancellation requested through the Agent contract.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentCancelCause {
+    /// The user stopped this Agent.
+    User,
+    /// Its parent stopped this Agent.
+    Parent,
+    /// An Agent lifecycle hook stopped the Turn.
+    Hook {
+        /// The hook's original reason, retained as Session content.
+        reason: std::sync::Arc<str>,
+    },
+    /// The Agent was disposed.
+    Disposed,
+}
+
+impl CancelReason {
+    /// Validates caller diagnostics. Structured causes use the containing Fact envelope.
+    pub fn validate(&self) -> Result<()> {
+        if let Self::Diagnostic(text) = self {
+            validate_safe_diagnostic("cancellation reason", text)?;
+        }
+        Ok(())
+    }
+}
+
+impl From<&str> for CancelReason {
+    fn from(text: &str) -> Self {
+        Self::Diagnostic(text.to_owned())
+    }
+}
+
 /// Single terminal outcome of one accepted turn.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -2530,8 +2573,8 @@ pub enum SessionFactBody {
     CancelRequested {
         /// Exact target turn.
         turn_id: TurnId,
-        /// Optional safe caller reason.
-        reason: Option<String>,
+        /// Caller diagnostic or an attributed Agent cancellation.
+        reason: Option<CancelReason>,
     },
     /// Immutable Language provider input was prepared before I/O.
     ModelIntent {
@@ -2783,12 +2826,7 @@ impl SessionFactBody {
             }
             Self::CancelRequested { reason, .. } => {
                 if let Some(reason) = reason {
-                    validate_safe_text(
-                        "cancellation reason",
-                        reason,
-                        MAXIMUM_AGENT_DIAGNOSTIC_BYTES,
-                        false,
-                    )?;
+                    reason.validate()?;
                 }
                 Ok(())
             }

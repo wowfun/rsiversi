@@ -843,7 +843,7 @@ impl SessionHandle for UnknownThenAcceptedHandle {
     async fn cancel(
         &self,
         target: CancelTarget,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> rsi_session_protocol::Result<rsi_agent_turn_protocol::CancelResult> {
         let accepted = matches!(target, CancelTarget::Turn(_));
         self.cancellations.lock().unwrap().push(target);

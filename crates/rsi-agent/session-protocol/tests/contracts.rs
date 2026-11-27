@@ -6,6 +6,22 @@ use rsi_tools_protocol::{ToolContent, ToolResult, ToolResultIdentity};
 use serde_json::json;
 
 #[test]
+fn cancellation_fact_preserves_hook_text_and_native_diagnostics() {
+    for reason in [
+        json!({"kind":"hook","reason":format!("  插件\n{}", "大".repeat(4096))}),
+        json!({"kind":"user"}),
+        json!({"kind":"disposed"}),
+        json!({"kind":"parent"}),
+        json!("native stop"),
+        json!(null),
+    ] {
+        let wire = json!({"type":"cancel_requested","seq":1,"timestamp_ms":1,"turn_id":"turn","reason":reason});
+        let fact: SessionFact = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(fact).unwrap(), wire);
+    }
+}
+
+#[test]
 fn automatic_compaction_installation_references_an_earlier_settlement() {
     let fact = SessionFact::new(
         11,

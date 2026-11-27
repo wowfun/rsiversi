@@ -594,9 +594,18 @@ async fn session_stop_captures_all_direct_turns_but_not_a_later_submission() {
         accepted.push(next(&kernel).await);
     }
     let id = &accepted[0].session_id;
+    let cause = rsi_agent_session_protocol::CancelReason::Agent(
+        rsi_agent_session_protocol::AgentCancelCause::Hook {
+            reason: "插件停止\n  intact".into(),
+        },
+    );
     assert!(
         kernel
-            .cancel_target(id, CancelTarget::Session { keep_inbox: false }, None)
+            .cancel_target(
+                id,
+                CancelTarget::Session { keep_inbox: false },
+                Some(cause.clone())
+            )
             .await
             .unwrap()
             .accepted
@@ -615,7 +624,10 @@ async fn session_stop_captures_all_direct_turns_but_not_a_later_submission() {
         .facts
         .iter()
         .filter_map(|fact| match fact.body() {
-            SessionFactBody::CancelRequested { turn_id, .. } => Some(turn_id),
+            SessionFactBody::CancelRequested { turn_id, reason } => {
+                assert_eq!(reason.as_ref(), Some(&cause));
+                Some(turn_id)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

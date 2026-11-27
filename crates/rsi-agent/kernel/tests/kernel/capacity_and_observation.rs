@@ -174,7 +174,9 @@ async fn cancellation_pending_capacity(fail_flush: bool) {
             .cancel(
                 &submitted.session_id,
                 &submitted.turn_id,
-                Some("c".repeat(1024))
+                Some(rsi_agent_session_protocol::CancelReason::Diagnostic(
+                    "c".repeat(1024)
+                ))
             )
             .await,
         Err(TurnError::Capacity)
@@ -185,7 +187,9 @@ async fn cancellation_pending_capacity(fail_flush: bool) {
         .cancel(
             &submitted.session_id,
             &submitted.turn_id,
-            Some("c".repeat(1024)),
+            Some(rsi_agent_session_protocol::CancelReason::Diagnostic(
+                "c".repeat(1024),
+            )),
         )
         .await
         .unwrap();

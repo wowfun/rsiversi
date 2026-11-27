@@ -179,7 +179,7 @@ impl TurnService for UnavailableTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }
@@ -601,7 +601,7 @@ impl TurnService for ConcurrentResumeTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }
@@ -713,7 +713,7 @@ impl TurnService for CompetingPublicationTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }
@@ -793,7 +793,7 @@ impl TurnService for CompetingImagePublicationTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }
@@ -1330,7 +1330,7 @@ impl TurnService for ImageTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }
@@ -1379,7 +1379,7 @@ impl TurnService for RejectingResumeTurns {
         &self,
         _session_id: &SessionId,
         _turn_id: &TurnId,
-        _reason: Option<String>,
+        _reason: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> TurnResult<CancelResult> {
         panic!("not used")
     }

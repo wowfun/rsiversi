@@ -31,7 +31,9 @@ mod ui;
 
 use super::*;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
-use rsi_agent_session_protocol::{MessageDelivery, SessionHeader, TurnId};
+use rsi_agent_session_protocol::{
+    AgentCancelCause, CancelReason, MessageDelivery, SessionHeader, TurnId,
+};
 use rsi_agent_store_protocol::StoreSessionInspection;
 use state::{Action, Menu, State};
 use std::collections::BTreeSet;
@@ -968,7 +970,10 @@ impl Client {
         self.state.info("Stopping displayed Turn…");
         self.cancelling = self.spawn_as(WorkKind::Cancel, async move {
             let result = handle
-                .cancel(CancelTarget::Turn(turn), None)
+                .cancel(
+                    CancelTarget::Turn(turn),
+                    Some(CancelReason::Agent(AgentCancelCause::User)),
+                )
                 .await
                 .map_err(error)?;
             Ok(Update::Notice(

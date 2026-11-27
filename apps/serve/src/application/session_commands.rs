@@ -215,6 +215,7 @@ impl BoundSessions {
             keep_inbox: bool,
             #[serde(default)]
             inbox_only: bool,
+            cause: Option<rsi_agent_session_protocol::AgentCancelCause>,
         }
         let input: Input = serde_json::from_value(payload).map_err(|_| Error::Protocol)?;
         let handle = self
@@ -229,7 +230,9 @@ impl BoundSessions {
                         keep_inbox: input.keep_inbox,
                     }
                 },
-                None,
+                input
+                    .cause
+                    .map(rsi_agent_session_protocol::CancelReason::Agent),
             )
             .await
             .map_err(|error| Error::Remote(error.to_string()))?;

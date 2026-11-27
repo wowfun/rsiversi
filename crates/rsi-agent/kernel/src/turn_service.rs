@@ -1,6 +1,8 @@
 use super::observation::durable_message_entry;
 use super::*;
-use rsi_agent_session_protocol::{AgentMessageSourceKind, MessageDelivery, SessionPermission};
+use rsi_agent_session_protocol::{
+    AgentMessageSourceKind, CancelReason, MessageDelivery, SessionPermission,
+};
 
 impl AgentKernel {
     pub(super) async fn current_permission(
@@ -754,7 +756,7 @@ impl TurnService for AgentKernel {
         &self,
         session_id: &SessionId,
         target: CancelTarget,
-        reason: Option<String>,
+        reason: Option<CancelReason>,
     ) -> TurnResult<CancelResult> {
         let message_id = match target {
             CancelTarget::Message(message_id) => message_id,
@@ -907,7 +909,7 @@ impl TurnService for AgentKernel {
         &self,
         session_id: &SessionId,
         turn_id: &TurnId,
-        reason: Option<String>,
+        reason: Option<CancelReason>,
     ) -> TurnResult<CancelResult> {
         let body = SessionFactBody::CancelRequested {
             turn_id: turn_id.clone(),

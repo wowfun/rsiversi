@@ -1,4 +1,6 @@
-use rsi_agent_session_protocol::{CommandRevision, DomainRequestId, MessageId, SessionId, TurnId};
+use rsi_agent_session_protocol::{
+    CancelReason, CommandRevision, DomainRequestId, MessageId, SessionId, TurnId,
+};
 use rsi_agent_turn_protocol::{CancelTarget, ObservationCursor};
 use rsi_api_protocol::{
     ApiError, OperationClass, OperationEffect, OperationId, OperationSpec, RequestEncoding,
@@ -434,7 +436,7 @@ pub(crate) struct MessageReadReply {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Cancel {
     pub target: CancelTarget,
-    pub reason: Option<String>,
+    pub reason: Option<CancelReason>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use rsi_agent_composition_protocol::{AgentCompositionPin, PreparedFreshSession};
 use rsi_agent_session_protocol::{
-    ActivationId, AgentControlRecord, AgentMessage, AgentPath, DomainStateView, EffectId,
-    ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
+    ActivationId, AgentControlRecord, AgentMessage, AgentPath, CancelReason, DomainStateView,
+    EffectId, ForkTurnSelection, MessageDiscardReason, MessageId, SessionFact, SessionFactBody,
     SessionHeader, SessionId, StepId, TurnId, TurnOutcome, validate_identifier,
     validate_safe_diagnostic,
 };
@@ -1200,7 +1200,7 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         &self,
         session_id: &SessionId,
         target: CancelTarget,
-        reason: Option<String>,
+        reason: Option<CancelReason>,
     ) -> Result<CancelResult> {
         match target {
             CancelTarget::Turn(turn_id) => self.cancel(session_id, &turn_id, reason).await,
@@ -1224,7 +1224,7 @@ pub trait TurnService: fmt::Debug + Send + Sync + 'static {
         &self,
         session_id: &SessionId,
         turn_id: &TurnId,
-        reason: Option<String>,
+        reason: Option<CancelReason>,
     ) -> Result<CancelResult>;
     /// Observes Facts and watermarks strictly after one live sequence.
     async fn observe(&self, session_id: &SessionId, after_seq: u64) -> Result<TurnObservation>;

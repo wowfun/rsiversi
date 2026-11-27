@@ -1,6 +1,6 @@
 use crate::wire::{self, Failure, HandleReply, HandleRequest, Operation, Target};
 use async_trait::async_trait;
-use rsi_agent_session_protocol::{AgentMessage, MessageId, SessionHeader, SessionId};
+use rsi_agent_session_protocol::{AgentMessage, CancelReason, MessageId, SessionHeader, SessionId};
 use rsi_agent_store_protocol::{StoreBackwardFactPage, StoreSessionInspection};
 use rsi_agent_turn_protocol::{
     CancelResult, CancelTarget, MessageReceipt, ObservationCursor, ObservationRetention,
@@ -1041,7 +1041,7 @@ impl SessionHandle for Handle {
     async fn cancel(
         &self,
         target: CancelTarget,
-        reason: Option<String>,
+        reason: Option<CancelReason>,
     ) -> rsi_session_protocol::Result<CancelResult> {
         let result: CancelResult = self
             .call(Operation::Cancel, &wire::Cancel { target, reason })

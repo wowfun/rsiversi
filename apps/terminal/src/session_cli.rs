@@ -1,5 +1,5 @@
 use super::*;
-use rsi_agent_session_protocol::MessageDelivery;
+use rsi_agent_session_protocol::{AgentCancelCause, CancelReason, MessageDelivery};
 use rsi_user_questions_protocol::{QuestionAnswer, QuestionRequest};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -813,8 +813,8 @@ async fn cancel_explicit(handle: &Arc<dyn SessionHandle>, id: &str) -> Result<()
             Err(error) => return Err(session_error(error)),
         }
     };
-    let reason =
-        matches!(&target, CancelTarget::Turn(_)).then(|| "explicit client cancellation".into());
+    let reason = matches!(&target, CancelTarget::Turn(_))
+        .then_some(CancelReason::Agent(AgentCancelCause::User));
     handle.cancel(target, reason).await.map_err(session_error)?;
     Ok(())
 }
@@ -836,8 +836,8 @@ async fn cancel_owned(handle: &Arc<dyn SessionHandle>, owned: &BTreeSet<MessageI
             MessageState::Discarded { .. } => None,
         };
         if let Some(target) = target {
-            let reason =
-                matches!(&target, CancelTarget::Turn(_)).then(|| "client interrupt".into());
+            let reason = matches!(&target, CancelTarget::Turn(_))
+                .then_some(CancelReason::Agent(AgentCancelCause::User));
             if let Err(error) = handle.cancel(target, reason).await {
                 failure.get_or_insert(error);
             }

@@ -575,7 +575,7 @@ impl SessionHandle for Backend {
     async fn cancel(
         &self,
         t: CancelTarget,
-        _: Option<String>,
+        _: Option<rsi_agent_session_protocol::CancelReason>,
     ) -> rsi_session_protocol::Result<CancelResult> {
         self.cancel.lock().unwrap().push(t);
         Ok(CancelResult {

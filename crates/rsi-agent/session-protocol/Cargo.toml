@@ -22,7 +22,7 @@ rsi-approval-protocol = { path = "../../rsi-approval/protocol" }
 rsi-media-protocol = { path = "../../rsi-media/protocol" }
 rsi-sandbox = { path = "../../rsi-sandbox/core" }
 rsi-tools-protocol = { path = "../../rsi-tools/protocol" }
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true

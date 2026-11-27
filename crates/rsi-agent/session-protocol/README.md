@@ -372,6 +372,12 @@ advancing either cursor and clears after adoption or return to the selected sour
 
 ## Session commands
 
+The first accepted cancellation request owns its Turn's cancellation reason.
+A native caller can supply diagnostic text. An Agent can instead identify the
+user, parent, disposal or plugin hook that requested the stop. A hook includes
+its original reason text. Readers with access to the Session can recover this
+evidence after restart. A missing reason leaves the origin unknown.
+
 Queue withdrawal preserves the input's source and does not cancel a claimed Turn.
 Only replacement and steering conversion require Human provenance. The initial
 input of a ProgramRun-owned child requires Program cancellation rather than plain
