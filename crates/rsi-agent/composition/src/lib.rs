@@ -299,7 +299,6 @@ struct CompiledSelection {
     application: bool,
     candidate: Arc<rsi_meta_profile::ProfileCandidate>,
     catalog: Arc<AgentContributionCatalog>,
-    code: Arc<[u8]>,
     program_digest: String,
     selection: rsi_agent_session_protocol::GenerationSelection,
 }
@@ -388,7 +387,6 @@ impl PresetRow {
             && Arc::ptr_eq(&cached.candidate, &candidate)
             && cached.application == application
             && cached.catalog.same_identity(&snapshot.contributions)
-            && cached.code == snapshot.code
         {
             return Ok(cached.clone());
         }
@@ -401,7 +399,6 @@ impl PresetRow {
             program_digest,
             candidate,
             catalog: snapshot.contributions.clone(),
-            code: snapshot.code.clone(),
         });
         *self
             .selection
@@ -1418,7 +1415,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn unchanged_compiled_tree_reuses_identity_but_changed_code_changes_selection() {
+    fn unchanged_catalog_reuses_selection_and_a_replaced_native_artifact_changes_it() {
         let compiler = rsi_meta_profile::ProfileCompiler::new(
             rsi_meta_profile::ProfileEnvironment::without_paths("test", BTreeMap::new()).unwrap(),
             rsi_meta_profile::ProfileLimits::default(),
@@ -1438,8 +1435,19 @@ mod tests {
             ),
         )
         .unwrap();
-        let snapshot =
-            AgentCompositionSnapshot::new(presets, AgentContributionCatalog::new([]).unwrap());
+        let snapshot_for = |digest: &str| {
+            let factory = ResolvedFactory::native(
+                "fixture.builder",
+                digest,
+                UpdateMode::Replayable,
+                Arc::new(rsi_agent_context::DefaultContextBuilderFactory),
+            );
+            AgentCompositionSnapshot::new(
+                presets.clone(),
+                AgentContributionCatalog::new([factory]).unwrap(),
+            )
+        };
+        let snapshot = snapshot_for(&"1".repeat(64));
         let row = PresetRow::default();
         let first = row.selection(&snapshot, candidate.clone(), false).unwrap();
         assert!(Arc::ptr_eq(
@@ -1448,9 +1456,7 @@ mod tests {
         ));
         let application = row.selection(&snapshot, candidate.clone(), true).unwrap();
         assert_ne!(first.selection, application.selection);
-        let changed = snapshot
-            .with_code_selection(Arc::from(b"new".as_slice()))
-            .unwrap();
+        let changed = snapshot_for(&"2".repeat(64));
         let next = row.selection(&changed, candidate, false).unwrap();
         assert_ne!(first.selection, next.selection);
     }

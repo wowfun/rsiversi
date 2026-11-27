@@ -97,7 +97,7 @@ query fails selection before Runtime mutation, including a cache hit.
 Pins from one published generation share its immutable base catalog measurement.
 Claim-specific membership changes retain their own measurements.
 
-An unchanged evaluated Profile, catalog, code selection and seed identity reuse the published
+An unchanged evaluated Profile, catalog and seed identity reuse the published
 generation. Each preset retains its last compiled tree and selection digest;
 unchanged source bytes skip parsing, evaluation, freezing and selection hashing.
 The source probe uses a separate eight-operation blocking lane to verify current

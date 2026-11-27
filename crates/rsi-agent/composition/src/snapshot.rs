@@ -25,7 +25,6 @@ impl rsi_meta::LocalContract for ApplicationPresetSourceContract {
 /// Immutable compiler/allowlist and executable catalog selected for one build.
 #[derive(Clone)]
 pub struct AgentCompositionSnapshot {
-    pub(crate) code: Arc<[u8]>,
     pub(crate) seeds: Result<rsi_agent_composition_protocol::AgentGenerationSeed, &'static str>,
     pub(crate) presets: AgentPresetCatalog,
     pub(crate) contributions: Arc<AgentContributionCatalog>,
@@ -53,7 +52,6 @@ impl AgentCompositionSnapshot {
         seed: rsi_agent_composition_protocol::AgentGenerationSeed,
     ) -> rsi_meta_profile::Result<Self> {
         Ok(Self {
-            code: Arc::clone(&self.code),
             presets,
             contributions: Arc::new(self.contributions.replacing(replacements)?),
             seeds: Ok(seed),
@@ -110,26 +108,12 @@ impl AgentCompositionSnapshot {
     /// Freezes application-selected preset and contribution authority together.
     pub fn new(presets: AgentPresetCatalog, contributions: AgentContributionCatalog) -> Self {
         Self {
-            code: Arc::from([]),
             seeds: Ok(rsi_agent_composition_protocol::AgentGenerationSeed::default()),
             presets,
             contributions: Arc::new(contributions),
         }
     }
 
-    /// Captures application-owned artifact/build selection, independent of mutable discovery.
-    ///
-    /// # Errors
-    /// Rejects code metadata beyond the existing selection byte ceiling.
-    pub fn with_code_selection(mut self, code: Arc<[u8]>) -> rsi_meta_profile::Result<Self> {
-        if code.len() > 64 * 1024 * 1024 {
-            return Err(rsi_meta_profile::ProfileError::InvalidProgram(
-                "code selection exceeds selection capacity".into(),
-            ));
-        }
-        self.code = code;
-        Ok(self)
-    }
     /// Borrows current opaque inputs so product source decorators can preserve other owners.
     ///
     /// # Errors

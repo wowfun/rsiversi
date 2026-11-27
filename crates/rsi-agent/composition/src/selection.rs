@@ -17,7 +17,6 @@ pub(super) fn identify(
         &mut digest,
         snapshot.contributions.durable_digest().as_bytes(),
     );
-    crate::catalog::hash_field(&mut digest, &snapshot.code);
     crate::catalog::hash_field(&mut digest, profile_digest.as_bytes());
     GenerationSelection::new(format!("{:x}", digest.finalize()))
         .map_err(|error| AgentCompositionError::InvalidInput(error.to_string()))

@@ -2,34 +2,6 @@
 use rsi_agent_composition::{AgentCompositionSnapshot, AgentCompositionSource};
 use rsi_agent_composition_protocol::AgentGenerationSeed;
 use std::sync::{Arc, Mutex};
-pub(crate) fn linked_identity() -> std::result::Result<&'static str, &'static str> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-    use std::sync::OnceLock;
-    static IDENTITY: OnceLock<std::result::Result<String, std::io::Error>> = OnceLock::new();
-    IDENTITY
-        .get_or_init(|| {
-            // Linux upgrades can replace the pathname while this image remains mapped.
-            #[cfg(target_os = "linux")]
-            let path = std::path::PathBuf::from("/proc/self/exe");
-            #[cfg(not(target_os = "linux"))]
-            let path = std::env::current_exe()?;
-            let mut input = std::fs::File::open(path)?;
-            let mut hash = Sha256::new();
-            let mut buffer = vec![0_u8; 64 * 1024];
-            loop {
-                let read = input.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                hash.update(&buffer[..read]);
-            }
-            Ok(hex::encode(hash.finalize()))
-        })
-        .as_deref()
-        .map_err(|_| "linked executable identity is unavailable")
-}
-
 #[derive(Debug)]
 pub(crate) struct SeededSource {
     source: Arc<dyn AgentCompositionSource>,
@@ -232,27 +204,12 @@ impl rsi_meta::PluginFactory for SourceFactory {
         )))
     }
     async fn activate(&self, plan: rsi_meta::ActivationPlan) -> rsi_meta::Result<()> {
-        let identity = plan
-            .context()
-            .runtime()
-            .execution()
-            .prepare(linked_identity)
-            .await
-            .map_err(|_| {
-                rsi_meta::MetaError::Activation("linked identity worker ended unexpectedly".into())
-            })?
-            .map_err(|reason| rsi_meta::MetaError::Activation(reason.into()))?;
-        let snapshot = Arc::new(
-            self.0
-                .as_ref()
-                .clone()
-                .with_code_selection(Arc::from(identity.as_bytes()))
-                .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?,
-        );
         let supply = plan
             .context()
             .provide_local::<rsi_agent_composition::AgentCompositionSourceContract>(capture(
-                &plan, snapshot, &self.1,
+                &plan,
+                self.0.clone(),
+                &self.1,
             )?)?;
         plan.defer(
             "withdraw linked Agent composition source",

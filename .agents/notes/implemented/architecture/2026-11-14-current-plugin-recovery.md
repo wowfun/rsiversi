@@ -15,7 +15,10 @@ This supersedes the historical executable recovery and full-state publication
 clauses of [durable generation selection](2026-11-12-durable-agent-generation-selection.md).
 
 Sessions resume with the current composition and validate retained state at their
-owning plugin boundary. Immutable pins retain already admitted work without
+owning plugin boundary. The running Host already owns its linked implementation. Reading every byte
+of that executable would distinguish rebuilds even when the selected preset and
+plugins are identical. Native extension artifacts have separate loader identities.
+Immutable pins retain already admitted work without
 retaining executable recipes for historical restoration. Validated durable
 references accompany canonical Domain state so maintenance does not execute old
 code. Generation cuts append only changed Domain states and explicit removals.

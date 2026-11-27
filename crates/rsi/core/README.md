@@ -47,6 +47,9 @@ The route adapters for workspace-review, history, ACP, device operations,
 workspace, models, Agent presets, settings, media, output and Session use Replayable registration.
 Disable/enable and regrouping affect routes while admitted mutations drain; linked
 implementation changes still require rebuilding the binary and replacing its catalog.
+The Agent composition identifies its linked factories by their declared revisions
+and its selected native factories by their loader-verified artifact identities. Host startup can
+construct this catalog without reading the running executable.
 Profile apply can wait for that drain and reports Pending until convergence. A
 timeout never releases a route name while its old worker remains active. After
 bounded observation retries stop, reopen the affected surface to subscribe again.

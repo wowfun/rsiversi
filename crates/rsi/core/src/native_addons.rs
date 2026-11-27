@@ -2,7 +2,6 @@
 mod api;
 pub(crate) mod bootstrap;
 mod plugin;
-mod selection;
 #[cfg(test)]
 mod tests;
 use crate::{NativeAddonRecord, NativeAddonStore, StandardAddonBuilder, StandardAddonSet};
@@ -155,11 +154,7 @@ impl NativeAddonManager {
         base: StandardAddonSet,
         reserved: BTreeSet<String>,
     ) -> rsi_host::Result<Self> {
-        let code = selection::encode(&[])
-            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
-        let snapshot = AgentCompositionSnapshot::new(presets.clone(), base.agent_catalog()?)
-            .with_code_selection(code)
-            .map_err(|error| rsi_host::HostError::Bootstrap(error.to_string()))?;
+        let snapshot = AgentCompositionSnapshot::new(presets.clone(), base.agent_catalog()?);
         Ok(Self {
             store,
             loader,
@@ -329,9 +324,7 @@ impl NativeAddonManager {
             .agent_catalog()
             .map_err(|_| NativeAddonUpdateError::Selection("Agent contribution catalog"))?;
         let snapshot =
-            AgentCompositionSnapshot::new(presets.clone().with_compiler(compiler), contributions)
-                .with_code_selection(selection::encode(selected)?)
-                .map_err(|_| NativeAddonUpdateError::Selection("code selection capacity"))?;
+            AgentCompositionSnapshot::new(presets.clone().with_compiler(compiler), contributions);
         Ok(Arc::new(snapshot))
     }
 
