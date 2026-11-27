@@ -38,7 +38,6 @@ use rsi_ai_protocol::{
 use rsi_media_protocol::{MediaDescriptor, MediaKind};
 use rsi_tools_protocol::{ToolContent, ToolResult};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
@@ -56,9 +55,7 @@ pub const MAXIMUM_CONTEXT_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum encoded Context-owned checkpoint bytes.
 pub const MAXIMUM_CONTEXT_CHECKPOINT_BYTES: usize =
     rsi_agent_session_protocol::MAXIMUM_CONTEXT_CHECKPOINT_BYTES;
-const CONTEXT_CHECKPOINT_VERSION: u32 = 23;
-const CHECKPOINT_BINDING_DOMAIN: &[u8] = b"rsi-agent-context-checkpoint-v23\0";
-const CHECKPOINT_MAGIC: &[u8] = b"rsi-agent-context-checkpoint-v23\0";
+const CONTEXT_CHECKPOINT_VERSION: u32 = 24;
 
 /// Explicit compaction limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -616,10 +613,7 @@ impl ContextFold {
                 })
                 .collect(),
         };
-        let prefix = CHECKPOINT_MAGIC.len() + 32;
-        let size = prefix
-            .checked_add(budget::weight(&payload)?)
-            .ok_or(ContextError::Capacity)?;
+        let size = budget::weight(&payload)?;
         let credit = self.budget.reserve(size)?;
         let reservation = rsi_api_protocol::ByteReservation::from_retention(size, credit)
             .map_err(|e| ContextError::Invalid(e.to_string()))?;
@@ -627,17 +621,10 @@ impl ContextFold {
             bytes: Vec::with_capacity(size),
             limit: MAXIMUM_CONTEXT_CHECKPOINT_BYTES,
         };
-        writer.bytes.extend_from_slice(CHECKPOINT_MAGIC);
-        writer.bytes.resize(prefix, 0);
         serde_json::to_writer(&mut writer, &payload)
             .map_err(|error| ContextError::Invalid(error.to_string()))?;
-        let mut bytes = writer.bytes;
-        let mut digest = Sha256::new();
-        digest.update(CHECKPOINT_BINDING_DOMAIN);
-        digest.update(&bytes[prefix..]);
-        bytes[CHECKPOINT_MAGIC.len()..prefix].copy_from_slice(&digest.finalize());
         reservation
-            .retain_vec(bytes)
+            .retain_vec(writer.bytes)
             .map_err(|e| ContextError::Invalid(e.to_string()))
     }
 
@@ -655,25 +642,7 @@ impl ContextFold {
                 "checkpoint bytes are empty or exceed their absolute bound".into(),
             ));
         }
-        let Some(envelope) = bytes.strip_prefix(CHECKPOINT_MAGIC) else {
-            return Err(ContextError::Invalid(
-                "checkpoint has the wrong format version".into(),
-            ));
-        };
-        let Some((binding, payload_bytes)) = envelope.split_at_checked(32) else {
-            return Err(ContextError::Invalid(
-                "checkpoint envelope is truncated".into(),
-            ));
-        };
-        let mut digest = Sha256::new();
-        digest.update(CHECKPOINT_BINDING_DOMAIN);
-        digest.update(payload_bytes);
-        if binding != digest.finalize().as_slice() {
-            return Err(ContextError::Invalid(
-                "checkpoint binding does not match its retained projection".into(),
-            ));
-        }
-        let checkpoint: ContextCheckpointPayload = serde_json::from_slice(payload_bytes)
+        let checkpoint: ContextCheckpointPayload = serde_json::from_slice(bytes)
             .map_err(|error| ContextError::Invalid(format!("invalid checkpoint: {error}")))?;
         let fact_prefix_digest = decode_sha256(
             "checkpoint Fact-prefix digest",
@@ -1862,10 +1831,9 @@ mod checkpoint_encoding_tests {
         .unwrap()])
             .unwrap();
         let bytes = fold.checkpoint_bytes().unwrap();
-        let payload = &bytes[CHECKPOINT_MAGIC.len() + 32..];
         let builder = DefaultContextBuilder::default();
         for mutation in 0..7 {
-            let mut payload: serde_json::Value = serde_json::from_slice(payload).unwrap();
+            let mut payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             match mutation {
                 0 => payload["semantic"]["last_human"]["missing-turn"] = serde_json::json!(0),
                 1 => {
@@ -1887,13 +1855,7 @@ mod checkpoint_encoding_tests {
                 5 => payload["semantic"]["identity"]["semantic_version"] = "1.0.0".into(),
                 _ => payload["semantic"]["identity"]["config_sha256"] = "0".repeat(64).into(),
             }
-            let payload = serde_json::to_vec(&payload).unwrap();
-            let mut digest = Sha256::new();
-            digest.update(CHECKPOINT_BINDING_DOMAIN);
-            digest.update(&payload);
-            let mut bytes = CHECKPOINT_MAGIC.to_vec();
-            bytes.extend_from_slice(&digest.finalize());
-            bytes.extend_from_slice(&payload);
+            let bytes = serde_json::to_vec(&payload).unwrap();
             assert!(
                 matches!(
                     builder.open(ContextInit {

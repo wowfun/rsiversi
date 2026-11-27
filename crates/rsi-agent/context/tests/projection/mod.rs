@@ -1429,23 +1429,17 @@ fn checkpoint_rejects_active_assembler_corruption_and_identity_mismatch() {
         .is_err()
     );
 
-    let mut injected = bytes.to_vec();
-    let original = b"complete";
-    let replacement = b"injected";
-    let offset = injected
-        .windows(original.len())
-        .position(|window| window == original)
-        .expect("checkpoint contains the projected user message");
-    injected[offset..offset + replacement.len()].copy_from_slice(replacement);
+    let mut stale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    stale["version"] = 23.into();
     assert!(
         ContextFold::from_checkpoint(
             header("system"),
             limits,
-            &injected,
+            &serde_json::to_vec(&stale).unwrap(),
             rsi_agent_context::ContextBudget::default()
         )
         .is_err(),
-        "a structurally valid same-length checkpoint mutation must be rejected"
+        "a checkpoint with an unsupported projection schema must be rebuilt"
     );
 }
 

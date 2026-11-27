@@ -5,10 +5,9 @@ use rsi_agent_session_protocol::{SessionFact, SessionHeader};
 use rsi_ai_protocol::{LanguageProfile, LanguageRequest, LanguageRequestOptions};
 use rsi_meta::LocalContract;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{fmt, sync::Arc};
 
-const MAGIC: &[u8] = b"rsi-agent-model-context-v6\0";
+const MAGIC: &[u8] = b"rsi-agent-model-context-v7\0";
 const MAXIMUM_METADATA_BYTES: usize = 2048;
 const RAW_MESSAGE_TARGET: usize = 1024;
 const RAW_BYTE_TARGET: usize = 8 * 1024 * 1024;
@@ -468,7 +467,7 @@ impl ModelContextState {
             pending_bytes: std::num::NonZeroUsize::new(pending.len()),
         })
         .map_err(|error| invalid(&error.to_string()))?;
-        let size = MAGIC.len() + 32 + 4 + metadata.len() + pending.len() + payload.len();
+        let size = MAGIC.len() + 4 + metadata.len() + pending.len() + payload.len();
         if metadata.len() > MAXIMUM_METADATA_BYTES || size > MAXIMUM_CONTEXT_CHECKPOINT_BYTES {
             return Err(invalid(
                 "context checkpoint envelope exceeds its byte bound",
@@ -477,18 +476,11 @@ impl ModelContextState {
         let length = u32::try_from(metadata.len())
             .map_err(|_| invalid("checkpoint metadata length overflow"))?
             .to_le_bytes();
-        let mut digest = Sha256::new();
-        digest.update(MAGIC);
-        digest.update(length);
-        digest.update(&metadata);
-        digest.update(&pending);
-        digest.update(&payload);
         let credit = self.budget.reserve(size)?;
         let reservation = rsi_api_protocol::ByteReservation::from_retention(size, credit)
             .map_err(|e| ContextError::Invalid(e.to_string()))?;
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&digest.finalize());
         bytes.extend_from_slice(&length);
         bytes.extend_from_slice(&metadata);
         bytes.extend_from_slice(&pending);
@@ -513,9 +505,6 @@ impl ModelContextState {
         let body = bytes
             .strip_prefix(MAGIC)
             .ok_or_else(|| invalid("context checkpoint version mismatch"))?;
-        let (binding, body) = body
-            .split_at_checked(32)
-            .ok_or_else(|| invalid("truncated checkpoint digest"))?;
         let (length, body) = body
             .split_at_checked(4)
             .ok_or_else(|| invalid("truncated checkpoint metadata length"))?;
@@ -533,13 +522,6 @@ impl ModelContextState {
             .ok_or_else(|| invalid("truncated checkpoint metadata"))?;
         if payload.is_empty() {
             return Err(invalid("empty checkpoint payload"));
-        }
-        let mut digest = Sha256::new();
-        digest.update(MAGIC);
-        digest.update(length);
-        digest.update(body);
-        if binding != digest.finalize().as_slice() {
-            return Err(invalid("context checkpoint binding mismatch"));
         }
         let metadata: Metadata =
             serde_json::from_slice(metadata).map_err(|error| invalid(&error.to_string()))?;

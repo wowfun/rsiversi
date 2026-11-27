@@ -33,9 +33,8 @@ Accepted direct text and claimed input remain outside model messages until
 Session, resolves the final decision from that exact set, and drops consumed
 claims even when the decision enters nothing or rejects. A pending capture borrows
 that retained set; it does not reread history per message. Checkpoints retain
-unprepared claims separately from entered model history. Fold checkpoint v23 and
-builder 2.18.0 bind explicit prompt ownership and retained runtime-context positions.
-Earlier projection caches are incompatible.
+unprepared claims separately from entered model history. Builder 2.18.0 binds
+explicit prompt ownership and retained runtime-context positions.
 
 Each retained Turn records the last entered PluginContext Fact timestamp per
 producer, excluding Tool-result context. BeforeStep borrows the latest such
@@ -88,7 +87,7 @@ exposes that same tagged value for Executor equality; new Steps and terminal Tur
 reset it. Context never calls native prompt providers or repeats interpolation.
 Ordinary contributed inputs retain their existing history semantics.
 The bounded guidance participates in context accounting, compaction requests and
-checkpoint v23, so recovery cannot retain an exited Plan's old instructions.
+checkpoints, so recovery cannot retain an exited Plan's old instructions.
 
 Language history is projected from atomic `ModelAttemptSettled` evidence.
 Final failed, cancelled and max-token attempts contribute their safe text and
@@ -111,8 +110,8 @@ interrupted-output projection.
 Target-specific Tool image fallback consumes the assembled messages before request
 construction, moving unaffected messages and request options without cloning. Only Tool results containing
 images are rebuilt; complete-request validation still bounds the projection.
-The allocation golden binds builder 2.18.0, Session format 48, the v23 fold
-and the v6 envelope.
+The allocation golden binds builder 2.18.0, Session format 48, the v24 fold
+and the v7 envelope.
 
 The single deep module for prompt projection, incremental model context, and
 deterministic compaction. It consumes validated session Facts and emits bounded
@@ -309,39 +308,23 @@ retries and forced/manual compaction retain their distinct operations.
 Validated SessionHeader values are trusted at these in-process handoffs; durable
 Header decoding and checkpoint/builder admission retain their own validation.
 
-`ModelContextState` owns the selected builder, cursor, and version-6 cache
-envelope. The envelope binds the builder ID, semantic version and normalized
-configuration digest, Header fingerprint, exact limits, cursor and Fact prefix
-to the raw bounded provider payload. Restore validates this envelope before
-calling the builder and requires the restored cursor's position to agree.
-The private fold encoding version is independent of semantic builder identity;
-encoding-only changes preserve the identity used by durable compaction Facts.
-Rejected or mismatched caches are rebuilt from Facts; a failed restore leaves
-the current cursor intact. The Store's single Session cache slot does not change. The envelope writes metadata and raw payload once without
-deep-cloning projected messages. The default provider uses the version-22 fold
-encoding below as its opaque payload; other providers own their payload schema.
+`ModelContextState` stores one optional checkpoint per Session. Its envelope
+frames the builder identity, Header fingerprint, limits, cursor position, pending
+tool context and provider payload. Restore checks the metadata against the
+current Session and requires the restored cursor to agree with that position.
+Providers own their payload schema. Private encoding revisions preserve the
+semantic identity recorded in compaction Facts. A rejected cache leaves the
+current cursor intact and permits rebuilding from canonical Facts.
 
-Exact Fact prefixes with no active model assembler may be encoded as the
-version-22 Context checkpoint. Retained nonterminal turns are encoded with their
-lifecycle state, so accepted queued turns do not prevent a checkpoint. Context
-alone owns and validates that schema, recomputes all message accounting on
-restore, and binds the retained projection to the immutable header, exact
-retention limits, cursor, and a rolling SHA-256 digest of every folded Fact.
-Restore validates semantic metadata bounds and its positions against restored
-Turns before accounting or pruning; the provider separately verifies builder identity.
-The envelope first measures the borrowed retained projection to admit its exact
-encoded allocation, then serializes it into that allocation and prefixes its raw
-digest. Checkpoint creation traverses the payload twice without deep-cloning the
-retained messages. Fact-prefix hashing streams canonical JSON
-directly into SHA-256, and the immutable system message plus its canonical byte
-size are cached once per fold.
-The Store carries that prefix digest independently so the executor can reject
-bytes that no longer describe the canonical prefix. A claim-filtered sequence
-hole, active assembler, wrong header, wrong limits, changed payload, or
-malformed bytes makes the fold non-checkpointable. The checkpoint is an
-integrity-checked cache written by the trusted in-process Context owner, not an
-authentication boundary against coordinated replacement of both Store metadata
-and cache bytes.
+The default provider encodes an exact Fact prefix as a versioned JSON projection.
+It measures the borrowed projection to reserve its encoded size, then serializes
+directly into that allocation. A claim-filtered sequence hole or active
+assembler prevents checkpointing. The projection retains entered nonterminal
+turns and their lifecycle state. Restore checks the schema, header, limits and
+semantic positions, then reconstructs message accounting. The Store separately
+records the Fact-prefix identity used by the executor. A well-formed edit to
+cached message text can affect the restored projection. Replay from canonical
+Facts regenerates it.
 
 An accepted mailbox turn becomes checkpointable only after its first
 model-visible input has entered; Context never writes an empty turn that its
@@ -494,6 +477,6 @@ Tool batch metadata retains typed spill references beside each settled call.
 Notices are absent from the retained raw messages and their pruning budgets.
 Projection renders their retrieval notice, and pruning redraws that notice from
 the typed references after selecting text. It does not infer protected cache
-identities from arbitrary Tool text. Checkpoint v23 carries this metadata; older
+identities from arbitrary Tool text. The checkpoint carries this metadata; older
 checkpoints rebuild from canonical Facts. Semantic compaction preserves the
 original Fact coordinates for source retrieval.
