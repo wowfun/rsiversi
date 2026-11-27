@@ -89,8 +89,7 @@ pub struct WorkspaceReview {
 struct IntervalState {
     admission: Option<ExecutionOperation>,
     finished: bool,
-    scratch: Option<Scratch>,
-    before: Option<Capture>,
+    before: Option<(Scratch, Capture)>,
     omissions: Vec<Omission>,
 }
 #[derive(Clone, Debug)]
@@ -519,18 +518,27 @@ impl Interval {
             omission(&mut inner.omissions, OmissionKind::Deadline, 1);
             return;
         };
-        match self.owner.git.initialize(&self.owner.root.path, stop).await {
-            Ok(mut scratch) => {
-                let before = self
-                    .owner
-                    .git
-                    .capture(&self.workspace, &mut scratch, stop, self.execution.as_ref())
-                    .await;
-                inner.before = Some(before);
-                inner.scratch = Some(scratch);
-            }
+        let mut scratch = self.owner.git.scratch();
+        match self.capture(&mut scratch, stop).await {
+            Ok(before) => inner.before = Some((scratch, before)),
             Err(reason) => omission(&mut inner.omissions, reason, 1),
         }
+    }
+    async fn capture(
+        &self,
+        scratch: &mut Scratch,
+        stop: &CancellationToken,
+    ) -> crate::git::Result<Capture> {
+        self.owner
+            .git
+            .capture(
+                &self.workspace,
+                &self.owner.root.path,
+                scratch,
+                stop,
+                self.execution.as_ref(),
+            )
+            .await
     }
     async fn end_work(&self, evidence: ExecutionObservationEnd, stop: &CancellationToken) {
         let mut inner = self.state.lock().await;
@@ -546,26 +554,21 @@ impl Interval {
             omission(&mut inner.omissions, OmissionKind::Unsettled, 1);
         }
         let mut ready = None;
-        if let (Some(mut scratch), Some(before)) = (inner.scratch.take(), inner.before.take()) {
+        if let Some((mut scratch, before)) = inner.before.take() {
             for row in &before.omissions {
                 omission(&mut inner.omissions, row.kind, row.count);
             }
             if evidence.begin_completed {
                 if let Ok(_permit) = self.capture_permit(stop).await {
-                    let after = self
-                        .owner
-                        .git
-                        .capture(&self.workspace, &mut scratch, stop, self.execution.as_ref())
-                        .await;
-                    for row in &after.omissions {
-                        omission(&mut inner.omissions, row.kind, row.count);
+                    let comparison = async {
+                        let after = self.capture(&mut scratch, stop).await?;
+                        for row in &after.omissions {
+                            omission(&mut inner.omissions, row.kind, row.count);
+                        }
+                        self.owner.git.compare(&scratch, &before, &after, stop).await
                     }
-                    match self
-                        .owner
-                        .git
-                        .compare(&scratch, &before, &after, stop)
-                        .await
-                    {
+                    .await;
+                    match comparison {
                         Ok(Some(comparison)) => {
                             ready = Some(Ready::Changes(Arc::new(Changes {
                                 scratch,

@@ -227,15 +227,15 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     let stop = CancellationToken::new();
     let mut scratch = git.initialize(&root.path, &stop).await.unwrap();
     let before = git
-        .capture(&workspace, &mut scratch, &stop, Some(&execution))
-        .await;
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .await.unwrap();
     assert!(before.omissions.is_empty());
     assert_eq!(before.files["run.sh"].1, 0o100_644);
     std::fs::write(&path, "after\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let after = git
-        .capture(&workspace, &mut scratch, &stop, Some(&execution))
-        .await;
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .await.unwrap();
     assert_eq!(after.files["run.sh"].1, 0o100_755);
     let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap().unwrap();
     let diff = git
@@ -246,8 +246,8 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     assert!(diff.contains("old mode 100644") && diff.contains("new mode 100755"));
     files.unavailable.store(true, Ordering::SeqCst);
     let unreadable = git
-        .capture(&workspace, &mut scratch, &stop, Some(&execution))
-        .await;
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .await.unwrap();
     assert!(
         unreadable
             .omissions
@@ -263,8 +263,8 @@ async fn target_inventory_bytes_and_modes_use_original_lease_and_failures_are_no
     let resolved = backend.resolved.load(Ordering::SeqCst);
     gate.0.store(true, Ordering::SeqCst);
     let disconnected = git
-        .capture(&workspace, &mut scratch, &stop, Some(&execution))
-        .await;
+        .capture(&workspace, &root.path, &mut scratch, &stop, Some(&execution))
+        .await.unwrap();
     assert!(!disconnected.listed_complete);
     assert!(!disconnected.omissions.is_empty());
     assert_eq!(backend.resolved.load(Ordering::SeqCst), resolved);

@@ -244,13 +244,16 @@ impl Git {
             .map_err(|_| OmissionKind::Unreadable)?;
         collected(process, stop).await
     }
-    pub async fn initialize(&self, base: &Path, stop: &CancellationToken) -> Result<Scratch> {
-        let mut scratch = Scratch {
+    pub fn scratch(&self) -> Scratch {
+        Scratch {
             directory: None,
             tasks: self.tasks.clone(),
             permits: vec![],
             charged: 0,
-        };
+        }
+    }
+    pub async fn initialize(&self, base: &Path, stop: &CancellationToken) -> Result<Scratch> {
+        let mut scratch = self.scratch();
         scratch.reserve(&self.quota, 4 * 1024 * 1024)?;
         scratch.directory = Some(
             crate::scratch_root::interval_directory(base).map_err(|_| OmissionKind::Capacity)?,
@@ -273,16 +276,17 @@ impl Git {
     pub async fn capture(
         &self,
         workspace: &Path,
+        base: &Path,
         scratch: &mut Scratch,
         stop: &CancellationToken,
         execution: Option<&ExecutionLease>,
-    ) -> Capture {
+    ) -> Result<Capture> {
         let mut capture = Capture::default();
         let listing = match self.source_listing(workspace, execution, stop).await {
             Ok(bytes) => bytes,
             Err(reason) => {
                 capture.omit(reason);
-                return capture;
+                return Ok(capture);
             }
         };
         let mut names = BTreeSet::new();
@@ -329,7 +333,7 @@ impl Git {
         else {
             capture.omit(OmissionKind::Unreadable);
             capture.listed_complete = false;
-            return capture;
+            return Ok(capture);
         };
         let _caller = CallerLease {
             files: files.clone(),
@@ -338,7 +342,10 @@ impl Git {
         if scope.is_err() {
             capture.listed_complete = false;
             capture.omit(OmissionKind::Unreadable);
-            return capture;
+            return Ok(capture);
+        }
+        if !names.is_empty() && scratch.directory.is_none() {
+            *scratch = self.initialize(base, stop).await?;
         }
         let binding = FilesBinding::new(
             caller.clone(),
@@ -416,7 +423,7 @@ impl Git {
         if !batch.is_empty() {
             self.import(scratch, &mut capture, batch, stop).await;
         }
-        capture
+        Ok(capture)
     }
     async fn import(
         &self,
@@ -694,7 +701,9 @@ fn numstat(bytes: &[u8]) -> Result<Vec<FileChange>> {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let directory = self.directory.take();
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
         let permits = std::mem::take(&mut self.permits);
         self.tasks.spawn_blocking(move || {
             drop(directory);

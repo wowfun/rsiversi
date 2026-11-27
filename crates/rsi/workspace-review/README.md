@@ -25,7 +25,10 @@ workspace through the original claim execution lease. Missing remote authority o
 a mismatched location is rejected before capture admission. The interval retains
 its admitted operation through completion, including independently retained
 capture tasks. Each new capture
-rechecks that lease; reconnect cannot replace its provider. The source is a bounded
+rechecks that lease; reconnect cannot replace its provider. Both captures list the
+source before reserving space for a private Git repository. An empty inventory
+is a valid baseline for files added later in the interval. Failed listings retain
+their omission reason. The source is a bounded
 repo bundle of validated relative names, versioned bytes and executable flags.
 No target Git objects, refs, config or index are imported into Local scratch. Existing dirty bytes are part of the baseline. Git executes only through
 Process and Sandbox with a fixed environment, disabled hooks/config helpers and no

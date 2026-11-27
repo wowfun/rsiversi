@@ -225,7 +225,7 @@ async fn scenario(native: bool) {
     );
     drop(held);
     let before_calls = process_calls.load(std::sync::atomic::Ordering::Relaxed);
-    let before = git.capture(&workspace, &mut scratch, &stop, None).await;
+    let before = git.capture(&workspace, &root.path, &mut scratch, &stop, None).await.unwrap();
     assert_eq!(
         process_calls.load(std::sync::atomic::Ordering::Relaxed) - before_calls,
         4,
@@ -239,7 +239,7 @@ async fn scenario(native: bool) {
     std::fs::rename(workspace.join("rename.txt"), workspace.join("renamed.txt")).unwrap();
     std::fs::remove_file(workspace.join("deleted.txt")).unwrap();
     std::fs::write(workspace.join(":(glob)literal.txt"), "independent writer\n").unwrap();
-    let after = git.capture(&workspace, &mut scratch, &stop, None).await;
+    let after = git.capture(&workspace, &root.path, &mut scratch, &stop, None).await.unwrap();
     assert!(after.omissions.is_empty(), "{:?}", after.omissions);
     let comparison = git.compare(&scratch, &before, &after, &stop).await.unwrap().unwrap();
     assert_eq!(comparison.files.len(), 4, "{:?}", comparison.files);
@@ -275,7 +275,7 @@ async fn scenario(native: bool) {
         "private captures must not change the user's index, objects, refs or config"
     );
     std::fs::write(workspace.join("tracked.txt"), [0, 1, 2]).unwrap();
-    let binary = git.capture(&workspace, &mut scratch, &stop, None).await;
+    let binary = git.capture(&workspace, &root.path, &mut scratch, &stop, None).await.unwrap();
     assert!(
         binary
             .omissions
@@ -289,7 +289,7 @@ async fn scenario(native: bool) {
     );
     std::fs::write(workspace.join("large.txt"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
     std::os::unix::fs::symlink("/etc/passwd", workspace.join("linked.txt")).unwrap();
-    let limited = git.capture(&workspace, &mut scratch, &stop, None).await;
+    let limited = git.capture(&workspace, &root.path, &mut scratch, &stop, None).await.unwrap();
     assert!(
         limited
             .omissions
@@ -313,8 +313,8 @@ async fn scenario(native: bool) {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(
-        git.capture(&workspace, &mut scratch, &cancelled, None)
-            .await
+        git.capture(&workspace, &root.path, &mut scratch, &cancelled, None)
+            .await.unwrap()
             .omissions
             .iter()
             .any(|r| r.kind == OmissionKind::Deadline)

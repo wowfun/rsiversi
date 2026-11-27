@@ -438,6 +438,11 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         .unwrap()
         .unwrap();
     recovered.begin(CancellationToken::new()).await;
+    assert_eq!(
+        std::fs::read_dir(&second.root.path).unwrap().count(),
+        1,
+        "a non-Git baseline needs only the scratch owner's lock file"
+    );
     recovered
         .end(
             ExecutionObservationEnd {
@@ -451,6 +456,10 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         .summary
         .clone();
     assert_eq!(summary.phase, Phase::Partial);
+    assert!(
+        summary.omissions.iter().any(|row| row.kind == OmissionKind::NonGit && row.count == 2),
+        "both inventories report the unavailable repository"
+    );
     assert!(
         summary
             .omissions
@@ -562,7 +571,6 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
             .unwrap()
             .success()
     );
-    std::fs::write(workspace.join("file.txt"), "before\n").unwrap();
     let runtime = Runtime::default();
     let process = runtime
         .root()
@@ -610,6 +618,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     );
     drop(held);
     baseline.await.unwrap();
+    assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
     std::fs::write(
         workspace.join("file.txt"),
         "after long change line\n".repeat(5000),
@@ -630,6 +639,10 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         (entry.summary.clone(), entry.runtime.clone().unwrap())
     };
     assert_eq!(summary.phase, Phase::Complete);
+    assert_eq!(
+        (summary.changed_files, summary.added_lines, summary.removed_lines),
+        (1, 5000, 0)
+    );
     let request = |offset| Request::Diff {
         scope: summary.scope.clone(),
         id: interval.id.clone(),
@@ -732,7 +745,7 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
         finished,
         "finished evidence must not be overwritten"
     );
-    assert!(interval.state.lock().await.scratch.is_none());
+    assert!(interval.state.lock().await.before.is_none());
     owner.close().await;
     drop(interval);
     drop(owner);
