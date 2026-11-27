@@ -109,12 +109,11 @@ forwards bounded bytes and acknowledges pages after xterm has parsed them.
 
 Terminal dynamic styles use constructed CSSOM sheets through a scoped document
 override, with inert template placeholders and explicit disposal. The production
-`style-src 'self'` policy is unchanged. `xterm-document.mjs` resolves the installed
-ES module and validates it when Vite config loads; resolution also rejects a
-different entry in development; production builds also require
-the patched module to have been loaded. It checks the exact
-dependency digest before correcting the 6.0.0 document override and its
-cell color writer. xterm applies its generated foreground and background
+`style-src 'self'` policy applies to terminal content. When Vite loads its
+configuration, `xterm-document.mjs` resolves the installed ES module and
+requires exactly one match for each of the document override and cell color
+writer patches. Development resolves this same entry and production builds
+require the patched module to load. xterm applies its generated foreground and background
 colors as individual CSSOM properties so truecolor and contrast adjustments
 render under the production policy. Dependency upgrades require reviewing
 these sites. No global DOM method is patched.

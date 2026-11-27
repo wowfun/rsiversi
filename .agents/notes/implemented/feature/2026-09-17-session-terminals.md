@@ -62,7 +62,7 @@ one Rust controller over an independently bounded terminal service.
 xterm's DOM renderer writes dynamic font, cell and color CSS through style text,
 which the existing `style-src 'self'` policy rejects. Its public document override
 is scoped to the terminal and maps only those style writes to constructed CSSOM
-sheets. Disposal removes those sheets. A hash-checked build patch corrects the
+sheets. Disposal removes those sheets. A build patch matching the two affected sites corrects the
 pinned 6.0.0 source's nullish/conditional precedence in `CoreBrowserTerminal.open`;
 otherwise the viewport silently receives the global document instead of the
 override. Upgrading xterm requires reviewing that exact patch. This retains the
