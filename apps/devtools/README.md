@@ -106,9 +106,11 @@ both native exports and the launcher are verified before publication.
 `fixture-dist` binds the document bundle identity to its captured build-family
 digest. This lets evidence fixtures verify the exact native/assets publication;
 it does not make that digest a production wire-compatibility requirement.
-Capture reuses a regular file whose size and SHA-256 match the source.
+Capture takes its initial file-identity observations as it selects the present
+Git paths. It reuses a regular file whose size and SHA-256 match the source.
 Only new or changed contents need a temporary file for atomic replacement.
 The final verification still checks the checkout against the captured bytes.
+The build-family fingerprint also identifies an unchanged manifest on disk.
 The frontend install gives pnpm the same store path when different checkouts
 reach the shared build cache through directory links.
 Its synchronous command runner waits for the build lock, drains both child

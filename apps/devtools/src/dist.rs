@@ -506,8 +506,7 @@ fn build(
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("source manifest exceeds 16 MiB".into());
     }
-    source::put(&manifest_path, &bytes)?;
-    let family = hash(&bytes);
+    let family = source::write_manifest(&manifest_path, &bytes)?;
     runner.environment.insert(
         "RSI_BUILD_FAMILY_MANIFEST".into(),
         manifest_path.into_os_string(),

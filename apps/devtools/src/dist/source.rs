@@ -1,7 +1,7 @@
 use super::{Path, Result, Value, fs, hash, hash_file, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::{Read, Seek, Write},
 };
 
@@ -24,27 +24,13 @@ pub(super) fn capture(root: &Path, destination: &Path, previous: Option<&Value>)
     if !result.status.success() {
         return Err("source publication requires a Git checkout".into());
     }
-    let mut names = String::from_utf8(result.stdout)?
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    names.dedup();
-    let mut present = Vec::with_capacity(names.len());
-    for name in names {
-        match fs::symlink_metadata(root.join(&name)) {
-            Ok(_) => present.push(name),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    capture_names(root, destination, &present, previous)
+    let paths = String::from_utf8(result.stdout)?;
+    capture_names(root, destination, paths.split_terminator('\0'), previous)
 }
-fn capture_names(
+fn capture_names<'a>(
     root: &Path,
     destination: &Path,
-    names: &[String],
+    names: impl IntoIterator<Item = &'a str>,
     previous: Option<&Value>,
 ) -> Result<Value> {
     let root = root.canonicalize()?;
@@ -53,9 +39,20 @@ fn capture_names(
         return Err("capture root cannot be a link".into());
     }
     let destination = &destination.canonicalize()?;
+    let mut stamps = BTreeMap::new();
+    for name in names {
+        let path = root.join(name);
+        match fs::symlink_metadata(path) {
+            Ok(info) => {
+                valid_name(name)?;
+                stamps.insert(name, stamp(&info));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
     if let Some(previous) = previous.and_then(Value::as_object) {
-        let retained: BTreeSet<_> = names.iter().collect();
-        for name in previous.keys().filter(|n| !retained.contains(n)) {
+        for name in previous.keys().filter(|n| !stamps.contains_key(n.as_str())) {
             valid_name(name)?;
             parents(destination, name)?;
             let path = destination.join(name);
@@ -66,12 +63,7 @@ fn capture_names(
         }
     }
     let mut records = BTreeMap::new();
-    let mut stamps = BTreeMap::new();
-    for name in names {
-        valid_name(name)?;
-        stamps.insert(name, stamp(&fs::symlink_metadata(root.join(name))?));
-    }
-    for name in names {
+    for (&name, expected) in &stamps {
         let path = root.join(name);
         let target = destination.join(name);
         if !path
@@ -83,7 +75,7 @@ fn capture_names(
             return Err(format!("source parent escapes checkout: {name}").into());
         }
         let before = fs::symlink_metadata(&path)?;
-        if stamps.get(name) != Some(&stamp(&before)) {
+        if *expected != stamp(&before) {
             return Err(format!("source changed before capture: {name}").into());
         }
         parents(destination, name)?;
@@ -108,13 +100,13 @@ fn capture_names(
                     }
                 }
             }
-            records.insert(name.clone(), json!({"kind":"symlink","target":link}));
+            records.insert(name, json!({"kind":"symlink","target":link}));
         } else if before.is_file() {
             if before.len() > MAX_SOURCE_BYTES {
                 return Err(format!("source file exceeds 64 MiB: {name}").into());
             }
             let mut input = fs::File::open(&path)?;
-            if stamp(&input.metadata()?) != stamp(&before) {
+            if stamp(&input.metadata()?) != *expected {
                 return Err(format!("source changed while opening: {name}").into());
             }
             let (digest, bytes) = copy_source(&mut input, before.len(), &target)?;
@@ -128,7 +120,7 @@ fn capture_names(
                 )?;
             }
             records.insert(
-                name.clone(),
+                name,
                 json!({"kind":"file","sha256":digest,"bytes":bytes,"executable":executable}),
             );
         } else {
@@ -250,12 +242,11 @@ fn valid_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
-fn stamp(info: &fs::Metadata) -> String {
+fn stamp(info: &fs::Metadata) -> impl Eq + use<> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
+        (
             info.dev(),
             info.ino(),
             info.len(),
@@ -263,18 +254,17 @@ fn stamp(info: &fs::Metadata) -> String {
             info.mtime_nsec(),
             info.ctime(),
             info.ctime_nsec(),
-            info.mode()
+            info.mode(),
         )
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        format!(
-            "{}:{}:{}:{}",
+        (
             info.creation_time(),
             info.last_write_time(),
             info.file_size(),
-            info.file_attributes()
+            info.file_attributes(),
         )
     }
     #[cfg(not(any(unix, windows)))]
@@ -294,20 +284,21 @@ fn is_executable(info: &fs::Metadata) -> bool {
         false
     }
 }
-pub(super) fn put(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_manifest(path: &Path, bytes: &[u8]) -> Result<String> {
+    let family = hash(bytes);
     if fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) {
         fs::remove_file(path)?;
     }
     if fs::metadata(path).is_ok_and(|info| info.is_file() && info.len() == bytes.len() as u64)
-        && hash_file(path)? == hash(bytes)
+        && hash_file(path)? == family
     {
-        return Ok(());
+        return Ok(family);
     }
     if path.exists() {
         writable(path)?;
     }
     fs::write(path, bytes)?;
-    Ok(())
+    Ok(family)
 }
 #[cfg_attr(windows, allow(clippy::permissions_set_readonly_false))] // Windows file attribute, never Unix permissions.
 fn writable(path: &Path) -> Result<()> {
@@ -405,6 +396,25 @@ pub(super) fn verify(root: &Path, records: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn manifest_fingerprint_tracks_exact_bytes_and_retains_an_unchanged_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("build-family.json");
+        assert_eq!(write_manifest(&manifest, b"one").unwrap(), hash(b"one"));
+        let file = fs::OpenOptions::new().write(true).open(&manifest).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(60))
+            .unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        drop(file);
+        assert_eq!(write_manifest(&manifest, b"one").unwrap(), hash(b"one"));
+        assert_eq!(
+            fs::metadata(&manifest).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(write_manifest(&manifest, b"two").unwrap(), hash(b"two"));
+        assert_eq!(fs::read(manifest).unwrap(), b"two");
+    }
+
     #[cfg(windows)]
     #[test]
     fn capture_retains_deeply_nested_fixture_payloads_on_windows() {
@@ -421,8 +431,7 @@ mod tests {
         let file = input.join(&relative);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, b"fixture").unwrap();
-        let records =
-            capture_names(&input, &output, std::slice::from_ref(&relative), None).unwrap();
+        let records = capture_names(&input, &output, [relative.as_str()], None).unwrap();
         verify(&output, &records).unwrap();
         assert_eq!(fs::read(output.join(relative)).unwrap(), b"fixture");
     }
@@ -438,7 +447,7 @@ mod tests {
             .set_len(64 * 1024 * 1024 + 1)
             .unwrap();
         fs::write(output.join("large"), b"previous").unwrap();
-        let error = capture_names(&input, &output, &["large".into()], None).unwrap_err();
+        let error = capture_names(&input, &output, ["large"], None).unwrap_err();
         assert!(error.to_string().contains("64 MiB"), "{error}");
         assert_eq!(fs::read(output.join("large")).unwrap(), b"previous");
     }
@@ -532,8 +541,13 @@ mod tests {
             let path = root.path().join(&name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"source").unwrap();
-            let error = capture_names(root.path(), &root.path().join("capture"), &[name], None)
-                .unwrap_err();
+            let error = capture_names(
+                root.path(),
+                &root.path().join("capture"),
+                [name.as_str()],
+                None,
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("reserved generated directory"));
         }
     }
@@ -545,9 +559,9 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("keep"), b"dirty\0bytes").unwrap();
         fs::write(root.join("removed"), b"old").unwrap();
-        let first = capture_names(&root, &out, &["keep".into(), "removed".into()], None).unwrap();
+        let first = capture_names(&root, &out, ["keep", "removed"], None).unwrap();
         let time = fs::metadata(out.join("keep")).unwrap().modified().unwrap();
-        let second = capture_names(&root, &out, &["keep".into()], Some(&first)).unwrap();
+        let second = capture_names(&root, &out, ["keep"], Some(&first)).unwrap();
         assert_eq!(
             fs::metadata(out.join("keep")).unwrap().modified().unwrap(),
             time
@@ -557,7 +571,8 @@ mod tests {
         fs::write(out.join("added.rs"), b"injected").unwrap();
         assert!(verify(&out, &second).is_err());
         fs::remove_file(out.join("added.rs")).unwrap();
-        put(&out.join("keep"), b"changed").unwrap();
+        writable(&out.join("keep")).unwrap();
+        fs::write(out.join("keep"), b"changed").unwrap();
         assert!(verify(&out, &second).is_err());
     }
     #[cfg(unix)]
@@ -568,7 +583,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(t.path().join("outside"), b"no").unwrap();
         std::os::unix::fs::symlink("../outside", root.join("escape")).unwrap();
-        assert!(capture_names(&root, &t.path().join("output"), &["escape".into()], None).is_err());
+        assert!(capture_names(&root, &t.path().join("output"), ["escape"], None).is_err());
     }
     #[test]
     fn captures_git_dirty_and_untracked_sources_but_not_ignored_build_output() {
@@ -591,12 +606,13 @@ mod tests {
         fs::write(root.join("tracked"), "original").unwrap();
         fs::write(root.join("deleted"), "removed from working tree").unwrap();
         git(&["add", "."]);
+        let out = t.path().join("output");
+        let before = capture(&root, &out, None).unwrap();
         fs::remove_file(root.join("deleted")).unwrap();
         fs::write(root.join("tracked"), "dirty").unwrap();
         fs::write(root.join("new"), "untracked").unwrap();
         fs::write(root.join("ignored"), "build").unwrap();
-        let out = t.path().join("output");
-        let files = capture(&root, &out, None).unwrap();
+        let files = capture(&root, &out, Some(&before)).unwrap();
         assert_eq!(fs::read_to_string(out.join("tracked")).unwrap(), "dirty");
         assert_eq!(fs::read_to_string(out.join("new")).unwrap(), "untracked");
         assert!(!out.join("ignored").exists());
@@ -622,8 +638,8 @@ mod tests {
         let alias = t.path().join("checkout-link");
         symlink(&root, &alias).unwrap();
         let out = t.path().join("output");
-        let names = ["sub/run".into(), "alias".into(), "missing".into()];
-        let files = capture_names(&alias, &out, &names, None).unwrap();
+        let names = ["sub/run", "alias", "missing"];
+        let files = capture_names(&alias, &out, names, None).unwrap();
         verify(&out, &files).unwrap();
         assert_eq!(
             fs::read_link(out.join("alias")).unwrap(),
@@ -633,7 +649,7 @@ mod tests {
         assert!(verify(&out, &files).is_err());
         fs::rename(out.join("sub"), out.join("old")).unwrap();
         symlink(root.join("sub"), out.join("sub")).unwrap();
-        assert!(capture_names(&root, &out, &names, Some(&files)).is_err());
+        assert!(capture_names(&root, &out, names, Some(&files)).is_err());
         assert!(verify(&out, &files).is_err());
         assert_eq!(fs::read_to_string(root.join("sub/run")).unwrap(), "script");
     }
