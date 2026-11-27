@@ -128,7 +128,6 @@ impl PluginFactory for WorkspaceReviewApiFactory {
                                 expected.clone(),
                             );
                             async move {
-                                request.validate()?;
                                 if request.spec() != expected {
                                     return Err(ApiError::Invalid(
                                         "review operation mismatch".into(),

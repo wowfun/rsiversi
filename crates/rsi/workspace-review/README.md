@@ -40,7 +40,8 @@ active again or acquire new scratch.
 One capture admits at most 10,000 paths, 1 MiB of path names, 4 MiB per file and
 128 MiB of original bytes. Concurrent sessions keep independent baselines and
 share two capture workers. They wait for a worker within their capture deadline.
-API reads use a separate two-slot pool. Each interval can reserve up to 512 MiB
+Summary and file listings read the live comparison directly. Concurrent diff requests for
+one comparison share its patch cache. Each interval can reserve up to 512 MiB
 of private scratch within a shared 1 GiB budget. When a reservation needs space,
 the oldest completed comparison with no readers releases its scratch first.
 Current baselines and in-flight reads retain their files. If the available

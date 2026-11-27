@@ -152,14 +152,15 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
             .clone();
         assert_eq!((summary.phase, summary.changed_files), (Phase::Complete, 1));
         let reply = owner
-            .read_inner(
-                &Request::Diff {
+            .read(
+                Request::Diff {
                     scope: summary.scope,
                     id: interval.id.clone(),
                     path: "note.txt".into(),
                     offset: 0,
                 },
-                &stop,
+                ExecutionOperation::new(()),
+                stop.clone(),
             )
             .await
             .unwrap();
@@ -203,58 +204,101 @@ async fn independent_sessions_retain_their_diffs_until_scratch_is_needed() {
         );
     }
     next.end(end, stop).await;
-    drop((reader, held));
-    owner.close().await;
+    drop(held);
+    let summary = owner.state.lock().unwrap().entries[&intervals[0].id]
+        .summary
+        .clone();
+    check_concurrent_diff_shutdown(&owner, reader, &summary).await;
     assert!(process.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
 }
 
 #[tokio::test]
-async fn shutdown_retains_an_admitted_read_until_its_task_drains() {
+async fn three_devices_can_list_live_summaries_together() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let markers = Arc::new(Markers::default());
-    let owner = owner(&runtime, temporary.path().join("scratch"), markers).await;
+    let owner = owner(
+        &runtime,
+        temporary.path().join("scratch"),
+        Arc::new(Markers::default()),
+    )
+    .await;
     let interval = owner.admit(start(temporary.path(), false)).unwrap();
+    interval.first_tool(CancellationToken::new()).await;
     let scope = owner.state.lock().unwrap().entries[&interval.id]
         .summary
         .scope
         .clone();
-    let request = Request::List { scope, after: None };
-    let mut read = Box::pin(owner.read(
-        request.clone(),
-        ExecutionOperation::new(()),
-        CancellationToken::new(),
-    ));
-    assert!(futures_util::poll!(read.as_mut()).is_pending());
-    assert_eq!(
-        owner.tasks.len(),
-        1,
-        "read is registered before yielding to shutdown"
-    );
-    let mut closing = Box::pin(owner.close());
-    assert!(
-        futures_util::poll!(closing.as_mut()).is_pending(),
-        "shutdown must join the admitted task"
-    );
-    closing.await;
-    assert!(owner.tasks.is_empty());
-    assert!(matches!(read.await, Err(ApiError::ShuttingDown)));
-    assert!(matches!(
-        owner
-            .read(
-                request,
-                ExecutionOperation::new(()),
-                CancellationToken::new()
-            )
-            .await,
-        Err(ApiError::ShuttingDown)
-    ));
-    drop(interval);
-    drop(owner);
+    let list = || {
+        owner.read(
+            Request::List {
+                scope: scope.clone(),
+                after: None,
+            },
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
+    };
+    let (a, b, c) = tokio::join!(list(), list(), list());
+    for result in [a, b, c] {
+        let Reply::Summaries { items, .. } = result.expect("read live summaries") else {
+            panic!("expected summaries")
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, interval.id);
+    }
+    owner.close().await;
     assert!(process.dispose().await.is_clean());
     assert!(runtime.shutdown().await.is_clean());
+}
+
+async fn check_concurrent_diff_shutdown(
+    owner: &Arc<WorkspaceReview>,
+    changes: Arc<Changes>,
+    summary: &Summary,
+) {
+    let request = Request::Diff {
+        id: summary.id.clone(),
+        scope: summary.scope.clone(),
+        path: changes.comparison.files[0].path.clone(),
+        offset: 0,
+    };
+    let held = changes.patch.lock().await;
+    let diff = || {
+        owner.read(
+            request.clone(),
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
+    };
+    let mut diffs = [Box::pin(diff()), Box::pin(diff()), Box::pin(diff())];
+    for read in &mut diffs {
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+    }
+    let files = owner
+        .read(
+            Request::Files {
+                id: summary.id.clone(),
+                scope: summary.scope.clone(),
+                offset: 0,
+            },
+            ExecutionOperation::new(()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(files, Reply::Files { files, .. } if files == changes.comparison.files));
+    let mut closing = Box::pin(owner.close());
+    assert!(futures_util::poll!(closing.as_mut()).is_pending());
+    drop(held);
+    drop(changes);
+    closing.await;
+    assert!(owner.tasks.is_empty());
+    for read in diffs {
+        assert!(matches!(read.await, Err(ApiError::ShuttingDown)));
+    }
+    assert!(matches!(diff().await, Err(ApiError::ShuttingDown)));
 }
 
 #[tokio::test]
@@ -304,13 +348,13 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         .clone();
     let request = Request::List { scope, after: None };
     assert!(matches!(
-        owner.read_inner(&request, &CancellationToken::new()).await.unwrap(),
+        owner.read(request.clone(), ExecutionOperation::new(()), CancellationToken::new()).await.unwrap(),
         Reply::Summaries { items, .. } if items.is_empty()
     ));
     interval.first_tool(CancellationToken::new()).await;
     assert!(markers.0.lock().unwrap().is_empty());
     assert!(matches!(
-        owner.read_inner(&request, &CancellationToken::new()).await.unwrap(),
+        owner.read(request.clone(), ExecutionOperation::new(()), CancellationToken::new()).await.unwrap(),
         Reply::Summaries { items, .. } if items.len() == 1 && items[0].phase == Phase::Pending
     ));
     assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
