@@ -789,6 +789,17 @@ impl LocalContract for LanguageModelsContract {
     type Service = dyn LanguageModels;
 }
 
+/// Model-hidden origin of a live invocation. This stays outside request hashes and snapshots.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LanguageCallOrigin {
+    /// The caller is executing this Session, including when no browser is attached.
+    pub active_session: bool,
+    /// Omitted by callers working independently of a Session.
+    pub session_id: Option<String>,
+    /// Auxiliary operation such as compaction. Ordinary conversation leaves this empty.
+    pub purpose: Option<String>,
+}
+
 /// Exact-route Language router invocation service.
 #[async_trait]
 pub trait LanguageCall: fmt::Debug + Send + Sync + 'static {
@@ -800,6 +811,15 @@ pub trait LanguageCall: fmt::Debug + Send + Sync + 'static {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError>;
+    /// Binds live caller metadata for adapters with request-time contributions.
+    async fn prepare_for(
+        &self,
+        model: ModelRef,
+        request: LanguageRequest,
+        _origin: LanguageCallOrigin,
+    ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        self.prepare(model, request).await
+    }
     /// Validates and freezes one explicitly deferred call without provider I/O.
     async fn prepare_deferred(
         &self,

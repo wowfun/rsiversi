@@ -185,7 +185,9 @@ impl ManualCompactor for Driver {
         let prepared = tokio::select! { biased;
             () = cancel.cancelled() => return Ok(CompactionOutcome::Interrupted),
             () = self.stopped.cancelled() => return Ok(CompactionOutcome::Interrupted),
-            result = self.language.prepare(model.model, planned.request) => result.map_err(invalid)?,
+            result = self.language.prepare_for(model.model, planned.request, rsi_ai_protocol::LanguageCallOrigin {
+                active_session: true, session_id: Some(fold.header().session_id().to_string()), purpose: Some("compaction".to_owned()),
+            }) => result.map_err(invalid)?,
         };
         let snapshot = prepared.snapshot().clone();
         let evidence = capture.finish(&snapshot).map_err(drive_error)?;
@@ -305,7 +307,9 @@ impl ManualCompactor for Driver {
         let prepared = tokio::select! { biased;
             () = cancel.cancelled() => return Err(invalid("Turn cancelled")),
             () = self.stopped.cancelled() => return Err(TurnError::ShuttingDown),
-            result = self.language.prepare(model.model, planned.request) => result.map_err(invalid)?,
+            result = self.language.prepare_for(model.model, planned.request, rsi_ai_protocol::LanguageCallOrigin {
+                active_session: true, session_id: Some(session.to_string()), purpose: Some("compaction".to_owned()),
+            }) => result.map_err(invalid)?,
         };
         let snapshot = prepared.snapshot().clone();
         let evidence = capture.finish(&snapshot).map_err(drive_error)?;

@@ -5561,6 +5561,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "bytes",
  "futures-util",
  "hex",
  "rsi-ai-openai",
@@ -5575,6 +5576,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7594,6 +7596,7 @@ name = "rsi-serve"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -7607,7 +7610,9 @@ dependencies = [
  "rsi-agent-store-protocol",
  "rsi-agent-testkit",
  "rsi-agent-turn-protocol",
+ "rsi-ai-deepseek",
  "rsi-ai-protocol",
+ "rsi-ai-transport",
  "rsi-api",
  "rsi-api-http",
  "rsi-api-protocol",

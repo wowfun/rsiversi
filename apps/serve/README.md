@@ -114,6 +114,11 @@ choosers. Explicit process environment values take precedence. The Host
 resolves these values in memory for the running application. The
 host sends `application.open` with protocol 16, a private profile directory
 and a random upstream key over the generation's private process connection.
+The optional `deepseek_request_fields` grant lets the application contribute
+fields to DeepSeek model calls. While a contributor is active, the Host sends
+the base JSON and the caller's optional session and purpose over a private
+loopback transaction on that generation's listener. The credential and HTTP
+headers stay with the provider. See the [DeepSeek request contract](../../crates/rsi-ai/deepseek/README.md).
 The opening payload also supplies an opaque `owner` callback handle. Native
 composition gives it the product's shared browser identity and the application
 process's lifetime. Background plugin work uses this handle without borrowing

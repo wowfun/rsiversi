@@ -11,6 +11,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+bytes.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 async-stream.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true

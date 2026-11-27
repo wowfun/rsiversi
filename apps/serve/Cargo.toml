@@ -51,6 +51,9 @@ rsi-configuration-api = { path = "../../crates/rsi/configuration-api" }
 rsi-configuration-access = { path = "../../crates/rsi/configuration-access" }
 rsi-settings-protocol = { path = "../../crates/rsi-settings/protocol" }
 rsi-ai-protocol = { path = "../../crates/rsi-ai/protocol" }
+rsi-ai-deepseek = { path = "../../crates/rsi-ai/deepseek" }
+rsi-ai-transport = { path = "../../crates/rsi-ai/transport" }
+bytes.workspace = true
 rsi-meta = { path = "../../crates/rsi-meta/core" }
 serde_json.workspace = true
 serde.workspace = true

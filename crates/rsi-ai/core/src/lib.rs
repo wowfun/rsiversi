@@ -306,6 +306,15 @@ impl LanguageCall for Router {
         model: ModelRef,
         request: LanguageRequest,
     ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
+        self.prepare_for(model, request, Default::default()).await
+    }
+
+    async fn prepare_for(
+        &self,
+        model: ModelRef,
+        request: LanguageRequest,
+        origin: rsi_ai_protocol::LanguageCallOrigin,
+    ) -> Result<Box<dyn PreparedLanguageCall>, AiError> {
         let route = self.route(&model)?;
         let (request, context) = self
             .prepare_request(&route.registration, &model, request)
@@ -315,7 +324,11 @@ impl LanguageCall for Router {
             .registration
             .language()
             .expect("route checked its Language facet")
-            .prepare(context, model.model().to_owned(), request)
+            .prepare(
+                context.with_origin(origin),
+                model.model().to_owned(),
+                request,
+            )
             .await?;
         validate_prepared_snapshot(prepared.snapshot(), &expected_call)?;
         Ok(Box::new(PinnedLanguageCall { prepared }))

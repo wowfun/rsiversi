@@ -5,6 +5,12 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+mod fields;
+pub use fields::{
+    AcceptedFields, DeepSeekFieldSource, DeepSeekFieldSourceContract, FieldPreparation,
+    PreparedFields,
+};
+
 use rsi_ai_openai::{OpenAiConfig, OpenAiResponsesAdapter, ResponsesState};
 use rsi_ai_openai_compatible::{
     ChatCompletionsAdapter, ChatCompletionsConfig, DeveloperMessageRole,
@@ -576,7 +582,13 @@ impl rsi_meta::PluginFactory for DeepSeekFactory {
             )
             .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?
             .with_config_generation(generation)
-            .with_language(DeepSeekAdapter::new(prepared.adapter, transport))
+            .with_language(DeepSeekAdapter::new(
+                prepared.adapter,
+                Arc::new(fields::Transport {
+                    inner: transport,
+                    context: plan.context().clone(),
+                }),
+            ))
             .build()
             .map_err(|error| rsi_meta::MetaError::Activation(error.to_string()))?;
         let publication = ProviderPublication::publish(

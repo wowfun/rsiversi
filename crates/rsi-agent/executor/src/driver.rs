@@ -898,7 +898,11 @@ impl Driver {
         let prepared_result = tokio::select! { biased;
             () = stop.cancelled() => return Err(DriveFailure::Stopped),
             () = cancellation.cancelled() => return Err(DriveFailure::Turn(TurnOutcome::Cancelled)),
-            result = self.language.prepare(selection.model.clone(), request) => result,
+            result = self.language.prepare_for(selection.model.clone(), request, rsi_ai_protocol::LanguageCallOrigin {
+                active_session: true,
+                session_id: Some(claim.session_id().to_string()),
+                purpose: matches!(purpose, rsi_agent_session_protocol::ModelPurpose::ContextCompaction(_)).then(|| "compaction".to_owned()),
+            }) => result,
         };
         let prepared = match prepared_result {
             Ok(prepared) => prepared,

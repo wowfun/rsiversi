@@ -12,6 +12,8 @@ struct Input {
     request: String,
     id: u64,
     model: ModelRef,
+    session_id: Option<String>,
+    purpose: Option<String>,
     body: Body,
 }
 
@@ -56,7 +58,15 @@ impl BoundSessions {
                 .await?;
             drop(assembly);
             let prepared = service
-                .prepare(input.model, body)
+                .prepare_for(
+                    input.model,
+                    body,
+                    rsi_ai_protocol::LanguageCallOrigin {
+                        active_session: false,
+                        session_id: input.session_id,
+                        purpose: input.purpose,
+                    },
+                )
                 .await
                 .map_err(|e| Error::Remote(e.to_string()))?;
             let mut batches = prepared

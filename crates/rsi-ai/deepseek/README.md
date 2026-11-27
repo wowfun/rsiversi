@@ -9,6 +9,14 @@ Explicit `protocol = "chat-completions"` selects Chat at `/chat/completions`;
 there is no automatic protocol fallback. Endpoint, media and setting admission
 belong to this provider. The prepared snapshot records the selected protocol.
 
+A mounted workbench may contribute top-level JSON fields to the selected
+DeepSeek request. Both protocols use the same acceptance boundary. A field
+provider can inspect the serialized model request, its optional Session ID
+and auxiliary purpose. HTTP 2xx confirms the contribution before any SSE
+frame is read. A rejected or interrupted send leaves the prefix eligible for
+the next call. Session logs and field values stay outside the canonical
+Language request and its persisted model evidence.
+
 The declared effort ID `off` disables thinking. Chat serializes it as
 `thinking.type = disabled` and omits `reasoning_effort`; Responses serializes it
 as `reasoning.effort = none`. Other declared IDs keep their exact spelling.

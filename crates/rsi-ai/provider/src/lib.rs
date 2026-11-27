@@ -53,6 +53,7 @@ pub type DeferredLanguageAdapterStream = AdapterStream<DeferredLanguageBatch>;
 #[derive(Clone)]
 pub struct PrepareContext {
     snapshot: PreparedCallSnapshot,
+    origin: rsi_ai_protocol::LanguageCallOrigin,
     credential: Option<ResolvedCredential>,
     media: Arc<dyn MediaResolver>,
     resolved_media: Arc<MediaResolutions>,
@@ -397,11 +398,24 @@ impl PrepareContext {
         })?;
         Ok(Self {
             snapshot,
+            origin: rsi_ai_protocol::LanguageCallOrigin::default(),
             credential,
             media,
             resolved_media: Arc::new(MediaResolutions::new(media_admission_bytes)?),
             files: None,
         })
+    }
+
+    /// Binds the live invocation origin independently of durable preparation evidence.
+    #[must_use]
+    pub fn with_origin(mut self, origin: rsi_ai_protocol::LanguageCallOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    /// Returns the live Session and auxiliary purpose for request contributions.
+    pub fn origin(&self) -> &rsi_ai_protocol::LanguageCallOrigin {
+        &self.origin
     }
 
     /// Freezes optional file location access without reading or copying objects.

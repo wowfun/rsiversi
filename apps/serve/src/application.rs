@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 
 mod agent_settings;
+mod deepseek_fields;
 mod language;
 #[cfg(test)]
 mod lease_tests;
@@ -54,6 +55,8 @@ struct Config {
     importer: Option<Importer>,
     #[serde(default)]
     host_desktop: bool,
+    #[serde(default)]
+    deepseek_request_fields: bool,
     #[serde(default)]
     tools: bool,
     #[serde(default)]
@@ -277,6 +280,7 @@ fn package_error(error: &rsi_packages::Error) -> rsi_extension::Error {
 }
 #[derive(Clone, Debug)]
 struct Sessions {
+    fields: Option<Arc<deepseek_fields::Source>>,
     history_pages: session_fragments::Pages,
     owner: Arc<dyn rsi_api_http::BrowserOwner>,
     models: Option<Arc<dyn rsi_ai_protocol::LanguageModels>>,
@@ -295,6 +299,7 @@ struct Sessions {
 }
 #[derive(Debug)]
 struct BoundSessions {
+    fields_enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     sessions: Sessions,
     plugin_callback: Arc<rsi_api_http::ApplicationCallback>,
     connection: std::sync::Weak<rsi_extension::Connection>,
@@ -323,11 +328,13 @@ impl Sessions {
         self,
         connection: &Arc<rsi_extension::Connection>,
         plugin_callback: Arc<rsi_api_http::ApplicationCallback>,
+        fields_enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> rsi_meta::Result<Vec<rsi_extension::HandlerRegistration>> {
         if let Some(peer) = &self.preset_peer {
             peer.send_replace(Arc::downgrade(connection));
         }
         let sessions: Arc<dyn rsi_extension::Handler> = Arc::new(BoundSessions {
+            fields_enabled,
             sessions: self,
             plugin_callback,
             connection: Arc::downgrade(connection),
@@ -344,6 +351,7 @@ impl Sessions {
                 "application.loop-settings",
                 "application.permission-settings",
                 "application.language",
+                "application.deepseek.fields",
                 "application.model.select",
                 "application.command",
                 "application.inbox",
@@ -393,6 +401,11 @@ impl rsi_extension::Handler for BoundSessions {
                     "application.loop-settings"=>self.agent_settings(agent_settings::Field::ToolConcurrency,payload).await,
                     "application.permission-settings"=>self.agent_settings(agent_settings::Field::DefaultPermission,payload).await,
                     "application.language"=>self.language(payload,&stop).await,
+                    "application.deepseek.fields"=>{
+                        let flag=self.fields_enabled.as_ref().ok_or(rsi_extension::Error::Protocol)?;
+                        flag.store(payload.as_bool().ok_or(rsi_extension::Error::Protocol)?,std::sync::atomic::Ordering::Release);
+                        Ok(ConfigValue::Null)
+                    },
                     "application.model.select"=>self.select_model(payload).await,
                     "application.command"=>self.command(payload).await,
                     "application.inbox"=>self.inbox(payload).await,
@@ -553,12 +566,15 @@ async fn open_application(
     key: &SecretValue,
     importer: bool,
     tools: Option<&tools::Publisher>,
-    language: bool,
+    capabilities: &OpenCapabilities,
     owner: &rsi_api_http::ApplicationCallback,
 ) -> rsi_meta::Result<Ready> {
     const PROTOCOL: u32 = 16;
     let mut payload = serde_json::json!({"protocol":PROTOCOL,"profile":profile,"key":key.expose_secret(),"importer":importer,"owner":owner.id()});
-    if language {
+    if capabilities.fields {
+        payload["deepseekFields"] = true.into();
+    }
+    if capabilities.language {
         payload["language"] = true.into();
     }
     if let Some(source) = tools {
@@ -591,6 +607,11 @@ async fn open_application(
 }
 fn failure(error: impl std::fmt::Display) -> MetaError {
     MetaError::Activation(error.to_string())
+}
+
+struct OpenCapabilities {
+    language: bool,
+    fields: bool,
 }
 
 #[async_trait]
@@ -685,7 +706,16 @@ impl PluginFactory for Factory {
         } else {
             None
         };
+        let fields = if config.deepseek_request_fields {
+            let source = Arc::new(deepseek_fields::Source::default());
+            plan.context()
+                .provide_local::<rsi_ai_deepseek::DeepSeekFieldSourceContract>(source.clone())?;
+            Some(source)
+        } else {
+            None
+        };
         let mut sessions = Sessions {
+            fields,
             history_pages: session_fragments::Pages::default(),
             owner: plan.local::<rsi_api_http::BrowserOwnerContract>()?,
             models: plan
@@ -842,9 +872,16 @@ async fn start_process(
         let disconnected = connection.disconnect_token();
         let owner = Arc::new(sessions.owner_callback(&connection).await?);
         let tools = sessions.tools.clone();
-        let language = sessions.language.is_some() && sessions.models.is_some();
+        let fields = sessions.fields.clone();
+        let enabled = fields
+            .as_ref()
+            .map(|_| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let capabilities = OpenCapabilities {
+            language: sessions.language.is_some() && sessions.models.is_some(),
+            fields: fields.is_some(),
+        };
         let _directory = session_page::watch_directory(&sessions, &connection, owner.id())?;
-        let _sessions = sessions.attach(&connection, owner.clone())?;
+        let _sessions = sessions.attach(&connection, owner.clone(), enabled.clone())?;
         let import_available = importer.is_some();
         let _handle = importer
             .map(|selection| {
@@ -864,7 +901,7 @@ async fn start_process(
             &key,
             import_available,
             tools.as_deref(),
-            language,
+            &capabilities,
             &owner,
         )
         .await?;
@@ -874,7 +911,16 @@ async fn start_process(
         .await
         .map_err(failure)?
         .map_err(failure)?;
-        ready.publish(&upstream, tools.as_deref(), key, disconnected.clone())?;
+        let port = ready.port;
+        ready.publish(
+            &upstream,
+            tools.as_deref(),
+            key.clone(),
+            disconnected.clone(),
+        )?;
+        if let (Some(source), Some(enabled)) = (fields, enabled) {
+            source.publish(port, key, disconnected.clone(), enabled);
+        }
         disconnected.cancelled().await;
         upstream.retire();
         match connection.disconnect_cause() {

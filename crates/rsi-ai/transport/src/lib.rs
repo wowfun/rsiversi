@@ -575,6 +575,17 @@ impl HttpRequest {
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
+
+    /// Removes the encoded body for a provider that has an active request contributor.
+    /// Buffered JSON retains its allocation. Media is collected only on this opt-in path.
+    pub async fn take_json_bytes(&mut self) -> Result<Bytes, TransportError> {
+        match std::mem::replace(&mut self.body, RequestBody::Buffered(Bytes::new())) {
+            RequestBody::Buffered(bytes) => Ok(bytes),
+            RequestBody::Streaming(stream) => {
+                collect_body(stream, MAX_PROVIDER_REQUEST_BODY_BYTES).await
+            }
+        }
+    }
 }
 
 impl fmt::Debug for HttpRequest {
@@ -630,6 +641,16 @@ pub trait HttpTransport: fmt::Debug + Send + Sync {
         request: HttpRequest,
         abort: CancellationToken,
     ) -> Result<HttpResponse, TransportError>;
+
+    /// Executes a live Language request with adapter-local, model-hidden metadata.
+    async fn execute_language(
+        &self,
+        request: HttpRequest,
+        _origin: &rsi_ai_protocol::LanguageCallOrigin,
+        abort: CancellationToken,
+    ) -> Result<HttpResponse, TransportError> {
+        self.execute(request, abort).await
+    }
 }
 
 /// Rustls-backed production transport. It performs one request and no retry.
@@ -829,6 +850,19 @@ pub fn invalid_request_error(error: impl fmt::Display) -> AiError {
 /// Maps a transport connection failure while preserving cancellation.
 #[allow(clippy::needless_pass_by_value)] // Intended for direct use with Result::map_err.
 pub fn transport_connect_error(error: TransportError) -> AiError {
+    if error.code() == "http.invalid_request_fields" || error.code() == "http.fields_disconnected" {
+        let kind = if error.code() == "http.invalid_request_fields" {
+            ErrorKind::InvalidRequest
+        } else {
+            ErrorKind::Transport
+        };
+        return provider_error(
+            kind,
+            ErrorPhase::Prepare,
+            DispatchStatus::NotDispatched,
+            error.to_string(),
+        );
+    }
     let kind = if error.code() == "http.cancelled" {
         ErrorKind::Cancelled
     } else if error.code() == "http.timeout" {

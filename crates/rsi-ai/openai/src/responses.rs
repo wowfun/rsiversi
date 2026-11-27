@@ -87,7 +87,7 @@ impl LanguageAdapter for OpenAiResponsesAdapter {
                         body,
                     )?;
                     let response = transport
-                        .execute(outgoing, abort.cancellation_token())
+                        .execute_language(outgoing, context.origin(), abort.cancellation_token())
                         .await
                         .map_err(transport_connect_error)?;
                     if !(200..300).contains(&response.status) {
