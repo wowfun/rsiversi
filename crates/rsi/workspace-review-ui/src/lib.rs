@@ -189,17 +189,26 @@ fn present(reply: Reply) -> UiView {
     match reply{
         Reply::Summaries{epoch,items,next,capacity_limited}=>{
             if capacity_limited { elements.push(text("Workspace review history is full. New execution intervals are not being recorded; Agent work continues. Existing summaries remain available.")); }
-            if items.is_empty() {
-                elements.push(text("No reviews yet. A review begins with a tool call."));
-            } else {
+            if !items.is_empty() {
                 elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
+            } else if !capacity_limited {
+                elements.push(text("No reviews yet. A review begins with a tool call."));
             }
             for item in items{
                 let expired=item.epoch!=epoch;
                 let state=match(item.phase,expired){(Phase::Pending,true)=>"Interrupted; diff expired",(Phase::Pending,false)=>"Pending; work or capture not settled",(Phase::Complete,false)=>"Complete",(Phase::Complete,true)=>"Complete; diff expired",(Phase::Partial,false)=>"Partial",(Phase::Partial,true)=>"Partial; diff expired"};
-                elements.push(UiElement::Field{label:format!("Interval {}",item.id),value:format!("{state} · {} files · +{} / −{} lines · {} → {} ms",item.changed_files,item.added_lines,item.removed_lines,item.started_ms,item.finished_ms.as_deref().unwrap_or("pending"))});
+                let value = match item.finished_ms {
+                    Some(end) => format!(
+                        "{state} · {} files · +{} / −{} lines · {} → {end} ms",
+                        item.changed_files, item.added_lines, item.removed_lines, item.started_ms,
+                    ),
+                    None => state.to_owned(),
+                };
+                elements.push(UiElement::Field { label: format!("Interval {}", item.id), value });
                 if !item.omissions.is_empty(){elements.push(text(format!("Coverage omissions: {}",item.omissions.iter().map(|o|format!("{:?}: {}",o.kind,o.count)).collect::<Vec<_>>().join(", "))));}
-                if item.phase!=Phase::Pending{elements.push(button("Open interval files",Operation::Files{id:item.id,offset:0}));}
+                if !expired && item.changed_files > 0 && item.phase != Phase::Pending {
+                    elements.push(button("Open interval files", Operation::Files { id: item.id, offset: 0 }));
+                }
             }
             if let Some(after)=next{elements.push(button("More intervals",Operation::List{after:Some(after)}));}
         }
@@ -238,6 +247,63 @@ mod tests {
             capacity_limited: true,
         });
         assert!(result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("New execution intervals are not being recorded"))));
+        assert!(!result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("A review begins"))));
+    }
+    #[test]
+    fn review_rows_show_only_observed_counts_and_available_actions() {
+        let epoch = "a".repeat(32);
+        for (phase, expired, files, expected, opens) in [
+            (
+                Phase::Pending,
+                false,
+                0,
+                "Pending; work or capture not settled",
+                false,
+            ),
+            (Phase::Pending, true, 0, "Interrupted; diff expired", false),
+            (Phase::Complete, false, 0, "Complete · 0 files", false),
+            (
+                Phase::Complete,
+                true,
+                2,
+                "Complete; diff expired · 2 files",
+                false,
+            ),
+            (Phase::Partial, false, 2, "Partial · 2 files", true),
+        ] {
+            let item = serde_json::from_value(serde_json::json!({
+                "id": "1".repeat(32), "epoch": epoch, "scope": {
+                    "workspace": "2".repeat(64), "conversation": {"kind":"native","id":"source"}
+                },
+                "turn":"turn", "execution":"1", "accepted_seq":"1", "live_seq":"3",
+                "started_ms":"100", "finished_ms": (phase != Phase::Pending).then_some("200"),
+                "phase":phase, "changed_files":files, "added_lines":0, "removed_lines":0, "omissions":[]
+            })).unwrap();
+            let result = present(Reply::Summaries {
+                epoch: if expired {
+                    "b".repeat(32)
+                } else {
+                    epoch.clone()
+                },
+                items: vec![item],
+                next: None,
+                capacity_limited: false,
+            });
+            let value = result
+                .elements
+                .iter()
+                .find_map(|element| match element {
+                    UiElement::Field { value, .. } => Some(value.as_str()),
+                    _ => None,
+                })
+                .unwrap();
+            if phase == Phase::Pending {
+                assert_eq!(value, expected);
+            } else {
+                assert_eq!(value, format!("{expected} · +0 / −0 lines · 100 → 200 ms"));
+            }
+            assert_eq!(opens, result.elements.iter().any(|element| matches!(element, UiElement::Button { label, .. } if label == "Open interval files")));
+        }
     }
     fn next(view: &UiView) -> Operation {
         let value = view
