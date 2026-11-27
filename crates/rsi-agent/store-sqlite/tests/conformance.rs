@@ -1412,42 +1412,6 @@ fn indexed_turn_boundary_rejects_fact_json_with_a_different_sequence() {
 }
 
 #[test]
-fn malformed_fact_prefix_digest_is_rejected_on_access_and_by_verify() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime
-        .block_on(store.append(AppendBatch {
-            session_id: SessionId::new("session-prefix-corrupt").unwrap(),
-            expected_seq: 0,
-            header: Some(header("session-prefix-corrupt")),
-            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
-        }))
-        .unwrap();
-    drop(store);
-
-    let connection = Connection::open(root.path().join("sessions.sqlite3")).unwrap();
-    connection
-        .execute(
-            "UPDATE sessions SET fact_prefix_sha256 = 'not-a-digest' WHERE session_id = ?1",
-            ["session-prefix-corrupt"],
-        )
-        .unwrap();
-    drop(connection);
-
-    let reopened = SqliteStore::open(root.path()).unwrap();
-    assert!(matches!(
-        runtime.block_on(reopened.header(&SessionId::new("session-prefix-corrupt").unwrap())),
-        Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
-    ));
-    drop(reopened);
-    assert!(matches!(
-        SqliteStore::verify(root.path()),
-        Err(StoreError::Corrupt(message)) if message.contains("Fact-prefix digest")
-    ));
-}
-
-#[test]
 fn verify_decodes_every_dormant_session_header() {
     let root = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(root.path()).unwrap();
@@ -1899,33 +1863,6 @@ async fn verification_derives_activation_lineage_from_the_immutable_header() {
     assert!(
         matches!(SqliteStore::verify(root.path()), Err(StoreError::Corrupt(message)) if message.contains("lineage"))
     );
-}
-
-#[tokio::test]
-async fn lazy_session_access_rejects_a_malformed_control_digest() {
-    let root = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    let session_id = SessionId::new("bad-control-digest").unwrap();
-    store
-        .append(AppendBatch {
-            session_id: session_id.clone(),
-            expected_seq: 0,
-            header: Some(header(session_id.as_str())),
-            facts: (vec![fact(1)]).into_iter().map(Into::into).collect(),
-        })
-        .await
-        .unwrap();
-    let database = root.path().join("sessions.sqlite3");
-    drop(store);
-    Connection::open(database)
-        .unwrap()
-        .execute("UPDATE sessions SET control_prefix_sha256 = 'bad'", [])
-        .unwrap();
-    let store = SqliteStore::open(root.path()).unwrap();
-    assert!(matches!(
-        store.header(&session_id).await,
-        Err(StoreError::Corrupt(_))
-    ));
 }
 
 #[tokio::test]

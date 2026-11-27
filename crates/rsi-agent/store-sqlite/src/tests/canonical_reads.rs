@@ -18,6 +18,43 @@ async fn damaged_store(sql: &str) -> (tempfile::TempDir, SqliteStore, SessionId)
 }
 
 #[tokio::test]
+async fn metadata_reads_ignore_stream_digests_but_execution_and_audit_reject_damage() {
+    for (sql, label) in [
+        (
+            "UPDATE sessions SET fact_prefix_sha256 = 'bad'",
+            "Fact-prefix digest",
+        ),
+        (
+            "UPDATE sessions SET control_prefix_sha256 = 'bad'",
+            "control-prefix digest",
+        ),
+    ] {
+        let (root, store, id) = damaged_store(sql).await;
+        let summary = store.session_summary(&id).await.unwrap();
+        assert_eq!(store.header(&id).await.unwrap(), summary.header);
+        let page = store
+            .list_recent_sessions(
+                &rsi_agent_store_protocol::ExecutionLocations::all(),
+                None,
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.sessions, [summary]);
+        assert!(matches!(
+            store.prepare_session(&id).await,
+            Err(StoreError::Corrupt(message)) if message.contains(label)
+        ));
+        drop(store);
+        assert!(matches!(
+            SqliteStore::verify(root.path()),
+            Err(StoreError::Corrupt(message)) if message.contains(label)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn canonical_pages_ignore_unused_indexes_but_execution_refuses_them() {
     let (_root, store, id) = damaged_store("DELETE FROM turns").await;
     let bytes = MAXIMUM_STORE_FACT_PAGE_BYTES;

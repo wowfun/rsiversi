@@ -11,6 +11,10 @@ stored record, while the Session prefix binds the full logical Fact.
 Live summary and access reads select the Header and check retirement in the
 same indexed statement. An access batch reuses that statement inside one
 snapshot and keeps each selected Header's decode result in its own slot.
+Header reads and recent-session lists use the stored watermarks without
+reading either stream's prefix digest. Session validation checks the Fact
+digest format and compares the control digest with the replayed controls.
+Offline verification also compares the Fact digest with the replayed Facts.
 
 Domain reads batch the distinct canonical control positions in one bounded SQL
 query, decoding each control once and retaining only selected snapshots. Both

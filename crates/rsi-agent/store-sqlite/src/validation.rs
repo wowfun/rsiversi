@@ -170,14 +170,22 @@ pub(super) fn validate_session_observed(
     )
     .map_err(|error| StoreError::Corrupt(error.to_string()))?;
 
-    let (fact_count, maximum_sequence) = connection
+    let (fact_count, maximum_sequence, fact_prefix) = connection
         .query_row(
-            "SELECT COUNT(*), COALESCE(MAX(seq), 0)
+            "SELECT COUNT(*), COALESCE(MAX(seq), 0),
+                    (SELECT fact_prefix_sha256 FROM sessions WHERE session_id = ?1)
              FROM facts WHERE session_id = ?1",
             [session_id.as_str()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    bounded_text(row, 2, 64)?,
+                ))
+            },
         )
         .map_err(sql_error)?;
+    validate_sha256("Fact-prefix digest", &fact_prefix)?;
     if decode_u64("session Fact count", fact_count)? != durable_seq
         || decode_u64("session maximum Fact sequence", maximum_sequence)? != durable_seq
     {
@@ -285,13 +293,10 @@ thread_local! {
 
 pub(super) fn header_projection() -> String {
     format!("created_at_ms, durable_seq,
-                    CASE WHEN length(CAST(fact_prefix_sha256 AS BLOB)) = 64
-                         THEN fact_prefix_sha256 END,
                     length(CAST(header_json AS BLOB)),
                     CASE WHEN length(CAST(header_json AS BLOB)) <= {MAXIMUM_SESSION_HEADER_BYTES}
                          THEN header_json END,
-                    CASE WHEN length(CAST(control_prefix_sha256 AS BLOB)) = 64
-                         THEN control_prefix_sha256 END, control_seq, coordinates_key, last_activity_ms, directory_control_seq,
+                    control_seq, coordinates_key, last_activity_ms, directory_control_seq,
                     CASE WHEN directory_control_seq > 0 THEN
                       (SELECT CASE WHEN length(CAST(control_json AS BLOB)) <= {MAXIMUM_SESSION_FACT_BYTES}
                                    THEN json_extract(control_json,'$.cwd') END FROM agent_controls AS c
@@ -304,10 +309,8 @@ pub(super) struct HeaderRow {
     working_directory: Option<String>,
     created_at_ms: i64,
     durable_seq: i64,
-    fact_prefix_sha256: Option<String>,
     header_encoded_len: i64,
     header_json: Option<String>,
-    control_prefix_sha256: Option<String>,
     control_seq: i64,
     coordinates_key: String,
     last_activity_ms: i64,
@@ -318,21 +321,19 @@ pub(super) fn read_header_projection(
     offset: usize,
 ) -> rusqlite::Result<HeaderRow> {
     Ok(HeaderRow {
-        directory_control_seq: row.get(offset + 9)?,
+        directory_control_seq: row.get(offset + 7)?,
         working_directory: optional_text(
             row,
-            offset + 10,
+            offset + 8,
             rsi_agent_session_protocol::MAXIMUM_WORKSPACE_PATH_BYTES,
         )?,
         created_at_ms: row.get(offset)?,
         durable_seq: row.get(offset + 1)?,
-        fact_prefix_sha256: row.get(offset + 2)?,
-        header_encoded_len: row.get(offset + 3)?,
-        header_json: row.get(offset + 4)?,
-        control_prefix_sha256: row.get(offset + 5)?,
-        control_seq: row.get(offset + 6)?,
-        coordinates_key: bounded_text(row, offset + 7, 128 * 1024)?,
-        last_activity_ms: row.get(offset + 8)?,
+        header_encoded_len: row.get(offset + 2)?,
+        header_json: row.get(offset + 3)?,
+        control_seq: row.get(offset + 4)?,
+        coordinates_key: bounded_text(row, offset + 5, 128 * 1024)?,
+        last_activity_ms: row.get(offset + 6)?,
     })
 }
 
@@ -358,13 +359,14 @@ pub(super) fn read_session_header_source(
 }
 
 pub(super) fn live_headers(connection: &Connection) -> Result<rusqlite::CachedStatement<'_>> {
-    connection
-        .prepare_cached(&format!(
+    static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
             "SELECT {} FROM sessions WHERE session_id = ?1
          AND NOT EXISTS (SELECT 1 FROM session_tombstones WHERE session_id = ?1)",
             header_projection()
-        ))
-        .map_err(sql_error)
+        )
+    });
+    connection.prepare_cached(&SQL).map_err(sql_error)
 }
 
 pub(super) fn read_selected_header(
@@ -397,10 +399,8 @@ fn decode_header_source(
         working_directory,
         created_at_ms,
         durable_seq,
-        fact_prefix_sha256,
         header_encoded_len,
         header_json,
-        control_prefix_sha256,
         control_seq,
         coordinates_key,
         last_activity_ms,
@@ -409,14 +409,6 @@ fn decode_header_source(
     let control_seq = decode_u64("durable control sequence", control_seq)?;
     let directory_control_seq = decode_u64("directory change", directory_control_seq)?;
     let last_activity_ms = decode_u64("activity timestamp", last_activity_ms)?;
-    for (label, digest) in [
-        ("Fact-prefix digest", fact_prefix_sha256),
-        ("Control-prefix digest", control_prefix_sha256),
-    ] {
-        let digest =
-            digest.ok_or_else(|| StoreError::Corrupt(format!("{label} has invalid length")))?;
-        validate_sha256(label, &digest)?;
-    }
     let (header, encoded): (SessionHeader, _) = super::cas::decode_projected_json_with_source(
         "session header",
         (header_encoded_len, header_json),
@@ -1519,7 +1511,8 @@ fn validate_agent_indexes_observed(
                 "Agent control record",
                 (
                     row.get(0).map_err(sql_error)?,
-                    super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES).map_err(sql_error)?,
+                    super::record_codec::projected(row, 0, MAXIMUM_SESSION_FACT_BYTES)
+                        .map_err(sql_error)?,
                 ),
                 MAXIMUM_SESSION_FACT_BYTES,
             )?;
