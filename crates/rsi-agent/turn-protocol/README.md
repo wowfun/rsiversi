@@ -182,7 +182,12 @@ The observer may use that revocable lease for bounded source capture; it cannot
 substitute a new provider or gain claim mutation authority. It asynchronously
 admits an interval bound to the exact claim, then Executor awaits
 its `begin` before entering any effect owner, including Job preparation and
-finalization. `end` receives both the baseline completion result and the separate
+finalization. After the first durable Tool start or rejection, the claim driver
+offers its interval one `first_tool` notification before dispatch. A recovered
+outstanding Tool also supplies this notification before settlement. The callback
+has a cancellation token and a 30-second deadline; it has no authority to admit
+or fail a Tool. A claim with only model work never sends the notification.
+`end` receives both the baseline completion result and the separate
 controlled-work status after the claim driver and retained Tools settle. Initial
 history inspection, admission and begin share one 30-second deadline. Admission
 failure prevents effects; incomplete history or baseline evidence remains partial.

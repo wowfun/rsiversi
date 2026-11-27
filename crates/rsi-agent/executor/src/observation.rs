@@ -12,6 +12,22 @@ use tokio_util::task::TaskTracker;
 
 pub(super) const OBSERVATION_WAIT: Duration = Duration::from_secs(30);
 
+tokio::task_local! {
+    pub(super) static FIRST_TOOL: std::cell::Cell<Option<Arc<dyn ExecutionInterval>>>;
+}
+
+pub(super) async fn first_tool(retirement: &CancellationToken) {
+    let Ok(Some(interval)) = FIRST_TOOL.try_with(std::cell::Cell::take) else {
+        return;
+    };
+    let stop = retirement.child_token();
+    let _guard = stop.clone().drop_guard();
+    tokio::select! { biased;
+        _ = tokio::time::timeout(OBSERVATION_WAIT, interval.first_tool(stop)) => {},
+        () = retirement.cancelled() => {},
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Observations {
     slots: Arc<Semaphore>,
@@ -124,10 +140,15 @@ mod tests {
     #[derive(Debug, Default)]
     struct Hung {
         begin: Mutex<Option<CancellationToken>>,
+        tool: Mutex<Option<CancellationToken>>,
         end: Mutex<Option<(ExecutionObservationEnd, CancellationToken)>>,
     }
     #[async_trait::async_trait]
     impl ExecutionInterval for Hung {
+        async fn first_tool(&self, stop: CancellationToken) {
+            assert!(self.tool.lock().unwrap().replace(stop).is_none());
+            std::future::pending::<()>().await;
+        }
         async fn begin(&self, stop: CancellationToken) {
             *self.begin.lock().unwrap() = Some(stop);
             std::future::pending::<()>().await;
@@ -159,6 +180,18 @@ mod tests {
                 .is_cancelled()
         );
         let (_tracker, work) = super::super::controlled_work::Tracker::new();
+        FIRST_TOOL
+            .scope(std::cell::Cell::new(Some(interval.clone())), async {
+                let retirement = CancellationToken::new();
+                let start = Instant::now();
+                first_tool(&retirement).await;
+                assert_eq!(Instant::now() - start, OBSERVATION_WAIT);
+                let notified = implementation.tool.lock().unwrap().clone().unwrap();
+                assert!(notified.is_cancelled());
+                first_tool(&retirement).await;
+                assert_eq!(Instant::now() - start, OBSERVATION_WAIT);
+            })
+            .await;
         let before = Instant::now();
         end(interval, false, work, &CancellationToken::new()).await;
         assert_eq!(Instant::now() - before, OBSERVATION_WAIT);

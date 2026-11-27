@@ -6,7 +6,8 @@ resolves the actual surface Session controller and authorized Session header;
 request payloads cannot substitute a workspace or conversation. Registry action
 and view lifetimes fence reads. No model call or execution starts on inspection.
 
-Lists describe temporal comparisons, scope exclusions and counted omissions.
+The empty view explains when a review begins. Lists with recorded intervals
+describe temporal comparisons, scope exclusions and counted omissions.
 Pending evidence never renders as complete. A different owner epoch marks an
 unfinished summary interrupted and comparison content expired. Finished durable
 summaries remain readable after scratch expires. Each action reads at most one

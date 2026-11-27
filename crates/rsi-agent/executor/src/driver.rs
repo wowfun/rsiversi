@@ -106,7 +106,14 @@ impl Driver {
             None => true,
         };
         drop(preparation_guard);
-        self.run_observed_claim(&mut claim, stop).await;
+        let drive = self.run_observed_claim(&mut claim, stop);
+        if let Some(interval) = &interval {
+            observation::FIRST_TOOL
+                .scope(std::cell::Cell::new(Some(interval.clone())), drive)
+                .await;
+        } else {
+            drive.await;
+        }
         // Only observation ownership is dropped; Tools retains uncertain effects.
         let unconfirmed = self
             .active_tools
@@ -2036,6 +2043,7 @@ impl Driver {
         else {
             return Err(fatal("retained settlement lacks a ToolIntent"));
         };
+        observation::first_tool(stop).await;
         let model_call = matches!(origin, rsi_agent_session_protocol::ToolOrigin::Model { .. });
         let tools = composition.tools();
         self.track_tool(claim, composition.clone(), identity.clone());
@@ -2239,6 +2247,16 @@ impl Driver {
             .ok_or_else(|| failed("executor.empty_publish", "publication returned no Facts"))?
             .seq();
         self.flush_durable(claim, seq).await?;
+        if self.observer.is_some()
+            && receipt.facts().iter().any(|fact| {
+                matches!(
+                    fact.body(),
+                    SessionFactBody::ToolStarted { .. } | SessionFactBody::ToolRejected { .. }
+                )
+            })
+        {
+            observation::first_tool(&self.stopped).await;
+        }
         Ok(receipt)
     }
 

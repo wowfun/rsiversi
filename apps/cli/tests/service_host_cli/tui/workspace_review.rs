@@ -46,12 +46,26 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
         .await;
     terminal.send(b"\r");
     terminal.select_menu("Review workspace changes").await;
+    terminal.until("A review begins with a tool call.").await;
+    let followup = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    *state.request_gate.lock().unwrap() = Some(RequestGate {
+        matches: |_| true,
+        entered: followup.clone(),
+        release: finish.clone(),
+    });
+    state.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), followup.notified())
+        .await
+        .unwrap();
+    terminal.send(b"\r");
+    terminal.select_menu("Review workspace changes").await;
     terminal.until("Pending; work or capture not settled").await;
     let complete_field = "Complete · ";
     let pending = terminal.screen.lock().unwrap().screen().contents();
     assert!(pending.contains("Complete"));
     assert!(!pending.contains(complete_field));
-    state.release.notify_one();
+    finish.notify_one();
     terminal.until_idle().await;
     let end = Instant::now() + Duration::from_secs(15);
     while !terminal

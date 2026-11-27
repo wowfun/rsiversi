@@ -211,6 +211,7 @@ async fn cancellation_retires_an_admitted_tool_after_it_settles() {
         }
     });
     entered.notified().await;
+    assert_eq!(observer.tool_intervals.load(Ordering::SeqCst), 1);
     stack.cancel_current().await;
     drop(stack.composition.pin.lock().unwrap().take());
     let (submitted, outcome) = tokio::time::timeout(std::time::Duration::from_secs(2), turn)

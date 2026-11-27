@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[derive(Debug, Default)]
 pub(super) struct Observer {
+    pub tool_intervals: AtomicUsize,
     pub entered: Notify,
     pub release: CancellationToken,
     pub ended: Notify,
@@ -21,6 +22,9 @@ pub(super) struct Observer {
 }
 #[async_trait]
 impl ExecutionInterval for Observer {
+    async fn first_tool(&self, _: CancellationToken) {
+        self.tool_intervals.fetch_add(1, Ordering::SeqCst);
+    }
     async fn begin(&self, stop: CancellationToken) {
         self.entered.notify_one();
         tokio::select! { ()=self.release.cancelled()=>{}, ()=stop.cancelled()=>{} }
@@ -347,6 +351,7 @@ async fn executor_awaits_baseline_before_model_effects_and_end_after_finalizatio
             controlled_work: ControlledWorkStatus::Settled
         })
     );
+    assert_eq!(observer.tool_intervals.load(Ordering::SeqCst), 0);
     assert_eq!(
         turns
             .outcome(&submitted.session_id, &submitted.turn_id)

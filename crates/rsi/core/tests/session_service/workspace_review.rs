@@ -239,6 +239,8 @@ async fn workspace_review_api_waits_for_real_shell_work_and_preserves_summaries_
         head
     );
     assert_eq!(requests.load(Ordering::SeqCst), 2);
+    run_message_with_text_to_terminal(&handle, "review-chat", "follow up without tools").await;
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
     drop((client, handle));
     daemon.shutdown().await;
     let daemon = DaemonFixture::new(&fixture).await;

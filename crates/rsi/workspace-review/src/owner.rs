@@ -62,8 +62,14 @@ struct Changes {
 #[derive(Debug)]
 struct Entry {
     summary: Summary,
-    active: bool,
+    status: EntryStatus,
     runtime: Option<Ready>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryStatus {
+    Baseline,
+    Recording,
+    Finished,
 }
 #[derive(Debug)]
 struct State {
@@ -79,7 +85,6 @@ pub struct WorkspaceReview {
     execution: Execution,
     epoch: String,
     state: Mutex<State>,
-    writer: tokio::sync::Mutex<()>,
     workers: Arc<Semaphore>,
     reads: Arc<Semaphore>,
     stop: CancellationToken,
@@ -100,6 +105,11 @@ struct Interval {
     execution: Option<ExecutionLease>,
     recovered: bool,
     state: Arc<tokio::sync::Mutex<IntervalState>>,
+}
+enum Stage {
+    Begin,
+    FirstTool,
+    End(ExecutionObservationEnd),
 }
 #[derive(Debug)]
 pub(super) struct Observer(pub Arc<WorkspaceReview>);
@@ -153,7 +163,7 @@ impl WorkspaceReview {
                 key.to_owned(),
                 Entry {
                     summary: (*summary).clone(),
-                    active: false,
+                    status: EntryStatus::Finished,
                     runtime: None,
                 },
             );
@@ -168,7 +178,6 @@ impl WorkspaceReview {
                 closed: false,
                 entries,
             }),
-            writer: tokio::sync::Mutex::new(()),
             workers: Arc::new(Semaphore::new(2)),
             reads: Arc::new(Semaphore::new(2)),
             stop: CancellationToken::new(),
@@ -197,21 +206,27 @@ impl WorkspaceReview {
         if state.entries.len() >= 8192 {
             return Ok(None);
         }
-        if state.entries.values().filter(|e| e.active).count() >= 8 {
+        if state
+            .entries
+            .values()
+            .filter(|e| e.status != EntryStatus::Finished)
+            .count()
+            >= 8
+        {
             return Err(ApiError::Capacity);
         }
         // Retire oldest finished runtime material while preserving its durable summary.
         while state
             .entries
             .values()
-            .filter(|e| e.runtime.is_some() || e.active)
+            .filter(|e| e.runtime.is_some() || e.status != EntryStatus::Finished)
             .count()
             >= 8
         {
             let oldest = state
                 .entries
                 .iter()
-                .filter(|(_, e)| !e.active && e.runtime.is_some())
+                .filter(|(_, e)| e.status == EntryStatus::Finished && e.runtime.is_some())
                 .min_by_key(|(_, e)| {
                     rsi_workspace_review_api::decimal(&e.summary.started_ms).unwrap_or(0)
                 })
@@ -253,7 +268,7 @@ impl WorkspaceReview {
             id.clone(),
             Entry {
                 summary,
-                active: true,
+                status: EntryStatus::Baseline,
                 runtime: None,
             },
         );
@@ -268,32 +283,6 @@ impl WorkspaceReview {
                 ..IntervalState::default()
             })),
         }))
-    }
-    async fn publish(
-        &self,
-        summary: Summary,
-        runtime: Option<Ready>,
-        active: bool,
-    ) -> Result<()> {
-        summary.validate()?;
-        let _writer = self.writer.lock().await;
-        self.domain.ensure_available().map_err(storage_error)?;
-        self.domain
-            .table::<Summary>("summaries")
-            .map_err(storage_error)?
-            .put(&summary.id, summary.clone())
-            .await
-            .map_err(storage_error)?;
-        let mut state = self.state.lock().expect("review publication");
-        state.entries.insert(
-            summary.id.clone(),
-            Entry {
-                summary,
-                active,
-                runtime,
-            },
-        );
-        Ok(())
     }
     /// Returns finite evidence after the product adapter has authorized the exact scope.
     ///
@@ -347,7 +336,9 @@ impl WorkspaceReview {
             let mut bytes = 0;
             let mut more = false;
             for (id, entry) in &state.entries {
-                if &entry.summary.scope != scope || after.as_ref().is_some_and(|after| id <= after)
+                if entry.status == EntryStatus::Baseline
+                    || &entry.summary.scope != scope
+                    || after.as_ref().is_some_and(|after| id <= after)
                 {
                     continue;
                 }
@@ -381,7 +372,7 @@ impl WorkspaceReview {
             if &entry.summary.scope != scope {
                 return Err(invalid("review source mismatch"));
             }
-            if entry.active {
+            if entry.status != EntryStatus::Finished {
                 return Err(ApiError::Unavailable);
             }
             entry.runtime.clone()
@@ -486,6 +477,16 @@ impl WorkspaceReview {
     }
 }
 impl Interval {
+    async fn persist(&self, summary: Summary) -> Result<()> {
+        summary.validate()?;
+        self.owner
+            .domain
+            .table::<Summary>("summaries")
+            .map_err(storage_error)?
+            .put(&self.id, summary)
+            .await
+            .map_err(storage_error)
+    }
     async fn capture_permit(
         &self,
         stop: &CancellationToken,
@@ -498,13 +499,6 @@ impl Interval {
     async fn begin_work(&self, stop: &CancellationToken) {
         let mut inner = self.state.lock().await;
         if inner.finished {
-            return;
-        }
-        let summary = self.owner.state.lock().expect("review begin").entries[&self.id]
-            .summary
-            .clone();
-        if self.owner.publish(summary, None, true).await.is_err() {
-            omission(&mut inner.omissions, OmissionKind::MissingBaseline, 1);
             return;
         }
         if self.recovered {
@@ -547,6 +541,14 @@ impl Interval {
         }
         inner.finished = true;
         let _admission = inner.admission.take();
+        {
+            let mut state = self.owner.state.lock().expect("review end");
+            if state.entries[&self.id].status == EntryStatus::Baseline {
+                state.entries.remove(&self.id);
+                inner.before.take();
+                return;
+            }
+        }
         if !evidence.begin_completed {
             omission(&mut inner.omissions, OmissionKind::MissingBaseline, 1);
         }
@@ -590,7 +592,7 @@ impl Interval {
             .summary
             .clone();
         summary.finished_ms = Some(now());
-        summary.omissions = inner.omissions.clone();
+        summary.omissions = std::mem::take(&mut inner.omissions);
         summary.phase = if summary.omissions.is_empty() {
             Phase::Complete
         } else {
@@ -604,38 +606,50 @@ impl Interval {
                 summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
             }
         }
-        if self.owner.publish(summary, ready, false).await.is_err() {
-            self.owner
-                .state
-                .lock()
-                .expect("uncertain review receipt")
-                .entries
-                .get_mut(&self.id)
-                .unwrap()
-                .active = false;
+        let stored = self.persist(summary.clone()).await;
+        let mut state = self.owner.state.lock().expect("review publication");
+        let entry = state.entries.get_mut(&self.id).expect("admitted review");
+        entry.status = EntryStatus::Finished;
+        if stored.is_ok() {
+            entry.summary = summary;
+            entry.runtime = ready;
         }
     }
-    async fn retained(
-        &self,
-        evidence: Option<ExecutionObservationEnd>,
-        cancellation: CancellationToken,
-    ) {
+    async fn persist_pending(&self) {
+        let inner = self.state.lock().await;
+        if !inner.finished {
+            let summary = self.owner.state.lock().expect("review tool").entries[&self.id]
+                .summary
+                .clone();
+            let _ = self.persist(summary).await;
+        }
+    }
+    async fn retained(&self, stage: Stage, cancellation: CancellationToken) {
         let stop = self.owner.stop.child_token();
         let _guard = stop.clone().drop_guard();
         let worker_stop = stop.clone();
         let interval = self.clone();
         let task = {
-            let state = self.owner.state.lock().expect("review stage admission");
+            let mut state = self.owner.state.lock().expect("review stage admission");
             if state.closed {
                 return;
+            }
+            if matches!(stage, Stage::FirstTool) {
+                let Some(entry) = state.entries.get_mut(&self.id) else {
+                    return;
+                };
+                if entry.status != EntryStatus::Baseline {
+                    return;
+                }
+                entry.status = EntryStatus::Recording;
             }
             self.owner
                 .execution
                 .spawn(self.owner.tasks.track_future(async move {
-                    if let Some(evidence) = evidence {
-                        interval.end_work(evidence, &worker_stop).await;
-                    } else {
-                        interval.begin_work(&worker_stop).await;
+                    match stage {
+                        Stage::Begin => interval.begin_work(&worker_stop).await,
+                        Stage::FirstTool => interval.persist_pending().await,
+                        Stage::End(evidence) => interval.end_work(evidence, &worker_stop).await,
                     }
                 }))
         };
@@ -645,10 +659,13 @@ impl Interval {
 #[async_trait]
 impl ExecutionInterval for Interval {
     async fn begin(&self, cancellation: CancellationToken) {
-        self.retained(None, cancellation).await;
+        self.retained(Stage::Begin, cancellation).await;
+    }
+    async fn first_tool(&self, cancellation: CancellationToken) {
+        self.retained(Stage::FirstTool, cancellation).await;
     }
     async fn end(&self, evidence: ExecutionObservationEnd, cancellation: CancellationToken) {
-        self.retained(Some(evidence), cancellation).await;
+        self.retained(Stage::End(evidence), cancellation).await;
     }
 }
 

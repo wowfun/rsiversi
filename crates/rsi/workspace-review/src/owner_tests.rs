@@ -366,6 +366,8 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         .unwrap();
     let id = interval.id.clone();
     interval.begin(CancellationToken::new()).await;
+    assert!(domain.snapshot().unwrap().is_empty());
+    interval.first_tool(CancellationToken::new()).await;
     let summary = first.state.lock().unwrap().entries[&id].summary.clone();
     assert_eq!(
         domain.rows.lock().unwrap().len(),
@@ -393,7 +395,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
     assert_eq!(
         std::fs::read_dir(&path).unwrap().count(),
         1,
-        "no baseline starts after uncertain Pending persistence"
+        "the non-Git baseline requires no private repository"
     );
     first.close().await;
     drop(interval);
@@ -438,6 +440,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         .unwrap()
         .unwrap();
     recovered.begin(CancellationToken::new()).await;
+    recovered.first_tool(CancellationToken::new()).await;
     assert_eq!(
         std::fs::read_dir(&second.root.path).unwrap().count(),
         1,
@@ -606,7 +609,7 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         async move { interval.begin(CancellationToken::new()).await }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while domain.snapshot().unwrap().is_empty() {
+        while interval.state.try_lock().is_ok() {
             tokio::task::yield_now().await;
         }
     })
@@ -618,6 +621,18 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     );
     drop(held);
     baseline.await.unwrap();
+    assert!(domain.snapshot().unwrap().is_empty());
+    let scope = owner.state.lock().unwrap().entries[&interval.id]
+        .summary
+        .scope
+        .clone();
+    let request = Request::List { scope, after: None };
+    assert!(matches!(
+        owner.read_inner(&request, &CancellationToken::new()).await.unwrap(),
+        Reply::Summaries { items, .. } if items.is_empty()
+    ));
+    interval.first_tool(CancellationToken::new()).await;
+    assert_eq!(domain.snapshot().unwrap().len(), 1);
     assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
     std::fs::write(
         workspace.join("file.txt"),
@@ -734,17 +749,14 @@ async fn late_begin_cannot_resurrect_a_finished_interval() {
             CancellationToken::new(),
         )
         .await;
-    let finished = domain.snapshot().unwrap();
+    assert!(domain.snapshot().unwrap().is_empty());
     interval.begin(CancellationToken::new()).await;
+    interval.first_tool(CancellationToken::new()).await;
     assert!(
-        !owner.state.lock().unwrap().entries[&interval.id].active,
+        !owner.state.lock().unwrap().entries.contains_key(&interval.id),
         "late begin must not consume a resident slot again"
     );
-    assert_eq!(
-        domain.snapshot().unwrap(),
-        finished,
-        "finished evidence must not be overwritten"
-    );
+    assert!(domain.snapshot().unwrap().is_empty());
     assert!(interval.state.lock().await.before.is_none());
     owner.close().await;
     drop(interval);

@@ -39,6 +39,8 @@ pub struct ExecutionObservationEnd {
 pub trait ExecutionInterval: fmt::Debug + Send + Sync + 'static {
     /// Capture a baseline. Failure details belong to the observation owner.
     async fn begin(&self, cancellation: CancellationToken);
+    /// The first durable tool start, rejection, or outstanding tool recovered in this claim.
+    async fn first_tool(&self, _cancellation: CancellationToken) {}
     /// Capture and publish final evidence; never changes the durable Turn outcome.
     async fn end(&self, evidence: ExecutionObservationEnd, cancellation: CancellationToken);
 }

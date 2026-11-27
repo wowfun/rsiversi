@@ -189,8 +189,11 @@ fn present(reply: Reply) -> UiView {
     match reply{
         Reply::Summaries{epoch,items,next,capacity_limited}=>{
             if capacity_limited { elements.push(text("Workspace review history is full. New execution intervals are not being recorded; Agent work continues. Existing summaries remain available.")); }
-            elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
-            if items.is_empty(){elements.push(text("No recorded execution intervals."));}
+            if items.is_empty() {
+                elements.push(text("No reviews yet. A review begins with a tool call."));
+            } else {
+                elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
+            }
             for item in items{
                 let expired=item.epoch!=epoch;
                 let state=match(item.phase,expired){(Phase::Pending,true)=>"Interrupted; diff expired",(Phase::Pending,false)=>"Pending; work or capture not settled",(Phase::Complete,false)=>"Complete",(Phase::Complete,true)=>"Complete; diff expired",(Phase::Partial,false)=>"Partial",(Phase::Partial,true)=>"Partial; diff expired"};

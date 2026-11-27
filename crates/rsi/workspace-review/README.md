@@ -54,10 +54,16 @@ most eight intervals retaining scratch and 1 GiB total scratch reservation.
 Capture stages expire after 30 seconds and preserve omission reasons. Drops and
 retirement cancel subsequent steps and drain admitted Process/Files/storage work.
 
+An interval keeps its turn-start baseline private until the first Tool start,
+rejection, or recovery of an outstanding Tool. At that point the pending summary
+is published before Tool dispatch or recovery continues. A claim that finishes
+with only model work releases its baseline without listing or writing a review.
+Historical review records retain their original scope and phase.
+
 Summary Domain `rsi.workspace-review`, version 2, stores typed records in its
 `summaries` table, with at most 8,192 summaries,
-256 KiB each and 64 MiB total. It lives outside the Agent Store. Pending summaries
-are durable before capture; a lost acknowledgement closes further write admission
+256 KiB each and 64 MiB total. It lives outside the Agent Store. A lost
+acknowledgement for the pending summary closes further write admission
 until restart and cannot be claimed as success. A list carries the current epoch
 so old unfinished captures can be shown as interrupted without inventing an end
 time or rewriting historical evidence.
