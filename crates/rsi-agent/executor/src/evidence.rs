@@ -58,26 +58,20 @@ impl Capture {
             "provider_family":snapshot.provider_family,"protocol":snapshot.protocol,"transport":snapshot.transport,
             "config_generation":snapshot.config_generation,"language_settings":snapshot.language_settings,
         });
-        let evidence = RequestEvidence::Available {
-            configuration: EvidencePart::inline(
-                serde_json::to_string(&self.configuration).map_err(fatal)?,
-            ),
-            system: EvidencePart::inline(self.system),
-            tools: EvidencePart::inline(self.tools),
-            manifest: self.manifest,
-        };
-        if evidence
-            .parts()
-            .iter()
-            .map(|(_, part)| part.bytes())
-            .sum::<usize>()
+        let configuration = serde_json::to_string(&self.configuration).map_err(fatal)?;
+        if configuration.len() + self.system.len() + self.tools.len()
             > rsi_agent_session_protocol::MAXIMUM_REQUEST_EVIDENCE_BYTES
         {
             return Ok(RequestEvidence::Unavailable {
                 reason: EvidenceUnavailable::Budget,
             });
         }
-        Ok(evidence)
+        Ok(RequestEvidence::Available {
+            configuration: EvidencePart::inline(configuration),
+            system: EvidencePart::inline(self.system),
+            tools: EvidencePart::inline(self.tools),
+            manifest: self.manifest,
+        })
     }
 }
 
@@ -151,7 +145,7 @@ impl EvidenceCache {
         for (section, part) in evidence.parts() {
             {
                 let seq = match part {
-                    EvidencePart::Inline { .. } => fact.seq(),
+                    EvidencePart::Inline(_) => fact.seq(),
                     EvidencePart::Reference { seq, .. } => *seq,
                 };
                 self.0.retain(|entry| {
@@ -261,7 +255,7 @@ mod tests {
             if section == EvidenceSection::Tools {
                 assert!(matches!(part, EvidencePart::Reference { seq: 1, .. }));
             } else {
-                assert!(matches!(part, EvidencePart::Inline { .. }));
+                assert!(matches!(part, EvidencePart::Inline(_)));
             }
             let source = evidence.part(section).unwrap();
             assert_eq!(
@@ -281,6 +275,30 @@ mod tests {
             assert!(matches!(part, EvidencePart::Reference { seq, .. } if *seq == original_seq));
         }
         assert_eq!(cache.0.len(), 64);
+    }
+
+    #[test]
+    fn oversized_optional_evidence_is_omitted_at_capture() {
+        let context = rsi_ai_testkit::language_context(
+            "fixture",
+            "fixture",
+            "model",
+            None,
+            Arc::new(rsi_ai_testkit::InMemoryMediaResolver::default()),
+            0,
+        );
+        let capture = Capture {
+            configuration: serde_json::json!({}),
+            system: "s".repeat(rsi_agent_session_protocol::MAXIMUM_REQUEST_EVIDENCE_BYTES),
+            tools: "[]".into(),
+            manifest: vec![],
+        };
+        assert_eq!(
+            capture.finish(context.snapshot()).unwrap(),
+            RequestEvidence::Unavailable {
+                reason: EvidenceUnavailable::Budget
+            }
+        );
     }
 
     #[test]

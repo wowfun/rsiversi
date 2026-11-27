@@ -71,7 +71,8 @@ mod evidence;
 pub use continuation::{ContinuationInput, ContinuationProvenance, ContinuationSource};
 pub use evidence::{
     EvidenceContentCount, EvidenceContentKind, EvidencePart, EvidenceSection, EvidenceUnavailable,
-    MAXIMUM_EVIDENCE_CONTENT_COUNT, MAXIMUM_REQUEST_EVIDENCE_BYTES, RequestEvidence,
+    InlineEvidence, MAXIMUM_EVIDENCE_CONTENT_COUNT, MAXIMUM_REQUEST_EVIDENCE_BYTES,
+    RequestEvidence,
 };
 mod contribution;
 pub use compaction::{
@@ -3287,18 +3288,6 @@ impl SessionFact {
         Ok(fact)
     }
 
-    /// Verifies the immutable construction proof retained by this typed Fact.
-    pub fn validate(&self) -> Result<()> {
-        if self.encoded_len == 0 || self.encoded_len > MAXIMUM_SESSION_FACT_BYTES {
-            return Err(SessionError::TooLarge {
-                kind: "session Fact",
-                maximum: MAXIMUM_SESSION_FACT_BYTES,
-                actual: self.encoded_len,
-            });
-        }
-        Ok(())
-    }
-
     /// Returns the exact compact-JSON byte length proven at construction.
     pub const fn encoded_len(&self) -> usize {
         self.encoded_len
@@ -3336,7 +3325,6 @@ impl SessionFact {
 
 /// Advances the canonical digest chain by one validated Fact.
 pub fn advance_fact_prefix_digest(previous: [u8; 32], fact: &SessionFact) -> Result<[u8; 32]> {
-    fact.validate()?;
     hash_record(prefix_hasher(FACT_PREFIX_DOMAIN, previous), fact)
 }
 
@@ -3439,7 +3427,6 @@ where
         .checked_add(1)
         .ok_or_else(|| SessionError::Invalid("Fact sequence exhausted".into()))?;
     for fact in facts {
-        fact.validate()?;
         if fact.seq != expected {
             return Err(SessionError::Invalid(format!(
                 "Fact sequence is not contiguous: expected {expected}, got {}",

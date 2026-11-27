@@ -623,7 +623,7 @@ fn assert_request_tool_evidence(facts: &[SessionFact], requests: &[LanguageReque
             panic!("request evidence missing");
         };
         let original = match tools {
-            rsi_agent_session_protocol::EvidencePart::Inline { .. } => tools,
+            rsi_agent_session_protocol::EvidencePart::Inline(_) => tools,
             rsi_agent_session_protocol::EvidencePart::Reference { seq, .. } => {
                 let original = facts.iter().find(|f| f.seq() == *seq).unwrap();
                 let SessionFactBody::ModelIntent {
@@ -636,10 +636,10 @@ fn assert_request_tool_evidence(facts: &[SessionFact], requests: &[LanguageReque
                 tools
             }
         };
-        let rsi_agent_session_protocol::EvidencePart::Inline { text, .. } = original else {
+        let rsi_agent_session_protocol::EvidencePart::Inline(inline) = original else {
             panic!("evidence reference must be direct");
         };
-        let schema: serde_json::Value = serde_json::from_str(text).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(inline.text()).unwrap();
         assert_eq!(
             schema["definitions"],
             serde_json::to_value(requests[intents].tools()).unwrap()

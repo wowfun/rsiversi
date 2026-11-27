@@ -1,8 +1,6 @@
 //! Exact binding of references to immutable, original inline evidence.
 use crate::{SessionStore, StoreError};
-use rsi_agent_session_protocol::{
-    EvidencePart, EvidenceSection, SessionFact, SessionId,
-};
+use rsi_agent_session_protocol::{EvidencePart, EvidenceSection, SessionFact, SessionId};
 
 /// A failed Store lookup or an invalid original binding.
 #[derive(Debug, thiserror::Error)]
@@ -70,8 +68,8 @@ impl EvidenceOriginal {
         };
         let mut digests = EvidenceDigests([None, None, None]);
         for (section, part) in evidence.parts() {
-            if let EvidencePart::Inline { text, sha256 } = part {
-                digests.0[index(section)] = Some((sha256.clone(), text.len()));
+            if let EvidencePart::Inline(inline) = part {
+                digests.0[index(section)] = Some((part.sha256().into(), inline.text().len()));
             }
         }
         Ok(Self { fact, digests })
@@ -91,10 +89,10 @@ impl EvidenceOriginal {
         let Some(evidence) = self.fact.body().request_evidence() else {
             unreachable!("validated original")
         };
-        let Some(EvidencePart::Inline { text, .. }) = evidence.part(section) else {
+        let Some(EvidencePart::Inline(inline)) = evidence.part(section) else {
             unreachable!("validated inline binding")
         };
-        Ok(text)
+        Ok(inline.text())
     }
     /// Transfers original text after the shared binding check, releasing other sections.
     pub fn into_text(
@@ -107,10 +105,10 @@ impl EvidenceOriginal {
         let Some((_, evidence)) = self.fact.into_body().into_request_evidence() else {
             unreachable!("validated original")
         };
-        let Some(EvidencePart::Inline { text, .. }) = evidence.into_part(section) else {
+        let Some(EvidencePart::Inline(inline)) = evidence.into_part(section) else {
             unreachable!("validated inline binding")
         };
-        Ok(text)
+        Ok(inline.into_parts().0)
     }
 }
 const fn index(section: EvidenceSection) -> usize {

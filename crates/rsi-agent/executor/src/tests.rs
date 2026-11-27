@@ -1773,7 +1773,7 @@ async fn replayed_fact_metadata_deduplicates_without_retaining_bodies() {
         .lock()
         .unwrap()
         .deduplicate(claim.session_id(), &mut deduplicated);
-    assert!(deduplicated.parts().iter().all(|(_, part)| matches!(
+    assert!(deduplicated.parts().all(|(_, part)| matches!(
         part,
         rsi_agent_session_protocol::EvidencePart::Reference { seq: 4, .. }
     )));

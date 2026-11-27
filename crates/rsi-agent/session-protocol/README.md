@@ -341,8 +341,10 @@ earlier same-Session inline section reference (sequence, section, digest, length
 References never chain. Decoded section bytes total at most 16 MiB; ordinary
 content is represented only by a bounded typed count/byte manifest. The Kernel
 separately admits at most 16 MiB new inline bytes per Turn, within its existing
-generated-byte budget. Fact construction validates evidence with its final sequence
-in one pass; earlier direct-reference targets are checked by Kernel and grouped
+generated-byte budget. Capture checks the combined section length before hashing.
+Each inline section binds its immutable text and digest at capture or decode.
+Fact construction checks the final sequence and aggregate limits. Earlier
+direct-reference targets are checked by Kernel and grouped
 by source sequence, so shared originals are read once. Optional evidence cannot trigger a second provider Prepare.
 
 `FrozenAgentSettings.pricing` captures at most 256 exact deployment/endpoint/model
@@ -525,8 +527,8 @@ Custom deserialization revalidates nested protocol values, exact format,
 identifiers, paths, diagnostics, Fact size, and sequence rules. Older formats
 are rejected; this pre-release contract has no migration or compatibility
 reader. A constructed immutable `SessionFact` retains its exact compact-JSON
-length as an in-process validation proof; batching and Store admission trust
-that proof instead of serializing the same typed value again.
+length. In-process consumers use that length for accounting and check sequence
+and aggregate bounds in the context of the destination page or batch.
 
 The protocol also owns the canonical rolling SHA-256 chain over serialized
 Facts. Context projection and Store append accounting share that algorithm but

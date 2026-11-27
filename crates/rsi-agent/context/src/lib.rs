@@ -798,8 +798,6 @@ impl ContextFold {
                     fact.seq()
                 )));
             }
-            fact.validate()
-                .map_err(|error| ContextError::Invalid(error.to_string()))?;
             let next_digest = advance_fact_prefix(self.fact_prefix_digest, fact)?;
             self.apply_admitted_fact(fact, &session)?;
             self.through_seq = fact.seq();
@@ -898,8 +896,6 @@ impl ContextFold {
                     fact.seq()
                 )));
             }
-            fact.validate()
-                .map_err(|error| ContextError::Invalid(error.to_string()))?;
             self.apply_admitted_fact(fact, &parent_session)?;
             self.seed_through_seq = fact.seq();
             expected = expected
@@ -983,8 +979,6 @@ impl ContextFold {
                     "claim page Facts are not increasing within its watermark".into(),
                 ));
             }
-            fact.validate()
-                .map_err(|error| ContextError::Invalid(error.to_string()))?;
             let next_digest = advance_fact_prefix(self.fact_prefix_digest, fact)?;
             self.apply_admitted_fact(fact, &session)?;
             if fact.seq() != previous.saturating_add(1) {

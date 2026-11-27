@@ -24,17 +24,52 @@ pub enum EvidenceSection {
     Tools,
 }
 
+/// Original request text with a SHA-256 bound to its exact UTF-8 bytes.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InlineEvidence {
+    /// Complete decoded UTF-8 source bytes.
+    text: String,
+    /// Lowercase SHA-256 of those bytes.
+    sha256: String,
+}
+impl InlineEvidence {
+    /// Borrows the captured bytes without materializing another copy.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    /// Transfers the original text and digest for an owned read.
+    pub fn into_parts(self) -> (String, String) {
+        (self.text, self.sha256)
+    }
+}
+impl<'de> Deserialize<'de> for InlineEvidence {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            text: String,
+            sha256: String,
+        }
+        let Wire { text, sha256 } = Wire::deserialize(deserializer)?;
+        if text.len() > MAXIMUM_REQUEST_EVIDENCE_BYTES {
+            return Err(serde::de::Error::custom("inline evidence exceeds 16 MiB"));
+        }
+        if sha256.len() != 64 || sha256 != hex::encode(Sha256::digest(text.as_bytes())) {
+            return Err(serde::de::Error::custom("evidence inline digest mismatch"));
+        }
+        Ok(Self { text, sha256 })
+    }
+}
+
 /// Exact UTF-8 section or a direct reference to an earlier inline section.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidencePart {
     /// Complete source bytes in this intent.
-    Inline {
-        /// Complete decoded UTF-8 source bytes.
-        text: String,
-        /// Lowercase SHA-256 of those bytes.
-        sha256: String,
-    },
+    Inline(InlineEvidence),
     /// Original inline bytes in this Session; references cannot be targets.
     Reference {
         /// Earlier original `ModelIntent` in the same Session.
@@ -51,51 +86,39 @@ impl EvidencePart {
     /// Captures exact source bytes and their digest.
     pub fn inline(text: String) -> Self {
         let sha256 = hex::encode(Sha256::digest(text.as_bytes()));
-        Self::Inline { text, sha256 }
+        Self::Inline(InlineEvidence { text, sha256 })
     }
     /// Lowercase SHA-256 of decoded source bytes.
     pub fn sha256(&self) -> &str {
         match self {
-            Self::Inline { sha256, .. } | Self::Reference { sha256, .. } => sha256,
+            Self::Inline(inline) => &inline.sha256,
+            Self::Reference { sha256, .. } => sha256,
         }
     }
     /// Decoded bytes, regardless of physical representation.
     pub fn bytes(&self) -> usize {
         match self {
-            Self::Inline { text, .. } => text.len(),
+            Self::Inline(inline) => inline.text.len(),
             Self::Reference { bytes, .. } => *bytes as usize,
         }
     }
     fn validate(&self, expected: EvidenceSection, intent_seq: Option<u64>) -> Result<()> {
-        if self.bytes() > MAXIMUM_REQUEST_EVIDENCE_BYTES
-            || self.sha256().len() != 64
-            || !self
-                .sha256()
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        if let Self::Reference {
+            seq,
+            section,
+            sha256,
+            ..
+        } = self
         {
-            return Err(SessionError::Invalid(
-                "invalid evidence length or digest".into(),
-            ));
-        }
-        match self {
-            Self::Inline { text, sha256 }
-                if hex::encode(Sha256::digest(text.as_bytes())) != *sha256 =>
-            {
-                return Err(SessionError::Invalid(
-                    "evidence inline digest mismatch".into(),
-                ));
-            }
-            Self::Reference { seq, section, .. }
-                if *seq == 0
-                    || *section != expected
-                    || intent_seq.is_some_and(|current| *seq >= current) =>
+            crate::validate_sha256("evidence reference digest", sha256)?;
+            if *seq == 0
+                || *section != expected
+                || intent_seq.is_some_and(|current| *seq >= current)
             {
                 return Err(SessionError::Invalid(
                     "evidence reference is not an earlier exact section".into(),
                 ));
             }
-            _ => {}
         }
         Ok(())
     }
@@ -206,25 +229,26 @@ impl TryFrom<EvidenceWire> for RequestEvidence {
 }
 impl RequestEvidence {
     /// Iterates the three source sections in deterministic order.
-    pub fn parts(&self) -> Vec<(EvidenceSection, &EvidencePart)> {
+    pub fn parts(&self) -> impl Iterator<Item = (EvidenceSection, &EvidencePart)> {
         match self {
             Self::Available {
                 configuration,
                 system,
                 tools,
                 ..
-            } => vec![
+            } => Some([
                 (EvidenceSection::Configuration, configuration),
                 (EvidenceSection::System, system),
                 (EvidenceSection::Tools, tools),
-            ],
-            Self::Unavailable { .. } => vec![],
+            ]),
+            Self::Unavailable { .. } => None,
         }
+        .into_iter()
+        .flatten()
     }
     /// Finds one section without resolving references.
     pub fn part(&self, section: EvidenceSection) -> Option<&EvidencePart> {
         self.parts()
-            .into_iter()
             .find(|(kind, _)| *kind == section)
             .map(|(_, part)| part)
     }
@@ -263,9 +287,8 @@ impl RequestEvidence {
     /// Newly retained source bytes, excluding direct references.
     pub fn inline_bytes(&self) -> usize {
         self.parts()
-            .iter()
             .map(|(_, part)| match part {
-                EvidencePart::Inline { text, .. } => text.len(),
+                EvidencePart::Inline(inline) => inline.text.len(),
                 EvidencePart::Reference { .. } => 0,
             })
             .sum()
@@ -315,6 +338,14 @@ mod tests {
     #[test]
     fn sections_decode_closed_and_references_bind_an_earlier_exact_section() {
         let evidence = available();
+        let part = evidence.part(EvidenceSection::System).unwrap();
+        let mut bytes = serde_json::to_value(part).unwrap();
+        assert_eq!(
+            bytes,
+            serde_json::json!({"kind":"inline","text":"system","sha256":part.sha256()})
+        );
+        bytes["text"] = "changed".into();
+        assert!(serde_json::from_value::<EvidencePart>(bytes).is_err());
         assert_eq!(
             serde_json::from_value::<RequestEvidence>(serde_json::to_value(&evidence).unwrap())
                 .unwrap(),
@@ -379,14 +410,15 @@ mod tests {
             EvidenceSection::Tools,
         ] {
             let evidence = available();
-            let EvidencePart::Inline { text, .. } = evidence.part(section).unwrap() else {
+            let EvidencePart::Inline(inline) = evidence.part(section).unwrap() else {
                 panic!("inline");
             };
-            let allocation = text.as_ptr();
-            let expected = text.clone();
-            let EvidencePart::Inline { text, .. } = evidence.into_part(section).unwrap() else {
+            let allocation = inline.text().as_ptr();
+            let expected = inline.text().to_owned();
+            let EvidencePart::Inline(inline) = evidence.into_part(section).unwrap() else {
                 panic!("inline");
             };
+            let (text, _) = inline.into_parts();
             assert_eq!(text, expected);
             assert_eq!(text.as_ptr(), allocation);
         }

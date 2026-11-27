@@ -392,13 +392,16 @@ async fn load_section(
                 .into_part(*section)
                 .expect("available evidence has every section");
             match part {
-                EvidencePart::Inline { text, sha256 } => Ok(Selected::available(
-                    text,
-                    sha256,
-                    reservation,
-                    purpose,
-                    *intent_seq,
-                )),
+                EvidencePart::Inline(inline) => {
+                    let (text, sha256) = inline.into_parts();
+                    Ok(Selected::available(
+                        text,
+                        sha256,
+                        reservation,
+                        purpose,
+                        *intent_seq,
+                    ))
+                }
                 EvidencePart::Reference {
                     seq,
                     section,

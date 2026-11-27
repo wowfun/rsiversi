@@ -217,10 +217,9 @@ async fn evidence_matches_actual_request_reuses_original_sections_and_survives_r
         if part.sha256() == first.sha256() {
             assert!(matches!(part,EvidencePart::Reference {seq,..} if *seq == original_seq));
         } else {
-            assert!(matches!(part, EvidencePart::Inline { .. }));
-            if let (EvidencePart::Inline { text: a, .. }, EvidencePart::Inline { text: b, .. }) =
-                (first, part)
-            {
+            assert!(matches!(part, EvidencePart::Inline(_)));
+            if let (EvidencePart::Inline(a), EvidencePart::Inline(b)) = (first, part) {
+                let (a, b) = (a.text(), b.text());
                 let prefix = a.chars().zip(b.chars()).take_while(|(a, b)| a == b).count();
                 eprintln!(
                     "changed {kind:?}: {:?} -> {:?}",

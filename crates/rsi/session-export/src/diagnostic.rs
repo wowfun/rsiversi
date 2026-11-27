@@ -150,7 +150,7 @@ async fn resolve(
             .expect("section string")
             .to_string();
         let text: Result<String> = match part {
-            EvidencePart::Inline { text, .. } => Ok(text.clone()),
+            EvidencePart::Inline(inline) => Ok(inline.text().to_owned()),
             EvidencePart::Reference {
                 seq,
                 section,
@@ -210,7 +210,6 @@ pub(super) async fn request(cut: &Cut, latest: &Latest) -> Result<Diagnostic> {
     };
     let evidence_bytes = evidence
         .parts()
-        .iter()
         .try_fold(0usize, |sum, (_, part)| sum.checked_add(part.bytes()))
         .ok_or_else(|| invalid("evidence weight overflow"))?;
     let initial = evidence_bytes

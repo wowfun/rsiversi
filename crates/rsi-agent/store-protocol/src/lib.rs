@@ -437,10 +437,6 @@ impl AtomicSessionAppend {
                 ));
             }
         }
-        for fact in &self.facts {
-            fact.validate()
-                .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        }
         self.fact_suffix()?;
         validate_control_sequence(self.expected_control_seq, &self.controls)
             .map_err(|error| StoreError::Invalid(error.to_string()))?;
@@ -1720,9 +1716,6 @@ impl StoreTurnBoundary {
         terminal: Option<SessionFact>,
         durable_seq: u64,
     ) -> Result<Self> {
-        accepted
-            .validate()
-            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         if accepted.seq() > durable_seq
             || accepted.body().turn_id() != Some(&turn_id)
             || !matches!(
@@ -1736,19 +1729,15 @@ impl StoreTurnBoundary {
                 "turn boundary acceptance does not match its index".into(),
             ));
         }
-        if let Some(terminal) = &terminal {
-            terminal
-                .validate()
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            if terminal.seq() <= accepted.seq()
+        if let Some(terminal) = &terminal
+            && (terminal.seq() <= accepted.seq()
                 || terminal.seq() > durable_seq
                 || terminal.body().turn_id() != Some(&turn_id)
-                || !matches!(terminal.body(), SessionFactBody::TurnTerminal { .. })
-            {
-                return Err(StoreError::Corrupt(
-                    "turn boundary terminal does not match its index".into(),
-                ));
-            }
+                || !matches!(terminal.body(), SessionFactBody::TurnTerminal { .. }))
+        {
+            return Err(StoreError::Corrupt(
+                "turn boundary terminal does not match its index".into(),
+            ));
         }
         Ok(Self {
             turn_id,
