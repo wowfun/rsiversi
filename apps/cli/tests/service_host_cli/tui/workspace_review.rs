@@ -46,7 +46,7 @@ async fn workspace_review_tui_opens_dirty_baseline_diff_without_model_work() {
         .await;
     terminal.send(b"\r");
     terminal.select_menu("Review workspace changes").await;
-    terminal.until("A review begins with a tool call.").await;
+    terminal.until("No workspace changes recorded.").await;
     let followup = Arc::new(Notify::new());
     let finish = Arc::new(Notify::new());
     *state.request_gate.lock().unwrap() = Some(RequestGate {

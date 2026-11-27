@@ -59,18 +59,18 @@ Capture stages expire after 30 seconds and preserve omission reasons. Drops and
 retirement cancel subsequent steps and drain admitted Process/Files/storage work.
 
 An interval keeps its turn-start baseline private until the first Tool start,
-rejection, or recovery of an outstanding Tool. At that point the pending summary
-is published before Tool dispatch or recovery continues. A claim that finishes
-with only model work releases its baseline without listing or writing a review.
-Historical review records retain their original scope and phase.
+rejection, or recovery of an outstanding Tool. That transition makes the
+pending review visible in the running Host. The completed comparison is
+published to history only if it found a changed file. An interval with no
+observed changes releases its baseline and its list entry.
 
 Summary Domain `rsi.workspace-review`, version 2, stores typed records in its
 `summaries` table, with at most 8,192 summaries,
 256 KiB each and 64 MiB total. It lives outside the Agent Store. A lost
-acknowledgement for the pending summary closes further write admission
-until restart and cannot be claimed as success. A list carries the current epoch
-so old unfinished captures can be shown as interrupted without inventing an end
-time or rewriting historical evidence.
+acknowledgement for a changed-file summary closes further write admission
+until restart. The next Host reads the actual committed records. An unfinished
+capture has no durable review. A list carries the current epoch so clients can
+identify available comparisons.
 Current-runtime diffs live only in private scratch and carry the exact runtime
 epoch. Restart leaves summaries readable and returns `Expired` for old diffs.
 Capacity exhaustion never silently removes an old durable summary or claims that
@@ -78,8 +78,7 @@ an omitted capture was complete. The [API](../workspace-review-api/README.md)
 owns bounded reads and source authorization.
 
 Comparison uses the captured object ID and file mode for each path known at
-both ends. An unchanged interval serves an empty file list and releases its
-scratch repository. Omission diagnostics remain visible for partial captures.
+both ends. Omissions accompany partial comparisons that found changes.
 
 Capture imports validated in-memory file bytes with Git fast-import in batches
 of at most 64 files and 8 MiB of original bytes. Private blob marks never name

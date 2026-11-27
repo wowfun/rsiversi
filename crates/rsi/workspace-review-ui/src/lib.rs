@@ -192,7 +192,7 @@ fn present(reply: Reply) -> UiView {
             if !items.is_empty() {
                 elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
             } else if !capacity_limited {
-                elements.push(text("No reviews yet. A review begins with a tool call."));
+                elements.push(text("No workspace changes recorded."));
             }
             for item in items{
                 let expired=item.epoch!=epoch;
@@ -247,7 +247,7 @@ mod tests {
             capacity_limited: true,
         });
         assert!(result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("New execution intervals are not being recorded"))));
-        assert!(!result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text.contains("A review begins"))));
+        assert!(!result.elements.iter().any(|element| matches!(element, UiElement::Text { text } if text == "No workspace changes recorded.")));
     }
     #[test]
     fn review_rows_show_only_observed_counts_and_available_actions() {

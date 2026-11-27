@@ -363,6 +363,7 @@ async fn full_durable_history_is_preserved_and_reports_omission_after_restart() 
         .summary
         .clone();
     template.phase = Phase::Complete;
+    template.changed_files = 1;
     template.finished_ms = Some(template.started_ms.clone());
     initial.close().await;
     drop(interval);
@@ -442,39 +443,53 @@ fn seed_history(domain: &Storage, template: &mut Summary) {
     clippy::too_many_lines,
     reason = "one causal failure, teardown and recovery sequence"
 )]
-async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_is_expired() {
+async fn lost_storage_ack_recovers_only_the_observed_change_after_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let runtime = Runtime::default();
     let process = install_process(&runtime).await;
-    let domain = Arc::new(Storage {
-        spec: DomainSpec {
-            id: "review".into(),
-            backend: "base".into(),
-            version: 2,
-            maximum_records: 8192,
-            maximum_bytes: 64 * 1024 * 1024,
-            ..DomainSpec::default()
-        },
-        rows: Mutex::new(BTreeMap::new()),
-        fail: AtomicBool::new(true),
-        fenced: AtomicBool::new(false),
-    });
+    let domain = storage();
+    domain.fail.store(true, Ordering::Release);
+    let workspace = temporary.path().join("workspace");
+    assert!(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .status()
+            .unwrap()
+            .success()
+    );
     let path = temporary.path().join("scratch");
     let first = owner(&runtime, path.clone(), domain.clone()).await;
-    let interval = first
-        .admit(start(temporary.path(), false))
-        .unwrap()
-        .unwrap();
+    let interval = first.admit(start(&workspace, true)).unwrap().unwrap();
     let id = interval.id.clone();
     interval.begin(CancellationToken::new()).await;
     assert!(domain.snapshot().unwrap().is_empty());
     interval.first_tool(CancellationToken::new()).await;
-    let summary = first.state.lock().unwrap().entries[&id].summary.clone();
+    assert!(domain.snapshot().unwrap().is_empty());
+    std::fs::write(workspace.join("actual.txt"), "added\n").unwrap();
+    interval
+        .end(
+            ExecutionObservationEnd {
+                begin_completed: true,
+                controlled_work: ControlledWorkStatus::Unsettled,
+            },
+            CancellationToken::new(),
+        )
+        .await;
     assert_eq!(
         domain.rows.lock().unwrap().len(),
         1,
         "test storage wrote before losing its acknowledgement"
     );
+    let summary: Summary =
+        serde_json::from_value(domain.rows.lock().unwrap()[&id].clone()).unwrap();
+    assert_eq!((summary.phase, summary.changed_files), (Phase::Partial, 1));
+    for reason in [
+        OmissionKind::RecoveredWithoutBaseline,
+        OmissionKind::Unsettled,
+    ] {
+        assert!(summary.omissions.iter().any(|row| row.kind == reason));
+    }
     let request = Request::List {
         scope: summary.scope.clone(),
         after: None,
@@ -493,11 +508,6 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         first.admit(start(temporary.path(), false)),
         Err(ApiError::Unavailable)
     ));
-    assert_eq!(
-        std::fs::read_dir(&path).unwrap().count(),
-        1,
-        "the non-Git baseline requires no private repository"
-    );
     first.close().await;
     drop(interval);
     drop(first);
@@ -507,7 +517,7 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
         fail: AtomicBool::new(false),
         fenced: AtomicBool::new(false),
     });
-    let second = owner(&runtime, path, recovered_domain).await;
+    let second = owner(&runtime, path, recovered_domain.clone()).await;
     let Reply::Summaries { epoch, items, .. } = second
         .read(
             request,
@@ -556,29 +566,15 @@ async fn lost_storage_ack_blocks_reads_and_admission_until_restart_then_pending_
             CancellationToken::new(),
         )
         .await;
-    let summary = second.state.lock().unwrap().entries[&recovered.id]
-        .summary
-        .clone();
-    assert_eq!(summary.phase, Phase::Partial);
     assert!(
-        summary
-            .omissions
-            .iter()
-            .any(|row| row.kind == OmissionKind::NonGit && row.count == 2),
-        "both inventories report the unavailable repository"
+        !second
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&recovered.id)
     );
-    assert!(
-        summary
-            .omissions
-            .iter()
-            .any(|o| o.kind == OmissionKind::RecoveredWithoutBaseline)
-    );
-    assert!(
-        summary
-            .omissions
-            .iter()
-            .any(|o| o.kind == OmissionKind::Unsettled)
-    );
+    assert_eq!(recovered_domain.snapshot().unwrap().len(), 1);
     second.close().await;
     drop(recovered);
     drop(second);
@@ -688,7 +684,11 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         Reply::Summaries { items, .. } if items.is_empty()
     ));
     interval.first_tool(CancellationToken::new()).await;
-    assert_eq!(domain.snapshot().unwrap().len(), 1);
+    assert!(domain.snapshot().unwrap().is_empty());
+    assert!(matches!(
+        owner.read_inner(&request, &CancellationToken::new()).await.unwrap(),
+        Reply::Summaries { items, .. } if items.len() == 1 && items[0].phase == Phase::Pending
+    ));
     assert_eq!(std::fs::read_dir(&owner.root.path).unwrap().count(), 1);
     std::fs::write(
         workspace.join("file.txt"),
@@ -740,9 +740,6 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
         panic!("diff")
     };
     assert!(has_more);
-    let Ready::Changes(ready) = ready else {
-        panic!("changed file has captured evidence");
-    };
     let private = ready.scratch.path().join("repository");
     let hidden = ready.scratch.path().join("repository-hidden");
     std::fs::rename(&private, &hidden).unwrap();
@@ -761,6 +758,37 @@ async fn admitted_baseline_waits_for_workers_and_diff_pages_reuse_captured_patch
     assert!(!text.is_empty());
     drop(ready);
     drop(interval);
+    let unchanged = owner
+        .admit(session_start(&workspace, false, "read-only"))
+        .unwrap()
+        .unwrap();
+    let stop = CancellationToken::new();
+    unchanged.begin(stop.clone()).await;
+    unchanged.first_tool(stop.clone()).await;
+    assert!(
+        std::fs::read_to_string(workspace.join("file.txt"))
+            .unwrap()
+            .starts_with("after")
+    );
+    unchanged
+        .end(
+            ExecutionObservationEnd {
+                begin_completed: true,
+                controlled_work: ControlledWorkStatus::Settled,
+            },
+            stop,
+        )
+        .await;
+    assert!(
+        !owner
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&unchanged.id)
+    );
+    assert_eq!(domain.snapshot().unwrap().len(), 1);
+    drop(unchanged);
     owner.close().await;
     drop(owner);
     assert!(process.dispose().await.is_clean());

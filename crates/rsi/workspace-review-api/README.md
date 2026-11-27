@@ -13,7 +13,8 @@ scratch or durable summaries. Lists return at most
 32 summaries and 1 MiB; file pages at most 64 entries and 256 KiB. Diff pages carry
 at most 64 KiB of text and explicit byte cursors. IDs and cursors are canonical
 strings, not JavaScript numbers. An old runtime epoch or discarded scratch returns
-`Expired`; missing, pending and partial evidence are distinct from a complete
-empty comparison. Reads confer no execution, rollback, staging or restore authority.
+`Expired`. A running tool can expose a pending review. A completed capture
+appears in history when it found changed files, with any known omissions.
+Reads confer no execution, rollback, staging or restore authority.
 Every summary page reports `capacity_limited`: new intervals are omitted while
 the durable summary store is full, and previously recorded evidence remains readable.

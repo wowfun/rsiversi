@@ -13,7 +13,7 @@ use rsi_meta::Execution;
 use rsi_storage_domain::Domain;
 use rsi_storage_domain::storage_error;
 use rsi_workspace_review_api::{
-    ConversationIdentity, FileChange, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
+    ConversationIdentity, Omission, OmissionKind, Phase, Reply, Request, Scope, Summary,
 };
 use std::{
     collections::BTreeMap,
@@ -40,19 +40,6 @@ fn now() -> String {
         .min(u128::from(u64::MAX))
         .to_string()
 }
-#[derive(Clone, Debug)]
-enum Ready {
-    Empty,
-    Changes(Arc<Changes>),
-}
-impl Ready {
-    fn files(&self) -> &[FileChange] {
-        match self {
-            Self::Empty => &[],
-            Self::Changes(changes) => &changes.comparison.files,
-        }
-    }
-}
 #[derive(Debug)]
 struct Changes {
     scratch: Scratch,
@@ -63,7 +50,7 @@ struct Changes {
 struct Entry {
     summary: Summary,
     status: EntryStatus,
-    runtime: Option<Ready>,
+    runtime: Option<Arc<Changes>>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryStatus {
@@ -108,7 +95,6 @@ struct Interval {
 }
 enum Stage {
     Begin,
-    FirstTool,
     End(ExecutionObservationEnd),
 }
 #[derive(Debug)]
@@ -255,17 +241,21 @@ impl WorkspaceReview {
     }
     fn take_oldest_scratch(&self) -> Option<Scratch> {
         let mut state = self.state.lock().expect("review scratch eviction");
-        let entry = state.entries.values_mut()
-            .filter(|entry| matches!(&entry.runtime, Some(Ready::Changes(changes)) if Arc::strong_count(changes) == 1))
+        let entry = state
+            .entries
+            .values_mut()
+            .filter(|entry| {
+                entry
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|changes| Arc::strong_count(changes) == 1)
+            })
             .min_by(|a, b| {
                 let a = &a.summary.started_ms;
                 let b = &b.summary.started_ms;
                 a.len().cmp(&b.len()).then_with(|| a.cmp(b))
             })?;
-        let Ready::Changes(changes) = entry.runtime.take()? else {
-            return None;
-        };
-        Arc::into_inner(changes).map(|changes| changes.scratch)
+        Arc::into_inner(entry.runtime.take()?).map(|changes| changes.scratch)
     }
     /// Returns finite evidence after the product adapter has authorized the exact scope.
     ///
@@ -365,12 +355,13 @@ impl WorkspaceReview {
         };
         match request {
             Request::Files { offset, .. } => {
-                if *offset > runtime.files().len() {
+                let changed = &runtime.comparison.files;
+                if *offset > changed.len() {
                     return Err(invalid("file cursor exceeds comparison"));
                 }
                 let mut files = Vec::new();
                 let mut bytes = 0;
-                for file in runtime.files().iter().skip(*offset).take(64) {
+                for file in changed.iter().skip(*offset).take(64) {
                     let length = serde_json::to_vec(file).map_err(invalid)?.len();
                     if bytes + length > 240 * 1024 {
                         break;
@@ -381,14 +372,11 @@ impl WorkspaceReview {
                 Ok(Reply::Files {
                     id: id.clone(),
                     offset: *offset,
-                    has_more: offset + files.len() < runtime.files().len(),
+                    has_more: offset + files.len() < changed.len(),
                     files,
                 })
             }
             Request::Diff { path, offset, .. } => {
-                let Ready::Changes(runtime) = runtime else {
-                    return Err(ApiError::Unavailable);
-                };
                 let index = runtime
                     .comparison
                     .files
@@ -461,7 +449,6 @@ impl WorkspaceReview {
 }
 impl Interval {
     async fn persist(&self, summary: Summary) -> Result<()> {
-        summary.validate()?;
         self.owner
             .domain
             .table::<Summary>("summaries")
@@ -558,14 +545,14 @@ impl Interval {
                     }
                     .await;
                     match comparison {
-                        Ok(Some(comparison)) => {
-                            ready = Some(Ready::Changes(Arc::new(Changes {
+                        Ok(Some(comparison)) if !comparison.files.is_empty() => {
+                            ready = Some(Arc::new(Changes {
                                 scratch,
                                 comparison,
                                 patch: tokio::sync::Mutex::new(None),
-                            })));
+                            }));
                         }
-                        Ok(None) => ready = Some(Ready::Empty),
+                        Ok(_) => {}
                         Err(reason) => omission(&mut inner.omissions, reason, 1),
                     }
                 } else {
@@ -575,6 +562,15 @@ impl Interval {
         } else {
             omission(&mut inner.omissions, OmissionKind::MissingBaseline, 1);
         }
+        let Some(changes) = ready else {
+            self.owner
+                .state
+                .lock()
+                .expect("review end")
+                .entries
+                .remove(&self.id);
+            return;
+        };
         let mut summary = self.owner.state.lock().expect("review end").entries[&self.id]
             .summary
             .clone();
@@ -585,30 +581,21 @@ impl Interval {
         } else {
             Phase::Partial
         };
-        if let Some(ready) = &ready {
-            summary.changed_files =
-                u32::try_from(ready.files().len()).expect("bounded changed files");
-            for file in ready.files() {
-                summary.added_lines = summary.added_lines.saturating_add(file.added);
-                summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
-            }
+        summary.changed_files =
+            u32::try_from(changes.comparison.files.len()).expect("bounded changed files");
+        for file in &changes.comparison.files {
+            summary.added_lines = summary.added_lines.saturating_add(file.added);
+            summary.removed_lines = summary.removed_lines.saturating_add(file.removed);
         }
         let stored = self.persist(summary.clone()).await;
         let mut state = self.owner.state.lock().expect("review publication");
-        let entry = state.entries.get_mut(&self.id).expect("admitted review");
-        entry.status = EntryStatus::Finished;
         if stored.is_ok() {
+            let entry = state.entries.get_mut(&self.id).expect("admitted review");
+            entry.status = EntryStatus::Finished;
             entry.summary = summary;
-            entry.runtime = ready;
-        }
-    }
-    async fn persist_pending(&self) {
-        let inner = self.state.lock().await;
-        if !inner.finished {
-            let summary = self.owner.state.lock().expect("review tool").entries[&self.id]
-                .summary
-                .clone();
-            let _ = self.persist(summary).await;
+            entry.runtime = Some(changes);
+        } else {
+            state.entries.remove(&self.id);
         }
     }
     async fn retained(&self, operation: Stage, cancellation: CancellationToken) {
@@ -617,25 +604,15 @@ impl Interval {
         let worker_stop = stop.clone();
         let interval = self.clone();
         let task = {
-            let mut state = self.owner.state.lock().expect("review stage admission");
+            let state = self.owner.state.lock().expect("review stage admission");
             if state.closed {
                 return;
-            }
-            if matches!(operation, Stage::FirstTool) {
-                let Some(entry) = state.entries.get_mut(&self.id) else {
-                    return;
-                };
-                if entry.status != EntryStatus::Baseline {
-                    return;
-                }
-                entry.status = EntryStatus::Recording;
             }
             self.owner
                 .execution
                 .spawn(self.owner.tasks.track_future(async move {
                     match operation {
                         Stage::Begin => interval.begin_work(&worker_stop).await,
-                        Stage::FirstTool => interval.persist_pending().await,
                         Stage::End(evidence) => interval.end_work(evidence, &worker_stop).await,
                     }
                 }))
@@ -648,8 +625,14 @@ impl ExecutionInterval for Interval {
     async fn begin(&self, cancellation: CancellationToken) {
         self.retained(Stage::Begin, cancellation).await;
     }
-    async fn first_tool(&self, cancellation: CancellationToken) {
-        self.retained(Stage::FirstTool, cancellation).await;
+    async fn first_tool(&self, _: CancellationToken) {
+        let mut state = self.owner.state.lock().expect("review tool");
+        if !state.closed
+            && let Some(entry) = state.entries.get_mut(&self.id)
+            && entry.status == EntryStatus::Baseline
+        {
+            entry.status = EntryStatus::Recording;
+        }
     }
     async fn end(&self, evidence: ExecutionObservationEnd, cancellation: CancellationToken) {
         self.retained(Stage::End(evidence), cancellation).await;
