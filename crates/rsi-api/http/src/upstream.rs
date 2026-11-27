@@ -8,8 +8,10 @@ use hyper_util::rt::TokioIo;
 use rsi_api_protocol::{ApiError, AuthenticatedDevice, CallOrigin, Result};
 use rsi_credentials_protocol::SecretValue;
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpStream, sync::Semaphore, time::timeout};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+
+mod client;
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -108,6 +110,7 @@ pub struct ApplicationUpstream {
     retired: CancellationToken,
     slots: Arc<Semaphore>,
     requests: Requests,
+    client: client::DeviceClient,
 }
 type Requests = Arc<std::sync::Mutex<std::collections::BTreeMap<String, AppRequest>>>;
 #[derive(Debug)]
@@ -211,6 +214,7 @@ impl ApplicationUpstream {
             retired,
             slots: Arc::new(Semaphore::new(32)),
             requests: Arc::default(),
+            client: client::DeviceClient::default(),
         })
     }
     /// Resolves a live native request handle for an application callback.
@@ -396,15 +400,6 @@ impl ApplicationUpstream {
         upgrade: bool,
         peer: Option<SocketAddr>,
     ) -> Result<()> {
-        let path = parts
-            .uri
-            .path_and_query()
-            .ok_or(ApiError::Unauthorized)?
-            .clone();
-        parts.uri = http::Uri::builder()
-            .path_and_query(path)
-            .build()
-            .map_err(|_| ApiError::Unauthorized)?;
         parts.version = http::Version::HTTP_11;
         strip_hop_headers(&mut parts.headers)?;
         parts.headers.remove("cookie");
@@ -504,24 +499,27 @@ impl ApplicationUpstream {
             ()=device.revoked.cancelled()=>return Err(ApiError::Unauthorized),
             ready=endpoint.wait_for(Option::is_some)=>ready.map_err(|_|ApiError::Unavailable)?.as_ref().ok_or(ApiError::Unavailable)?.0,
         };
-        let socket = timeout(TIMEOUT, TcpStream::connect(address))
-            .await
-            .map_err(|_| ApiError::Unavailable)?
-            .map_err(|_| ApiError::Unavailable)?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket))
-            .await
-            .map_err(|_| ApiError::Unavailable)?;
-        let retired = self.retired.clone();
-        let revoked = device.revoked.clone();
-        drop(state.execution.spawn(async move {
-            tokio::select!{ biased; ()=retired.cancelled()=>{}, ()=revoked.cancelled()=>{}, _=connection.with_upgrades()=>{} }
-        }));
+        parts.uri = http::Uri::builder()
+            .scheme("http")
+            .authority(address.to_string())
+            .path_and_query(
+                parts
+                    .uri
+                    .path_and_query()
+                    .ok_or(ApiError::Unauthorized)?
+                    .clone(),
+            )
+            .build()
+            .map_err(|_| ApiError::Unauthorized)?;
+        let client = self
+            .client
+            .for_device(&state.execution, &self.retired, &device);
         let request = Request::from_parts(parts, Limited::new(body, MAX_BODY));
         let mut response = tokio::select! {
             biased;
             ()=self.retired.cancelled()=>return Err(ApiError::ShuttingDown),
             ()=device.revoked.cancelled()=>return Err(ApiError::Unauthorized),
-            reply=sender.send_request(request)=>reply.map_err(|_|ApiError::Unavailable)?,
+            reply=client.request(request)=>reply.map_err(|_|ApiError::Unavailable)?,
         };
         let switching = response.status() == StatusCode::SWITCHING_PROTOCOLS;
         if switching && !upgrade {

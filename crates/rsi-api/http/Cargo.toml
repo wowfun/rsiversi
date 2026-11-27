@@ -17,7 +17,7 @@ futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http2"] }
-hyper-util.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
 rsi-api-protocol = { path = "../protocol" }
 rsi-credentials-protocol = { path = "../../rsi-credentials/protocol" }
 rsi-meta = { path = "../../rsi-meta/core" }

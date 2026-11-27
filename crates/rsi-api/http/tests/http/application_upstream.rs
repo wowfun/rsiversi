@@ -282,6 +282,70 @@ async fn fixture() -> (Harness, TcpListener, Arc<rsi_api_http::ApplicationUpstre
 }
 
 #[tokio::test]
+async fn sequential_application_requests_reuse_a_socket_and_receive_distinct_callbacks() {
+    use http_body_util::Full;
+    use hyper_util::rt::TokioIo;
+
+    let (h, listener, app) = fixture().await;
+    let (closed, mut closed_connections) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (socket, peer) = listener.accept().await.unwrap();
+            let connection = hyper::server::conn::http1::Builder::new().serve_connection(
+                TokioIo::new(socket),
+                hyper::service::service_fn(move |request| async move {
+                    let id = request.headers()["x-rsi-upstream-request"]
+                        .to_str()
+                        .unwrap();
+                    let response =
+                        http::Response::new(Full::new(bytes::Bytes::from(format!("{peer} {id}"))));
+                    Ok::<_, std::convert::Infallible>(response)
+                }),
+            );
+            let closed = closed.clone();
+            connections.spawn(async move {
+                let _ = connection.await;
+                let _ = closed.send(peer.to_string());
+            });
+        }
+    });
+    let client = Harness::client();
+    let mut replies = Vec::new();
+    for credential in [TOKEN, TOKEN, OTHER_LEASE_TOKEN, SECOND_TOKEN] {
+        let text = client
+            .get(format!("{}/sidebar/history", h.origin))
+            .header("sec-fetch-site", "same-origin")
+            .header("cookie", browser_cookie(&h.origin, credential))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let (peer, id) = text.split_once(' ').unwrap();
+        replies.push((peer.to_owned(), id.to_owned()));
+    }
+    assert_eq!(replies[0].0, replies[1].0);
+    assert_ne!(replies[1].0, replies[2].0);
+    assert_ne!(replies[2].0, replies[3].0);
+    assert_ne!(replies[0].1, replies[1].1);
+    h.authentication.second.cancel();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while closed_connections.recv().await.unwrap() != replies[3].0 {}
+    })
+    .await
+    .expect("revocation closes the second device's idle connection");
+    for (_, id) in replies {
+        assert!(app.caller(&id).is_err());
+    }
+    worker.abort();
+    h.close().await;
+}
+
+#[tokio::test]
 async fn separately_authenticated_browsers_forward_as_one_owner() {
     let (h, target, app) = fixture().await;
     let client = Harness::client();

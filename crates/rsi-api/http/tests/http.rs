@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SECOND_TOKEN: &str = "1905c16e76c5449284d7c08419d4128950e3de60fb9f47d9ad5800b17b3c36bd";
+const OTHER_LEASE_TOKEN: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 fn browser_cookie(origin: &str, token: &str) -> String {
     use sha2::Digest as _;
     let uri: http::Uri = origin.parse().unwrap();
@@ -92,6 +93,7 @@ mod browser_stream;
 struct Authentication {
     first: CancellationToken,
     second: CancellationToken,
+    other_lease: CancellationToken,
     calls: std::sync::atomic::AtomicUsize,
 }
 impl DeviceAuthentication for Authentication {
@@ -100,6 +102,7 @@ impl DeviceAuthentication for Authentication {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (id, revoked) = match token.expose_secret() {
             TOKEN => (DeviceId::from_bytes([1; 16]), &self.first),
+            OTHER_LEASE_TOKEN => (DeviceId::from_bytes([1; 16]), &self.other_lease),
             SECOND_TOKEN => (DeviceId::from_bytes([2; 16]), &self.second),
             _ => return Err(ApiError::Unauthorized),
         };
