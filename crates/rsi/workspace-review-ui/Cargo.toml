@@ -18,5 +18,9 @@ rsi-workspace-review-api = { path = "../workspace-review-api" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [lints]
 workspace = true

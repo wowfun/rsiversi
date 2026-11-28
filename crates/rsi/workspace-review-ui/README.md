@@ -4,7 +4,10 @@ This ordinary Application contribution renders the read-only workspace-review
 API in the existing TUI, browser and desktop surface registry. Every action
 resolves the actual surface Session controller and authorized Session header;
 request payloads cannot substitute a workspace or conversation. Registry action
-and view lifetimes fence reads. No model call or execution starts on inspection.
+and view lifetimes fence reads. Opening the surface shows its scope summary
+without calling the workspace-review API; once a presentation runs an inspection
+action, target invalidations refresh that selected operation until the
+presentation closes. No model call or execution starts on inspection.
 
 The empty view reports when there are no changes available for review. Lists with recorded intervals
 describe temporal comparisons, scope exclusions and counted omissions.

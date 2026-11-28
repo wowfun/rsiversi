@@ -10,12 +10,16 @@ use rsi_meta::{
 };
 use rsi_session_protocol::SessionContract;
 use rsi_ui::{
-    ActionContribution, ActionInput, ActionTarget, Contributions, Result, SurfaceContribution,
-    SurfaceRenderer, TargetKind, UiAction, UiContract, UiElement, UiError, UiView,
+    ActionContribution, ActionInput, ActionTarget, Contributions, PresentationBinding,
+    PresentationBindingOwner, PresentationIdentity, Result, SurfaceContribution, SurfaceRenderer,
+    TargetKind, UiAction, UiContract, UiElement, UiError, UiModel, UiView,
 };
 use rsi_workspace_review_api::{Client, ConversationIdentity, Phase, Reply, Request, Scope};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio_util::sync::CancellationToken;
+
+type Selections = Mutex<Vec<(PresentationIdentity, Option<Operation>)>>;
 
 /// Ordinary read-only contribution; no product-specific renderer transport.
 #[derive(Debug, Clone, Default)]
@@ -31,6 +35,7 @@ impl PluginFactory for Factory {
         Ok(PreparedActivation::new(ConfigValue::Null).requiring_local::<UiContract>())
     }
     async fn activate(&self, plan: ActivationPlan) -> rsi_meta::Result<()> {
+        let selections = Arc::new(Selections::default());
         let lease = plan
             .local::<UiContract>()?
             .register(
@@ -41,12 +46,12 @@ impl PluginFactory for Factory {
                         name: "review".into(),
                         title: "Workspace changes".into(),
                         target: TargetKind::Surface,
-                        renderer: Arc::new(Surface),
+                        renderer: Arc::new(Surface(selections.clone())),
                     }],
                     actions: vec![ActionContribution {
                         name: "read".into(),
                         target: TargetKind::Surface,
-                        handler: Arc::new(Read),
+                        handler: Arc::new(Read(selections)),
                     }],
                     renderers: vec![],
                 },
@@ -66,7 +71,7 @@ impl PluginFactory for Factory {
         )
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     List {
@@ -110,44 +115,137 @@ fn error(e: impl std::fmt::Display) -> UiError {
     s.truncate(end);
     UiError::Action(s)
 }
+fn cover(context: &Context) -> Result<UiView> {
+    context
+        .lookup_local::<SessionControllerContract>()
+        .ok_or(UiError::Retired)?;
+    Ok(view(vec![
+        text(
+            "Changes observed during an execution interval; concurrent edits may be included.",
+        ),
+        text(
+            "Scope: Git tracked and non-ignored untracked text files. Ignored files and nested repository contents are outside coverage; omissions are reported per interval.",
+        ),
+        home(),
+    ]))
+}
+fn record_selection(
+    selections: &Selections,
+    presentation: Option<&PresentationIdentity>,
+    operation: Operation,
+) {
+    if let Some(presentation) = presentation
+        && let Some((_, slot)) = selections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|(id, _)| id == presentation)
+    {
+        *slot = Some(operation);
+    }
+}
+fn selected_operation(
+    selections: &Selections,
+    presentation: &PresentationIdentity,
+) -> Option<Operation> {
+    selections
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find_map(|(id, slot)| (id == presentation).then(|| slot.clone()))
+        .flatten()
+}
 #[derive(Debug)]
-struct Surface;
-impl SurfaceRenderer for Surface {
-    fn render(&self, context: &Context) -> Result<UiView> {
-        context
-            .lookup_local::<SessionControllerContract>()
-            .ok_or(UiError::Retired)?;
-        Ok(view(vec![
-            text(
-                "Changes observed during an execution interval; concurrent edits may be included.",
-            ),
-            text(
-                "Scope: Git tracked and non-ignored untracked text files. Ignored files and nested repository contents are outside coverage; omissions are reported per interval.",
-            ),
-            home(),
-        ]))
+struct BindingOwner {
+    selections: Arc<Selections>,
+    presentation: PresentationIdentity,
+}
+#[async_trait]
+impl PresentationBindingOwner for BindingOwner {
+    fn retire(&self) {
+        self.selections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(id, _)| id != &self.presentation);
+    }
+    async fn close(&self) -> Result<()> {
+        self.retire();
+        Ok(())
     }
 }
 #[derive(Debug)]
-struct Read;
+struct Surface(Arc<Selections>);
+impl SurfaceRenderer for Surface {
+    fn bind(
+        &self,
+        target: Context,
+        presentation: PresentationIdentity,
+        stop: CancellationToken,
+    ) -> BoxFuture<'_, Result<Option<PresentationBinding>>> {
+        Box::pin(async move {
+            if stop.is_cancelled() {
+                return Err(UiError::Retired);
+            }
+            {
+                let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some((_, slot)) = entries.iter_mut().find(|(id, _)| id == &presentation) {
+                    *slot = None;
+                } else {
+                    entries.push((presentation.clone(), None));
+                }
+            }
+            let owner = Arc::new(BindingOwner {
+                selections: self.0.clone(),
+                presentation,
+            });
+            if stop.is_cancelled() {
+                owner.retire();
+                return Err(UiError::Retired);
+            }
+            Ok(Some(PresentationBinding::new(target, owner)))
+        })
+    }
+    fn render(&self, context: &Context) -> Result<UiView> {
+        cover(context)
+    }
+    fn model_in(
+        &self,
+        target: Context,
+        presentation: PresentationIdentity,
+    ) -> BoxFuture<'_, Result<UiModel>> {
+        let selected = selected_operation(&self.0, &presentation);
+        Box::pin(async move {
+            let current = match selected {
+                Some(operation) => read(&target, operation).await?,
+                None => cover(&target)?,
+            };
+            UiModel::standard(current).map_err(Into::into)
+        })
+    }
+}
+#[derive(Debug)]
+struct Read(Arc<Selections>);
 impl UiAction for Read {
     fn invoke(
         &self,
         target: ActionTarget,
         input: ActionInput,
     ) -> BoxFuture<'static, Result<UiView>> {
+        let selections = self.0.clone();
         Box::pin(async move {
             if !input.fields.is_empty() {
                 return Err(UiError::Invalid(
                     "Workspace review has no editable fields".into(),
                 ));
             }
-            let operation = serde_json::from_value(input.value).map_err(error)?;
-            tokio::select! {biased;
+            let operation: Operation = serde_json::from_value(input.value).map_err(error)?;
+            let current = tokio::select! {biased;
                 ()=target.cancelled()=>Err(UiError::Retired),
                 ()=target.view_closed()=>Err(UiError::Retired),
-                result=read(target.context(),operation)=>result,
-            }
+                result=read(target.context(),operation.clone())=>result,
+            }?;
+            record_selection(&selections, target.presentation(), operation);
+            Ok(current)
         })
     }
 }
@@ -187,117 +285,13 @@ async fn read(context: &Context, operation: Operation) -> Result<UiView> {
 fn present(reply: Reply) -> UiView {
     let mut elements = vec![home()];
     match reply {
-        Reply::Summaries { items, next } => {
-            if !items.is_empty() {
-                elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
-            } else {
-                elements.push(text("No workspace changes to review."));
-            }
-            for item in items {
-                let state = match item.phase {
-                    Phase::Pending => "Pending; work or capture not settled",
-                    Phase::Complete => "Complete",
-                    Phase::Partial => "Partial",
-                };
-                let value = match item.finished_ms {
-                    Some(end) => format!(
-                        "{state} · {} {} · +{} / −{} lines · {} → {end} ms",
-                        item.changed_files,
-                        if item.changed_files == 1 {
-                            "file"
-                        } else {
-                            "files"
-                        },
-                        item.added_lines,
-                        item.removed_lines,
-                        item.started_ms,
-                    ),
-                    None => state.to_owned(),
-                };
-                elements.push(UiElement::Field {
-                    label: format!("Interval {}", item.id),
-                    value,
-                });
-                if !item.omissions.is_empty() {
-                    elements.push(text(format!(
-                        "Coverage omissions: {}",
-                        item.omissions
-                            .iter()
-                            .map(|o| format!("{:?}: {}", o.kind, o.count))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                }
-                if item.changed_files > 0 && item.phase != Phase::Pending {
-                    elements.push(button(
-                        "Open interval files",
-                        Operation::Files {
-                            id: item.id,
-                            offset: 0,
-                        },
-                    ));
-                }
-            }
-            if let Some(after) = next {
-                elements.push(button(
-                    "More intervals",
-                    Operation::List { after: Some(after) },
-                ));
-            }
-        }
+        Reply::Summaries { items, next } => present_summaries(&mut elements, items, next),
         Reply::Files {
             id,
             offset,
             files,
             has_more,
-        } => {
-            elements.push(text(format!("Interval {id}. Changes occurred in this interval; concurrent edits may be included.")));
-            let shown = files
-                .iter()
-                .take(16)
-                .scan(0usize, |bytes, file| {
-                    *bytes += 2 * file.path.len()
-                        + file.previous_path.as_ref().map_or(0, String::len)
-                        + 512;
-                    Some(*bytes)
-                })
-                .take_while(|bytes| *bytes <= 16 * 1024)
-                .count();
-            if files.is_empty() {
-                elements.push(text("No comparable text changes in this interval."));
-            }
-            for file in files.iter().take(shown) {
-                elements.push(UiElement::Field {
-                    label: file.path.clone(),
-                    value: format!(
-                        "+{} / −{}{}",
-                        file.added,
-                        file.removed,
-                        file.previous_path
-                            .as_ref()
-                            .map(|p| format!(" · renamed from {p}"))
-                            .unwrap_or_default()
-                    ),
-                });
-                elements.push(button(
-                    "Open file diff",
-                    Operation::Diff {
-                        id: id.clone(),
-                        path: file.path.clone(),
-                        offset: 0,
-                    },
-                ));
-            }
-            if has_more || shown < files.len() {
-                elements.push(button(
-                    "More changed files",
-                    Operation::Files {
-                        id,
-                        offset: offset + shown,
-                    },
-                ));
-            }
-        }
+        } => present_files(&mut elements, id, offset, &files, has_more),
         Reply::Diff {
             id,
             path,
@@ -305,39 +299,164 @@ fn present(reply: Reply) -> UiView {
             has_more,
             text: content,
             ..
-        } => {
-            let mut end = content.len().min(12 * 1024);
-            while !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            elements.push(button(
-                "Back to interval files",
-                Operation::Files {
-                    id: id.clone(),
-                    offset: 0,
-                },
-            ));
-            elements.push(UiElement::Field {
-                label: "File diff".into(),
-                value: path.clone(),
-            });
-            elements.push(UiElement::Code {
-                text: content[..end].into(),
-            });
-            if has_more || end < content.len() {
-                elements.push(button(
-                    "Continue diff",
-                    Operation::Diff {
-                        id,
-                        path,
-                        offset: offset + end,
-                    },
-                ));
-            }
-        }
+        } => present_diff(&mut elements, id, path, offset, has_more, &content),
         Reply::Expired { .. } => elements.push(text("This comparison has expired.")),
     }
     view(elements)
+}
+fn present_summaries(
+    elements: &mut Vec<UiElement>,
+    items: Vec<rsi_workspace_review_api::Summary>,
+    next: Option<String>,
+) {
+    if items.is_empty() {
+        elements.push(text("No workspace changes to review."));
+    } else {
+        elements.push(text("Interval evidence includes concurrent edits, and excludes ignored files and nested repository contents. Complete applies only to the declared text-file scope and controlled work. External agents and detached background work may write after the interval."));
+    }
+    for item in items {
+        let state = match item.phase {
+            Phase::Pending => "Pending; work or capture not settled",
+            Phase::Complete => "Complete",
+            Phase::Partial => "Partial",
+        };
+        let value = match item.finished_ms {
+            Some(end) => format!(
+                "{state} · {} {} · +{} / −{} lines · {} → {end} ms",
+                item.changed_files,
+                if item.changed_files == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
+                item.added_lines,
+                item.removed_lines,
+                item.started_ms,
+            ),
+            None => state.to_owned(),
+        };
+        elements.push(UiElement::Field {
+            label: format!("Interval {}", item.id),
+            value,
+        });
+        if !item.omissions.is_empty() {
+            elements.push(text(format!(
+                "Coverage omissions: {}",
+                item.omissions
+                    .iter()
+                    .map(|o| format!("{:?}: {}", o.kind, o.count))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if item.changed_files > 0 && item.phase != Phase::Pending {
+            elements.push(button(
+                "Open interval files",
+                Operation::Files {
+                    id: item.id,
+                    offset: 0,
+                },
+            ));
+        }
+    }
+    if let Some(after) = next {
+        elements.push(button(
+            "More intervals",
+            Operation::List { after: Some(after) },
+        ));
+    }
+}
+fn present_files(
+    elements: &mut Vec<UiElement>,
+    id: String,
+    offset: usize,
+    files: &[rsi_workspace_review_api::FileChange],
+    has_more: bool,
+) {
+    elements.push(text(format!(
+        "Interval {id}. Changes occurred in this interval; concurrent edits may be included."
+    )));
+    let shown = files
+        .iter()
+        .take(16)
+        .scan(0usize, |bytes, file| {
+            *bytes +=
+                2 * file.path.len() + file.previous_path.as_ref().map_or(0, String::len) + 512;
+            Some(*bytes)
+        })
+        .take_while(|bytes| *bytes <= 16 * 1024)
+        .count();
+    if files.is_empty() {
+        elements.push(text("No comparable text changes in this interval."));
+    }
+    for file in files.iter().take(shown) {
+        elements.push(UiElement::Field {
+            label: file.path.clone(),
+            value: format!(
+                "+{} / −{}{}",
+                file.added,
+                file.removed,
+                file.previous_path
+                    .as_ref()
+                    .map(|p| format!(" · renamed from {p}"))
+                    .unwrap_or_default()
+            ),
+        });
+        elements.push(button(
+            "Open file diff",
+            Operation::Diff {
+                id: id.clone(),
+                path: file.path.clone(),
+                offset: 0,
+            },
+        ));
+    }
+    if has_more || shown < files.len() {
+        elements.push(button(
+            "More changed files",
+            Operation::Files {
+                id,
+                offset: offset + shown,
+            },
+        ));
+    }
+}
+fn present_diff(
+    elements: &mut Vec<UiElement>,
+    id: String,
+    path: String,
+    offset: usize,
+    has_more: bool,
+    content: &str,
+) {
+    let mut end = content.len().min(12 * 1024);
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    elements.push(button(
+        "Back to interval files",
+        Operation::Files {
+            id: id.clone(),
+            offset: 0,
+        },
+    ));
+    elements.push(UiElement::Field {
+        label: "File diff".into(),
+        value: path.clone(),
+    });
+    elements.push(UiElement::Code {
+        text: content[..end].into(),
+    });
+    if has_more || end < content.len() {
+        elements.push(button(
+            "Continue diff",
+            Operation::Diff {
+                id,
+                path,
+                offset: offset + end,
+            },
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -462,5 +581,45 @@ mod tests {
                 |e| matches!(e,UiElement::Text{text} if text == "This comparison has expired.")
             )
         );
+    }
+    #[tokio::test]
+    async fn presentation_selection_tracks_bound_lifetime_and_rejects_retired_updates() {
+        let runtime = rsi_meta::Runtime::default();
+        let selections = Arc::new(Selections::default());
+        let surface = Surface(selections.clone());
+        let id = PresentationIdentity {
+            reference: rsi_ui::UiReference {
+                application: "app".into(),
+                target: "target".into(),
+                contribution: "rsi.workspace.review".into(),
+                name: "review".into(),
+            },
+            epoch: "epoch".into(),
+        };
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            surface.bind(runtime.root(), id.clone(), cancelled).await,
+            Err(UiError::Retired)
+        ));
+        assert!(selections.lock().unwrap().is_empty());
+        let binding = surface
+            .bind(runtime.root(), id.clone(), CancellationToken::new())
+            .await
+            .unwrap()
+            .expect("presentation binding");
+        assert_eq!(selected_operation(&selections, &id), None);
+        assert_eq!(selections.lock().unwrap().len(), 1);
+        let selected = Operation::Files {
+            id: "1".repeat(32),
+            offset: 0,
+        };
+        record_selection(&selections, Some(&id), selected.clone());
+        assert_eq!(selected_operation(&selections, &id), Some(selected));
+        binding.close().await.unwrap();
+        assert!(selections.lock().unwrap().is_empty());
+        record_selection(&selections, Some(&id), Operation::List { after: None });
+        assert!(selections.lock().unwrap().is_empty());
+        assert!(runtime.shutdown().await.is_clean());
     }
 }
