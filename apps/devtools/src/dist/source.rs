@@ -1,8 +1,9 @@
 use super::{Path, Result, Value, fs, hash, hash_file, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Seek, Write},
+    path::PathBuf,
 };
 
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -51,10 +52,12 @@ fn capture_names<'a>(
             Err(error) => return Err(error.into()),
         }
     }
+    let mut verified_sources = BTreeSet::new();
+    let mut verified_targets = BTreeSet::new();
     if let Some(previous) = previous.and_then(Value::as_object) {
         for name in previous.keys().filter(|n| !stamps.contains_key(n.as_str())) {
             valid_name(name)?;
-            parents(destination, name)?;
+            parents(destination, name, &mut verified_targets)?;
             let path = destination.join(name);
             if fs::symlink_metadata(&path).is_ok() {
                 writable(&path)?;
@@ -66,19 +69,18 @@ fn capture_names<'a>(
     for (&name, expected) in &stamps {
         let path = root.join(name);
         let target = destination.join(name);
-        if !path
-            .parent()
-            .ok_or("source parent missing")?
-            .canonicalize()?
-            .starts_with(&root)
-        {
-            return Err(format!("source parent escapes checkout: {name}").into());
+        let source_parent = path.parent().ok_or("source parent missing")?;
+        if !verified_sources.contains(source_parent) {
+            if !source_parent.canonicalize()?.starts_with(&root) {
+                return Err(format!("source parent escapes checkout: {name}").into());
+            }
+            verified_sources.insert(source_parent.to_owned());
         }
         let before = fs::symlink_metadata(&path)?;
         if *expected != stamp(&before) {
             return Err(format!("source changed before capture: {name}").into());
         }
-        parents(destination, name)?;
+        parents(destination, name, &mut verified_targets)?;
         if before.is_symlink() {
             let link = fs::read_link(&path)?;
             if link.is_absolute() || !link_destination(&path)?.starts_with(&root) {
@@ -140,10 +142,11 @@ fn capture_names<'a>(
     Ok(serde_json::to_value(records)?)
 }
 fn copy_source(input: &mut (impl Read + Seek), size: u64, target: &Path) -> Result<(String, u64)> {
-    if fs::symlink_metadata(target).is_ok_and(|info| info.is_file() && info.len() == size) {
-        let (digest, bytes) = stream_source(input, &mut std::io::sink(), target)?;
-        if bytes == size && hash_file(target)? == digest {
-            return Ok((digest, bytes));
+    if fs::symlink_metadata(target).is_ok_and(|info| info.is_file() && info.len() == size)
+        && let Ok(mut cached) = fs::File::open(target)
+    {
+        if let Some(matched) = compare_source(input, &mut cached, size, target)? {
+            return Ok(matched);
         }
         input.rewind()?;
     }
@@ -159,6 +162,57 @@ fn copy_source(input: &mut (impl Read + Seek), size: u64, target: &Path) -> Resu
     }
     temporary.persist(target)?;
     Ok(record)
+}
+fn read_chunk(reader: &mut impl Read, mut buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while !buffer.is_empty() {
+        match reader.read(buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                total += count;
+                buffer = &mut buffer[count..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(total)
+}
+fn compare_source(
+    input: &mut impl Read,
+    cached: &mut impl Read,
+    size: u64,
+    target: &Path,
+) -> Result<Option<(String, u64)>> {
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut source_buf = [0_u8; 16 * 1024];
+    let mut cached_buf = [0_u8; 16 * 1024];
+    loop {
+        let count = match input.read(&mut source_buf) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        bytes += count as u64;
+        if bytes > MAX_SOURCE_BYTES {
+            return Err(format!("source file exceeds 64 MiB: {}", target.display()).into());
+        }
+        let Ok(cached_count) = read_chunk(cached, &mut cached_buf[..count]) else {
+            return Ok(None);
+        };
+        if cached_count != count || source_buf[..count] != cached_buf[..count] {
+            return Ok(None);
+        }
+        digest.update(&source_buf[..count]);
+    }
+    let at_eof = matches!(read_chunk(cached, &mut cached_buf[..1]), Ok(0));
+    if bytes == size && at_eof {
+        Ok(Some((format!("{:x}", digest.finalize()), bytes)))
+    } else {
+        Ok(None)
+    }
 }
 fn stream_source(
     input: &mut impl Read,
@@ -209,7 +263,7 @@ fn link_destination(path: &Path) -> Result<std::path::PathBuf> {
         }
     }
 }
-fn parents(root: &Path, name: &str) -> Result<()> {
+fn parents(root: &Path, name: &str, verified: &mut BTreeSet<PathBuf>) -> Result<()> {
     let mut parent = root.to_owned();
     for part in Path::new(name)
         .parent()
@@ -217,12 +271,16 @@ fn parents(root: &Path, name: &str) -> Result<()> {
         .components()
     {
         parent.push(part);
+        if verified.contains(&parent) {
+            continue;
+        }
         match fs::symlink_metadata(&parent) {
             Ok(info) if info.is_dir() && !info.is_symlink() => (),
             Ok(_) => return Err("capture parent must be an ordinary directory".into()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&parent)?,
             Err(error) => return Err(error.into()),
         }
+        verified.insert(parent.clone());
     }
     Ok(())
 }
@@ -518,6 +576,46 @@ mod tests {
         assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), modified);
         bytes[32_768] = b'b';
         copy_source(&mut std::io::Cursor::new(&bytes), size, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+
+        // Early byte mismatch rewinds without reading the remaining source stream first.
+        struct PrefixProbe<'a> {
+            bytes: &'a [u8],
+            pos: usize,
+            max_before_rewind: usize,
+            rewound: bool,
+        }
+        impl Read for PrefixProbe<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = (self.bytes.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&self.bytes[self.pos..self.pos + n]);
+                self.pos += n;
+                if !self.rewound {
+                    self.max_before_rewind = self.max_before_rewind.max(self.pos);
+                }
+                Ok(n)
+            }
+        }
+        impl Seek for PrefixProbe<'_> {
+            fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+                assert_eq!(to, std::io::SeekFrom::Start(0));
+                self.rewound = true;
+                self.pos = 0;
+                Ok(0)
+            }
+        }
+        bytes[0] = b'z';
+        let mut probe = PrefixProbe {
+            bytes: &bytes,
+            pos: 0,
+            max_before_rewind: 0,
+            rewound: false,
+        };
+        let (digest, count) = copy_source(&mut probe, size, &target).unwrap();
+        assert!(probe.rewound);
+        assert!(probe.max_before_rewind <= 16 * 1024);
+        assert_eq!(digest, hash(&bytes));
+        assert_eq!(count, size);
         assert_eq!(fs::read(&target).unwrap(), bytes);
     }
 
