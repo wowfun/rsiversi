@@ -332,63 +332,65 @@ pub(super) fn executable(path: &Path) -> Result<()> {
 pub(super) fn verify(root: &Path, records: &Value) -> Result<()> {
     let records = records.as_object().ok_or("invalid capture records")?;
     let mut directories = vec![root.to_owned()];
+    let mut verified = 0;
     while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory)? {
+        if !fs::symlink_metadata(&directory)?.is_dir() {
+            return Err(format!("captured directory changed: {}", directory.display()).into());
+        }
+        for entry in fs::read_dir(&directory)? {
             let entry = entry?;
             let path = entry.path();
             let kind = entry.file_type()?;
             let name = path
                 .strip_prefix(root)?
                 .to_str()
-                .ok_or("non-Unicode capture path")?
-                .replace('\\', "/");
+                .ok_or("non-Unicode capture path")?;
+            #[cfg(windows)]
+            let normalized = name.replace('\\', "/");
+            #[cfg(windows)]
+            let name = normalized.as_str();
             if kind.is_dir() {
-                if !GENERATED.contains(&name.as_str()) {
+                if !GENERATED.contains(&name) {
                     directories.push(path);
                 }
-            } else if !records.contains_key(&name) {
-                return Err(format!("uncaptured source added: {name}").into());
+                continue;
             }
+            let record = records
+                .get(name)
+                .ok_or_else(|| format!("uncaptured source added: {name}"))?;
+            if record["kind"] == "symlink" {
+                if !kind.is_symlink()
+                    || fs::read_link(&path)?
+                        != Path::new(record["target"].as_str().ok_or("missing link target")?)
+                {
+                    return Err(format!("captured symlink changed: {name}").into());
+                }
+            } else {
+                if !kind.is_file() || hash_file(&path)? != record["sha256"] {
+                    return Err(format!("captured source bytes changed: {name}").into());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let expected = if record["executable"] == true {
+                        0o555
+                    } else {
+                        0o444
+                    };
+                    if entry.metadata()?.permissions().mode() & 0o777 != expected {
+                        return Err(format!("captured source mode changed: {name}").into());
+                    }
+                }
+            }
+            verified += 1;
         }
     }
-    for (name, record) in records {
-        valid_name(name)?;
-        let mut parent = root.to_owned();
-        for part in Path::new(name)
-            .parent()
-            .ok_or("capture parent missing")?
-            .components()
-        {
-            parent.push(part);
-            let info = fs::symlink_metadata(&parent)?;
-            if !info.is_dir() || info.is_symlink() {
-                return Err("captured parent changed".into());
-            }
-        }
-        let path = root.join(name);
-        let info = fs::symlink_metadata(&path)?;
-        if record["kind"] == "symlink" {
-            if !info.is_symlink()
-                || fs::read_link(path)?
-                    != Path::new(record["target"].as_str().ok_or("missing link target")?)
-            {
-                return Err(format!("captured symlink changed: {name}").into());
-            }
-        } else if !info.is_file() || info.is_symlink() || hash_file(&path)? != record["sha256"] {
-            return Err(format!("captured source bytes changed: {name}").into());
-        }
-        #[cfg(unix)]
-        if record["kind"] == "file" {
-            use std::os::unix::fs::PermissionsExt;
-            let expected = if record["executable"] == true {
-                0o555
-            } else {
-                0o444
-            };
-            if info.permissions().mode() & 0o777 != expected {
-                return Err(format!("captured source mode changed: {name}").into());
-            }
-        }
+    if verified != records.len() {
+        return Err(format!(
+            "captured sources missing: verified {verified} of {}",
+            records.len()
+        )
+        .into());
     }
     Ok(())
 }
@@ -575,6 +577,22 @@ mod tests {
         fs::write(out.join("keep"), b"changed").unwrap();
         assert!(verify(&out, &second).is_err());
     }
+    #[cfg(unix)]
+    #[test]
+    fn verification_distinguishes_literal_backslashes_from_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("input");
+        let output = root.path().join("output");
+        fs::create_dir(&input).unwrap();
+        let name = r"sub\file";
+        fs::write(input.join(name), "literal").unwrap();
+        let records = capture_names(&input, &output, [name], None).unwrap();
+        verify(&output, &records).unwrap();
+        fs::create_dir(output.join("sub")).unwrap();
+        fs::rename(output.join(name), output.join("sub/file")).unwrap();
+        assert!(verify(&output, &records).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_targets_must_stay_in_source() {

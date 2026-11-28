@@ -110,6 +110,9 @@ Capture takes its initial file-identity observations as it selects the present
 Git paths. It reuses a regular file whose size and SHA-256 match the source.
 Only new or changed contents need a temporary file for atomic replacement.
 The final verification still checks the checkout against the captured bytes.
+Before compilation and publication, the verifier walks the captured tree and
+checks each source against the manifest. It visits real directories once per
+walk and preserves literal backslashes in Unix filenames.
 The build-family fingerprint also identifies an unchanged manifest on disk.
 The frontend install gives pnpm the same store path when different checkouts
 reach the shared build cache through directory links.
