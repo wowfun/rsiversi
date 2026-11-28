@@ -199,7 +199,9 @@ Its reply includes required rendered `instructions` from the same captured
 application context, with an empty string meaning no system contribution. Native
 admission applies the Step instruction bound before retaining the request view.
 Capture, preparation and start use the caller's cancellation/deadline. Receipt
-queries and control requests retain their ten-second transport timeout.
+queries and control requests retain their ten-second transport timeout. Idle
+loopback connections expire after four seconds so non-idempotent Tool starts
+do not race upstream server keep-alive teardown.
 Dropping the final request view delivers an idempotent release to its original
 listener. Uncertain delivery and capacity refusals retry with a bounded backoff
 until acknowledged or that process generation retires. Definite endpoint refusals

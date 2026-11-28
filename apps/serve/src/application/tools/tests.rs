@@ -586,3 +586,81 @@ async fn cancellation_interrupts_a_stalled_read_and_an_unconfirmed_body_remains_
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn idle_pooled_listener_connection_expires_before_server_keepalive_closes_start() {
+    use rsi_meta::{ResolvedFactory, Runtime, UpdateMode};
+    use rsi_tools_protocol::ToolCatalogProviderContract;
+
+    let runtime = Runtime::default();
+    let tools = runtime
+        .root()
+        .apply(
+            ResolvedFactory::linked(
+                "tools",
+                "test",
+                UpdateMode::Replayable,
+                Arc::new(rsi_tools::ToolsFactory),
+            ),
+            Value::Null,
+        )
+        .await
+        .unwrap();
+    let (source, publisher) = Source::new(
+        runtime
+            .root()
+            .lookup_local::<ToolCatalogProviderContract>()
+            .unwrap(),
+        CancellationToken::new(),
+        BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    publisher.publish(
+        Listener {
+            protocol: 18,
+            generation: "worker".into(),
+            port: listener.local_addr().unwrap().port(),
+        },
+        SecretValue::new("fixture-key").unwrap(),
+        CancellationToken::new(),
+    );
+    let endpoint = source.endpoint.borrow().as_ref().unwrap().clone();
+    let view = captured_view(endpoint);
+    let prepare_req = json!({"view":"capture"});
+    let start_req = json!({"effect":"concurrent-1"});
+    let server = async {
+        let mut first = accept(&listener, "stopping", &prepare_req).await;
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nnull")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(4200)).await;
+        drop(first);
+        let mut second = accept(&listener, "start", &start_req).await;
+        respond(
+            &mut second,
+            r#"{"state":"settled","result":{"value":"after1","content":[],"is_error":false}}"#,
+        )
+        .await;
+    };
+    let client = async {
+        view.turn_stopping(CancellationToken::new()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(4300)).await;
+        let result = view
+            .start_and_observe(&start_req, &start_req, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.value, "after1");
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .unwrap();
+    drop(view);
+    drop(source);
+    assert!(tools.dispose().await.is_clean());
+    assert!(runtime.shutdown().await.is_clean());
+}

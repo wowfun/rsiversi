@@ -51,7 +51,9 @@ HTTP request/response bodies and WebSocket upgrades stream independently from
 process-extension JSON frames. Exact static files and native API/bootstrap
 routes retain their own handlers.
 Sequential HTTP requests can reuse the private connection for the same device
-and application generation. Each request receives its own authenticated
+and application generation within a bounded four-second idle window, retiring
+idle sockets before upstream server keep-alive timers can close them across
+non-idempotent requests. Each request receives its own authenticated
 callback and public origin metadata. Revoking the device or retiring the
 application closes its private connections, including idle ones.
 For authenticated GET and HEAD requests, a successful JavaScript or CSS

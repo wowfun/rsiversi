@@ -38,6 +38,7 @@ impl DeviceClient {
             revoked: device.revoked.clone(),
         })
         .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(std::time::Duration::from_secs(4))
         .pool_max_idle_per_host(1)
         .set_host(false)
         .build(connector);

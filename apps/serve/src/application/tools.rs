@@ -192,6 +192,7 @@ impl Source {
     ) -> rsi_meta::Result<(Self, Publisher)> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .pool_idle_timeout(Duration::from_secs(4))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(failure)?;
