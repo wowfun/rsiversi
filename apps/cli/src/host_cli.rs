@@ -464,7 +464,7 @@ pub(super) async fn start_host_daemon(profile_id: &HostProfileId) -> rsi::Result
 }
 
 async fn start_host_daemon_inner(profile_id: &HostProfileId, attach: bool) -> rsi::Result<()> {
-    super::core_cli::ensure_no_pending()?;
+    super::core_cli::ensure_no_pending(false)?;
     let paths = standard_paths()?;
     let host_paths = ServiceHostPaths::from_host_paths(&paths)
         .map_err(|error| RsiError::Boot(error.to_string()))?;
@@ -481,7 +481,7 @@ async fn start_host_daemon_inner(profile_id: &HostProfileId, attach: bool) -> rs
         }
     };
     // A caller may have waited while an upgrade was interrupted.
-    super::core_cli::ensure_no_pending()?;
+    super::core_cli::ensure_no_pending(false)?;
     rsi::reject_pending_import(&paths)?;
     start_host_coordinated(
         profile_id,
@@ -561,6 +561,17 @@ pub(super) async fn start_host_coordinated(
     if tokio::time::Instant::now() >= deadline {
         return Err(daemon_readiness_timeout_error());
     }
+    let input = match source {
+        Some(_) => Stdio::from(
+            rsi_installation::upgrade::activation_input(
+                executable
+                    .parent()
+                    .ok_or_else(|| RsiError::Boot("missing executable parent".into()))?,
+            )
+            .map_err(|error| RsiError::Boot(format!("open core activation lease: {error}")))?,
+        ),
+        None => Stdio::null(),
+    };
     let mut command = std::process::Command::new(executable);
     launch::current()?.append_child_options(&mut command);
     command.args([
@@ -573,7 +584,7 @@ pub(super) async fn start_host_coordinated(
     #[cfg(windows)]
     super::host_runtime::detach(&mut command)?;
     let child = command
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()

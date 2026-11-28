@@ -185,10 +185,25 @@ fn installed_core_upgrades_recovers_and_preserves_active_host_on_invalid_candida
     )
     .unwrap();
     transaction.promote().unwrap();
+    let detached = ["host", "serve", "--detached-child", "--profile", "missing"];
+    let independent = fixture.command().args(detached).output().unwrap();
+    assert!(!independent.status.success());
+    assert!(String::from_utf8_lossy(&independent.stderr).contains("core recover"));
     drop(transaction);
     drop(startup);
     let denied = fixture.command().args(["config", "show"]).output().unwrap();
     assert!(!denied.status.success());
+    let stale = fixture
+        .command()
+        .args(detached)
+        .stdin(
+            rsi_installation::upgrade::activation_input(fixture.executable.parent().unwrap())
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("core recover"));
     fixture.success(&["core", "recover"]);
     assert_eq!(hash(&fixture.executable), hash(&fixture.candidate));
     let recovered = fixture.metadata();

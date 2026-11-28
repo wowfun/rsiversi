@@ -6952,6 +6952,7 @@ dependencies = [
  "rsi-service-host",
  "rsi-workspace-path",
  "rustix 1.1.4",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

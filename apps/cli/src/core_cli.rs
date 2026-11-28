@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 
 use super::cli::CORE_HELP as HELP;
 
-pub(super) fn ensure_no_pending() -> rsi::Result<()> {
+pub(super) fn ensure_no_pending(detached_child: bool) -> rsi::Result<()> {
     let executable = std::env::current_exe().map_err(error)?;
-    if CoreUpgrade::has_pending(
-        executable
-            .parent()
-            .ok_or_else(|| error("missing executable parent"))?,
-    )
-    .map_err(error)?
+    let bin = executable
+        .parent()
+        .ok_or_else(|| error("missing executable parent"))?;
+    if CoreUpgrade::has_pending(bin).map_err(error)?
+        && !(detached_child
+            && rsi_installation::upgrade::is_activation_child(bin).map_err(error)?)
     {
         return Err(error(
             "a core upgrade needs recovery; run rsi core recover with its original config/state homes",
@@ -43,7 +43,7 @@ async fn execute(command: Command) -> rsi::Result<()> {
     let paths = super::launch::paths()?;
     let executable = std::env::current_exe().map_err(error)?;
     let package = if let Command::Upgrade(local) = &command {
-        ensure_no_pending()?;
+        ensure_no_pending(false)?;
         Some(super::plugin_cli::install_core(local.as_deref()).await?)
     } else {
         None

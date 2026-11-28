@@ -168,7 +168,10 @@ precedes stopping the selected Host. The [installation owner](../../installation
 defines fixed-layout records, transaction versions, installation lease order and
 platform filesystem policy. The
 Host startup coordinator remains held across stop, executable
-promotion and readiness. Executable hashes, final config/data/state homes and bounded
+promotion and readiness. During activation or rollback the coordinator passes the
+child a read-only handle to the installation's existing maintenance lock. The
+detached Host may start with a pending journal while the coordinator holds that
+lock. An independent launch still requires recovery. Executable hashes, final config/data/state homes and bounded
 single-component backup names are recorded before the first rename. The previous
 binary is retained on the same volume. The coordinator stops the live Host
 before promotion. Windows permits renaming the running upgrade launcher's image.

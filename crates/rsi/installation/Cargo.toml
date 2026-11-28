@@ -11,6 +11,7 @@ rsi-files-native-fs = { path = "../../rsi-files/native-fs" }
 rsi-host = { path = "../../rsi-host/core" }
 rsi-service-host = { path = "../service-host" }
 rsi-packages = { path = "../packages" }
+same-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

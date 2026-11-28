@@ -1,6 +1,33 @@
 //! Select the journal owner without adopting legacy copies into managed installs.
 use crate::{Layout, Result, error, transaction::Transaction};
 use std::path::{Path, PathBuf};
+
+/// Open a separate reader so a detached child cannot prolong the coordinator's lock.
+pub fn activation_input(bin: &Path) -> Result<std::fs::File> {
+    let directory = rsi_files_native_fs::open_absolute_directory_no_follow(bin)?;
+    rsi_files_native_fs::open_relative_file_no_follow(
+        &directory,
+        Path::new(crate::filesystem::LOCK),
+    )
+}
+
+/// A pending journal permits the activation child while its coordinator owns this installation.
+pub fn is_activation_child(bin: &Path) -> Result<bool> {
+    let lock = match activation_input(bin) {
+        Ok(file) => same_file::Handle::from_file(file)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !same_file::Handle::stdin().is_ok_and(|input| input == lock) {
+        return Ok(false);
+    }
+    match lock.as_file().try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 #[derive(Debug)]
 pub struct Upgrade(UpgradeKind);
 #[derive(Debug)]

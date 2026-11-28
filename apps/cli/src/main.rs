@@ -148,17 +148,21 @@ async fn run_main() -> u8 {
         return 0;
     }
     #[cfg(any(target_os = "linux", windows))]
-    if !matches!(
-        &parsed,
+    if let Err(error) = match &parsed {
         Parse::Core(_)
-            | Parse::Help(_)
-            | Parse::Version
-            | Parse::Host(HostCommand {
-                operation: HostOperation::Stop | HostOperation::Status,
-                ..
-            })
-    ) && let Err(error) = core_cli::ensure_no_pending()
-    {
+        | Parse::Help(_)
+        | Parse::Version
+        | Parse::Host(HostCommand {
+            operation: HostOperation::Stop | HostOperation::Status,
+            ..
+        }) => Ok(()),
+        Parse::Host(HostCommand {
+            operation: HostOperation::Serve,
+            detached_child,
+            ..
+        }) => core_cli::ensure_no_pending(*detached_child),
+        _ => core_cli::ensure_no_pending(false),
+    } {
         return report_error(&error);
     }
     if matches!(parsed, Parse::Help(_) | Parse::Version) {
