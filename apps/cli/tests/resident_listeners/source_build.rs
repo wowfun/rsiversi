@@ -87,8 +87,6 @@ async fn ordinary_watch_deduplicates_sources_preserves_good_package_and_releases
         },
     );
     std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
-    // Runtime publication can copy a full default-debug ELF before the Host is
-    // ready. Keep that separate from the source-observation deadline below.
     fixture.assert_success(&["host", "start"]);
     assert!(
         !source.join("count").exists(),

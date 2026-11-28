@@ -170,8 +170,8 @@ platform filesystem policy. The
 Host startup coordinator remains held across stop, executable
 promotion and readiness. Executable hashes, final config/data/state homes and bounded
 single-component backup names are recorded before the first rename. The previous
-binary is retained on the same volume. Windows permits renaming the running
-launcher image; the Host already runs from its immutable artifact copy.
+binary is retained on the same volume. The coordinator stops the live Host
+before promotion. Windows permits renaming the running upgrade launcher's image.
 
 Readiness across core revisions uses frozen Lifecycle v1 and native child
 identity, rather than an old client's product API schema. Failed activation
@@ -186,9 +186,7 @@ ordinary-file types; v2 additionally verifies each disposable payload digest. Wi
 may retain an executing image until its caller exits; the next upgrade retries
 that cleanup. Before a new transaction, abandoned candidate copies that have no
 journal or receipt are also reclaimed. Pending recovery participants are never
-collected. Runtime publication converts OS-canonical local-drive spelling to the
-bounded native path representation before acquiring directory handles. There is
-no background updater.
+collected. There is no background updater.
 
 Import resolves managed targets from the admitted absolute home roots through the
 native root-alias resolver before checking overlap or acquiring copy ownership.
