@@ -238,7 +238,16 @@ async fn host_profile_preview_of_the_running_artifact_matches_the_daemon_launch_
     )
     .unwrap();
     let pid = owner["pid"].as_u64().unwrap();
-    fixture.binary = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    let running = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    assert_eq!(running, fixture.binary.canonicalize().unwrap());
+    assert!(
+        !fixture
+            .temporary
+            .path()
+            .join("state/rsiversi/session-host/artifacts")
+            .exists()
+    );
+    fixture.binary = running;
     let preview =
         fixture.assert_success(&["profile", "host", "preview", "fixture", "--output", "json"]);
     let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();

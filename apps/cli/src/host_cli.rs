@@ -557,23 +557,11 @@ pub(super) async fn start_host_coordinated(
     let stderr = log
         .try_clone()
         .map_err(|error| RsiError::Boot(format!("clone Service Host log: {error}")))?;
-    let origin = match source {
-        Some(source) => rsi_installation::origin::for_executable(source)
-            .map_err(|error| RsiError::Boot(error.to_string()))?,
-        None => rsi_installation::origin::launch_hint().unwrap_or_else(|error| {
-            eprintln!("Installation provenance unavailable: {error}");
-            None
-        }),
-    };
-    let executable = super::host_runtime::publish_before(paths, source, deadline.into_std())?;
-    let mut command = std::process::Command::new(&executable.path);
-    command.env_remove("RSI_INSTALLATION_ORIGIN");
-    if let Some(origin) = origin {
-        command.env(
-            "RSI_INSTALLATION_ORIGIN",
-            serde_json::to_string(&origin).map_err(|e| RsiError::Boot(e.to_string()))?,
-        );
+    let (executable, _generation) = super::host_runtime::executable(source)?;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(daemon_readiness_timeout_error());
     }
+    let mut command = std::process::Command::new(executable);
     launch::current()?.append_child_options(&mut command);
     command.args([
         "host",
@@ -629,9 +617,6 @@ pub(super) async fn start_host_coordinated(
                     return Err(RsiError::Boot("new core stopped during readiness".into()));
                 }
                 child.disarm();
-                if let Err(error) = executable.collect(paths) {
-                    eprintln!("warning: {error}");
-                }
                 return Ok(());
             }
         } else if let Some(metadata) = host_paths
@@ -651,9 +636,6 @@ pub(super) async fn start_host_coordinated(
                 println!("started\t{}", child.id());
             }
             child.disarm();
-            if let Err(error) = executable.collect(paths) {
-                eprintln!("warning: {error}");
-            }
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {

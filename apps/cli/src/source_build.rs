@@ -49,7 +49,7 @@ impl WatchSources {
         let mut pending = Vec::new();
         for (name, source) in &configuration.sources {
             let directory = rsi::normalize_launch_path(&source.directory, paths.config())?;
-            let command = resolve_command(&source.command, &directory, &environment, paths)?;
+            let command = resolve_command(&source.command, &directory, &environment)?;
             let recipe = BuildRecipe {
                 package: name.clone(),
                 directory,
@@ -152,7 +152,6 @@ fn resolve_command(
     command: &[String],
     directory: &Path,
     environment: &BTreeMap<String, String>,
-    paths: &rsi_host::HostPaths,
 ) -> rsi::Result<Vec<String>> {
     let name = command
         .first()
@@ -199,15 +198,14 @@ fn resolve_command(
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
     {
         result.push(
-            super::host_runtime::publish(paths)?
+            std::env::current_exe()
+                .map_err(error)?
                 .to_str()
                 .ok_or_else(|| error("runtime path is not UTF-8"))?
                 .into(),
         );
         result.push("__source-command".into());
     }
-    #[cfg(not(windows))]
-    let _ = paths;
     result.push(
         executable
             .to_str()
@@ -242,7 +240,7 @@ pub(super) fn frontend(
             ))
         })
         .collect::<rsi::Result<BTreeMap<_, _>>>()?;
-    let command = resolve_command(&frontend.command, &directory, &utf8, paths)?;
+    let command = resolve_command(&frontend.command, &directory, &utf8)?;
     Ok(Some(rsi_serve::FrontendRecipe {
         directory,
         command,
@@ -280,4 +278,25 @@ pub(super) fn run_batch_helper() -> Option<u8> {
             .and_then(|code| u8::try_from(code).ok())
             .unwrap_or(1),
     )
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn batch_build_uses_the_invoking_executable() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("build.cmd");
+    std::fs::write(&script, "@exit /b 0\r\n").unwrap();
+    let command = resolve_command(
+        &[script.to_str().unwrap().into(), "two words".into()],
+        root.path(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(Path::new(&command[0]), std::env::current_exe().unwrap());
+    assert_eq!(command[1], "__source-command");
+    assert_eq!(
+        Path::new(&command[2]).canonicalize().unwrap(),
+        script.canonicalize().unwrap()
+    );
+    assert_eq!(&command[3..], ["two words"]);
 }

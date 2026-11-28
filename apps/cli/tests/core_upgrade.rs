@@ -342,7 +342,6 @@ fn managed_upgrade_updates_all_roles_and_uninstall_stops_only_its_own_host() {
     fixture.success(&["config", "init"]);
     fixture.success(&["host", "start"]);
     let first = fixture.metadata();
-    assert_eq!(first.format, 3);
     assert_eq!(first.installation.as_ref().unwrap().prefix, layout.prefix);
     fixture.manifest();
     let refused = fixture
@@ -415,7 +414,7 @@ fn managed_upgrade_updates_all_roles_and_uninstall_stops_only_its_own_host() {
     assert!(!rsi_service_host::owner_process_is_current(&second).unwrap());
     assert!(fixture.paths.config().join("rsi.toml").exists());
     assert!(
-        fixture
+        !fixture
             .paths
             .state()
             .join("session-host/artifacts")
@@ -473,6 +472,8 @@ fn detached_host_checks_its_own_image_before_claiming_the_installation() {
         .write_all(b"unrecorded executable overlay")
         .unwrap();
 
+    let listed = fixture.success(&["profile", "application", "list"]);
+    assert!(!String::from_utf8_lossy(&listed.stderr).contains("provenance"));
     let started = fixture.success(&["host", "start"]);
     assert!(!String::from_utf8_lossy(&started.stderr).contains("provenance unavailable"));
     assert!(fixture.metadata().installation.is_none());

@@ -896,7 +896,7 @@ plugin = "rsi.application.tui"
     }
 
     async fn until_screen(&mut self, text: &str, matches: impl Fn(&str) -> bool) {
-        // The first view includes bounded cold runtime publication; subsequent
+        // The first view includes cold Host and application startup; subsequent
         // UI interactions retain their shorter response deadline.
         let seconds = if self.awaiting_first_screen { 210 } else { 20 };
         let deadline = Instant::now() + Duration::from_secs(seconds);

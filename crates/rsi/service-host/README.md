@@ -200,7 +200,7 @@ sockets, never enumerating the surrounding runtime root. Unknown runtime entries
 remain; missing legacy home authority does not authorize external cleanup.
 
 Graceful stop allows the drain timeout plus 15 seconds for native exit, preserving
-the CLI shutdown budget. Installation origin is admitted by the launcher and
-resolved once only when a Host needs it; it distinguishes same-build installations
-sharing homes and does not replace process-generation or home-lease authority.
+the CLI shutdown budget. A Host derives its installation origin from its own
+executable and the installation record at that prefix when it first needs the
+identity. This distinguishes same-build installations sharing homes.
 Older owners lacking provenance require confirmation during ordinary uninstall.

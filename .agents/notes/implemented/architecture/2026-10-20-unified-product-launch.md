@@ -67,24 +67,25 @@ discardable preparation from the final recoverable publication intent. Reset
 archives are user recovery data; exact participant lookups must not be limited
 by the number of unrelated archived siblings.
 
-Windows owner control uses private named pipes, native PID/SID/start-time checks
-and an immutable executable copy. A Job that forbids detachment fails explicitly.
+Windows owner control uses private named pipes and native PID/SID/start-time
+checks. A Job that forbids detachment fails explicitly.
 Same-user transport is not isolation from hostile unconfined processes. SDK
 embedding remains explicit. Native macOS ownership is not inferred from Windows
 or Linux verification.
 
-Only the ready Host generation needs an immutable runtime copy. Startup can
-reclaim inactive generations while holding its coordinator. Cached executable
-bytes are still hashed: equal length and modification time do not establish
-integrity, and are insufficient grounds for admitting an executable.
+The resident Host runs the selected executable in place. Copying ordinary
+builds so Windows could replace them during a run required a second complete
+image on disk and full-file reads on every launch. Users can stop the Host to
+replace that executable. Managed publications already pin the selected image
+with a generation lease. Running in place also gives the child its installation
+path directly when it needs to establish ownership for uninstall.
 
 Focused tests cover home contention, damaged-document recovery, journal steps,
 source unavailability after import staging, ACP attachment retirement and owner
 persistence. Product visuals and live provider calls remain separate acceptance
 from these deterministic tests.
 
-The launch deadline is three minutes, including immutable debug executable
-publication. Integration waits allow an additional thirty seconds to collect
+The launch deadline is three minutes. Integration waits allow an additional thirty seconds to collect
 cleanup and diagnostics; they do not define a separate production deadline.
 Embedded application launch resolves the same selected Service reference when
 the platform has no resident launcher.

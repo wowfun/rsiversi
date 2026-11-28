@@ -39,21 +39,13 @@ Global options precede the command. Application arguments after `--` are opaque
 to the launcher. A bare command selects the configured default application;
 `run NAME` selects an Application Profile explicitly.
 
-Resident launch publishes a private immutable copy of the actual executable,
-streaming its SHA-256 and bytes with a 4 GiB ceiling. This accommodates ordinary
-Linux debug executables containing DWARF data as well as release builds. Neither
-the selected homes nor the runtime behavior depend on the build profile.
-After successful readiness, the startup coordinator reclaims older runtime
-generations and abandoned publication files. It keeps the admitted running
-generation and refuses to follow links or delete unrecognized children. A
-failed cleanup reports its error without stopping the successfully started Host.
-An unrecognized generation is retained and reported; it does not prevent
-reclamation of other recognized generations in the bounded scan.
+The resident Host starts from the selected executable in place. On Windows,
+stop the Host before replacing an unmanaged executable that it is running.
+For managed application generations, the launcher holds the generation lease
+through readiness and the child holds its own lease until shutdown.
 Application transitions have a three-minute deadline, including startup
-coordination, immutable runtime publication and resident Host readiness. The Unix native-addon bootstrap
-uses that same product deadline. Generic Meta defaults, service-call deadlines
-and shutdown deadlines are unchanged; a large debug executable must not consume
-the entire generic thirty-second plugin budget before the Host can become ready.
+coordination and resident Host readiness. The Unix native-addon bootstrap
+uses that same product deadline.
 
 Resident configuration observation is a connection-owned lease. Starting a Host
 does not permanently enable watching. The ordinary product management plugin

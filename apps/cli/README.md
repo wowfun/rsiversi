@@ -40,22 +40,9 @@ one CPU is available or CPU availability cannot be determined. Set
 `TOKIO_WORKER_THREADS` before launching the process to override this default;
 Tokio owns parsing and validation of that value. The blocking pool remains
 independent. Restart an existing resident Host to apply a different worker count.
-An immutable managed publication starts its resident Host from the original
-executable and holds its generation lease through readiness; the child then
-retains its own lease through shutdown. Ordinary build outputs are first copied
-to the private content-addressed Host runtime so the resident process does not
-lock Cargo output. Publication hashes the source, then hashes bytes as they are
-copied into its private staging file and rejects a changed source before
-publication. Existing cached executables are verified when reused.
-Managed executables must never be copied away from their
-publication marker and lease for daemon startup. After readiness, both startup
-paths collect recognized obsolete private Host artifacts while retaining the
-startup coordinator. Managed generation pinning is independent of that private
-namespace; an absent private artifact directory needs no cleanup.
-Windows batch trampolines use the same managed executable and pin its generation
-before dispatching the batch. Private artifact collection retains executable
-directories still in use by Windows processes. Runtime publication resolves the
-source path before detecting its managed generation on every platform.
+Resident launch follows the [executable and generation lease contract](../../crates/rsi/core/docs/launch.md).
+Windows batch commands dispatch through the invoking CLI executable. Each
+managed CLI process holds its generation lease while dispatching the command.
 `cargo run --locked -p rsi-cli -- --help` does not activate a backend.
 The native executable always includes the linked application catalog. Web and
 Desktop are installed independently with `rsi plugin install`; application
@@ -108,7 +95,7 @@ global config/state resets, explicit import and recoverable core replacement.
 Application help is resolved before home initialization or maintenance.
 Host Profile preview includes the product's resident listener factories. Its
 launch key includes the exact coding-helper executable path; previewing the
-running immutable artifact reproduces the daemon's key.
+running executable reproduces the daemon's key.
 
 `rsi agent-store verify` audits an existing, cleanly closed Store without creating it.
 `rsi agent-store compact` obtains the exclusive Store writer lease, refuses pending

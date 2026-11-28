@@ -832,32 +832,6 @@ fn application_bootstrap_accepts_the_system_config_alias_for_preset_validation()
 mod native;
 
 #[test]
-fn read_only_management_does_not_resolve_installation_provenance() {
-    let root = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rsi"))
-        .args(["--config-home"])
-        .arg(root.path().join("config"))
-        .arg("--data-home")
-        .arg(root.path().join("data"))
-        .arg("--tmp-home")
-        .arg(root.path().join("tmp"))
-        .args(["--state-home"])
-        .arg(root.path().join("state"))
-        .args(["--cache-home"])
-        .arg(root.path().join("cache"))
-        .args(["profile", "application", "list"])
-        .env("RSI_INSTALLATION_ORIGIN", "invalid origin must stay unread")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("provenance"));
-}
-
-#[test]
 fn unknown_maintenance_help_does_not_initialize_or_reset_homes() {
     for command in ["core", "config", "import", "plugin", "host"] {
         let root = tempfile::tempdir().unwrap();
